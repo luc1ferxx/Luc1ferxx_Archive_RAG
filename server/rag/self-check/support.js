@@ -1375,7 +1375,12 @@ const canMatchDifferencePartitions = (leftEntries, rightEntries) => {
   );
 };
 
-const MAX_MULTIPARTITE_DIFFERENCE_ENTRIES = 18;
+// The most difference claims a Differences section of three or more documents
+// may hold and still be paired (the two-document case is matched without a
+// cap). The grounded template and the structured comparison renderer
+// (answer-writer.js) write no more than this many lines, so what they render
+// the gate can accept.
+export const MAX_MULTIPARTITE_DIFFERENCE_ENTRIES = 18;
 
 const canPairMultipartiteDifferenceEntries = (entries = []) => {
   if (entries.length > MAX_MULTIPARTITE_DIFFERENCE_ENTRIES) {

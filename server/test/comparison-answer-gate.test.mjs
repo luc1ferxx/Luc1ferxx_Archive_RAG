@@ -127,7 +127,7 @@ for (const heading of ["## Differences", "**Differences**", "差异："]) {
 
     assert.equal(accepted.text, buildDifferenceAnswer(heading));
     assert.equal(accepted.abstained, undefined);
-    assert.equal(accepted.modelRejectReason, undefined);
+    assert.equal(accepted.trace?.modelRejectReason, undefined);
 
     // The same heading with a number the evidence does not state is still
     // claim-checked: the model answer is replaced and the reason recorded.
@@ -137,11 +137,11 @@ for (const heading of ["## Differences", "**Differences**", "差异："]) {
     );
 
     assert.doesNotMatch(wrong.text, /\b4 days\b/);
-    assert.equal(wrong.modelRejectReason.code, "unsupported_claims");
-    assert.ok(wrong.modelRejectReason.unsupportedClaimCount >= 1);
-    assert.equal(wrong.modelRejectReason.differenceClaimCount, 2);
-    assert.equal(wrong.modelRejectReason.fallback, "grounded_template");
-    assertCodesAndCountsOnly(wrong.modelRejectReason);
+    assert.equal(wrong.trace?.modelRejectReason.code, "unsupported_claims");
+    assert.ok(wrong.trace?.modelRejectReason.unsupportedClaimCount >= 1);
+    assert.equal(wrong.trace?.modelRejectReason.differenceClaimCount, 2);
+    assert.equal(wrong.trace?.modelRejectReason.fallback, "grounded_template");
+    assertCodesAndCountsOnly(wrong.trace?.modelRejectReason);
     assert.match(wrong.text, /2 days per week/);
     assert.match(wrong.text, /3 days per week/);
   });
@@ -156,7 +156,7 @@ test("comparison gate records why an answer without a differences section was re
     ].join("\n")
   );
 
-  assert.deepEqual(response.modelRejectReason, {
+  assert.deepEqual(response.trace?.modelRejectReason, {
     code: "no_differences_section",
     fallback: "grounded_template",
   });
@@ -173,7 +173,7 @@ test("comparison gate records an empty model answer and an abstaining fallback",
   );
 
   assert.equal(response.abstained, true);
-  assert.deepEqual(response.modelRejectReason, {
+  assert.deepEqual(response.trace?.modelRejectReason, {
     code: "empty_answer",
     fallback: "abstained",
   });
@@ -209,13 +209,13 @@ test("comparison gate requires the differences section to bind every document", 
 
   assert.notEqual(betaRank, undefined);
   assert.equal(
-    response.modelRejectReason.code,
+    response.trace?.modelRejectReason.code,
     "differences_not_bound_to_every_document"
   );
-  assert.equal(response.modelRejectReason.unsupportedClaimCount, 0);
-  assert.equal(response.modelRejectReason.documentCount, 3);
-  assert.equal(response.modelRejectReason.coveredDocumentCount, 2);
-  assertCodesAndCountsOnly(response.modelRejectReason);
+  assert.equal(response.trace?.modelRejectReason.unsupportedClaimCount, 0);
+  assert.equal(response.trace?.modelRejectReason.documentCount, 3);
+  assert.equal(response.trace?.modelRejectReason.coveredDocumentCount, 2);
+  assertCodesAndCountsOnly(response.trace?.modelRejectReason);
 });
 
 const SOFT_WRAPPED_CONFLICT = [
@@ -252,8 +252,8 @@ test("comparison fallback quotes whole sentences from a soft-wrapped PDF paragra
     .split("\n")
     .filter((line) => line.startsWith("- "));
 
-  assert.equal(response.modelRejectReason.code, "no_differences_section");
-  assert.equal(response.modelRejectReason.fallback, "grounded_template");
+  assert.equal(response.trace?.modelRejectReason.code, "no_differences_section");
+  assert.equal(response.trace?.modelRejectReason.fallback, "grounded_template");
   assert.ok(
     bulletLines.some((line) =>
       line.includes(
@@ -303,7 +303,7 @@ test("no-material-difference fallback rejoins soft wraps and drops bare headings
     .split("\n")
     .filter((line) => line.startsWith("- "));
 
-  assert.equal(response.modelRejectReason, undefined);
+  assert.equal(response.trace?.modelRejectReason, undefined);
   assert.ok(
     bulletLines.some((line) =>
       line.startsWith(
@@ -331,7 +331,7 @@ test("comparison fallback keeps a Title Case evidence line that states a number"
   );
 
   assert.equal(response.abstained, undefined);
-  assert.equal(response.modelRejectReason.fallback, "grounded_template");
+  assert.equal(response.trace?.modelRejectReason.fallback, "grounded_template");
   assert.match(response.text, /vendor-alpha states Notice Period 30 Days \[Source \d+\]/);
   assert.match(response.text, /vendor-gamma states Notice Period 60 Days \[Source \d+\]/);
 });
@@ -358,7 +358,7 @@ for (const heading of ["Notice Period", "## Notice Period"]) {
     );
 
     assert.equal(response.abstained, undefined);
-    assert.equal(response.modelRejectReason.fallback, "grounded_template");
+    assert.equal(response.trace?.modelRejectReason.fallback, "grounded_template");
     assert.match(
       response.text,
       /vendor-alpha states the supplier must give 30 days written notice\. \[Source \d+\]/

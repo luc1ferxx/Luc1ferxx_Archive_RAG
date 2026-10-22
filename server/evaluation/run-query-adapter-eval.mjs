@@ -42,7 +42,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { pairedMeanDelta } from "./paired-bootstrap.js";
+import { pairedMeanDelta, roundTo4 } from "./paired-bootstrap.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { pairedRecallDeltas, summarizeRecallRows } from "./run-qasper-retrieval-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
@@ -62,7 +62,6 @@ const PAGE_OF = (result) => {
   return Number(metadata.pageNumber ?? metadata.loc?.pageNumber ?? metadata.page);
 };
 
-const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 
 /**
  * One answerable question's row: recall as eval:qasper-retrieval scores it,
@@ -143,7 +142,7 @@ export const countVectorScoreDrift = (identityResults, adapterResults, tolerance
 export { pairedMeanDelta } from "./paired-bootstrap.js";
 
 const meanOf = (rows, field) =>
-  rows.length === 0 ? null : round(rows.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) / rows.length);
+  rows.length === 0 ? null : roundTo4(rows.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) / rows.length);
 
 /**
  * The pre-declared rule. `answerable` is pairedRecallDeltas of adapter minus

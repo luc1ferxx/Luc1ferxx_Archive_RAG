@@ -1,10 +1,7 @@
-import test, { afterEach, beforeEach } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
-import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import { configureOpenAIProvider } from "../rag/openai.js";
+import { stubModelReplies, useIsolatedAnswerWriterEnvironment } from "./answer-writer-test-helpers.mjs";
 import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
 import { runWithAnswerDraftChannel } from "../rag/answer-drafts.js";
 import {
@@ -24,40 +21,10 @@ import { finalizeGroundedAnswer } from "../rag/grounded-answer-finalizer.js";
 // lexical claim check passes by construction. Off, the QA call is unchanged.
 
 const QUERY = "How many days per week may employees work remotely?";
-const ENV_KEYS = [
-  "RAG_QA_EXTRACTIVE_OUTPUT",
-  "RAG_QA_ANSWER_VERDICT",
-  "RAG_STRUCTURED_OUTPUT_ENABLED",
-  "RAG_INJECTION_SCREEN",
-];
-const originalDataDirectory = getRagDataDirectory();
-const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-let tempRoot = null;
-
-beforeEach(async () => {
-  tempRoot = await mkdtemp(path.join(os.tmpdir(), "qa-extractive-"));
-  configureRagDataDirectory(path.join(tempRoot, "rag-data"));
-
-  for (const key of ENV_KEYS) {
-    delete process.env[key];
-  }
-
-  process.env.RAG_QA_EXTRACTIVE_OUTPUT = "true";
-});
-
-afterEach(async () => {
-  resetOpenAIProvider();
-  configureRagDataDirectory(originalDataDirectory);
-
-  for (const key of ENV_KEYS) {
-    if (originalEnv[key] === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = originalEnv[key];
-    }
-  }
-
-  await rm(tempRoot, { recursive: true, force: true });
+useIsolatedAnswerWriterEnvironment({
+  keys: ["RAG_QA_EXTRACTIVE_OUTPUT", "RAG_QA_ANSWER_VERDICT", "RAG_STRUCTURED_OUTPUT_ENABLED", "RAG_INJECTION_SCREEN"],
+  prefix: "qa-extractive-",
+  set: { RAG_QA_EXTRACTIVE_OUTPUT: "true" },
 });
 
 const POLICY_SENTENCE = "Employees may work remotely 2 days per week with manager approval.";
@@ -77,20 +44,7 @@ const buildBundle = (pages) =>
 
 // One reply per model call, the last one repeated; an object is sent as JSON.
 const writeWithReplies = async (bundle, replies) => {
-  const queue = [...replies];
-  const calls = [];
-
-  configureOpenAIProvider({
-    embedTexts: async (texts) => texts.map(() => [1]),
-    embedQuery: async () => [1],
-    completeText: async (prompt, options) => {
-      calls.push({ options, prompt });
-      const reply = queue.length > 1 ? queue.shift() : queue[0];
-
-      return typeof reply === "string" ? reply : JSON.stringify(reply);
-    },
-  });
-
+  const calls = stubModelReplies(replies);
   const response = await writeQaAnswer({ query: QUERY, resolvedQuery: QUERY, bundle });
 
   return { calls, response };
@@ -102,16 +56,17 @@ const PROSE_REPLY = "Employees may work remotely 2 days per week. [Source 1]";
 
 // A failed attempt is handed to the prose call: the flag-off QA template over
 // the same question and context, no response format, and no directAnswer.
-const assertProseFallback = (calls, response, { code, verdict = false }) => {
+const assertProseFallback = (calls, response, { code, evidence = POLICY_SENTENCE, verdict = false }) => {
   assert.equal(calls.length, 2);
   assert.match(calls[0].prompt, /Reply with one JSON object and nothing else/);
   assert.equal(calls[1].options.responseFormat ?? null, null);
   assert.doesNotMatch(calls[1].prompt, /JSON/);
   // v*.3 (RAG_QA_ANSWER_VERDICT) tells the model how to abstain; v*.2 does not.
   assert.equal(/NOT_IN_EVIDENCE/.test(calls[1].prompt), verdict);
-  assert.ok(calls[1].prompt.includes(QUERY) && calls[1].prompt.includes(POLICY_SENTENCE));
-  assert.equal(response.structuredOutput.code, code);
-  assert.equal(response.structuredOutput.fallback, "prose");
+  // The same question and evidence blocks as the attempt.
+  assert.ok(calls[1].prompt.includes(QUERY) && calls[1].prompt.includes(evidence));
+  assert.equal(response.trace.qaStructuredOutput.code, code);
+  assert.equal(response.trace.qaStructuredOutput.fallback, "prose");
   assert.equal("directAnswer" in response, false);
 };
 
@@ -120,7 +75,6 @@ const COUNTS = {
   quoteCount: 1,
   resolvedQuoteCount: 1,
   droppedQuoteCount: 0,
-  directAnswerGrounded: 1,
   directAnswerLine: 1,
   unsupportedLineCount: 0,
   renderedLineCount: 2,
@@ -167,7 +121,7 @@ test("a span answer and its quote render as the finalizer's lines and pass the c
   assert.equal(response.directAnswer, "2 days per week");
   assert.equal(response.abstained, undefined);
   assert.deepEqual(response.citations, bundle.citations);
-  assert.deepEqual(response.structuredOutput, COUNTS);
+  assert.deepEqual(response.trace.qaStructuredOutput, COUNTS);
 
   // The agent path's self-check and finalizer see an answer they keep as is.
   const citations = attachRetrievedEvidence({
@@ -194,7 +148,7 @@ test("a yes/no answer is carried as directAnswer only, never as a line", async (
 
   assert.equal(response.text, `${POLICY_SENTENCE} [Source 1]`);
   assert.equal(response.directAnswer, "Yes");
-  assert.deepEqual(response.structuredOutput, { ...COUNTS, directAnswerLine: 0, renderedLineCount: 1 });
+  assert.deepEqual(response.trace.qaStructuredOutput, { ...COUNTS, directAnswerLine: 0, renderedLineCount: 1 });
 });
 
 test("a list answer is grounded item by item and cites every line it came from", async () => {
@@ -214,12 +168,12 @@ test("a list answer is grounded item by item and cites every line it came from",
     "SQuAD and NewsQA. [Source 1]",
   ]);
 
-  assert.equal(invented.calls.length, 2);
+  assertProseFallback(invented.calls, invented.response, {
+    code: "answer_ungrounded",
+    evidence: "We evaluate on SQuAD and NewsQA.",
+  });
   assert.equal(invented.response.text, "SQuAD and NewsQA. [Source 1]");
-  assert.equal(invented.response.structuredOutput.code, "answer_ungrounded");
-  assert.equal(invented.response.structuredOutput.fallback, "prose");
-  assert.equal(invented.response.structuredOutput.directAnswerGrounded, 0);
-  assert.equal(invented.response.structuredOutput.resolvedQuoteCount, 1);
+  assert.equal(invented.response.trace.qaStructuredOutput.resolvedQuoteCount, 1);
 });
 
 test("an answer the quotes do not contain, or an empty one, is no answer: the prose call answers over the same blocks", async () => {
@@ -233,9 +187,8 @@ test("an answer the quotes do not contain, or an empty one, is no answer: the pr
   assert.equal(ungrounded.response.text, PROSE_REPLY);
   assert.equal(ungrounded.response.abstained, undefined);
   assert.deepEqual(ungrounded.response.citations, bundle.citations);
-  assert.deepEqual(ungrounded.response.structuredOutput, {
+  assert.deepEqual(ungrounded.response.trace.qaStructuredOutput, {
     ...COUNTS,
-    directAnswerGrounded: 0,
     directAnswerLine: 0,
     renderedLineCount: 0,
     code: "answer_ungrounded",
@@ -249,7 +202,7 @@ test("an answer the quotes do not contain, or an empty one, is no answer: the pr
 
   assertProseFallback(empty.calls, empty.response, { code: "answer_empty" });
   assert.equal(empty.response.text, PROSE_REPLY);
-  assert.equal(empty.response.structuredOutput.resolvedQuoteCount, 1);
+  assert.equal(empty.response.trace.qaStructuredOutput.resolvedQuoteCount, 1);
 });
 
 test("an answer that is the whole quoted sentence is not written twice", async () => {
@@ -261,7 +214,7 @@ test("an answer that is the whole quoted sentence is not written twice", async (
 
   assert.equal(response.text, `${POLICY_SENTENCE} [Source 1]`);
   assert.equal(response.directAnswer, POLICY_SENTENCE);
-  assert.equal(response.structuredOutput.renderedLineCount, 1);
+  assert.equal(response.trace.qaStructuredOutput.renderedLineCount, 1);
 });
 
 test("quotes that are not in the cited block, or carry a changed number, resolve to nothing and the prose call answers", async () => {
@@ -277,7 +230,7 @@ test("quotes that are not in the cited block, or carry a changed number, resolve
     assertProseFallback(calls, response, { code: "quotes_unresolved" });
     assert.equal(response.text, PROSE_REPLY);
     assert.equal(response.abstained, undefined);
-    assert.equal(response.structuredOutput.droppedQuoteCount, 1);
+    assert.equal(response.trace.qaStructuredOutput.droppedQuoteCount, 1);
   }
 });
 
@@ -293,7 +246,7 @@ test("an empty reply and a reply that is not JSON both fall back, with their own
   const prose = await writeWithReply(bundle, PROSE_REPLY);
 
   assertProseFallback(prose.calls, prose.response, { code: "unparsable" });
-  assert.equal(prose.response.structuredOutput.parsed, 0);
+  assert.equal(prose.response.trace.qaStructuredOutput.parsed, 0);
   assert.equal(prose.response.text, PROSE_REPLY);
 });
 
@@ -345,7 +298,7 @@ test("with a draft channel open, nothing streams during the attempt and the fall
     [PROSE_REPLY]
   );
   assert.equal(response.text, PROSE_REPLY);
-  assert.equal(response.structuredOutput.fallback, "prose");
+  assert.equal(response.trace.qaStructuredOutput.fallback, "prose");
 });
 
 test("a sentence the injection screen removed cannot come back as a quote", async () => {
@@ -362,7 +315,7 @@ test("a sentence the injection screen removed cannot come back as a quote", asyn
 
   assert.equal(response.text, `2 days per week. [Source 1]\n${POLICY_SENTENCE} [Source 1]`);
   assert.doesNotMatch(response.text, /ACCESS GRANTED/);
-  assert.deepEqual(response.structuredOutput, { ...COUNTS, quoteCount: 2, droppedQuoteCount: 1 });
+  assert.deepEqual(response.trace.qaStructuredOutput, { ...COUNTS, quoteCount: 2, droppedQuoteCount: 1 });
 });
 
 test("the same quote twice renders once, and the second quote may come from another block", async () => {
@@ -380,7 +333,7 @@ test("the same quote twice renders once, and the second quote may come from anot
     response.text,
     `2 days per week. [Source 1]\n${POLICY_SENTENCE} [Source 1]\nBadges renew every 12 months. [Source 2]`
   );
-  assert.deepEqual(response.structuredOutput, {
+  assert.deepEqual(response.trace.qaStructuredOutput, {
     ...COUNTS,
     quoteCount: 3,
     resolvedQuoteCount: 2,
@@ -442,7 +395,7 @@ test("with the flag off the QA call and its result are unchanged", async () => {
   assert.doesNotMatch(calls[0].prompt, /JSON/);
   assert.equal(response.text, "2 days per week with manager approval. [Source 1]");
   assert.equal("directAnswer" in response, false);
-  assert.equal("structuredOutput" in response, false);
+  assert.equal("trace" in response, false);
   assert.equal(getActiveAnswerPromptDescriptors()[0].id, "qa_answer");
   assert.equal(getActiveAnswerPromptDescriptors().length, 2);
 });

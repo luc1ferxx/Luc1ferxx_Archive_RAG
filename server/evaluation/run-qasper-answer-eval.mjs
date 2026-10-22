@@ -70,8 +70,6 @@ import {
 } from "./agent-answer-outcome.js";
 import {
   compareQasperAnswerReports,
-  DEFAULT_COMPARE_ITERATIONS,
-  DEFAULT_COMPARE_SEED,
   formatComparisonMarkdown,
   readQasperAnswerReport,
 } from "./compare-qasper-answer-reports.mjs";
@@ -218,13 +216,7 @@ const formatMarkdown = (report) => {
     "|---|---|---|",
     ...Object.entries(summary.answerF1ByType).map(([type, entry]) => `| ${type} | ${entry.cases} | ${entry.f1} |`),
     "",
-    ...(report.comparison
-      ? formatComparisonMarkdown(report.comparison, {
-          against: report.comparison.against,
-          iterations: report.comparison.iterations,
-          seed: report.comparison.seed,
-        })
-      : []),
+    ...(report.comparison ? formatComparisonMarkdown(report.comparison) : []),
   ].join("\n");
 };
 
@@ -422,6 +414,9 @@ const main = async () => {
         expectedPages: testCase.expectedEvidence?.[0]?.pages ?? [],
         shouldAbstain: testCase.shouldAbstain,
       });
+      const references = testCase.referenceAnswers ?? [];
+      // The official F1 of a prediction string, best over the annotators.
+      const score = (text) => Number(qasperAnswerF1(text, references).toFixed(4));
       const row = {
         abstained: answer.abstained,
         abstainSource: answer.abstainSource ?? null,
@@ -433,14 +428,10 @@ const main = async () => {
         contextChars: answer.contextChars ?? null,
         contextEvidenceHit: evidence.contextEvidenceHit,
         directAnswer: answer.directAnswer ?? null,
-        f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),
-        f1DashNormalized: Number(
-          qasperAnswerF1DashNormalized(prediction, testCase.referenceAnswers ?? []).toFixed(4)
-        ),
+        f1: score(prediction),
+        f1DashNormalized: Number(qasperAnswerF1DashNormalized(prediction, references).toFixed(4)),
         // The short-answer score: directAnswer, else the first sentence.
-        f1Direct: Number(
-          qasperAnswerF1(toQasperDirectPrediction(answer), testCase.referenceAnswers ?? []).toFixed(4)
-        ),
+        f1Direct: score(toQasperDirectPrediction(answer)),
         id: testCase.id,
         prediction: prediction.slice(0, 400),
         references: testCase.referenceAnswers,
@@ -478,15 +469,9 @@ const main = async () => {
     config,
     ...(other
       ? {
-          comparison: {
+          comparison: compareQasperAnswerReports({ config, rows }, other, {
             against: path.basename(comparePath),
-            iterations: DEFAULT_COMPARE_ITERATIONS,
-            seed: DEFAULT_COMPARE_SEED,
-            ...compareQasperAnswerReports({ config, rows }, other, {
-              iterations: DEFAULT_COMPARE_ITERATIONS,
-              seed: DEFAULT_COMPARE_SEED,
-            }),
-          },
+          }),
         }
       : {}),
     generatedAt: new Date().toISOString(),

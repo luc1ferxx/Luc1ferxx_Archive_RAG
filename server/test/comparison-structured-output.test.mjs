@@ -1,10 +1,6 @@
-import test, { afterEach, beforeEach } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
-import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import { stubModelReplies, useIsolatedAnswerWriterEnvironment } from "./answer-writer-test-helpers.mjs";
 import {
   buildComparisonStructuredResponseFormat,
   getActiveAnswerPromptDescriptors,
@@ -21,39 +17,10 @@ import { alignComparisonEvidence } from "../rag/evidence-aligner.js";
 // checks the rendered text. Off, the comparison call is what it was.
 
 const QUERY = "Compare the remote work policy.";
-const ENV_KEYS = [
-  "RAG_COMPARISON_STRUCTURED_OUTPUT",
-  "RAG_NEAR_DUPLICATE_GUARD_ENABLED",
-  "RAG_STRUCTURED_OUTPUT_ENABLED",
-];
-const originalDataDirectory = getRagDataDirectory();
-const originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
-let tempRoot = null;
-
-beforeEach(async () => {
-  tempRoot = await mkdtemp(path.join(os.tmpdir(), "comparison-structured-"));
-  configureRagDataDirectory(path.join(tempRoot, "rag-data"));
-
-  for (const key of ENV_KEYS) {
-    delete process.env[key];
-  }
-
-  process.env.RAG_COMPARISON_STRUCTURED_OUTPUT = "true";
-});
-
-afterEach(async () => {
-  resetOpenAIProvider();
-  configureRagDataDirectory(originalDataDirectory);
-
-  for (const key of ENV_KEYS) {
-    if (originalEnv[key] === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = originalEnv[key];
-    }
-  }
-
-  await rm(tempRoot, { recursive: true, force: true });
+useIsolatedAnswerWriterEnvironment({
+  keys: ["RAG_COMPARISON_STRUCTURED_OUTPUT", "RAG_NEAR_DUPLICATE_GUARD_ENABLED", "RAG_STRUCTURED_OUTPUT_ENABLED"],
+  prefix: "comparison-structured-",
+  set: { RAG_COMPARISON_STRUCTURED_OUTPUT: "true" },
 });
 
 const buildComparison = (pagesByDoc) => {
@@ -95,17 +62,7 @@ const rankOf = ({ bundle }, docId) =>
   bundle.citations.find((citation) => citation.docId === docId).rank;
 
 const writeWithModelReply = async ({ analysis, bundle }, reply) => {
-  const calls = [];
-
-  configureOpenAIProvider({
-    embedTexts: async (texts) => texts.map(() => [1]),
-    embedQuery: async () => [1],
-    completeText: async (prompt, options) => {
-      calls.push({ options, prompt });
-      return typeof reply === "string" ? reply : JSON.stringify(reply);
-    },
-  });
-
+  const calls = stubModelReplies([reply]);
   const response = await writeComparisonAnswer({
     query: QUERY,
     resolvedQuery: QUERY,
@@ -179,8 +136,8 @@ test("verbatim quotes render as the grounded template's lines and pass the compa
     ].join("\n")
   );
   assert.equal(response.abstained, undefined);
-  assert.equal(response.modelRejectReason, undefined);
-  assert.deepEqual(response.structuredOutput, {
+  assert.equal(response.trace?.modelRejectReason, undefined);
+  assert.deepEqual(response.trace?.comparisonStructuredOutput, {
     parsed: 1,
     aspectCount: 1,
     entryCount: 2,
@@ -200,11 +157,11 @@ test("a quote with a value the evidence does not state is dropped and the answer
   );
 
   // alpha's entry is gone, so the aspect holds one document and is no difference.
-  assert.deepEqual(response.modelRejectReason, {
+  assert.deepEqual(response.trace?.modelRejectReason, {
     code: "structured_no_differences",
     fallback: "grounded_template",
   });
-  assert.deepEqual(response.structuredOutput, {
+  assert.deepEqual(response.trace?.comparisonStructuredOutput, {
     parsed: 1,
     aspectCount: 1,
     entryCount: 2,
@@ -227,9 +184,9 @@ test("a quote citing a rank the model was not shown is dropped", async () => {
     differenceReply(comparison, { alphaSource: 9 })
   );
 
-  assert.equal(response.modelRejectReason.code, "structured_no_differences");
-  assert.equal(response.structuredOutput.droppedEntryCount, 1);
-  assert.equal(response.structuredOutput.renderedLineCount, 0);
+  assert.equal(response.trace?.modelRejectReason.code, "structured_no_differences");
+  assert.equal(response.trace?.comparisonStructuredOutput.droppedEntryCount, 1);
+  assert.equal(response.trace?.comparisonStructuredOutput.renderedLineCount, 0);
 });
 
 test("a reply that is not JSON falls back as unparsable", async () => {
@@ -239,13 +196,13 @@ test("a reply that is not JSON falls back as unparsable", async () => {
     "Summary:\n- handbook-alpha allows 2 days per week. [Source 1]"
   );
 
-  assert.deepEqual(response.modelRejectReason, {
+  assert.deepEqual(response.trace?.modelRejectReason, {
     code: "structured_output_unparsable",
     fallback: "grounded_template",
   });
-  assert.equal(response.structuredOutput.parsed, 0);
-  assert.equal(response.structuredOutput.entryCount, 0);
-  assertIntegerCounts(response.structuredOutput);
+  assert.equal(response.trace?.comparisonStructuredOutput.parsed, 0);
+  assert.equal(response.trace?.comparisonStructuredOutput.entryCount, 0);
+  assertIntegerCounts(response.trace?.comparisonStructuredOutput);
   assert.match(response.text, /^Differences:$/m);
 });
 
@@ -253,11 +210,11 @@ test("an empty differences list falls back as no differences", async () => {
   const comparison = buildComparison(NUMERIC_CONFLICT);
   const { response } = await writeWithModelReply(comparison, { differences: [] });
 
-  assert.deepEqual(response.modelRejectReason, {
+  assert.deepEqual(response.trace?.modelRejectReason, {
     code: "structured_no_differences",
     fallback: "grounded_template",
   });
-  assert.deepEqual(response.structuredOutput, {
+  assert.deepEqual(response.trace?.comparisonStructuredOutput, {
     parsed: 1,
     aspectCount: 0,
     entryCount: 0,
@@ -288,10 +245,10 @@ test("the rendered answer still goes through the gate: a document the reply neve
   );
   const { response } = await writeWithModelReply(comparison, differenceReply(comparison));
 
-  assert.equal(response.modelRejectReason.code, "differences_not_bound_to_every_document");
-  assert.equal(response.modelRejectReason.documentCount, 3);
-  assert.equal(response.modelRejectReason.coveredDocumentCount, 2);
-  assert.equal(response.structuredOutput.renderedLineCount, 2);
+  assert.equal(response.trace?.modelRejectReason.code, "differences_not_bound_to_every_document");
+  assert.equal(response.trace?.modelRejectReason.documentCount, 3);
+  assert.equal(response.trace?.modelRejectReason.coveredDocumentCount, 2);
+  assert.equal(response.trace?.comparisonStructuredOutput.renderedLineCount, 2);
 });
 
 test("a quote across soft-wrapped PDF lines resolves to the whole sentence", () => {
@@ -448,13 +405,13 @@ test("near-duplicate documents form one group and are each paired with the docum
   // The gate accepts the rendered answer: every document is bound, and the
   // Differences section pairs alpha with gamma and beta with gamma (so the
   // gamma line is written twice), which is the pairing the claim check wants.
-  assert.equal(response.modelRejectReason, undefined);
+  assert.equal(response.trace?.modelRejectReason, undefined);
   assert.deepEqual(
     response.text.split("Differences:\n")[1].split("\nGaps or uncertainty:")[0].split("\n"),
     [alphaLine, gammaLine, betaLine, gammaLine]
   );
-  assert.equal(response.structuredOutput.renderedLineCount, 4);
-  assert.equal(response.structuredOutput.droppedAspectCount, 0);
+  assert.equal(response.trace?.comparisonStructuredOutput.renderedLineCount, 4);
+  assert.equal(response.trace?.comparisonStructuredOutput.droppedAspectCount, 0);
 });
 
 test("a near-duplicate document the reply left out is filled in with the sentence its partner quoted", async () => {
@@ -478,12 +435,12 @@ test("a near-duplicate document the reply left out is filled in with the sentenc
   const betaLine = boundLine("handbook-beta", ALPHA_SENTENCE, betaRank);
   const gammaLine = boundLine("handbook-gamma", GAMMA_SENTENCE, gammaRank);
 
-  assert.equal(response.modelRejectReason, undefined);
+  assert.equal(response.trace?.modelRejectReason, undefined);
   assert.deepEqual(
     response.text.split("Differences:\n")[1].split("\nGaps or uncertainty:")[0].split("\n"),
     [alphaLine, gammaLine, betaLine, gammaLine]
   );
-  assert.deepEqual(response.structuredOutput, {
+  assert.deepEqual(response.trace?.comparisonStructuredOutput, {
     parsed: 1,
     aspectCount: 1,
     entryCount: 2,
@@ -556,8 +513,8 @@ test("an aspect on which every quoted document says the same thing is no differe
     ],
   });
 
-  assert.equal(response.modelRejectReason, undefined);
-  assert.deepEqual(response.structuredOutput, {
+  assert.equal(response.trace?.modelRejectReason, undefined);
+  assert.deepEqual(response.trace?.comparisonStructuredOutput, {
     parsed: 1,
     aspectCount: 2,
     entryCount: 5,
@@ -602,8 +559,8 @@ test("without RAG_STRUCTURED_OUTPUT_ENABLED no response format is sent, and JSON
   );
 
   assert.equal(calls[0].options.responseFormat ?? null, null);
-  assert.equal(response.modelRejectReason, undefined);
-  assert.equal(response.structuredOutput.renderedLineCount, 2);
+  assert.equal(response.trace?.modelRejectReason, undefined);
+  assert.equal(response.trace?.comparisonStructuredOutput.renderedLineCount, 2);
 });
 
 test("with the flag off the comparison call and its result are unchanged", async () => {
@@ -619,6 +576,6 @@ test("with the flag off the comparison call and its result are unchanged", async
   assert.equal(calls[0].options.responseFormat ?? null, null);
   assert.doesNotMatch(calls[0].prompt, /JSON/);
   assert.equal(response.text, proseAnswer);
-  assert.equal("structuredOutput" in response, false);
+  assert.equal("trace" in response, false);
   assert.equal(getActiveAnswerPromptDescriptors()[1].id, "guarded_comparison_answer");
 });
