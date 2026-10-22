@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
+import { runWithAnswerDraftChannel } from "../rag/answer-drafts.js";
 import {
   buildQaExtractiveResponseFormat,
   getActiveAnswerPromptDescriptors,
@@ -73,7 +75,9 @@ const buildBundle = (pages) =>
     })),
   });
 
-const writeWithReply = async (bundle, reply) => {
+// One reply per model call, the last one repeated; an object is sent as JSON.
+const writeWithReplies = async (bundle, replies) => {
+  const queue = [...replies];
   const calls = [];
 
   configureOpenAIProvider({
@@ -81,6 +85,8 @@ const writeWithReply = async (bundle, reply) => {
     embedQuery: async () => [1],
     completeText: async (prompt, options) => {
       calls.push({ options, prompt });
+      const reply = queue.length > 1 ? queue.shift() : queue[0];
+
       return typeof reply === "string" ? reply : JSON.stringify(reply);
     },
   });
@@ -88,6 +94,25 @@ const writeWithReply = async (bundle, reply) => {
   const response = await writeQaAnswer({ query: QUERY, resolvedQuery: QUERY, bundle });
 
   return { calls, response };
+};
+
+const writeWithReply = (bundle, reply) => writeWithReplies(bundle, [reply]);
+
+const PROSE_REPLY = "Employees may work remotely 2 days per week. [Source 1]";
+
+// A failed attempt is handed to the prose call: the flag-off QA template over
+// the same question and context, no response format, and no directAnswer.
+const assertProseFallback = (calls, response, { code, verdict = false }) => {
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].prompt, /Reply with one JSON object and nothing else/);
+  assert.equal(calls[1].options.responseFormat ?? null, null);
+  assert.doesNotMatch(calls[1].prompt, /JSON/);
+  // v*.3 (RAG_QA_ANSWER_VERDICT) tells the model how to abstain; v*.2 does not.
+  assert.equal(/NOT_IN_EVIDENCE/.test(calls[1].prompt), verdict);
+  assert.ok(calls[1].prompt.includes(QUERY) && calls[1].prompt.includes(POLICY_SENTENCE));
+  assert.equal(response.structuredOutput.code, code);
+  assert.equal(response.structuredOutput.fallback, "prose");
+  assert.equal("directAnswer" in response, false);
 };
 
 const COUNTS = {
@@ -100,6 +125,7 @@ const COUNTS = {
   unsupportedLineCount: 0,
   renderedLineCount: 2,
   code: null,
+  fallback: null,
 };
 
 test("the extractive call sends a strict response format naming only the shown ranks", async () => {
@@ -119,10 +145,15 @@ test("the extractive call sends a strict response format naming only the shown r
   assert.match(calls[0].prompt, /Reply with one JSON object and nothing else/);
   assert.match(calls[0].prompt, /copied verbatim from that Source block/);
   assert.equal(getActiveAnswerPromptDescriptors()[0].id, "qa_answer_extractive");
+  // The prose template is in the active set too: a failed attempt sends it.
+  assert.equal(getActiveAnswerPromptDescriptors()[1].id, "qa_answer");
+  assert.equal(getActiveAnswerPromptDescriptors()[1].version, "v2.2");
 
-  // The extractive template replaces the verdict template, whatever the flag says.
+  // The attempt sends the extractive template whatever the verdict flag says;
+  // the fallback follows it.
   process.env.RAG_QA_ANSWER_VERDICT = "true";
   assert.equal(getActiveAnswerPromptDescriptors()[0].id, "qa_answer_extractive");
+  assert.equal(getActiveAnswerPromptDescriptors()[1].version, "v2.3");
 });
 
 test("a span answer and its quote render as the finalizer's lines and pass the claim check unchanged", async () => {
@@ -176,32 +207,49 @@ test("a list answer is grounded item by item and cites every line it came from",
   assert.equal(response.text, "SQuAD, NewsQA. [Source 1]\nWe evaluate on SQuAD and NewsQA. [Source 1]");
   assert.equal(response.directAnswer, "SQuAD, NewsQA");
 
-  // An item the quotes do not name makes the whole answer ungrounded.
-  const invented = await writeWithReply(bundle, {
-    answer: "SQuAD, NewsQA, TriviaQA",
-    quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }],
-  });
+  // An item the quotes do not name makes the whole answer ungrounded, and an
+  // ungrounded answer is no answer: the prose call answers instead.
+  const invented = await writeWithReplies(bundle, [
+    { answer: "SQuAD, NewsQA, TriviaQA", quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }] },
+    "SQuAD and NewsQA. [Source 1]",
+  ]);
 
-  assert.equal(invented.response.text, "We evaluate on SQuAD and NewsQA. [Source 1]");
-  assert.equal(invented.response.directAnswer, null);
+  assert.equal(invented.calls.length, 2);
+  assert.equal(invented.response.text, "SQuAD and NewsQA. [Source 1]");
+  assert.equal(invented.response.structuredOutput.code, "answer_ungrounded");
+  assert.equal(invented.response.structuredOutput.fallback, "prose");
   assert.equal(invented.response.structuredOutput.directAnswerGrounded, 0);
+  assert.equal(invented.response.structuredOutput.resolvedQuoteCount, 1);
 });
 
-test("an answer the quotes do not contain is dropped; the quotes still answer", async () => {
+test("an answer the quotes do not contain, or an empty one, is no answer: the prose call answers over the same blocks", async () => {
   const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
-  const { response } = await writeWithReply(bundle, {
-    answer: "twice a week",
-    quotes: [{ quote: POLICY_SENTENCE, source: 1 }],
-  });
+  const ungrounded = await writeWithReplies(bundle, [
+    { answer: "twice a week", quotes: [{ quote: POLICY_SENTENCE, source: 1 }] },
+    PROSE_REPLY,
+  ]);
 
-  assert.equal(response.text, `${POLICY_SENTENCE} [Source 1]`);
-  assert.equal(response.directAnswer, null);
-  assert.deepEqual(response.structuredOutput, {
+  assertProseFallback(ungrounded.calls, ungrounded.response, { code: "answer_ungrounded" });
+  assert.equal(ungrounded.response.text, PROSE_REPLY);
+  assert.equal(ungrounded.response.abstained, undefined);
+  assert.deepEqual(ungrounded.response.citations, bundle.citations);
+  assert.deepEqual(ungrounded.response.structuredOutput, {
     ...COUNTS,
     directAnswerGrounded: 0,
     directAnswerLine: 0,
-    renderedLineCount: 1,
+    renderedLineCount: 0,
+    code: "answer_ungrounded",
+    fallback: "prose",
   });
+
+  const empty = await writeWithReplies(bundle, [
+    { answer: "", quotes: [{ quote: POLICY_SENTENCE, source: 1 }] },
+    PROSE_REPLY,
+  ]);
+
+  assertProseFallback(empty.calls, empty.response, { code: "answer_empty" });
+  assert.equal(empty.response.text, PROSE_REPLY);
+  assert.equal(empty.response.structuredOutput.resolvedQuoteCount, 1);
 });
 
 test("an answer that is the whole quoted sentence is not written twice", async () => {
@@ -216,7 +264,7 @@ test("an answer that is the whole quoted sentence is not written twice", async (
   assert.equal(response.structuredOutput.renderedLineCount, 1);
 });
 
-test("quotes that are not in the cited block, or carry a changed number, resolve to nothing and the answer abstains", async () => {
+test("quotes that are not in the cited block, or carry a changed number, resolve to nothing and the prose call answers", async () => {
   const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
 
   for (const quotes of [
@@ -224,30 +272,80 @@ test("quotes that are not in the cited block, or carry a changed number, resolve
     [{ quote: "Remote work needs a signed form.", source: 1 }],
     [{ quote: POLICY_SENTENCE, source: 9 }],
   ]) {
-    const { response } = await writeWithReply(bundle, { answer: "2 days per week", quotes });
+    const { calls, response } = await writeWithReplies(bundle, [{ answer: "2 days per week", quotes }, PROSE_REPLY]);
 
-    assert.equal(response.abstained, true);
-    assert.equal(response.abstainSource, "answer_model");
-    assert.deepEqual(response.citations, []);
-    assert.equal(response.directAnswer, undefined);
-    assert.equal(response.structuredOutput.code, "quotes_unresolved");
+    assertProseFallback(calls, response, { code: "quotes_unresolved" });
+    assert.equal(response.text, PROSE_REPLY);
+    assert.equal(response.abstained, undefined);
     assert.equal(response.structuredOutput.droppedQuoteCount, 1);
   }
 });
 
-test("an empty reply and a reply that is not JSON both abstain, with their own codes", async () => {
+test("an empty reply and a reply that is not JSON both fall back, with their own codes", async () => {
   const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
-  const empty = await writeWithReply(bundle, { answer: "", quotes: [] });
+  const empty = await writeWithReplies(bundle, [{ answer: "", quotes: [] }, PROSE_REPLY]);
 
-  assert.equal(empty.response.abstained, true);
-  assert.equal(empty.response.abstainSource, "answer_model");
-  assert.equal(empty.response.structuredOutput.code, "no_quotes");
+  assertProseFallback(empty.calls, empty.response, { code: "no_quotes" });
+  assert.equal(empty.response.text, PROSE_REPLY);
 
-  const prose = await writeWithReply(bundle, "Employees may work remotely 2 days per week. [Source 1]");
+  // A prose reply to the attempt is not read as the answer: it is rejected as
+  // not JSON, and the prose call is made (the mock answers it the same way).
+  const prose = await writeWithReply(bundle, PROSE_REPLY);
 
-  assert.equal(prose.response.abstained, true);
-  assert.equal(prose.response.structuredOutput.code, "unparsable");
+  assertProseFallback(prose.calls, prose.response, { code: "unparsable" });
   assert.equal(prose.response.structuredOutput.parsed, 0);
+  assert.equal(prose.response.text, PROSE_REPLY);
+});
+
+test("the fallback keeps the verdict: the v*.3 template, and NOT_IN_EVIDENCE is the model's abstention", async () => {
+  process.env.RAG_QA_ANSWER_VERDICT = "true";
+  const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
+  const { calls, response } = await writeWithReplies(bundle, [
+    { answer: "2 days per week", quotes: [{ quote: "Remote work needs a signed form.", source: 1 }] },
+    "NOT_IN_EVIDENCE: The documents do not state the number of remote days.",
+  ]);
+
+  assertProseFallback(calls, response, { code: "quotes_unresolved", verdict: true });
+  assert.equal(response.abstained, true);
+  assert.equal(response.abstainSource, "answer_model");
+  assert.deepEqual(response.citations, []);
+});
+
+test("with a draft channel open, nothing streams during the attempt and the fallback streams as prose", async () => {
+  const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
+  const replies = [JSON.stringify({ answer: "", quotes: [] }), PROSE_REPLY];
+  const calls = [];
+
+  configureOpenAIProvider({
+    embedTexts: async (texts) => texts.map(() => [1]),
+    embedQuery: async () => [1],
+    completeText: async (prompt, options) => {
+      const reply = replies.shift();
+
+      calls.push({ prompt, streamed: typeof options.onTextDelta === "function" });
+      options.onAttemptStart?.();
+
+      for (const piece of reply.match(/[\s\S]{1,7}/g)) {
+        options.onTextDelta?.(piece);
+      }
+
+      return reply;
+    },
+  });
+
+  const events = [];
+  const response = await runWithAgentEventSink(
+    (event) => events.push(event),
+    () => runWithAnswerDraftChannel(() => writeQaAnswer({ query: QUERY, resolvedQuery: QUERY, bundle }))
+  );
+
+  assert.deepEqual(calls.map((call) => call.streamed), [false, true]);
+  assert.deepEqual(
+    events.filter((event) => event.type === "answer_draft").map((event) => event.draft.text),
+    [PROSE_REPLY]
+  );
+  assert.equal(response.text, PROSE_REPLY);
+  assert.equal(response.structuredOutput.fallback, "prose");
 });
 
 test("a sentence the injection screen removed cannot come back as a quote", async () => {
@@ -306,10 +404,21 @@ test("malformed replies render nothing", () => {
     parsed: { answer: 7, quotes: [null, 3, { source: "x" }, { quote: POLICY_SENTENCE, source: 1 }] },
   });
 
-  assert.equal(partlyMalformed.abstained, false);
-  assert.equal(partlyMalformed.directAnswer, null);
+  // The malformed quotes are skipped and the resolved one counted; a
+  // non-string answer is empty, and an empty answer is no answer.
+  assert.equal(partlyMalformed.abstained, true);
+  assert.equal(partlyMalformed.reason, "answer_empty");
   assert.equal(partlyMalformed.counts.quoteCount, 2);
   assert.equal(partlyMalformed.counts.resolvedQuoteCount, 1);
+
+  const grounded = renderExtractiveQaAnswer({
+    bundle,
+    parsed: { answer: "2 days per week", quotes: [null, { quote: POLICY_SENTENCE, source: 1 }] },
+  });
+
+  assert.equal(grounded.abstained, false);
+  assert.equal(grounded.directAnswer, "2 days per week");
+  assert.equal(grounded.counts.quoteCount, 1);
 });
 
 test("without RAG_STRUCTURED_OUTPUT_ENABLED no response format is sent, and JSON is still read", async () => {
@@ -335,4 +444,5 @@ test("with the flag off the QA call and its result are unchanged", async () => {
   assert.equal("directAnswer" in response, false);
   assert.equal("structuredOutput" in response, false);
   assert.equal(getActiveAnswerPromptDescriptors()[0].id, "qa_answer");
+  assert.equal(getActiveAnswerPromptDescriptors().length, 2);
 });
