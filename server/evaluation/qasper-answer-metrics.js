@@ -68,6 +68,25 @@ export const qasperAnswerF1 = (prediction, references = []) =>
     ? 0
     : Math.max(...references.map((reference) => qasperTokenF1(prediction, reference)));
 
+// A diagnostic next to the official F1, never a replacement: the official
+// normalization drops ASCII punctuation, so a hyphen vanishes inside a token
+// while an en or em dash stays part of it, and a correct answer written with
+// dashes scores 0 against a hyphenated reference. This folds the dash variants
+// (Unicode dashes, the minus sign, the small and full-width hyphens) to a
+// hyphen on both sides first and drops soft hyphens. It feeds no summary and
+// no decision rule.
+const DASH_VARIANTS = /[‐-―−⸺⸻﹣－]/g;
+const SOFT_HYPHEN = /­/g;
+
+export const normalizeQasperDashes = (text) =>
+  String(text ?? "").replace(SOFT_HYPHEN, "").replace(DASH_VARIANTS, "-");
+
+export const qasperAnswerF1DashNormalized = (prediction, references = []) =>
+  qasperAnswerF1(
+    normalizeQasperDashes(prediction),
+    references.map((reference) => normalizeQasperDashes(reference))
+  );
+
 /**
  * The string this system's answer is scored as: an abstention is
  * "Unanswerable", anything else is the answer with its [Source N] labels
@@ -128,7 +147,7 @@ export const scoreQasperEvidence = ({ abstained, citedPages = [], contextPages =
 
 // Reports written before the cited/context split named the context hit
 // evidenceHit; re-summarizing one keeps that figure under its explicit name.
-const readContextEvidenceHit = (row) => row.contextEvidenceHit ?? row.evidenceHit;
+export const readContextEvidenceHit = (row) => row.contextEvidenceHit ?? row.evidenceHit;
 
 /**
  * rows: { answerType, abstained, f1, shouldAbstain, contextEvidenceHit,

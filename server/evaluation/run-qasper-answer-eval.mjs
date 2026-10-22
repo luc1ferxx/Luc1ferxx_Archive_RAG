@@ -28,14 +28,27 @@
 // each row's contextChars, the characters of chunk text the answer model was
 // given (null on the agent surface, whose body carries no context text).
 //
+// Two runs over the same sample can be compared question by question:
+// --compare <other report.json> adds a paired bootstrap block (this run minus
+// that one; compare-qasper-answer-reports.mjs does the same for two saved
+// reports). --exclude-report <report.json> takes that report's questions out
+// of the corpus before sampling, so a confirmation sample shares no question
+// with the sample a candidate was tuned on; the report records what was
+// excluded. --list-cases prints the sample and exits before anything is
+// ingested, so a sample can be checked without a model. Each row also carries
+// f1DashNormalized, the official F1 after folding dash variants to a hyphen:
+// a diagnostic, never a summary figure or a decision rule.
+//
 // Usage (OpenAI-compatible endpoint, e.g. local Ollama):
 //   OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \
 //   OPENAI_CHAT_MODEL=qwen2.5:7b OPENAI_EMBEDDING_MODEL=nomic-embed-text \
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-qasper-answer-eval.mjs
 //     [--corpus evaluation/generated/qasper-dev.json] [--cases 200] [--seed 1]
 //     [--surface rag|agent] [--latest-name latest-qasper-answers]
+//     [--compare <report.json>] [--exclude-report <report.json>] [--list-cases]
 
 import "dotenv/config";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,6 +56,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   citedSourcePages,
   qasperAnswerF1,
+  qasperAnswerF1DashNormalized,
   scoreQasperEvidence,
   summarizeQasperRuns,
   toQasperPrediction,
@@ -53,23 +67,19 @@ import {
   isAgentVerdictOverridden,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
+import {
+  compareQasperAnswerReports,
+  DEFAULT_COMPARE_ITERATIONS,
+  DEFAULT_COMPARE_SEED,
+  formatComparisonMarkdown,
+  readQasperAnswerReport,
+} from "./compare-qasper-answer-reports.mjs";
 import { describeChunkingConfig, describeEvaluationCheckout, sumTextChars } from "./eval-run-config.js";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
+import { createSeededRandom } from "./paired-bootstrap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const resultsDirectory = path.join(__dirname, "results");
-
-// mulberry32, so a seed samples the same questions on every run.
-const createSeededRandom = (seed) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
 
 export const sampleQasperCases = (cases, count, seed) => {
   const random = createSeededRandom(seed);
@@ -82,6 +92,40 @@ export const sampleQasperCases = (cases, count, seed) => {
 
   return shuffled.slice(0, count);
 };
+
+/**
+ * The corpus cases without the questions another report ran, plus what the
+ * report records about the exclusion: the report's name, when it was made,
+ * the commit it ran on, how many corpus questions it removed and a digest of
+ * their sorted ids, so a "clean" sample can be audited.
+ */
+export const excludeReportCases = (cases, report, { reportName }) => {
+  const reportIds = new Set((report?.rows ?? []).map((row) => row.id));
+  const removedIds = cases
+    .map((testCase) => testCase.id)
+    .filter((id) => reportIds.has(id))
+    .sort();
+
+  return {
+    cases: cases.filter((testCase) => !reportIds.has(testCase.id)),
+    excluded: {
+      report: reportName,
+      generatedAt: report?.generatedAt ?? null,
+      gitSha: report?.config?.git?.sha ?? null,
+      excludedIds: removedIds.length,
+      excludedIdsDigest: createHash("sha256").update(removedIds.join("\n")).digest("hex"),
+    },
+  };
+};
+
+/** What a sample holds, for --list-cases: counts, papers and the ids. */
+export const describeSampledCases = (cases) => ({
+  cases: cases.length,
+  answerable: cases.filter((testCase) => !testCase.shouldAbstain).length,
+  unanswerable: cases.filter((testCase) => Boolean(testCase.shouldAbstain)).length,
+  papers: new Set(cases.flatMap((testCase) => testCase.docKeys ?? [])).size,
+  ids: cases.map((testCase) => testCase.id),
+});
 
 // The answer-rate flags this run used (rag/config.js); null on a checkout
 // that predates them.
@@ -160,11 +204,23 @@ const formatMarkdown = (report) => {
       : []),
     `- Answers through the verdict override (RAG_QA_VERDICT_OVERRIDE): answerable ${summary.verdictOverrides?.answeredAnswerable ?? 0}, unanswerable ${summary.verdictOverrides?.answeredUnanswerable ?? 0}`,
     `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}`,
+    ...(report.config.excluded
+      ? [
+          `- Sampled after excluding the ${report.config.excluded.excludedIds} questions of \`${report.config.excluded.report}\` (ids digest ${report.config.excluded.excludedIdsDigest.slice(0, 12)})`,
+        ]
+      : []),
     "",
     "| Answer type | Cases | F1 |",
     "|---|---|---|",
     ...Object.entries(summary.answerF1ByType).map(([type, entry]) => `| ${type} | ${entry.cases} | ${entry.f1} |`),
     "",
+    ...(report.comparison
+      ? formatComparisonMarkdown(report.comparison, {
+          against: report.comparison.against,
+          iterations: report.comparison.iterations,
+          seed: report.comparison.seed,
+        })
+      : []),
   ].join("\n");
 };
 
@@ -179,12 +235,25 @@ const main = async () => {
   const seed = Math.max(1, Number(option("--seed", "1")) || 1);
   const surface = option("--surface", "rag");
   const latestName = option("--latest-name", `latest-qasper-answers${surface === "rag" ? "" : `-${surface}`}`);
+  const comparePath = option("--compare", null);
+  const excludeReportPath = option("--exclude-report", null);
+  const listCases = args.includes("--list-cases");
 
   if (!["rag", "agent"].includes(surface)) {
     throw new Error("--surface must be rag or agent.");
   }
 
-  const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  // Both reports are read before anything runs, so a wrong path fails fast.
+  const other = comparePath ? await readQasperAnswerReport(comparePath) : null;
+  const excludedReport = excludeReportPath ? await readQasperAnswerReport(excludeReportPath) : null;
+  let corpus;
+
+  try {
+    corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  } catch (error) {
+    throw new Error(`${corpusPath}: ${error.message}`);
+  }
+
   // The checkout, before the run writes anything.
   const git = await describeEvaluationCheckout();
 
@@ -192,7 +261,50 @@ const main = async () => {
     throw new Error("Build the corpus with import-qasper.mjs --granularity paragraph so evidence is paragraph-level.");
   }
 
-  const cases = sampleQasperCases(corpus.cases, caseCount, seed);
+  const { cases: candidateCases, excluded } = excludedReport
+    ? excludeReportCases(corpus.cases, excludedReport, { reportName: path.basename(excludeReportPath) })
+    : { cases: corpus.cases, excluded: null };
+
+  if (excluded && excluded.excludedIds === 0) {
+    console.warn(`${excluded.report} shares no question id with the corpus; is it the right report, or the right corpus?`);
+  }
+
+  const cases = sampleQasperCases(candidateCases, caseCount, seed);
+
+  if (cases.length === 0) {
+    throw new Error(
+      excluded
+        ? `No question is left to sample after excluding the ${excluded.excludedIds} questions of ${excluded.report}.`
+        : "The corpus has no cases."
+    );
+  }
+
+  if (cases.length < caseCount) {
+    console.warn(`Only ${cases.length} questions could be sampled, not ${caseCount}; the report's summary counts the ${cases.length}.`);
+  }
+
+  if (listCases) {
+    const sample = describeSampledCases(cases);
+
+    console.log(
+      `${sample.cases} questions (${sample.answerable} answerable, ${sample.unanswerable} unanswerable) from ${sample.papers} papers; seed ${seed}${
+        excluded ? `; excluding the ${excluded.excludedIds} questions of ${excluded.report}` : ""
+      }`
+    );
+    console.log(sample.ids.join("\n"));
+    return;
+  }
+
+  // A paired comparison needs the same sample; refuse before the model runs
+  // when the other report shares no question with this one.
+  if (other) {
+    const otherIds = new Set(other.rows.map((row) => row.id));
+
+    if (!cases.some((testCase) => otherIds.has(testCase.id))) {
+      throw new Error(`${comparePath} shares no question id with this sample; --compare needs the same corpus, --cases and --seed.`);
+    }
+  }
+
   const docKeys = new Set(cases.flatMap((testCase) => testCase.docKeys));
   const documents = corpus.documents.filter((doc) => docKeys.has(doc.key));
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "qasper-answer-eval-"));
@@ -314,6 +426,9 @@ const main = async () => {
         contextChars: answer.contextChars ?? null,
         contextEvidenceHit: evidence.contextEvidenceHit,
         f1: Number(qasperAnswerF1(prediction, testCase.referenceAnswers ?? []).toFixed(4)),
+        f1DashNormalized: Number(
+          qasperAnswerF1DashNormalized(prediction, testCase.referenceAnswers ?? []).toFixed(4)
+        ),
         id: testCase.id,
         prediction: prediction.slice(0, 400),
         references: testCase.referenceAnswers,
@@ -331,22 +446,37 @@ const main = async () => {
   }
 
   const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
+  const config = {
+    answerRateFlags: await describeAnswerRateFlags(),
+    cases: caseCount,
+    chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
+    chunking: await describeChunkingConfig(),
+    claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
+    corpus: path.basename(corpusPath),
+    embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+    ...(excluded ? { excluded } : {}),
+    git,
+    promptTemplates: await describePromptTemplates(),
+    // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
+    queryAdapter: getQueryAdapterReportFingerprint(),
+    seed,
+    surface,
+  };
   const report = {
-    config: {
-      answerRateFlags: await describeAnswerRateFlags(),
-      cases: caseCount,
-      chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
-      chunking: await describeChunkingConfig(),
-      claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
-      corpus: path.basename(corpusPath),
-      embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
-      git,
-      promptTemplates: await describePromptTemplates(),
-      // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
-      queryAdapter: getQueryAdapterReportFingerprint(),
-      seed,
-      surface,
-    },
+    config,
+    ...(other
+      ? {
+          comparison: {
+            against: path.basename(comparePath),
+            iterations: DEFAULT_COMPARE_ITERATIONS,
+            seed: DEFAULT_COMPARE_SEED,
+            ...compareQasperAnswerReports({ config, rows }, other, {
+              iterations: DEFAULT_COMPARE_ITERATIONS,
+              seed: DEFAULT_COMPARE_SEED,
+            }),
+          },
+        }
+      : {}),
     generatedAt: new Date().toISOString(),
     reportType: "qasper-answers",
     rows,

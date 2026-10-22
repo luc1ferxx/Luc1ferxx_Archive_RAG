@@ -42,6 +42,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { pairedMeanDelta } from "./paired-bootstrap.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { pairedRecallDeltas, summarizeRecallRows } from "./run-qasper-retrieval-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
@@ -137,50 +138,9 @@ export const countVectorScoreDrift = (identityResults, adapterResults, tolerance
   return drift;
 };
 
-// mulberry32, as the other QASPER harnesses sample with.
-const createSeededRandom = (seed) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
-
-/** Paired bootstrap of a numeric field, this arm minus the other, by question. */
-export const pairedMeanDelta = (rows, otherRows, field, { iterations = 4000, seed = 1 } = {}) => {
-  const other = new Map(otherRows.map((row) => [row.id, row]));
-  const diffs = rows
-    .filter((row) => other.has(row.id))
-    .map((row) => (Number(row[field]) || 0) - (Number(other.get(row.id)[field]) || 0));
-
-  if (diffs.length === 0) {
-    return { cases: 0, ci95: null, delta: null };
-  }
-
-  const random = createSeededRandom(seed);
-  const samples = [];
-
-  for (let index = 0; index < iterations; index += 1) {
-    let sum = 0;
-
-    for (let draw = 0; draw < diffs.length; draw += 1) {
-      sum += diffs[Math.floor(random() * diffs.length)];
-    }
-
-    samples.push(sum / diffs.length);
-  }
-
-  samples.sort((left, right) => left - right);
-
-  return {
-    cases: diffs.length,
-    ci95: [round(samples[Math.floor(iterations * 0.025)]), round(samples[Math.floor(iterations * 0.975)])],
-    delta: round(diffs.reduce((sum, value) => sum + value, 0) / diffs.length),
-  };
-};
+// The paired bootstrap lives in paired-bootstrap.js (shared with the answer
+// comparison); re-exported here because this module used to define it.
+export { pairedMeanDelta } from "./paired-bootstrap.js";
 
 const meanOf = (rows, field) =>
   rows.length === 0 ? null : round(rows.reduce((sum, row) => sum + (Number(row[field]) || 0), 0) / rows.length);
