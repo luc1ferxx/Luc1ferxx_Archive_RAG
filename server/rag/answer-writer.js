@@ -9,6 +9,7 @@ import {
   isComparisonStructuredOutputEnabled,
   isNearDuplicateGuardEnabled,
   isQaAnswerVerdictEnabled,
+  isQaExtractiveOutputEnabled,
 } from "./config.js";
 import {
   attachRetrievedEvidence,
@@ -38,7 +39,11 @@ import {
   screenUntrustedText,
 } from "./prompt-injection-screen.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
-import { QA_NOT_IN_EVIDENCE_MARKER, readQaAnswerVerdict } from "./answer-verdict.js";
+import {
+  DEFAULT_NOT_IN_EVIDENCE_REASON,
+  QA_NOT_IN_EVIDENCE_MARKER,
+  readQaAnswerVerdict,
+} from "./answer-verdict.js";
 import {
   describeVerdictOverride,
   overrideNotInEvidenceVerdict,
@@ -193,6 +198,58 @@ const qaPromptV2 = buildQaPromptV2(
   "If the evidence is insufficient, say exactly what is missing and do not guess."
 );
 const qaVerdictPromptV2 = buildQaPromptV2(QA_NOT_IN_EVIDENCE_RULE);
+
+// RAG_QA_EXTRACTIVE_OUTPUT: for single-document QA the model selects evidence
+// instead of writing prose. It returns the shortest exact answer copied from
+// the evidence and the sentences it was copied from, each with its Source
+// number; the server resolves the quotes to evidence sentences and renders
+// them as the lines the finalizer writes ("<sentence> [Source N]"), so the
+// lexical claim check passes by construction. The JSON shape is described in
+// words because braces are template variables; buildQaExtractiveResponseFormat
+// enforces it where the endpoint honours response_format.
+const EXTRACTIVE_QA_RULES = `- Use only the provided evidence. Each evidence block is labelled Source N.
+- Reply with one JSON object and nothing else. It has two keys: "answer" (text) and "quotes" (a list). Each quote is an object with "source" (the Source number as an integer) and "quote" (one complete sentence copied verbatim from that Source block, with its numbers, qualifiers and named actors unchanged).
+- "answer" is the shortest exact answer the question allows, copied from the quoted sentences: a name, a number with its unit, a short phrase, or a comma-separated list of the items the quotes name. For a yes/no question write Yes or No. Never paraphrase, and never add a word the quotes do not contain.
+- Quote at most 4 sentences, each from the block that contains it and each only once; prefer the sentence that states the answer most directly.
+- If the evidence answers only part of the question, answer that part. If it does not answer the question at all, reply with an empty answer and an empty quotes list; never guess.
+${UNTRUSTED_EVIDENCE_RULES}`;
+
+const extractiveQaPromptV1 = createPromptTemplate(
+  `You answer questions about uploaded documents by selecting the evidence that answers them; the server writes the answer from your selection.
+${EXTRACTIVE_QA_RULES}
+Use long-term memory only for user preferences or stable notes, never as document evidence.
+
+{questionBlock}
+
+{preferenceBlock}
+
+Retrieved Evidence:
+{context}
+
+JSON:`
+);
+
+const extractiveQaPromptV2 = createChatPromptTemplate([
+  [
+    "system",
+    `You are a document-grounded assistant for uploaded PDFs. You do not write the answer: you select the evidence that answers the question, and the server writes the answer from your selection.
+Follow these rules strictly:
+${EXTRACTIVE_QA_RULES}
+- Answer the original user question, not the retrieval paraphrase.
+- Use long-term memory only for user preferences or stable notes, never as document evidence.`,
+  ],
+  [
+    "human",
+    `{questionBlock}
+
+{preferenceBlock}
+
+Retrieved evidence:
+{context}
+
+JSON:`,
+  ],
+]);
 
 const comparisonPromptV2 = createChatPromptTemplate([
   [
@@ -402,7 +459,21 @@ const QA_VERDICT_PROMPTS = defineAnswerPrompts({
   versions: { v1: "v1.3", v2: "v2.3" },
 });
 
-const selectQaPrompts = () => (isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS);
+// v1 / v2 (2026-10-22): the extractive QA templates (RAG_QA_EXTRACTIVE_OUTPUT).
+// The extractive reply carries its own abstention (an empty answer and no
+// quotes), so it replaces the verdict templates rather than stacking on them.
+const QA_EXTRACTIVE_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.qaAnswerExtractive,
+  v1Template: extractiveQaPromptV1,
+  v2Template: extractiveQaPromptV2,
+});
+
+const selectQaPrompts = () =>
+  isQaExtractiveOutputEnabled()
+    ? QA_EXTRACTIVE_PROMPTS
+    : isQaAnswerVerdictEnabled()
+      ? QA_VERDICT_PROMPTS
+      : QA_PROMPTS;
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,
   v1Template: comparisonPromptV1,
@@ -440,6 +511,7 @@ export const listAnswerPromptDescriptors = () =>
   [
     QA_PROMPTS,
     QA_VERDICT_PROMPTS,
+    QA_EXTRACTIVE_PROMPTS,
     COMPARISON_PROMPTS,
     GUARDED_COMPARISON_PROMPTS,
     STRUCTURED_COMPARISON_PROMPTS,
@@ -1234,6 +1306,11 @@ export const writeQaAnswer = async ({
       retrievedContexts: bundle.retrievedContexts ?? [],
     }),
   });
+
+  if (isQaExtractiveOutputEnabled()) {
+    return writeExtractiveQaAnswer({ allowedText, bundle, drafts, prompt, qaPrompt });
+  }
+
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
   const guarded = guardAnswerLinks(
@@ -1351,6 +1428,9 @@ const normalizeQuoteText = (value = "") =>
 const trimQuoteEdges = (value = "") =>
   value.replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "");
 
+// The sentences of each shown block a quote may resolve to. The text is the
+// screened one the model was shown (prompt-injection-screen.js), so a sentence
+// the screen removed cannot come back as a quote.
 const buildStructuredEvidenceSources = (bundle) =>
   new Map(
     (bundle.rankedResults ?? []).map((result) => [
@@ -1360,7 +1440,7 @@ const buildStructuredEvidenceSources = (bundle) =>
         fileName: result.document.metadata?.fileName ?? "Unknown document",
         rank: result.rank,
         sentences: splitEvidenceSentences(
-          joinEvidenceSoftWraps(result.document.pageContent)
+          joinEvidenceSoftWraps(screenUntrustedText(result.document.pageContent).text)
         )
           .filter((sentence) => !isBareHeadingSentence(sentence))
           .map((sentence) => ({
@@ -1748,5 +1828,254 @@ export const writeComparisonAnswer = async ({
     citations: bundle.citations,
     modelRejectReason,
     ...structuredResult,
+  };
+};
+
+// --- Extractive QA output (RAG_QA_EXTRACTIVE_OUTPUT) --------------------------
+
+const MAX_EXTRACTIVE_ANSWER_CHARS = 200;
+const MAX_EXTRACTIVE_QUOTES = 4;
+
+/**
+ * The strict response format of one extractive QA call: a bounded answer and
+ * at most four quotes, each naming a rank the model was shown.
+ */
+export const buildQaExtractiveResponseFormat = (ranks = []) => {
+  const sourceRanks = [
+    ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
+  ];
+
+  return buildJsonSchemaResponseFormat({
+    name: "extractive_answer",
+    schema: strictObject({
+      answer: boundedString(MAX_EXTRACTIVE_ANSWER_CHARS),
+      quotes: boundedArray(
+        strictObject({
+          quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
+          source: { enum: sourceRanks, type: "integer" },
+        }),
+        MAX_EXTRACTIVE_QUOTES
+      ),
+    }),
+  });
+};
+
+const ensureSentenceEnd = (text) =>
+  /[.!?。！？]$/u.test(text) ? text : `${text}.`;
+
+// The line shape the finalizer writes for a supported claim, so the text is
+// the same whether or not the finalizer rebuilds it.
+const renderEvidenceLine = (text, ranks) => `${ensureSentenceEnd(text)} ${formatSourceLabels(ranks)}`;
+
+const BOOLEAN_ANSWER_PATTERN = /^(yes|no)\b/iu;
+const ANSWER_ITEM_SEPARATOR = /\s*(?:,|;|\band\b)\s*/iu;
+
+/**
+ * Where the model's short answer sits in the resolved evidence lines: a
+ * verbatim span of one line, a list whose every item is in some line, or a
+ * yes/no answer (which is never a claim and never rendered as a line). An
+ * answer that is none of these is not grounded and is dropped.
+ */
+const groundDirectAnswer = (answer, lines) => {
+  const trimmed = normalizeWhitespace(String(answer ?? ""));
+
+  if (!trimmed) {
+    return { directAnswer: null, kind: "empty", ranks: [] };
+  }
+
+  const booleanMatch = trimmed.match(BOOLEAN_ANSWER_PATTERN);
+
+  if (booleanMatch) {
+    const word = booleanMatch[1].toLowerCase();
+
+    return { directAnswer: word === "yes" ? "Yes" : "No", kind: "boolean", ranks: [] };
+  }
+
+  const needle = trimQuoteEdges(normalizeQuoteText(trimmed));
+  const holder = lines.find((line) => line.normalized.includes(needle));
+
+  if (holder) {
+    return { directAnswer: trimmed, kind: "span", ranks: [holder.rank] };
+  }
+
+  const items = trimmed
+    .split(ANSWER_ITEM_SEPARATOR)
+    .map((item) => trimQuoteEdges(normalizeQuoteText(item)))
+    .filter(Boolean);
+  const ranks = [];
+
+  for (const item of items) {
+    const line = lines.find((candidate) => candidate.normalized.includes(item));
+
+    if (!line) {
+      return { directAnswer: null, kind: "ungrounded", ranks: [] };
+    }
+
+    if (!ranks.includes(line.rank)) {
+      ranks.push(line.rank);
+    }
+  }
+
+  return items.length > 1
+    ? { directAnswer: trimmed, kind: "list", ranks }
+    : { directAnswer: null, kind: "ungrounded", ranks: [] };
+};
+
+const toExtractiveReply = (parsed) =>
+  parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.quotes)
+    ? {
+        answer: typeof parsed.answer === "string" ? parsed.answer : "",
+        quotes: parsed.quotes
+          .filter((quote) => quote && typeof quote === "object")
+          .slice(0, MAX_EXTRACTIVE_QUOTES)
+          .map((quote) => ({ quote: String(quote.quote ?? ""), source: Number(quote.source) })),
+      }
+    : null;
+
+/**
+ * The answer rendered from an extractive reply: the direct answer as its own
+ * line when it is a span or list of the evidence (yes/no is kept only in
+ * `directAnswer`), then one line per resolved quote, every line "<sentence>
+ * [Source N]". The lines are claim-checked before they are returned and any
+ * line the lexical check refuses is dropped, so the agent's self-check and
+ * finalizer meet an answer that passes. `abstained` when nothing resolved or
+ * nothing passed. The counts are integers only: they go to the RAG trace.
+ */
+export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
+  const reply = toExtractiveReply(parsed);
+  const counts = {
+    parsed: reply ? 1 : 0,
+    quoteCount: 0,
+    resolvedQuoteCount: 0,
+    droppedQuoteCount: 0,
+    directAnswerGrounded: 0,
+    directAnswerLine: 0,
+    unsupportedLineCount: 0,
+    renderedLineCount: 0,
+  };
+
+  if (!reply) {
+    return { abstained: true, counts, directAnswer: null, reason: "unparsable", text: null };
+  }
+
+  const sources = buildStructuredEvidenceSources(bundle);
+  const lines = [];
+
+  for (const quote of reply.quotes) {
+    counts.quoteCount += 1;
+    const sentence = resolveQuoteSentence(quote.quote, sources.get(quote.source));
+
+    if (!sentence || lines.some((line) => line.normalized === sentence.normalized)) {
+      counts.droppedQuoteCount += 1;
+      continue;
+    }
+
+    counts.resolvedQuoteCount += 1;
+    lines.push({ normalized: sentence.normalized, rank: quote.source, text: sentence.text });
+  }
+
+  if (lines.length === 0) {
+    return {
+      abstained: true,
+      counts,
+      directAnswer: null,
+      reason: counts.quoteCount === 0 ? "no_quotes" : "quotes_unresolved",
+      text: null,
+    };
+  }
+
+  const direct = groundDirectAnswer(reply.answer, lines);
+
+  if (direct.directAnswer !== null) {
+    counts.directAnswerGrounded = 1;
+  }
+
+  const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer ?? ""));
+  // An answer that is a whole quoted sentence is not written twice.
+  const directLine =
+    (direct.kind === "span" || direct.kind === "list") &&
+    !lines.some((line) => trimQuoteEdges(line.normalized) === directNormalized)
+      ? renderEvidenceLine(direct.directAnswer, direct.ranks)
+      : null;
+  let rendered = [
+    ...(directLine ? [directLine] : []),
+    ...lines.map((line) => renderEvidenceLine(line.text, [line.rank])),
+  ];
+  // The same check the self-check and finalizer run; a line it refuses would
+  // cost a follow-up retrieval on the agent path and then be cut anyway.
+  const claimSupport = evaluateClaimSupport({
+    answerText: rendered.join("\n"),
+    citations: attachRetrievedEvidence({
+      citations: bundle.citations ?? [],
+      retrievedContexts: bundle.retrievedContexts ?? [],
+    }),
+  });
+
+  if (claimSupport.checked === true && (claimSupport.unsupportedClaimCount ?? 0) > 0) {
+    const unsupported = (claimSupport.claims ?? [])
+      .filter((claim) => claim.supported !== true)
+      .map((claim) => trimQuoteEdges(normalizeQuoteText(claim.text)))
+      .filter(Boolean);
+
+    rendered = rendered.filter((line) => {
+      const normalized = trimQuoteEdges(normalizeQuoteText(line));
+
+      return !unsupported.some((claimText) => normalized.includes(claimText));
+    });
+    counts.unsupportedLineCount = rendered.length === 0 ? lines.length + (directLine ? 1 : 0) : unsupported.length;
+  }
+
+  counts.directAnswerLine = directLine && rendered.includes(directLine) ? 1 : 0;
+  counts.renderedLineCount = rendered.length;
+
+  if (rendered.length === 0) {
+    return { abstained: true, counts, directAnswer: null, reason: "unsupported", text: null };
+  }
+
+  return {
+    abstained: false,
+    counts,
+    directAnswer: direct.directAnswer,
+    reason: null,
+    text: rendered.join("\n"),
+  };
+};
+
+// writeQaAnswer under RAG_QA_EXTRACTIVE_OUTPUT: one structured call, the
+// rendered answer, and the drafts released once from the rendered text (a JSON
+// reply is not prose, so nothing streams while it is being written).
+const writeExtractiveQaAnswer = async ({ allowedText, bundle, drafts, prompt, qaPrompt }) => {
+  const sourceRanks = (bundle.rankedResults ?? []).map((result) => result.rank);
+  const completion = await completeText(prompt, {
+    promptTemplate: qaPrompt.descriptor,
+    ...(sourceRanks.length > 0 ? { responseFormat: buildQaExtractiveResponseFormat(sourceRanks) } : {}),
+  });
+  const rendered = renderExtractiveQaAnswer({ bundle, parsed: parseFirstJsonValue(completion) });
+  // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
+  // unsupported; null when answered), for the trace.
+  const structuredOutput = { ...rendered.counts, code: rendered.reason };
+
+  if (rendered.abstained) {
+    return {
+      text: DEFAULT_NOT_IN_EVIDENCE_REASON,
+      citations: [],
+      abstained: true,
+      abstainReason: DEFAULT_NOT_IN_EVIDENCE_REASON,
+      abstainSource: "answer_model",
+      injectionScreen: buildInjectionScreenResult(bundle, []),
+      structuredOutput,
+    };
+  }
+
+  const guarded = guardAnswerLinks(rendered.text, { allowedText });
+
+  drafts?.finish(guarded.text);
+
+  return {
+    text: guarded.text,
+    citations: bundle.citations,
+    directAnswer: rendered.directAnswer,
+    injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
+    structuredOutput,
   };
 };

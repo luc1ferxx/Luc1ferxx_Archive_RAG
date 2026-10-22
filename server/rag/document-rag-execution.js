@@ -881,9 +881,14 @@ const executeQaRag = async ({
 
   // RAG_QA_VERDICT_OVERRIDE: the decision (codes and counts only) goes to the
   // trace, not into the response; an applied override also marks the answer
-  // verdictOverridden: true.
+  // verdictOverridden: true. So do the counts of an extractive reply
+  // (RAG_QA_EXTRACTIVE_OUTPUT), under qaStructuredOutput.
   if (answer.verdictOverride) {
     traceFields.verdictOverride = answer.verdictOverride;
+  }
+
+  if (answer.structuredOutput) {
+    traceFields.qaStructuredOutput = answer.structuredOutput;
   }
 
   if (retry) {
@@ -891,7 +896,11 @@ const executeQaRag = async ({
   }
 
   const final = retry?.answer ? retry : { answer, bundle };
-  const { verdictOverride: _verdictOverride, ...finalAnswer } = final.answer;
+  const {
+    verdictOverride: _verdictOverride,
+    structuredOutput: _structuredOutput,
+    ...finalAnswer
+  } = final.answer;
 
   return {
     routeMode: route.mode,
@@ -986,6 +995,10 @@ const retryQaWithDeeperRetrieval = async ({
 
   if (answer.verdictOverride) {
     trace.verdictOverride = answer.verdictOverride;
+  }
+
+  if (answer.structuredOutput) {
+    trace.qaStructuredOutput = answer.structuredOutput;
   }
 
   return { answer, bundle, trace };

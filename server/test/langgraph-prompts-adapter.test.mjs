@@ -68,6 +68,8 @@ const PINNED_TEMPLATE_PROMPTS = Object.freeze({
   "qa_answer@v1.3": "c57f90a838c7",
   "qa_answer@v2.2": "69647d5ad62c",
   "qa_answer@v2.3": "f13805dcc49f",
+  "qa_answer_extractive@v1": "cfd276c7467d",
+  "qa_answer_extractive@v2": "701e1a252ded",
   "web_answer@v1.1": "26e8ffa6c6c4",
   "web_answer@v2.1": "9fb8253dfa4f",
 });
@@ -86,6 +88,7 @@ const TEMPLATE_VARIABLES = Object.freeze({
   guarded_comparison_answer: ["context", "diagnostics", "preferenceBlock", "questionBlock"],
   memory_query_rewrite: ["documents", "longTermMemory", "question", "recentConversation"],
   qa_answer: ["context", "preferenceBlock", "questionBlock"],
+  qa_answer_extractive: ["context", "preferenceBlock", "questionBlock"],
   web_answer: ["question", "searchResults"],
 });
 

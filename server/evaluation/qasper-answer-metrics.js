@@ -95,6 +95,29 @@ export const qasperAnswerF1DashNormalized = (prediction, references = []) =>
 export const toQasperPrediction = ({ abstained, text }) =>
   abstained ? "Unanswerable" : String(text ?? "").replace(SOURCE_LABEL, " ").trim();
 
+const FIRST_SENTENCE_BOUNDARY = /(?<=[.!?。！？])\s+|\n+/;
+
+/** The first sentence (or line) of a prediction, labels already removed. */
+export const firstSentenceOf = (text) =>
+  String(text ?? "")
+    .split(FIRST_SENTENCE_BOUNDARY)
+    .map((sentence) => sentence.trim())
+    .find(Boolean) ?? "";
+
+/**
+ * The short answer a row is scored on as well: the extractive mode's
+ * directAnswer when the response carries one, else the first sentence of the
+ * ordinary prediction (the QA prompts lead with the direct answer), so both
+ * arms of a comparison get the same short-answer rule. An abstention stays
+ * "Unanswerable".
+ */
+export const toQasperDirectPrediction = ({ abstained, directAnswer, text }) =>
+  abstained
+    ? "Unanswerable"
+    : typeof directAnswer === "string" && directAnswer.trim()
+      ? directAnswer.trim()
+      : firstSentenceOf(toQasperPrediction({ abstained, text }));
+
 const mean = (values) =>
   values.length === 0 ? null : Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4));
 
@@ -167,9 +190,18 @@ export const summarizeQasperRuns = (rows) => {
   const citedRows = answerable.filter((row) => typeof row.citedEvidenceHit === "boolean");
   const precisionRows = answerable.filter((row) => !row.abstained && typeof row.citationPrecision === "number");
   const answeredWithCitationData = rows.filter((row) => !row.abstained && Array.isArray(row.citedPages));
+  // Reports before the direct-answer column have no f1Direct.
+  const directRows = rows.filter((row) => typeof row.f1Direct === "number");
 
   return {
     answerF1: mean(rows.map((row) => row.f1)),
+    // The short-answer score (toQasperDirectPrediction): the extractive
+    // directAnswer, else the prediction's first sentence. Not the official
+    // figure; it is what a short-answer prompt is judged on.
+    answerF1Direct: mean(directRows.map((row) => row.f1Direct)),
+    answerF1DirectWhenAnswered: mean(
+      directRows.filter((row) => !row.shouldAbstain && !row.abstained).map((row) => row.f1Direct)
+    ),
     answerF1ByType: Object.fromEntries(
       Object.entries(byType)
         .sort(([left], [right]) => left.localeCompare(right))
