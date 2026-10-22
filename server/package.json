@@ -38,6 +38,7 @@
     "corpus:arxiv": "node evaluation/build-arxiv-corpus.mjs",
     "corpus:qasper": "node evaluation/import-qasper.mjs",
     "eval:qasper-answers": "node evaluation/run-qasper-answer-eval.mjs",
+    "compare:qasper-answers": "node evaluation/compare-qasper-answer-reports.mjs",
     "eval:unified-graph-planner": "node evaluation/run-unified-graph-planner-eval.mjs",
     "eval:sparse-scoring": "node evaluation/run-sparse-scoring-eval.mjs",
     "eval:semantic-cache": "node evaluation/run-semantic-cache-eval.mjs",

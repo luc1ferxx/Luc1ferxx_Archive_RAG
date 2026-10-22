@@ -804,6 +804,16 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 
 **结论**：默认值维持 0.51。问答阈值已经单独拆成 `RAG_MIN_QA_QUERY_TERM_COVERAGE`，措辞变化多、又能接受相邻话题风险的部署可以自己调低。要真正提高 QASPER 上的表现，该改的是答案长度，以及换一个能区分"关键区分词缺失"和"只是措辞不同"的信号，而不是这个阈值。后两项的结果见下面的“答案变短”和“两段式拒答”。
 
+### 两次运行的配对比较与干净抽样（2026-10-21）
+
+答案评测以前不算区间，文档里的区间都来自一次性脚本；干净的确认样本也是手工在一次性目录里拼的。现在：
+
+- `npm run compare:qasper-answers -- <本次报告.json> <对照报告.json> [--iterations 10000] [--seed 12345]`（`evaluation/compare-qasper-answer-reports.mjs`）按题号配对两份 `qasper-answers` 报告，输出本次减对照的配对 bootstrap 95% 区间：官方 F1（全部题）、可答题 F1（拒答记 0）、答题率（只算可答题）、不可答被回答（只算不可答题）、引用证据召回和上下文证据召回（两份都记录了的可答题；旧报告的 `evidenceHit` 只配 `contextEvidenceHit`），以及可答题翻转数 +N / −M；还列出两份报告配置上的差异或无法确认一致的地方（surface、模型、评审、答题率开关、prompt 集的哈希、切块设置、提交号；旧报告没记提交号就算"无法确认"）。两份报告没有共同题号时直接报错，题号重复或缺失、f1 不是数的行也拒绝。`eval:qasper-answers -- --compare <对照报告.json>` 把同一块写进报告的 `comparison`。
+- `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
+- 每行多一个诊断列 `f1DashNormalized`：官方归一化只去 ASCII 标点，连字符会消失、长短破折号却留在词里，一条写法只差破折号的正确答案记 0 分（见"第二轮"的局限）；这一列先把破折号折成连字符再算，只作诊断，不进汇总也不进判定规则。
+- 验收：对第二轮的 D2 和 D0 报告跑 `compare:qasper-answers`（10000 次，seed 12345），点估计与当时一次性脚本逐字相同（答题率 +0.363、翻转 +33 / −0、可答题 F1 +0.123、不可答被回答 +0.222），区间 [0.264, 0.462]、[0.081, 0.170]、[0.000, 0.556] 也一致（相差不超过 0.001）；`--exclude-report D0 --cases 100 --seed 1 --list-cases` 得到第三轮描述的 88 可答、12 不可答、82 篇论文。
+- 配对 bootstrap 的实现收进 `evaluation/paired-bootstrap.js`（`eval:query-adapter` 的 `pairedMeanDelta` 从这里导出，`eval:qasper-retrieval` 的随机数也用它），输出不变。
+
 ### 答案变短（qa_answer v1.2 / v2.2）
 
 QA prompt 原来写的是"最多五句"，现在改成：先用尽量少的词给出直接答案（名称、数字、短列表或 Yes/No），最多再补两句简短的支撑句，不复述问题。拒答门控没动，所以两次运行的拒答完全相同，只有答案写法不同。
@@ -986,7 +996,7 @@ train 上（400 题）的损失拆解：
 - **无引用率** `noCitationRateWhenAnswered`：所有作答的题里，标签对不到任何页的比例。
 - **上下文证据召回** `contextEvidenceRecall`：就是原来的 `evidenceRecall`。
 
-评测脚本本身不算区间。下面的区间是逐题 bootstrap 95%（5000 次）。
+当时评测脚本本身不算区间，下面的区间是一次性脚本算的逐题 bootstrap 95%（5000 次）；2026-10-21 起 `--compare` 和 `compare:qasper-answers` 内置同样的配对 bootstrap（见"两次运行的配对比较与干净抽样"）。
 
 **结果**：对现有默认配置重新测量，不是某个产品改动的前后对比。条件：dev 同一组 200 题（seed 1），rag 接口，qwen2.5:7b + nomic；报告在已忽略的 `latest-qasper-answers-citations.*`。
 
@@ -1713,7 +1723,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 - 阶段 2 的 dev 样本已经准备好，但没有用过，仍然可以作为下一个候选的干净确认集。
   - 构成：88 道可答、12 道不可答，来自 82 篇论文。
   - 和 seed 1 没有共同题目；但其中 25 篇论文也出现在 seed 1 样本里，问的是别的题。
-  - 这个语料文件只在一次性目录里，评测脚本也没有排除题目的选项。要复现，需要按上面的做法重新生成。
+  - 这个语料文件当时只在一次性目录里，评测脚本也没有排除题目的选项。2026-10-21 起同一份样本可以直接得到：`eval:qasper-answers -- --exclude-report evaluation/results/latest-qasper-answers-agent-ar-D0.json --cases 100 --seed 1 --list-cases` 列出的正是 88 可答、12 不可答、82 篇论文。
 - 本轮没有改代码。完整后端 `npm test`（开关关）在 Node 24 和 Node 20 上都是 2561 通过、0 失败、14 跳过。`eval:trajectory` 是 19/19、84/84，去掉 run id 和耗时后，和改动前一致。
 
 **命令**（在 `server/` 下，前缀同第一轮）：

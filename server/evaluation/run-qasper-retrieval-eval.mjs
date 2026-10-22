@@ -33,6 +33,7 @@ import {
   describeRunConfigDifferences,
   sumTextChars,
 } from "./eval-run-config.js";
+import { createSeededRandom } from "./paired-bootstrap.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
@@ -73,18 +74,6 @@ export const summarizeRecallRows = (rows) => ({
     })
   ),
 });
-
-// mulberry32, as the other QASPER harnesses sample with.
-const createSeededRandom = (seed) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-};
 
 /**
  * Paired bootstrap of this run minus the other over the questions both ran:
