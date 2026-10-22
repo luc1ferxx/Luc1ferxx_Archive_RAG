@@ -6,6 +6,7 @@ import {
   getMaxComparisonSources,
   getPromptVersion,
   getQaVerdictOverrideMode,
+  isComparisonStructuredOutputEnabled,
   isNearDuplicateGuardEnabled,
   isQaAnswerVerdictEnabled,
 } from "./config.js";
@@ -23,6 +24,13 @@ import { isStructuralSectionHeading, joinWrappedLines } from "./self-check/attri
 import { hasClaimPredicate, splitAnswerStructure } from "./self-check/claims.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
+import {
+  boundedArray,
+  boundedString,
+  buildJsonSchemaResponseFormat,
+  parseFirstJsonValue,
+  strictObject,
+} from "./structured-output.js";
 import {
   addToInjectionScreenSummary,
   createInjectionScreenSummary,
@@ -282,6 +290,66 @@ Use short bullets inside sections when helpful.`,
   ],
 ]);
 
+// RAG_COMPARISON_STRUCTURED_OUTPUT: the model selects evidence instead of
+// writing prose. It returns, per aspect on which the documents differ, one
+// verbatim quote per document with the Source number it was copied from; the
+// server resolves each quote to the evidence sentences it lies in and renders
+// the "<document> states <sentence> [Source N]" lines the grounded template
+// uses, so the comparison gate checks the rendered answer unchanged. The JSON
+// shape is described in words because the template engine reads braces as
+// variables; the strict response format (buildComparisonStructuredResponseFormat)
+// enforces it where the endpoint honours response_format.
+const STRUCTURED_COMPARISON_RULES = `- Use only the provided evidence. Each evidence block is labelled Source N and belongs to one document.
+- Reply with one JSON object and nothing else. It has one key, "differences": a list of aspects. Each aspect is an object with "aspect" (a short name for the topic) and "entries" (a list). Each entry is an object with "source" (the Source number as an integer) and "quote" (text).
+- An aspect is one topic the user question asks about on which the documents differ: a value, a condition, a party, or a scope. For each aspect add one entry for every document whose evidence addresses it, including a document whose evidence says the same as another document's (the reader needs every document's position), each citing its own document's Source number.
+- "quote" must be copied verbatim from the cited Source block: a complete sentence or clause with its numbers, qualifiers, and named actors unchanged. Never paraphrase, never merge text from two sources, and never add a qualifier the evidence does not have.
+- Include only aspects where the quoted evidence of at least two documents differs. Do not invent a difference for near-duplicate evidence, and do not treat an omission as a difference.
+- Do not treat a related but different policy as evidence for the asked policy.
+- If the evidence shows no difference, reply with an empty differences list.
+${UNTRUSTED_EVIDENCE_RULES}`;
+
+const structuredComparisonPromptV1 = createPromptTemplate(
+  `You compare uploaded documents by selecting the evidence that shows how they differ; the server writes the answer from your selection.
+${STRUCTURED_COMPARISON_RULES}
+Use long-term memory only for user preferences or stable notes, never as document evidence.
+
+{questionBlock}
+
+{preferenceBlock}
+
+Comparison diagnostics:
+{diagnostics}
+
+Evidence by document:
+{context}
+
+JSON:`
+);
+
+const structuredComparisonPromptV2 = createChatPromptTemplate([
+  [
+    "system",
+    `You are a document-grounded comparison assistant for uploaded PDFs. You do not write the answer: you select the evidence that shows how the documents differ, and the server writes the answer from your selection.
+Follow these rules strictly:
+${STRUCTURED_COMPARISON_RULES}
+- Use long-term memory only for user preferences or stable notes, never as document evidence.`,
+  ],
+  [
+    "human",
+    `{questionBlock}
+
+{preferenceBlock}
+
+Comparison diagnostics:
+{diagnostics}
+
+Evidence by document:
+{context}
+
+JSON:`,
+  ],
+]);
+
 const buildQuestionBlock = ({ query, resolvedQuery }) =>
   resolvedQuery && resolvedQuery !== query
     ? [
@@ -348,19 +416,34 @@ const GUARDED_COMPARISON_PROMPTS = defineAnswerPrompts({
   versions: ANSWER_PROMPT_VERSIONS,
 });
 
+// v1 / v2 (2026-10-21): the first structured comparison templates
+// (RAG_COMPARISON_STRUCTURED_OUTPUT). One pair whatever the near-duplicate
+// guard says: the rule against inventing differences is always in.
+const STRUCTURED_COMPARISON_PROMPTS = defineAnswerPrompts({
+  id: PROMPT_IDS.comparisonAnswerStructured,
+  v1Template: structuredComparisonPromptV1,
+  v2Template: structuredComparisonPromptV2,
+});
+
 const selectPrompt = (variants) =>
   getPromptVersion() === "v1" ? variants.v1 : variants.v2;
 
 const selectComparisonPrompt = () =>
-  selectPrompt(
-    isNearDuplicateGuardEnabled() ? GUARDED_COMPARISON_PROMPTS : COMPARISON_PROMPTS
-  );
+  isComparisonStructuredOutputEnabled()
+    ? selectPrompt(STRUCTURED_COMPARISON_PROMPTS)
+    : selectPrompt(
+        isNearDuplicateGuardEnabled() ? GUARDED_COMPARISON_PROMPTS : COMPARISON_PROMPTS
+      );
 
 /** Every template this module can send, for the pinned fingerprint test. */
 export const listAnswerPromptDescriptors = () =>
-  [QA_PROMPTS, QA_VERDICT_PROMPTS, COMPARISON_PROMPTS, GUARDED_COMPARISON_PROMPTS].flatMap((variants) =>
-    Object.values(variants).map(({ descriptor }) => descriptor)
-  );
+  [
+    QA_PROMPTS,
+    QA_VERDICT_PROMPTS,
+    COMPARISON_PROMPTS,
+    GUARDED_COMPARISON_PROMPTS,
+    STRUCTURED_COMPARISON_PROMPTS,
+  ].flatMap((variants) => Object.values(variants).map(({ descriptor }) => descriptor));
 
 /** The templates the current configuration would send. */
 export const getActiveAnswerPromptDescriptors = () => [
@@ -1217,6 +1300,258 @@ export const writeQaAnswer = async ({
   };
 };
 
+// --- Structured comparison output (RAG_COMPARISON_STRUCTURED_OUTPUT) ---------
+
+const MAX_STRUCTURED_ASPECTS = 6;
+const MAX_STRUCTURED_ASPECT_CHARS = 80;
+const MAX_STRUCTURED_QUOTE_CHARS = 400;
+
+/**
+ * The strict response format of one structured comparison call: `source` may
+ * only name a rank the model was shown, and every string and list is bounded.
+ */
+export const buildComparisonStructuredResponseFormat = (ranks = []) => {
+  const sourceRanks = [
+    ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
+  ];
+
+  return buildJsonSchemaResponseFormat({
+    name: "comparison_differences",
+    schema: strictObject({
+      differences: boundedArray(
+        strictObject({
+          aspect: boundedString(MAX_STRUCTURED_ASPECT_CHARS),
+          entries: boundedArray(
+            strictObject({
+              quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
+              source: { enum: sourceRanks, type: "integer" },
+            }),
+            Math.max(1, sourceRanks.length)
+          ),
+        }),
+        MAX_STRUCTURED_ASPECTS
+      ),
+    }),
+  });
+};
+
+// Quotes are matched against the evidence after folding whitespace and case,
+// dropping double quotation marks (a model may wrap a phrase in them) and
+// folding the typographic variants of apostrophes and dashes; numbers stay as
+// they are, because a quote with a changed value must not resolve.
+const normalizeQuoteText = (value = "") =>
+  normalizeWhitespace(String(value ?? ""))
+    .normalize("NFKC")
+    .replace(/[‘’‚‛]/gu, "'")
+    .replace(/[“”„‟"]/gu, "")
+    .replace(/[‐-―−]/gu, "-")
+    .replace(/\s+/gu, " ")
+    .toLowerCase();
+
+const trimQuoteEdges = (value = "") =>
+  value.replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "");
+
+const buildStructuredEvidenceSources = (bundle) =>
+  new Map(
+    (bundle.rankedResults ?? []).map((result) => [
+      result.rank,
+      {
+        docId: result.document.metadata?.docId ?? result.document.id,
+        fileName: result.document.metadata?.fileName ?? "Unknown document",
+        rank: result.rank,
+        sentences: splitEvidenceSentences(
+          joinEvidenceSoftWraps(result.document.pageContent)
+        )
+          .filter((sentence) => !isBareHeadingSentence(sentence))
+          .map((sentence) => ({
+            normalized: normalizeQuoteText(sentence),
+            text: sentence,
+          })),
+      },
+    ])
+  );
+
+// The evidence sentence a quote lies in: the sentence that contains it, or,
+// when it runs across a sentence boundary, the sentence holding most of it
+// (one entry is one claim, and the gate pairs difference claims one to one).
+// A quote the cited block does not contain resolves to nothing.
+const resolveQuoteSentence = (quote, source) => {
+  const needle = trimQuoteEdges(normalizeQuoteText(quote));
+
+  if (!needle || !source) {
+    return null;
+  }
+
+  const containing = source.sentences.find((sentence) =>
+    sentence.normalized.includes(needle)
+  );
+
+  if (containing) {
+    return containing;
+  }
+
+  const joined = source.sentences.map((sentence) => sentence.normalized).join(" ");
+  const start = joined.indexOf(needle);
+
+  if (start === -1) {
+    return null;
+  }
+
+  const end = start + needle.length;
+  let best = null;
+  let bestOverlap = 0;
+  let offset = 0;
+
+  for (const sentence of source.sentences) {
+    const sentenceEnd = offset + sentence.normalized.length;
+    const overlap = Math.min(end, sentenceEnd) - Math.max(start, offset);
+
+    if (overlap > bestOverlap) {
+      best = sentence;
+      bestOverlap = overlap;
+    }
+
+    offset = sentenceEnd + 1;
+  }
+
+  return best;
+};
+
+// The claim check accepts a Differences section only as a perfect matching of
+// atomic claims, each pair two documents in substantive contrast (support.js
+// evaluateDifferenceSectionSupport, at most this many claims). The grounded
+// template writes such pairs; the structured renderer writes the same shape.
+const MAX_STRUCTURED_DIFFERENCE_LINES = 18;
+
+const toStructuredDifferences = (parsed) =>
+  Array.isArray(parsed?.differences)
+    ? parsed.differences
+        .filter((aspect) => aspect && typeof aspect === "object")
+        .slice(0, MAX_STRUCTURED_ASPECTS)
+        .map((aspect) => ({
+          entries: (Array.isArray(aspect.entries) ? aspect.entries : [])
+            .filter((entry) => entry && typeof entry === "object")
+            .map((entry) => ({
+              quote: String(entry.quote ?? ""),
+              source: Number(entry.source),
+            })),
+        }))
+    : null;
+
+/**
+ * The answer text rendered from a structured comparison reply, in the grounded
+ * template's shape, plus counts of what the reply held and what was dropped.
+ * `text` is null when nothing parsed or no aspect kept entries of two documents.
+ * The counts are integers only: they go to the RAG trace.
+ */
+export const renderStructuredComparisonAnswer = ({ bundle, parsed }) => {
+  const differences = toStructuredDifferences(parsed);
+  const counts = {
+    parsed: differences ? 1 : 0,
+    aspectCount: 0,
+    entryCount: 0,
+    resolvedEntryCount: 0,
+    droppedEntryCount: 0,
+    droppedAspectCount: 0,
+    renderedLineCount: 0,
+  };
+
+  if (!differences) {
+    return { text: null, counts };
+  }
+
+  const sources = buildStructuredEvidenceSources(bundle);
+  const differenceLines = [];
+  const firstLineByDocId = new Map();
+  counts.aspectCount = differences.length;
+
+  for (const aspect of differences) {
+    // One claim per document per aspect: the first entry of a document that
+    // resolves; a later one for the same document counts as dropped.
+    const resolvedByDocId = new Map();
+
+    for (const entry of aspect.entries) {
+      counts.entryCount += 1;
+      const source = sources.get(entry.source);
+      const sentence = resolveQuoteSentence(entry.quote, source);
+
+      if (!sentence || resolvedByDocId.has(source.docId)) {
+        counts.droppedEntryCount += 1;
+        continue;
+      }
+
+      counts.resolvedEntryCount += 1;
+      resolvedByDocId.set(source.docId, {
+        line: buildDocumentBoundFactLine(source, { rank: source.rank, text: sentence.text }),
+        normalized: sentence.normalized,
+      });
+    }
+
+    // Documents quoting the same sentence agree on this aspect (near-duplicate
+    // files do); a difference needs at least two groups that say different
+    // things. Each entry of one group is paired with each entry of every other
+    // group, written as the pair's two lines, which is the shape the claim
+    // check pairs up; a line therefore repeats when it contrasts with several.
+    const groups = [...new Map(
+      [...resolvedByDocId.values()].map((entry) => [entry.normalized, []])
+    ).keys()].map((normalized) =>
+      [...resolvedByDocId.values()].filter((entry) => entry.normalized === normalized)
+    );
+
+    if (groups.length < 2) {
+      counts.droppedAspectCount += 1;
+      continue;
+    }
+
+    const aspectLines = [];
+
+    for (let left = 0; left < groups.length; left += 1) {
+      for (let right = left + 1; right < groups.length; right += 1) {
+        for (const leftEntry of groups[left]) {
+          for (const rightEntry of groups[right]) {
+            aspectLines.push(leftEntry.line, rightEntry.line);
+          }
+        }
+      }
+    }
+
+    if (differenceLines.length + aspectLines.length > MAX_STRUCTURED_DIFFERENCE_LINES) {
+      counts.droppedAspectCount += 1;
+      continue;
+    }
+
+    differenceLines.push(...aspectLines);
+
+    for (const [docId, entry] of resolvedByDocId) {
+      if (!firstLineByDocId.has(docId)) {
+        firstLineByDocId.set(docId, entry.line);
+      }
+    }
+  }
+
+  counts.renderedLineCount = differenceLines.length;
+
+  if (differenceLines.length === 0) {
+    return { text: null, counts };
+  }
+
+  const perDocumentLines = [...sources.values()]
+    .map((source) => firstLineByDocId.get(source.docId))
+    .filter((line, index, lines) => line && lines.indexOf(line) === index);
+
+  return {
+    counts,
+    text: [
+      "Summary:",
+      "Per document:",
+      ...perDocumentLines,
+      "Differences:",
+      ...differenceLines,
+      "Gaps or uncertainty:",
+    ].join("\n"),
+  };
+};
+
 export const writeComparisonAnswer = async ({
   query,
   resolvedQuery,
@@ -1254,23 +1589,56 @@ export const writeComparisonAnswer = async ({
     diagnostics,
     context: bundle.context,
   });
-  const guarded = guardAnswerLinks(
-    normalizeGroupedSourceLabels(
-      await completeText(selectedPrompt, { promptTemplate: comparisonPrompt.descriptor })
-    ),
-    { allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }) }
-  );
-  const text = guarded.text;
-  const modelGate = assessStructuredDifferenceAnswer({
-    analysis,
-    bundle,
-    text,
+  const structuredOutputEnabled = isComparisonStructuredOutputEnabled();
+  const sourceRanks = (bundle.rankedResults ?? []).map((result) => result.rank);
+  const completion = await completeText(selectedPrompt, {
+    promptTemplate: comparisonPrompt.descriptor,
+    ...(structuredOutputEnabled && sourceRanks.length > 0
+      ? { responseFormat: buildComparisonStructuredResponseFormat(sourceRanks) }
+      : {}),
   });
+  // With structured output on, the model's reply is a selection of evidence
+  // and the text the gate sees is rendered from it; `structuredOutput` counts
+  // what the reply held (integers only, for the trace).
+  let structuredOutput = null;
+  let modelText = completion;
+
+  if (structuredOutputEnabled) {
+    const rendered = renderStructuredComparisonAnswer({
+      bundle,
+      parsed: parseFirstJsonValue(completion),
+    });
+
+    structuredOutput = rendered.counts;
+    modelText = rendered.text ?? "";
+  }
+
+  const structuredResult = structuredOutput ? { structuredOutput } : {};
+  const guarded = guardAnswerLinks(normalizeGroupedSourceLabels(modelText), {
+    allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }),
+  });
+  const text = guarded.text;
+  const modelGate =
+    structuredOutputEnabled && !modelText
+      ? {
+          safe: false,
+          reason: {
+            code: structuredOutput.parsed
+              ? "structured_no_differences"
+              : "structured_output_unparsable",
+          },
+        }
+      : assessStructuredDifferenceAnswer({
+          analysis,
+          bundle,
+          text,
+        });
 
   if (modelGate.safe) {
     return {
       text,
       citations: bundle.citations,
+      ...structuredResult,
     };
   }
 
@@ -1302,6 +1670,7 @@ export const writeComparisonAnswer = async ({
       abstained: true,
       abstainReason,
       modelRejectReason,
+      ...structuredResult,
     };
   }
 
@@ -1309,5 +1678,6 @@ export const writeComparisonAnswer = async ({
     text: groundedDifferenceAnswer,
     citations: bundle.citations,
     modelRejectReason,
+    ...structuredResult,
   };
 };

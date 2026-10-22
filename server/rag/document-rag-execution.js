@@ -692,18 +692,24 @@ const executeComparisonRag = async ({
     };
   }
 
-  const { modelRejectReason, ...generatedAnswer } = await writeComparisonAnswer({
-    query,
-    resolvedQuery,
-    bundle,
-    analysis,
-    preferenceBlock,
-  });
+  const { modelRejectReason, structuredOutput, ...generatedAnswer } =
+    await writeComparisonAnswer({
+      query,
+      resolvedQuery,
+      bundle,
+      analysis,
+      preferenceBlock,
+    });
 
   // Why the model's comparison answer was replaced (codes and counts only)
-  // goes to the trace, not into the response.
+  // goes to the trace, not into the response; so do the counts of what a
+  // structured comparison reply held (RAG_COMPARISON_STRUCTURED_OUTPUT).
   if (modelRejectReason) {
     traceFields.modelRejectReason = modelRejectReason;
+  }
+
+  if (structuredOutput) {
+    traceFields.comparisonStructuredOutput = structuredOutput;
   }
 
   return {
