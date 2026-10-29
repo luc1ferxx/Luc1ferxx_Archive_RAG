@@ -42,7 +42,11 @@ import {
   stripClaimLeadLabel,
   uniqueValues,
 } from "./text.js";
-import { getModalityLabels, splitModalityClauses } from "./modality.js";
+import {
+  getModalityLabels,
+  splitModalityClauses,
+  stripClauseConnectives,
+} from "./modality.js";
 import {
   buildNumericOccurrenceFacts,
   haveSameNumericOccurrences,
@@ -194,7 +198,9 @@ export const buildClaimTerms = ({
     (anchor) => anchor.type === "numeric_constraint"
   );
 
-  return extractFactTerms(stripNumericValueSurfaces(factualClaimText)).filter((term) => {
+  return extractFactTerms(
+    stripNumericValueSurfaces(stripClauseConnectives(factualClaimText))
+  ).filter((term) => {
     if (
       documentAttributionTerms.has(term) ||
       genericDocumentAttributionTerms.has(term)
@@ -521,11 +527,18 @@ export const evaluateClaimAgainstCitations = ({
       numericClaimClauses.every(
         (clause) => extractNumericOccurrences(clause).length > 0
       ));
+  // An evidence sentence is read whole, not only as its clauses, when the
+  // claim is numeric (above) or quotes it as it stands: equal to it, or a run
+  // of its words ("the records have many terminologies, so only annotators
+  // ... are qualified" spans two clauses of the sentence it is taken from).
   const normalizedFactualClaim = normalizeSearchText(factualClaimText);
   const parentSupportSegments = buildCitationSupportSentences(citations).filter(
     (sentence) =>
       numericParentEligible ||
-      normalizeSearchText(sentence) === normalizedFactualClaim
+      (normalizedFactualClaim.length > 0 &&
+        ` ${normalizeSearchText(sentence)} `.includes(
+          ` ${normalizedFactualClaim} `
+        ))
   );
   const exactEvidenceSupportSegments = citations.flatMap((citation) =>
     CHECKABLE_CITATION_FIELDS.map((field) =>

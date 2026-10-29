@@ -5374,3 +5374,107 @@ test("rejoining wrapped lines never merges list items or labelled values", () =>
   // must still be checked on its own.
   assert.equal(isSupported("The monthly fee is 500 dollars.", listed), false);
 });
+
+// A sentence quoted as it stands from the evidence must pass the lexical
+// check: the claim side and the evidence side read the same words the same
+// way. The cited chunk holds another sentence too, so the claim is checked
+// against the sentence (and its clauses), never as a whole-field match. Each
+// test pairs the quoted form with a control that changes the fact, so the
+// symmetry never widens what a paraphrase can claim.
+const quotedSentenceCitation = (sentence) => [
+  {
+    docId: "doc-1",
+    fileName: "paper.pdf",
+    pageNumber: 3,
+    excerpt: `The paper reports the following. ${sentence}`,
+  },
+];
+
+const checkQuotedSentence = (answerText, sentence) =>
+  evaluateClaimSupport({ answerText, citations: quotedSentenceCitation(sentence) });
+
+test("claim check symmetry: a word with digits inside it is one term on both sides", () => {
+  const sentence = "The decoder follows seq2seq training as described in BIBREF20 with word2vec inputs.";
+  const supported = checkQuotedSentence(`${sentence} [Source 1]`, sentence);
+
+  assert.equal(supported.unsupportedClaimCount, 0, JSON.stringify(supported.claims));
+
+  const otherReference = checkQuotedSentence(
+    "The decoder follows seq2seq training as described in BIBREF21 with word2vec inputs. [Source 1]",
+    sentence
+  );
+
+  assert.equal(otherReference.unsupportedClaimCount, 1);
+  assert.deepEqual(otherReference.claims[0].missingAnchors, ["term:bibref21"]);
+});
+
+test("claim check symmetry: a connective the evidence clause split consumes is no claim term", () => {
+  const sentence = "The largest knowledge bases are often incomplete.";
+  const supported = checkQuotedSentence(
+    "However, the largest knowledge bases are often incomplete. [Source 1]",
+    sentence
+  );
+
+  assert.equal(supported.unsupportedClaimCount, 0, JSON.stringify(supported.claims));
+
+  const otherFact = checkQuotedSentence(
+    "However, the smallest knowledge bases are often incomplete. [Source 1]",
+    sentence
+  );
+
+  assert.equal(otherFact.unsupportedClaimCount, 1);
+});
+
+test("claim check symmetry: additive detail reads its words as the evidence does", () => {
+  const sentence = "The scores are computed with the help of hand-written references.";
+  const supported = checkQuotedSentence(`${sentence} [Source 1]`, sentence);
+
+  assert.equal(supported.unsupportedClaimCount, 0, JSON.stringify(supported.claims));
+
+  const otherDetail = checkQuotedSentence(
+    "The scores are computed with the help of hand-written summaries. [Source 1]",
+    sentence
+  );
+
+  assert.equal(otherDetail.unsupportedClaimCount, 1);
+});
+
+test("claim check symmetry: a clause quoted as it stands is never refused for an ambiguity its evidence shares", () => {
+  const sentence =
+    "We introduce the Taskmaster-1 dataset which includes 13,215 task-based dialogs comprising six domains.";
+  const supported = checkQuotedSentence(`${sentence} [Source 1]`, sentence);
+
+  assert.equal(supported.unsupportedClaimCount, 0, JSON.stringify(supported.claims));
+
+  const otherCount = checkQuotedSentence(
+    "We introduce the Taskmaster-1 dataset which includes 13,215 task-based dialogs comprising seven domains. [Source 1]",
+    sentence
+  );
+
+  assert.equal(otherCount.unsupportedClaimCount, 1);
+  assert.ok(otherCount.claims[0].missingAnchors.includes("7"), JSON.stringify(otherCount.claims));
+
+  const enumeration =
+    "Experimental results reveal that (1) near human-like dialogue policies can be induced, (2) generalisation to unseen data is a difficult problem, and (3) training an ensemble of agents is essential for improved performance.";
+  const enumerated = checkQuotedSentence(`${enumeration} [Source 1]`, enumeration);
+
+  assert.equal(enumerated.unsupportedClaimCount, 0, JSON.stringify(enumerated.claims));
+});
+
+test("claim check symmetry: a sentence quoted in part is checked against the whole sentence", () => {
+  const sentence =
+    "First, the records have many medical terminologies, so only annotators with medical backgrounds are qualified to label them, and labelling is slow.";
+  const supported = checkQuotedSentence(
+    "The records have many medical terminologies, so only annotators with medical backgrounds are qualified to label them. [Source 1]",
+    sentence
+  );
+
+  assert.equal(supported.unsupportedClaimCount, 0, JSON.stringify(supported.claims));
+
+  const reworded = checkQuotedSentence(
+    "The records have many medical terminologies, so only annotators with legal backgrounds are qualified to label them. [Source 1]",
+    sentence
+  );
+
+  assert.equal(reworded.unsupportedClaimCount, 1);
+});

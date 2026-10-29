@@ -144,6 +144,13 @@ export const splitModalityClauses = (value = "") =>
     .map((clause) => clause.trim())
     .filter(Boolean);
 
+// What the clause split consumes, taken out of a claim before its terms are
+// read. The evidence is split with the same pattern
+// (buildCitationSupportSegments), so no evidence clause holds "however" or
+// "but", and a claim term made of one could never be found there.
+export const stripClauseConnectives = (value = "") =>
+  String(value ?? "").replace(MODALITY_CLAUSE_SPLIT_PATTERN, " ");
+
 export const getModalityClaimTerms = ({
   claimText = "",
   anchor,

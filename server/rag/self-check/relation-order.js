@@ -10,9 +10,16 @@ export const hasReversedTermOrder = (
   supportTerms = [],
   { pivotTerms = null } = {}
 ) => {
+  // The claim's terms as a run of the evidence's terms, in its order, is
+  // never a reversal; the pivot heuristic below would see one wherever a word
+  // repeats on both sides of the pivot ("many medical terminologies, so only
+  // annotators with medical backgrounds" against the sentence it is taken
+  // from, which goes on past it).
   if (
-    claimTerms.length === supportTerms.length &&
-    claimTerms.every((term, index) => supportTerms[index] === term)
+    claimTerms.length > 0 &&
+    supportTerms.some((_term, start) =>
+      claimTerms.every((term, index) => supportTerms[start + index] === term)
+    )
   ) {
     return false;
   }
