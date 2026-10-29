@@ -120,6 +120,12 @@ export const compareQasperAnswerReports = (
   const isBoolean = (value) => typeof value === "boolean";
   const isScore = (value) => Number.isFinite(value);
   const readCited = (row) => row.citedEvidenceHit;
+  // The answerable questions both runs answered: the model's score on the
+  // same questions, free of the composition change an answer-rate shift
+  // brings to the figures above; and the characters of context it read
+  // there (what a retrieval setting costs per answer, paired).
+  const bothAnswered = answerable.filter(([left, right]) => readAnswered(left) && readAnswered(right));
+  const readContextChars = (row) => (Number.isFinite(row?.contextChars) ? row.contextChars : undefined);
 
   return {
     // What this run was paired against and how, for the report and its Markdown.
@@ -142,6 +148,8 @@ export const compareQasperAnswerReports = (
     answerableF1Direct: delta(whereBoth(answerable, readF1Direct, isScore), f1DirectAbstainZero),
     answerRate: delta(answerable, answered),
     unanswerableAnswered: delta(unanswerable, answered),
+    answeredBothF1: delta(bothAnswered, f1),
+    contextCharsBothAnswered: delta(whereBoth(bothAnswered, readContextChars, isScore), readContextChars),
     citedEvidenceHit: delta(whereBoth(answerable, readCited, isBoolean), (row) => (readCited(row) ? 1 : 0)),
     contextEvidenceHit: delta(whereBoth(answerable, readContextEvidenceHit, isBoolean), (row) =>
       readContextEvidenceHit(row) ? 1 : 0
@@ -163,6 +171,8 @@ const METRIC_LABELS = Object.freeze({
   answerableF1Direct: "Short-answer F1 on answerable questions (abstention = 0)",
   answerRate: "Answer rate (answerable questions)",
   unanswerableAnswered: "Unanswerable questions answered",
+  answeredBothF1: "Answer F1 on answerable questions both runs answered",
+  contextCharsBothAnswered: "Context characters on answerable questions both runs answered",
   citedEvidenceHit: "Cited evidence recall (answerable, both runs recorded it)",
   contextEvidenceHit: "Context evidence recall (answerable, both runs recorded it)",
 });

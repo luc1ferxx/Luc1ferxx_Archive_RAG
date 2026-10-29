@@ -423,3 +423,33 @@ test("the comparison command prints the paired table for two saved reports", asy
     await rm(tempRoot, { force: true, recursive: true });
   }
 });
+
+test("the questions both runs answered get their own F1 and context-size deltas", () => {
+  const r = (id, answered, f1, contextChars, shouldAbstain = false) => ({
+    abstained: !answered,
+    answered,
+    contextChars,
+    f1,
+    id,
+    shouldAbstain,
+  });
+  const report = { rows: [r("a", true, 0.5, 1000), r("b", true, 1, 1200), r("c", false, 0, 0), r("u", true, 0, 900, true)] };
+  const other = { rows: [r("a", true, 0.25, 800), r("b", false, 0, 0), r("c", true, 0.5, 700), r("u", false, 1, 0, true)] };
+  const comparison = compareQasperAnswerReports(report, other, { iterations: 200 });
+
+  // Only "a" was answered by both; "b" and "c" each by one run, "u" is unanswerable.
+  assert.deepEqual({ cases: comparison.answeredBothF1.cases, delta: comparison.answeredBothF1.delta }, { cases: 1, delta: 0.25 });
+  assert.deepEqual(
+    { cases: comparison.contextCharsBothAnswered.cases, delta: comparison.contextCharsBothAnswered.delta },
+    { cases: 1, delta: 200 }
+  );
+  // A report whose rows carry no contextChars: paired F1 still, no size delta.
+  const older = { rows: other.rows.map(({ contextChars, ...rest }) => rest) };
+
+  assert.equal(compareQasperAnswerReports(report, older, { iterations: 200 }).answeredBothF1.cases, 1);
+  assert.deepEqual(compareQasperAnswerReports(report, older, { iterations: 200 }).contextCharsBothAnswered, {
+    cases: 0,
+    ci95: null,
+    delta: null,
+  });
+});

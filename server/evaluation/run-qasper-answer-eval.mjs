@@ -73,7 +73,12 @@ import {
   formatComparisonMarkdown,
   readQasperAnswerReport,
 } from "./compare-qasper-answer-reports.mjs";
-import { describeChunkingConfig, describeEvaluationCheckout, sumTextChars } from "./eval-run-config.js";
+import {
+  describeChunkingConfig,
+  describeEvaluationCheckout,
+  describeRetrievalConfig,
+  sumTextChars,
+} from "./eval-run-config.js";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 import { createSeededRandom } from "./paired-bootstrap.js";
 
@@ -462,6 +467,9 @@ const main = async () => {
     promptTemplates: await describePromptTemplates(),
     // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
     queryAdapter: getQueryAdapterReportFingerprint(),
+    // Every retrieval setting of the QA route (top-K, pools, fusion, gate
+    // floors, ...): two answer runs that differ there show it in --compare.
+    retrieval: await describeRetrievalConfig(),
     seed,
     surface,
   };
