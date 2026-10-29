@@ -10,7 +10,13 @@ import {
   isNearDuplicateGuardEnabled,
   isQaAnswerVerdictEnabled,
   isQaExtractiveOutputEnabled,
+  isQaGateInflectionEnabled,
 } from "./config.js";
+import {
+  computeQueryTermCoverage,
+  findQueryTermSubstitution,
+  findUncoveredQueryAnchors,
+} from "./confidence.js";
 import {
   attachRetrievedEvidence,
   buildCitation,
@@ -1859,7 +1865,7 @@ const groundDirectAnswer = (answer, lines) => {
   const holder = lines.find((line) => line.normalized.includes(needle));
 
   if (holder) {
-    return { directAnswer: trimmed, kind: "span", ranks: [holder.rank] };
+    return { directAnswer: trimmed, holders: [holder], kind: "span", ranks: [holder.rank] };
   }
 
   const items = trimmed
@@ -1867,6 +1873,7 @@ const groundDirectAnswer = (answer, lines) => {
     .map((item) => trimQuoteEdges(normalizeQuoteText(item)))
     .filter(Boolean);
   const ranks = [];
+  const holders = [];
 
   for (const item of items) {
     const line = lines.find((candidate) => candidate.normalized.includes(item));
@@ -1878,11 +1885,47 @@ const groundDirectAnswer = (answer, lines) => {
     if (!ranks.includes(line.rank)) {
       ranks.push(line.rank);
     }
+
+    if (!holders.includes(line)) {
+      holders.push(line);
+    }
   }
 
   return items.length > 1
-    ? { directAnswer: trimmed, kind: "list", ranks }
+    ? { directAnswer: trimmed, holders, kind: "list", ranks }
     : { directAnswer: null, kind: "ungrounded", ranks: [] };
+};
+
+/**
+ * Round 3 (2026-10-28): whether the evidence the direct answer was taken
+ * from answers the question, by the QA gate's own three lexical checks: it
+ * names every anchor of the question (findUncoveredQueryAnchors), shares at
+ * least one of its meaningful words (computeQueryTermCoverage, inflected
+ * forms counting under RAG_QA_GATE_INFLECTION), and swaps no question word
+ * for a rival on the same head word (findQueryTermSubstitution). A fragment
+ * copied from a related sentence ("converge faster" for a question the paper
+ * never answers) is a grounded span, so grounding alone let it through.
+ */
+const quoteAnswersQuestion = ({ queryText = "", text = "" }) => {
+  if (!queryText) {
+    return true;
+  }
+
+  if (findUncoveredQueryAnchors({ queryText, text }).length > 0) {
+    return false;
+  }
+
+  const coverage = computeQueryTermCoverage({
+    queryText,
+    resultText: text,
+    inflection: isQaGateInflectionEnabled(),
+  });
+
+  if (coverage !== null && coverage <= 0) {
+    return false;
+  }
+
+  return findQueryTermSubstitution(queryText, text) === null;
 };
 
 const toExtractiveReply = (parsed) =>
@@ -1903,10 +1946,11 @@ const toExtractiveReply = (parsed) =>
  * [Source N]". The lines are claim-checked before they are returned and any
  * line the lexical check refuses is dropped, so the agent's self-check and
  * finalizer meet an answer that passes. `abstained` when nothing resolved,
- * the direct answer is empty or in none of the resolved sentences, or nothing
- * passed. The counts are integers only: they go to the RAG trace.
+ * the direct answer is empty or in none of the resolved sentences, the
+ * sentence it sits in does not answer the question (`queryText` given), or
+ * nothing passed. The counts are integers only: they go to the RAG trace.
  */
-export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
+export const renderExtractiveQaAnswer = ({ bundle, parsed, queryText = "" }) => {
   const reply = toExtractiveReply(parsed);
   const counts = {
     parsed: reply ? 1 : 0,
@@ -1961,6 +2005,18 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed }) => {
       reason: direct.kind === "empty" ? "answer_empty" : "answer_ungrounded",
       text: null,
     };
+  }
+
+  // Round 3 (2026-10-28): the sentence the answer sits in (every sentence a
+  // list item sits in; every resolved sentence for yes/no) must answer the
+  // question by the gate's own checks, else the span was only copied from a
+  // related sentence.
+  const holderText = (direct.holders?.length > 0 ? direct.holders : lines)
+    .map((line) => line.text)
+    .join(" ");
+
+  if (!quoteAnswersQuestion({ queryText, text: holderText })) {
+    return { abstained: true, counts, directAnswer: null, reason: "answer_unanchored", text: null };
   }
 
   const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer));
@@ -2018,9 +2074,14 @@ const writeExtractiveQaAnswer = async (call) => {
     promptTemplate: qaPrompt.descriptor,
     ...structuredResponseFormatOptions(bundle, buildQaExtractiveResponseFormat),
   });
-  const rendered = renderExtractiveQaAnswer({ bundle, parsed: parseFirstJsonValue(completion) });
+  const rendered = renderExtractiveQaAnswer({
+    bundle,
+    parsed: parseFirstJsonValue(completion),
+    queryText: call.query || call.resolvedQuery || "",
+  });
   // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
-  // unsupported, answer_empty, answer_ungrounded; null when answered) and
+  // unsupported, answer_empty, answer_ungrounded, answer_unanchored; null
+  // when answered) and
   // `fallback` ("prose" when the prose call answered instead of the attempt;
   // null otherwise), for the trace.
   const qaStructuredOutput = { ...rendered.counts, code: rendered.reason, fallback: null };
