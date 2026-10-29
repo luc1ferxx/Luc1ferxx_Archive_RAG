@@ -286,7 +286,7 @@ v1 那次运行还有两个观察：
 
 **失效方式**：在适用范围内却没法适配时（文件缺失或损坏、训练空间与配置不一致、路由或融合方式不对、向量库不支持、替身 provider 的向量），检索退回未适配，每种原因只告警一次，不会让请求失败。不在适用范围的调用（不是单篇 QA，或不止一篇文档）直接不适配，也不告警。健康检查 `checks.queryAdapter`：文件不可读或格式不对时报 error（`STARTUP_HEALTH_STRICT` 下启动失败）；空间不匹配、路由不是 hybrid、融合不是 RRF、向量库不支持时报 warning（这些情况下不适配）。
 
-**可追溯**：被适配的检索在 `routes.dense.queryAdapter` 和 `provenance.queryAdapter` 上带适配器指纹。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:abstention-gate` 在 `config.queryAdapter` 里记录指纹；`eval:qasper-retrieval --compare` 拒绝配对指纹不同的两份报告。没开适配器时，检索结果和 `retrieval` 块不加这两个字段，响应和评测基线的形状不变；三个评测报告的 `config.queryAdapter` 记为 null。
+**可追溯**：被适配的检索在 `routes.dense.queryAdapter` 和 `provenance.queryAdapter` 上带适配器指纹。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:abstention-gate` 在 `config.queryAdapter` 里记录指纹；`eval:qasper-retrieval --compare` 拒绝配对指纹不同的两份报告（2026-10-28 起也拒绝语料、seed 或题数不同的报告，并列出 `config.retrieval` 的差异）。没开适配器时，检索结果和 `retrieval` 块不加这两个字段，响应和评测基线的形状不变；三个评测报告的 `config.queryAdapter` 记为 null。
 
 **测试**：`test/query-adapter.test.mjs`。
 

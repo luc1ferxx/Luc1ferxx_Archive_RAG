@@ -1068,7 +1068,7 @@ QA prompt 原来写的是"最多五句"，现在改成：先用尽量少的词�
 
 ### 检索召回：embedding 任务前缀
 
-`npm run eval:qasper-retrieval` 对每道可回答题只检索一次（`retrieveQaCandidates`，也就是问答路径在门控之前的部分），逐题记录标注的证据段落是否出现在：第 1 名、前 3 名、全部候选、默认门控放行的段落中。不调用大模型；两次运行可以用 `--compare` 逐题配对。
+`npm run eval:qasper-retrieval` 对每道可回答题只检索一次（`retrieveQaCandidates`，也就是问答路径在门控之前的部分），逐题记录标注的证据段落是否出现在：第 1 名、前 3 名、全部候选、默认门控放行的段落中。不调用大模型；两次运行可以用 `--compare` 逐题配对。2026-10-28 起报告还记录 `config.retrieval`（路线、混合开关、融合方法、RRF k、权重、top-K 和稀疏 top-K、重排、查询分解、BM25 k1/b、门控阈值，从路线读的同一批 getter 取值）、每题命中块的 `hitDenseRank`/`hitSparseRank`（稠密路和稀疏路各给它的名次，没返回它的路为 null）和 `timing`（入库、检索毫秒数）；`--compare` 会列出两次运行检索设置的差异（两边都记录了就逐项列，只有一边记录了就只列一条 `retrieval`，都没记录就不列）。此前只记录 top-K，融合或候选池设置的差别在报告里看不出来。
 
 **改动**：nomic-embed-text 的官方要求是查询前加 `search_query: `、文档前加 `search_document: `，之前两处都没加。
 
@@ -1344,7 +1344,47 @@ train 上（400 题）的损失拆解：
 - **当前代码等于 10-08 的 chunker-new 报告**：两份报告（`latest-qasper-retrieval-chunker-new-{train,dev}`，10-08 跑的 1dcc8467）和这次干净重跑的当前代码逐题完全相同（400 + 821 题），所以 1dcc8467 之后检索路径上的改动没有改变结果。上表 S0 用的是这次干净重跑；10-04 的 S0 报告与它相差不超过 0.003，但逐题并不相同，引用时以这次为准。
 - **主目录里跑会被污染**：这次在主目录直接跑同一个提交，dev 候选覆盖是 0.663（干净时 0.704）。原因是评测脚本只在静态导入之后才设置 `RAG_DATA_DIRECTORY`，而 `rag/storage.js` 在第一次导入时就定下数据目录，存在 `server/data/rag` 时就用它：评测会往本地档案里入库，BM25 统计也包含档案里的其他文档（当时有 664 篇之前评测留下的 QASPER 论文，已清理）。现在所有评测脚本都通过 `useEvaluationDataDirectory`（`evaluation/eval-data-directory.mjs`）设置数据目录，并检查确实生效。之前在主目录跑的检索评测都可能受过影响；10-08 的 chunker-new 和 10-04 的 S0 经核对是干净的，或者只差在第三位小数。
 - **之前在旧块上定下的东西需要留意**：QA 门控阈值 0.51、查询适配器、重排权重和概率阈值、段落识别默认开启，都是在 1dcc8467 之前的块上测的；当前块上没有重测，不代表它们失效，但引用这些数字时要说明。
-- **以后怎么避免**：切块输出变了就要升 `CHUNKER_VERSION`（`rag/chunk-profile.js`，现在是 2；1 是 1dcc8467 之前的 `structured`），`test/chunk-profile.test.mjs` 固定了各策略在合成语料和生成页面上的输出摘要，输出一变就失败。入库的块带 `metadata.chunkProfileId`（策略、块大小、重叠、切块器版本、PDF 解析设置的摘要），索引版本记录切块配置，和当前配置不同时健康检查给 warning。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:layout-parsing` 的报告 `config` 记录 `chunking`（策略、块大小、重叠、切块器版本）和 `git`（提交、工作区是否干净、改动路径数），`--compare` 会列出两次运行配置的差别；qasper-retrieval 每题还记录门控放行块的字符数 `admittedChars`。
+- **以后怎么避免**：切块输出变了就要升 `CHUNKER_VERSION`（`rag/chunk-profile.js`，现在是 2；1 是 1dcc8467 之前的 `structured`），`test/chunk-profile.test.mjs` 固定了各策略在合成语料和生成页面上的输出摘要，输出一变就失败。入库的块带 `metadata.chunkProfileId`（策略、块大小、重叠、切块器版本、PDF 解析设置的摘要），索引版本记录切块配置，和当前配置不同时健康检查给 warning。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:layout-parsing` 的报告 `config` 记录 `chunking`（策略、块大小、重叠、切块器版本）和 `git`（提交、工作区是否干净、改动路径数），`--compare` 会列出两次运行配置的差别；qasper-retrieval 每题还记录门控放行块的字符数 `admittedChars`。 2026-10-28 起 `eval:qasper-retrieval` 的报告还记录 `config.retrieval`（检索设置）和每题命中块的两路名次，`--compare` 也列出检索设置的差异，并拒绝语料、seed 或题数不同的对照报告。
+
+### 检索参数在 chunker v2 上重测（2026-10-28，规则先于运行）
+
+**为什么**：`RAG_CHUNK_SIZE=900`、`RAG_CHUNK_OVERLAP=180`、`RAG_RETRIEVAL_TOP_K=6`、`RAG_RRF_K=60`、融合权重 0.65/0.35、`RAG_SPARSE_TOP_K=8` 来自 2026-04 到 06 月的提交（5c884092、77236df6、e6ca2717、ea28990b，提交说明都为空）。topK、k、权重、稀疏 top-K 从没在 QASPER 上变过；块大小和重叠在 `structured` 下也没单独变过（S2 把 600/120 和 `sentence` 绑在一起测过一次）。2026-10-04 切块器改成 v2 之后只做了上一节末尾的事后复查（2026-10-18），没有在新块上重新选参。另外，从 RRF 的算术看：本地稠密路对单篇文档不设阈值地按余弦返回全部块的前 8 名（池子 = `max(topK 6, sparse topK 8)`），融合分 = 权重 × (k+1) / (k+名次)，稀疏独有的候选最高 0.35 × 61/61 = 0.35，低于稠密第 8 名的 0.65 × 61/68 = 0.583，两路都在的候选至少 61/68 = 0.897。所以默认权重和 k 下最终 6 个候选永远是稠密前 8 的子集，稀疏路只能在其中重排。这个推论还没实测过。
+
+**测什么**：`eval:qasper-retrieval`（QA 路线到门控为止，`retrieveQaCandidates`；nomic-embed-text 经本地 Ollama，local 索引，无对话模型）。每题记录证据段是否在第 1 名、前 3 名、全部候选（`hitAtAll`，候选覆盖）、门控放行的块（`admitted`）和模型会读到的上下文（`context@0`：放行块加补充候选，到 topK 为止）里，外加放行块的字符数。为这一轮先给运行器补了：报告的 `config.retrieval`（路线、混合开关、融合方法、k、权重、打分模式、top-K 和稀疏 top-K、重排、查询分解、BM25 k1/b、门控阈值、是否走远端检索或模型网关、embedding 端点主机名），每题的 `docKey`、`evidenceRequirementCount`、命中块的 `hitDenseRank`/`hitSparseRank`（两路各给它的名次，没返回它的路为 null；分解过的题取合并时胜出那份副本所在子查询的名次）和 `sparseOnlyCandidateCount`（稀疏返回而稠密没返回的候选数，上面的推论成立时恒为 0），`timing`（入库、检索毫秒数，只作诊断：第一次运行含模型加载，入库时间随索引增大，切块臂和融合臂之间不比），以及 `--compare` 的按论文聚类区间 `ci95ByPaper`（同一篇论文的题共享它的块和向量，dev 平均每篇 3 题，按题重抽样会把它们当独立的）、每项的翻转数 `flips`、`--iterations`，和对语料/seed/题数不同的对照报告的拒绝。
+
+**环境（每次运行相同）**：`env -i` 只保留 `PATH`、`HOME`、`TMPDIR`，再加 `DOTENV_CONFIG_PATH=/dev/null`、`OPENAI_BASE_URL=http://127.0.0.1:11434/v1`、`OPENAI_API_KEY=ollama`、`OPENAI_EMBEDDING_MODEL=nomic-embed-text`、`RAG_EMBEDDING_DIMENSIONS=768`、`VECTOR_STORE_PROVIDER=local`；每臂只多它表里的那几个变量；Ollama 0.34.4（CI 钉的是 0.40.3）；`--iterations 10000`。工具改动先提交，所有臂在同一个提交、干净的 worktree 上跑（报告的 `config.git.dirty` 必须为 false，`config.retrieval` 证明 B 就是默认值），报告名 `latest-qasper-retrieval-rp-<臂>-{train,dev}`（git 忽略，另外复制一份保存），摘要表写进本节。
+
+**样本**：阶段 1 用 train `--cases 400 --seed 11`：400 题、311 篇论文、833 万字符（按运行器的抽样函数离线算的，运行时 "Ingesting N papers" 一行核对篇数）；与 seed 1 的样本（前缀、上下文、重排权重、切块器的决定都在它上面做的）重叠 83 题；证据页 761 个，17.3% 超过 900 字符。阶段 2 用 dev `--corpus qasper-dev.json --cases 2000 --seed 1`，即全部 821 道可回答题：本项目的检索确认一直用它，QASPER 的 test 集没有导入；B 以前在它上面确认过的改动是各臂共有的，在配对差里抵消。环境核对：train seed 1 的默认臂与 10-08 的 `latest-qasper-retrieval-chunker-new-train`（按 10-18 的复查等于当时代码的干净重跑）逐题比较——逐题相同按原样继续；有题翻转就记下翻转数，`hitAtAll` 相差不超过 0.01 就继续并写明 embedding 有漂移、绝对数不与旧报告直接比；差更多就停下查原因（Ollama 版本、模型、数据目录）。噪声底：B 在 seed 11 上跑两次（B、B′），B′ 对 B 的配对差和翻转数放在各臂结果旁边；T8 对没分解的题前 6 个候选按构造与 B 相同，那里的 hitAt1/hitAt3 差别也是噪声。
+
+**臂**（每臂重新入库、重新 embedding，约 5 分钟；串行，一次一个）：
+
+| 臂 | 设置 | 问的问题；按算术的预期 |
+| --- | --- | --- |
+| B | 默认：structured 900/180，topK 6，sparse topK 8，RRF k 60，权重 0.65/0.35 | 基线 |
+| C600 | `RAG_CHUNK_SIZE=600 RAG_CHUNK_OVERLAP=120` | 块更小：同页多块会抢候选位；块短了词覆盖机械地降，门控放行可能随之降（门控耦合） |
+| C1200 | `RAG_CHUNK_SIZE=1200 RAG_CHUNK_OVERLAP=240` | 块更大：证据段很少被切开；`admittedChars` 随之变大 |
+| O0 | `RAG_CHUNK_OVERLAP=0` | 重叠复制的文字是否在浪费候选位 |
+| O360 | `RAG_CHUNK_OVERLAP=360` | 实际重叠 = min(设置, 块大小 − 标题 − 下一段 − 2)，而且只有超过块大小的页才有重叠（证据页里 17.3%），所以 O0/O360 只能动这些题；O360 没差别只说明"切块器允许的范围内更多重叠没用" |
+| W50 | `RAG_HYBRID_DENSE_WEIGHT=0.5 RAG_HYBRID_SPARSE_WEIGHT=0.5` | 同名次的稀疏候选和稠密候选并列，并列时稀疏在前（排序第二键是稀疏名次）：两路不交时前 6 是 s1、d1、s2、d2、s3、d3，稠密占比减半 |
+| K4 | `RAG_RRF_K=4` | 稀疏独有候选要进前 6 需要 0.35/(k+1) > 0.65/(k+6)，即 k < 4.83（k=5 不行）；k=4 时稀疏第 1 名（0.35）挤掉稠密第 6 名（0.325），稀疏第 2 名（0.292）进不了：最多一个稀疏独有候选，同时两路都在的候选不再自动置顶 |
+| FW | `RAG_HYBRID_FUSION=weighted` | 各路按自己的最大值归一化后加权：稠密第 8 名要输给稀疏第 1 名需要 cos₈/cos₁ < 0.538，单篇论文前 8 名的余弦通常只差几个百分点，所以 FW 多半仍是稠密前 8 内的重排；`sparseOnlyCandidateCount` 核实 |
+| T8、T10 | `RAG_RETRIEVAL_TOP_K=8` / `10` | 只记录：T8 池子不变（8/8），没分解的题前 6 个候选与 B 相同，多出的是稠密第 7、8 名；T10 池子 10/10，前 3 名也可能变；默认权重下稀疏独有候选两者都进不来；模型上下文也随 topK 变大，改它要另测答案质量和成本 |
+| D | `RAG_HYBRID_ENABLED=false RAG_RETRIEVAL_SCORING_MODE=dense` | 只记录：余弦前 6（池子 6），不是"混合减稀疏"——B 的前 6 是余弦前 8 的重排，B − D 测的是"稠密第 7、8 名被稀疏抬进来的 − 前 6 里被挤出去的"；不加打分模式的话纯稠密路按 combined 打分（余弦混词覆盖），会混进第二件事；train 和 dev 都跑 |
+
+含 and / also / ; 的问题会被分解成子查询，各取 topK 再合并，这对各臂相同（T8/T10 把合并上限抬到 8n/10n）。切块臂和融合臂之间不组合（先各选一个，组合留给下一轮）。
+
+**规则（运行前写下，之后不改；区间一律用按论文聚类的 `ci95ByPaper`；"下界 > 0"取严格不等，正好等于阈值不算过）**：
+
+- 阶段 1（train seed 11，每臂对 B 配对，`comparison.cases` 必须等于 400）：
+  - 切块组（C600、C1200、O0、O360）只用与门控无关的指标：入选条件 `hitAtAll` 下界 > 0 且 `hitAt3` 下界 > −0.02；多个满足时取 `hitAtAll` delta 最大者。`admitted`、`context@0`、`admittedChars` 作为门控耦合的诊断数据照记：0.51 的词覆盖门槛是在 900 字符的块上调的，块变小覆盖机械地降、变大机械地升，不能把这两项当成切块本身的好坏。
+  - 融合组（W50、K4、FW）：`hitAtAll` 下界 > 0，且 `context@0` 下界 > −0.03、`admitted` 下界 > −0.015；多个满足时取 `context@0` delta 最大者。读 W50/K4 的 `context@0` 时记住：稀疏独有候选的 vectorScore 是 0，补充候选要 admissionScore ≥ 0.256，所以它要词覆盖 ≥ 0.256 才进上下文。
+  - 边界值的来历：train 400 题上以前配对区间的半宽，`context@0` 约 ±0.03、`admitted` 约 ±0.015、`hitAtAll` ±0.02 到 ±0.04；dev 821 题上 `hitAt3` 约 ±0.02、`admitted` 约 ±0.01、`context@0` 约 ±0.02。所以这些"不劣于"的边界实际上等于"点估计不明显低于 0"。一轮没有候选过线，不等于默认值被验证了，只说明没有哪个臂被证明更好。
+  - 第 1 名命中不设规则：上下文是门控放行的块在前、其余按检索顺序到 topK，第 1 名的位置对答案影响小（切块器 v2 的复查里第 1 名降 0.05 而覆盖升）；前 3 名设护栏，因为 S2 当时在 dev 上前 3 名显著变差。
+- 阶段 2（dev 821，候选对同一轮跑的 B-dev 配对，`comparison.cases` 必须等于 821）：`hitAtAll` 下界 > 0，`hitAt3` 下界 > −0.02；融合候选另加 `context@0` 下界 > −0.02、`admitted` 下界 > −0.01。切块候选的 `context@0`、`admitted` 照记：只在这两项不过（下界 ≤ −0.02 / ≤ −0.01）的切块候选，结论记为"检索更好但门控不匹配，要先在另一轮重调 `RAG_MIN_QA_QUERY_TERM_COVERAGE` 再谈改默认"，不是"更差"；切块候选的 `admittedChars` 配对差作为成本写进结论。
+- 阶段 3（护栏，只对过了阶段 2 的候选）：(a) `eval:abstention-gate`（train，`--answerable 800 --seed 12`，272 道不可回答题全部；seed 12 避开阶段 1 选参用的题）默认门控那一行：候选的不可回答题拦截率 ≥ B − 0.02，且可回答题放行率 ≥ B − 0.02，这是该样本上的硬护栏（没有区间），`gateCost` 照记但不裁决；(b) 候选 dev 报告的前 200 行（seed 1 的 CI 固定样本）`hitAtAll` ≥ 0.6；(c) 答案检查：dev `--exclude-report evaluation/results/latest-qasper-answers-citations.json --cases 100 --seed 2`（89 可答 / 11 不可答 / 84 篇，`--list-cases` 核对过；seed 1 的那份仍留给答案侧的候选）、`--surface rag`、qwen2.5:7b、`--iterations 10000`：候选对 B 的官方 F1 配对 CI 上界 ≥ 0，不可回答题被回答数 ≤ B + 1——100 题只能排除 F1 下降超过约 0.045 的情况，这是灾难护栏，不是"答案质量不变"的证据；(d) 候选环境下 `verify:quality` 18/18，三个确定性评测（near-duplicate、compare-hard、trajectory，`VECTOR_STORE_PROVIDER=local --openai-provider deterministic`）的通过数与基线相同；全套 `npm test` 在改默认的提交里跑（改完代码默认、重钉 profile id、manifest 和基线之后），不用环境覆盖的方式跑。
+- 三阶段都过的候选才改默认；任何一条不过，默认不变，数字照记。两组都有候选过线时，本轮只改 dev `hitAtAll` delta 大的那个，组合留到下一轮再测。T8/T10/D 无论结果都不改默认。
+- 推论的核实：B 臂每道题的 `sparseOnlyCandidateCount` 都应为 0，有一题不为 0 推论就是错的，写明；FW、T8、T10 也看这一项。D 对 B 的 `hitAtAll`、`hitAt3` 配对区间（train 和 dev）照记；只有 dev 的 `hitAtAll` 区间整个落在 [−0.01, +0.01] 内才写"默认权重下稀疏路对单文档 QA 路线的贡献不超过 ±0.01"，否则只写区间；不因此关掉混合（pgvector 上多文档和比较路线没测）。
+- 改默认的代价（先写下，不属于测量）：块大小或重叠改了，`CHUNKER_VERSION` 不升（同样的页和设置输出不变），`test/chunk-profile.test.mjs` 的默认 profile id 重钉，`quality-current-suite-manifest.js` 的 `requiredConfig` 升版本并重生成确定性基线，现有档案 `vector:reindex --from documents --apply`；融合参数改了（W50/K4），pgvector 生产排序同样变，确定性评测可能变（`summary.config` 没有融合字段，变了会以基线回归的形式出现），所以 (d) 里的三个确定性评测和 `quality:current` 要在候选下先跑；FW 另外要改 manifest 的 `requiredRetrieval.hybridFusion` 并升版本。任何默认改动先更新 CURRENT-TRUTH.md，再改 README 第 110 行和本文档上一节"旧块上测的"那条说明。
 
 ### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
 
@@ -1392,7 +1432,7 @@ train 上（400 题）的损失拆解：
 
 **(d) 确定性评测**：flag 开关两次 near-duplicate 和 compare-hard 的结果除路径、id 和耗时外相同，near-duplicate 与锁定基线 `quality-near-duplicate-deterministic-v1` 的 metrics、config、cases 一致。但合成评测的 PDF 在开关下文本完全相同（24/24），所以这两项其实没有覆盖这个开关；段落行为只由 `test/pdf-paragraphs.test.mjs` 和 `test/load-bench-pdf.test.mjs` 验证。
 
-**结论**：四条都满足，`PDF_PARAGRAPH_DETECTION` 改为默认开启，`false` 恢复旧文本。理由是切块更贴近句子边界、文字不丢，而问答指标没有显著变差；不是因为测出了提升。已入库的文档要跑 `npm run vector:reindex -- --from documents --apply` 才会换成新切块。待办：切块器的段落重叠要不要限长（现在有 chunk 超过 `RAG_CHUNK_SIZE`）。
+**结论**：四条都满足，`PDF_PARAGRAPH_DETECTION` 改为默认开启，`false` 恢复旧文本。理由是切块更贴近句子边界、文字不丢，而问答指标没有显著变差；不是因为测出了提升。已入库的文档要跑 `npm run vector:reindex -- --from documents --apply` 才会换成新切块。待办（已由 1dcc8467 解决：块不再超过块大小，见「按句子装块」一节）：切块器的段落重叠要不要限长（现在有 chunk 超过 `RAG_CHUNK_SIZE`）。
 
 ### 交叉编码器重排（BAAI/bge-reranker-v2-m3）
 
