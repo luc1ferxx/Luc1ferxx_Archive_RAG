@@ -43,20 +43,24 @@ const buildBundle = (pages) =>
   });
 
 // One reply per model call, the last one repeated; an object is sent as JSON.
-const writeWithReplies = async (bundle, replies) => {
+const writeWithReplies = async (bundle, replies, query = QUERY) => {
   const calls = stubModelReplies(replies);
-  const response = await writeQaAnswer({ query: QUERY, resolvedQuery: QUERY, bundle });
+  const response = await writeQaAnswer({ query, resolvedQuery: query, bundle });
 
   return { calls, response };
 };
 
-const writeWithReply = (bundle, reply) => writeWithReplies(bundle, [reply]);
+const writeWithReply = (bundle, reply, query = QUERY) => writeWithReplies(bundle, [reply], query);
 
 const PROSE_REPLY = "Employees may work remotely 2 days per week. [Source 1]";
 
 // A failed attempt is handed to the prose call: the flag-off QA template over
 // the same question and context, no response format, and no directAnswer.
-const assertProseFallback = (calls, response, { code, evidence = POLICY_SENTENCE, verdict = false }) => {
+const assertProseFallback = (
+  calls,
+  response,
+  { code, evidence = POLICY_SENTENCE, query = QUERY, verdict = false }
+) => {
   assert.equal(calls.length, 2);
   assert.match(calls[0].prompt, /Reply with one JSON object and nothing else/);
   assert.equal(calls[1].options.responseFormat ?? null, null);
@@ -64,7 +68,7 @@ const assertProseFallback = (calls, response, { code, evidence = POLICY_SENTENCE
   // v*.3 (RAG_QA_ANSWER_VERDICT) tells the model how to abstain; v*.2 does not.
   assert.equal(/NOT_IN_EVIDENCE/.test(calls[1].prompt), verdict);
   // The same question and evidence blocks as the attempt.
-  assert.ok(calls[1].prompt.includes(QUERY) && calls[1].prompt.includes(evidence));
+  assert.ok(calls[1].prompt.includes(query) && calls[1].prompt.includes(evidence));
   assert.equal(response.trace.qaStructuredOutput.code, code);
   assert.equal(response.trace.qaStructuredOutput.fallback, "prose");
   assert.equal("directAnswer" in response, false);
@@ -153,24 +157,36 @@ test("a yes/no answer is carried as directAnswer only, never as a line", async (
 
 test("a list answer is grounded item by item and cites every line it came from", async () => {
   const bundle = buildBundle(["We evaluate on SQuAD and NewsQA.", "TriviaQA is left for future work."]);
-  const { response } = await writeWithReply(bundle, {
-    answer: "SQuAD, NewsQA",
-    quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }],
-  });
+  // A question the quoted sentence answers (round 3 refuses a quote that
+  // shares no word with the question).
+  const datasetQuery = "Which datasets do you evaluate on?";
+  const { response } = await writeWithReply(
+    bundle,
+    {
+      answer: "SQuAD, NewsQA",
+      quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }],
+    },
+    datasetQuery
+  );
 
   assert.equal(response.text, "SQuAD, NewsQA. [Source 1]\nWe evaluate on SQuAD and NewsQA. [Source 1]");
   assert.equal(response.directAnswer, "SQuAD, NewsQA");
 
   // An item the quotes do not name makes the whole answer ungrounded, and an
   // ungrounded answer is no answer: the prose call answers instead.
-  const invented = await writeWithReplies(bundle, [
-    { answer: "SQuAD, NewsQA, TriviaQA", quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }] },
-    "SQuAD and NewsQA. [Source 1]",
-  ]);
+  const invented = await writeWithReplies(
+    bundle,
+    [
+      { answer: "SQuAD, NewsQA, TriviaQA", quotes: [{ quote: "We evaluate on SQuAD and NewsQA.", source: 1 }] },
+      "SQuAD and NewsQA. [Source 1]",
+    ],
+    datasetQuery
+  );
 
   assertProseFallback(invented.calls, invented.response, {
     code: "answer_ungrounded",
     evidence: "We evaluate on SQuAD and NewsQA.",
+    query: datasetQuery,
   });
   assert.equal(invented.response.text, "SQuAD and NewsQA. [Source 1]");
   assert.equal(invented.response.trace.qaStructuredOutput.resolvedQuoteCount, 1);
@@ -398,4 +414,81 @@ test("with the flag off the QA call and its result are unchanged", async () => {
   assert.equal("trace" in response, false);
   assert.equal(getActiveAnswerPromptDescriptors()[0].id, "qa_answer");
   assert.equal(getActiveAnswerPromptDescriptors().length, 2);
+});
+
+// Round 3 (2026-10-28): the sentence the direct answer was taken from must
+// answer the question by the gate's own lexical checks, else the attempt is
+// handed to the prose call like any other failure (code answer_unanchored).
+test("a direct answer copied from a sentence that does not answer the question is no answer", async () => {
+  // The quoted sentence shares no meaningful word with the question.
+  const bundle = buildBundle([`${POLICY_SENTENCE} ${APPROVAL_SENTENCE}`]);
+  const unrelated = await writeWithReplies(bundle, [
+    { answer: "the direct manager", quotes: [{ quote: APPROVAL_SENTENCE, source: 1 }] },
+    PROSE_REPLY,
+  ]);
+
+  assertProseFallback(unrelated.calls, unrelated.response, {
+    code: "answer_unanchored",
+    evidence: APPROVAL_SENTENCE,
+  });
+  assert.equal(unrelated.response.text, PROSE_REPLY);
+  assert.equal(unrelated.response.trace.qaStructuredOutput.resolvedQuoteCount, 1);
+  assert.equal(unrelated.response.trace.qaStructuredOutput.renderedLineCount, 0);
+
+  // A rival of a question word on the same head word ("annual leave" for
+  // "parental leave") is the gate's substitution veto, applied to the quote.
+  const leaveBundle = buildBundle(["Annual leave is 20 days per year. Parental leave is 16 weeks."]);
+  const rivalCalls = stubModelReplies([
+    { answer: "20 days", quotes: [{ quote: "Annual leave is 20 days per year.", source: 1 }] },
+    "Parental leave is 16 weeks. [Source 1]",
+  ]);
+  const rival = await writeQaAnswer({
+    query: "How long is parental leave?",
+    resolvedQuery: "How long is parental leave?",
+    bundle: leaveBundle,
+  });
+
+  assert.equal(rivalCalls.length, 2);
+  assert.equal(rival.trace.qaStructuredOutput.code, "answer_unanchored");
+  assert.equal(rival.trace.qaStructuredOutput.fallback, "prose");
+  assert.equal("directAnswer" in rival, false);
+
+  // The sentence that does answer it is accepted as before.
+  const answeredCalls = stubModelReplies([
+    { answer: "16 weeks", quotes: [{ quote: "Parental leave is 16 weeks.", source: 1 }] },
+  ]);
+  const answered = await writeQaAnswer({
+    query: "How long is parental leave?",
+    resolvedQuery: "How long is parental leave?",
+    bundle: leaveBundle,
+  });
+
+  assert.equal(answeredCalls.length, 1);
+  assert.equal(answered.directAnswer, "16 weeks");
+  assert.equal(answered.text, "16 weeks. [Source 1]\nParental leave is 16 weeks. [Source 1]");
+  assert.equal(answered.trace.qaStructuredOutput.code, null);
+
+  // An anchor of the question (a quoted phrase) the quote does not name.
+  const anchorCalls = stubModelReplies([
+    { answer: "the direct manager", quotes: [{ quote: APPROVAL_SENTENCE, source: 1 }] },
+    "Requests go to the direct manager. [Source 1]",
+  ]);
+  const anchored = await writeQaAnswer({
+    query: 'Who handles a "manager approval" request?',
+    resolvedQuery: 'Who handles a "manager approval" request?',
+    bundle,
+  });
+
+  assert.equal(anchorCalls.length, 2);
+  assert.equal(anchored.trace.qaStructuredOutput.code, "answer_unanchored");
+
+  // Without a question (renderExtractiveQaAnswer called directly) the rule
+  // does not apply.
+  const direct = renderExtractiveQaAnswer({
+    bundle,
+    parsed: { answer: "the direct manager", quotes: [{ quote: APPROVAL_SENTENCE, source: 1 }] },
+  });
+
+  assert.equal(direct.abstained, false);
+  assert.equal(direct.directAnswer, "the direct manager");
 });
