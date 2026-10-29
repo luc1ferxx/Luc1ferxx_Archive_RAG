@@ -910,7 +910,32 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 - `unsupported`（引文定位成功、渲染的行却全被 claim 检查拒掉）以及作答行里 9 + 2 道"引文行被拒、只剩直接答案行"暴露了两个机制问题。离线复放量化（`check-sentence-lines.mjs` / `classify-refusals.mjs`，不调模型，train 前 120 篇论文每篇 4 页、2,521 句）：(1) 把 QASPER 原句逐字渲染成 `<句子> [Source 1]` 交给 `evaluateClaimSupport`，29.9% 被拒（`tokenOverlap` 不够或缺锚点）；去掉 QASPER 文本特有的 `BIBREF2`、`UTF8gkai`、`INLINEFORM1` 一类占位符后降到 10.4%——claim 侧把 `BIBREF2` 读成词项 `bibref`，证据侧的词项集合里没有它，于是记为缺锚点（`missingAnchors: ["term:bibref"]`）。真实 PDF 没有这些占位符，但带数字的词（`GPT2`、`H1N1`）走同一条路径；剩下的 10% 来自一句里多个数字、长句被拆成多条 claim、`additive_detail` 等既有规则。所以"按构造通过"在这类文本上只有七成，逐字引文不保证过校验。(2) `renderExtractiveQaAnswer` 删不受支持的行时用的是"行文本包含被拒 claim 的文本"，而直接答案按构造是引文行的子串，所以直接答案行一旦被拒（短片段常过不了 `tokenOverlap`），包含它的引文行也被一起删掉：7 道 `unsupported` 里 5 道是这个形态（1 条引文已定位、直接答案已定位、2 行全删）。这是实现缺陷，已在第二轮之后的代码清理里改成逐行各过一遍 claim 检查、只删被拒的那一行（`unsupportedLineCount` 改为"删掉的行数"），没有重新测量。
 - 两份候选报告的 `configDifferences` 只列出 `answerRateFlags` 和 `promptTemplates.setHash`（开关打开时活动模板集多了散文模板）。
 
-**结论**：两条改动都按预期起了作用——rag 面不再多拒（作答集合与基线相同，短答案 +0.033），agent 面不可答错答从 3/12 降到 2/14——但都没达到事先规则：rag 的提升不显著，agent 仍有 2 道不可答被答、作答行引用证据召回 0.29。开关保持默认关。下一轮候选（要先写规则再跑；逐行删除已经改掉，但没测）：直接答案所在的引文句必须覆盖问题的锚点词（`findUncoveredQueryAnchors`，门控用的同一个检查）才作答；claim 检查对带数字词项（`BIBREF2`、`GPT2`）的两侧分词不一致是独立的一般性问题，单独修、单独钉测试。
+**结论**：两条改动都按预期起了作用——rag 面不再多拒（作答集合与基线相同，短答案 +0.033），agent 面不可答错答从 3/12 降到 2/14——但都没达到事先规则：rag 的提升不显著，agent 仍有 2 道不可答被答、作答行引用证据召回 0.29。开关保持默认关。下一轮候选（要先写规则再跑；逐行删除已经改掉，但没测）：直接答案所在的引文句必须覆盖问题的锚点词（`findUncoveredQueryAnchors`，门控用的同一个检查）才作答；claim 检查对带数字词项（`BIBREF2`、`GPT2`）的两侧分词不一致是独立的一般性问题，单独修、单独钉测试（2026-10-28 已修，见下一节"Claim 检查两侧对称"）。
+
+### Claim 检查两侧对称：逐字引用按构造通过（2026-10-28）
+
+- **问题**：上一节的离线复放发现，把 QASPER 原句逐字渲染成 `<句子> [Source 1]` 交给 `evaluateClaimSupport`，29.9% 被拒。这不只影响抽取模式：finalizer、`answer_draft` 流式和 Agent 自检用的是同一个检查，对正确引用的原句也会丢。
+- **定位**（会话脚本 `classify-refusals.mjs` / `probe.mjs` / `probe-numeric.mjs`，不调模型，train 前 120 篇论文每篇 4 页、2,521 句）：六处 claim 侧和证据侧读法不一致。
+  1. `stripNumericValueSurfaces` 把 claim 里所有数字串换成空格，连词内数字也删（`BIBREF20`→`bibref`、`seq2seq`→`seq`+`seq`、`word2vec`、`WMT14`、`GPT2`、`2nd`、`5km`），证据侧按 `[A-Za-z0-9]+` 分词保留整词：755 条拒绝里 531 条缺 `term:bibref`。
+  2. 证据句按 `MODALITY_CLAUSE_SPLIT_PATTERN` 切子句时吃掉 but / however / whereas / while / whilst / yet（和 而 / 但是 / 然而 / 相比之下），claim 侧仍把它们当词项和主语绑定词去找（`term:however`、`subject:however`），在子句里永远找不到。
+  3. `getAdditiveDetailTermGroups` 用原始分词（`references`）去比对已经过 `extractFactTerms` 别名表的证据词（`reference`），`additive_detail` 必败。
+  4. `haveSameNumericOccurrences` 遇到"某个词到两个数字等距"就判歧义、整条返回 false，哪怕 claim 子句和证据子句一字不差（"includes 13,215 task-based dialogs comprising six domains"）。
+  5. 证据句只有和 claim 完全相等（或 claim 含数字）时才整句参与比较，否则只比子句；claim 侧只在句号、`;` 和"两边都有谓语的 and"处切，证据侧还在逗号、冒号、连接词处切，所以一条跨两个证据子句的逐字引文没有任何一段能装下它的全部词项。
+  6. 整句参与后，`hasReversedTermOrder` 的枢轴启发式在一个词于枢轴两侧各出现一次时（"many medical terminologies, so only annotators with medical backgrounds"）把顺序相同的引文判成反转。
+- **修法**（全部是"两侧按同一规则读"或"同文直接通过"，不放宽对释义的判定）：只删独立的数字（和 `NUMBER_PATTERN` 同样的字母数字边界）；claim 词项、主语绑定词、additive 词组先去掉子句切分会吃掉的连接词（`stripClauseConnectives`）；additive 词组改用 `extractFactTerms`；数字事实比较在歧义规则之前先看两段文本在数字语法规范化后是否相同（符号、运算符、币种、约数标记都保留，所以 `+2`/`-2`、`$500`/`€500`、`~2`/`2` 不算相同——第一版用 `normalizeSearchText` 比较，7 个既有数字用例立刻失败）；claim 是证据句里连续的一段词时该句整句参与比较；claim 的词项序列是证据词项序列的连续一段时不算反转。
+- **复放结果**（同一脚本、同一 2,521 句）：
+
+| | 修前 | 修后 |
+| --- | --- | --- |
+| 原文被拒 | 755（29.9%） | 64（2.5%） |
+| 去掉 `BIBREF` / `UTF8` / `INLINEFORM` 占位符后被拒 | 262（10.4%） | 63（2.5%） |
+| 其中有 `[Source N]` 标签的 claim 被拒 | 724 | 20 |
+| 只因 `;` 前半段没有标签被拒 | 31 | 44 |
+
+  剩下的 64 句：44 句是被 `CLAIM_SPLIT_PATTERN` 在 `;` 处切开后没有 `[Source N]` 的前半段，属于 `RAG_CLAIM_SOURCE_INHERITANCE`（默认关）的范围，没有改；20 句是极性（6，claim 在 and 处切开后与带 cannot 的父句极性不同）和数字边角（14：`(e.g., when (1)` 一类括号枚举、`600,000`、`5.80%`、版本号 `2.0` / `2.1`、`around 11260`）。
+- **钉住**：`test/claim-support.test.mjs` 里 "claim check symmetry" 五个用例。引文块里另放一句，所以走句子 / 子句路径而不是整字段相等（整字段相等本来就直接通过，第一版用例因此全绿、没测到）；每个用例带一个改了事实的对照（`BIBREF21`、smallest、summaries、seven、legal）仍被拒。全套 4,018 过、0 败（27 个跳过为数据库用例）。
+- **确定性评测不变**：near-duplicate、compare-hard（`--openai-provider deterministic`）和 `eval:feedback` 在改前改后各跑一遍，除 Run ID 和毫秒耗时外逐行相同；`eval:trajectory` 19/19、84/84。
+- **没有测的**：没有重跑模型评测。抽取模式第二轮的 `unsupported` 回退、agent 面的引用召回和 finalizer 对模型散文的保留率都受这个检查影响，重测要另起一轮并先写规则。
 
 ### 答案变短（qa_answer v1.2 / v2.2）
 
