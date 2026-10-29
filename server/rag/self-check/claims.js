@@ -30,6 +30,7 @@ import {
   isStructuralClaimLabel,
   isStructuralSectionHeading,
 } from "./attribution.js";
+import { stripClauseConnectives } from "./modality.js";
 
 export const hasClaimPredicate = (value = "") =>
   CLAIM_PREDICATE_PATTERN.test(stripSourceLabels(value));
@@ -314,7 +315,9 @@ export const getClaimBindingTerms = ({
   );
 
   return uniqueValues(
-    extractFactTerms(factualClaim.slice(0, predicateMatch.index))
+    extractFactTerms(
+      stripClauseConnectives(factualClaim.slice(0, predicateMatch.index))
+    )
   ).filter(
     (term) =>
       !documentAttributionTerms.has(term) &&
@@ -335,7 +338,10 @@ export const getAdditiveDetailTermGroups = ({
     ),
   ]
     .map((match) =>
-      uniqueValues(extractMeaningfulTokens(match[1])).filter(
+      // Read as the evidence side reads its terms (extractFactTerms, whose
+      // aliases make "references" "reference" there too), without the
+      // connectives the evidence clause split consumes.
+      extractFactTerms(stripClauseConnectives(match[1])).filter(
         (term) =>
           !documentAttributionTerms.has(term) &&
           !COMPARISON_SCAFFOLD_TERMS.has(term) &&

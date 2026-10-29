@@ -660,6 +660,17 @@ const canMatchNumericFacts = (claimFacts = [], supportFacts = []) => {
   );
 };
 
+// Two texts that read the same once their numeric syntax is normalized (case,
+// whitespace and a trailing comma or period apart) state the same numbers.
+// Signs, operators, currencies and approximation marks all stay, so "+2" and
+// "-2", "$500" and "€500", "~2" and "2" are never the same text.
+const normalizeNumericTextIdentity = (value = "") =>
+  normalizeNumericSyntax(value)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[,，;；.。]+$/u, "")
+    .toLowerCase();
+
 export const haveSameNumericOccurrences = (
   claimText = "",
   supportText = "",
@@ -669,6 +680,19 @@ export const haveSameNumericOccurrences = (
     supportRoleTerms = null,
   } = {}
 ) => {
+  // The same words state the same numbers: a clause quoted as it stands is
+  // never refused for an ambiguity (a term equidistant from two numbers) that
+  // its evidence shares, which refused "includes 13,215 task-based dialogs
+  // comprising six domains" against that very sentence.
+  const normalizedClaimText = normalizeNumericTextIdentity(claimText);
+
+  if (
+    normalizedClaimText.length > 0 &&
+    normalizedClaimText === normalizeNumericTextIdentity(supportText)
+  ) {
+    return true;
+  }
+
   const claim = buildNumericOccurrenceFacts(claimText, {
     ignoredTerms: claimIgnoredTerms,
   });
