@@ -9,10 +9,15 @@
 // Every row is kept, so two runs over the same sample (same corpus, --cases,
 // --seed) can be compared question by question: --compare <other report.json>
 // adds paired bootstrap 95% CIs for this run minus the other, and lists where
-// the two runs' chunking settings or commits differ (an older report without
-// them counts as unknown). Each row also records admittedChars, the
-// characters of the chunks the gate admits, so a chunker change that makes
-// the context larger or smaller shows next to the recall it bought.
+// the two runs' chunking settings, retrieval settings (config.retrieval: the
+// route, fusion, pools, rerank, decomposition, BM25 and gate floors the run
+// retrieved with) or commits differ (an older report without them counts as
+// unknown). Each row also records admittedChars, the characters of the chunks
+// the gate admits, so a chunker change that makes the context larger or
+// smaller shows next to the recall it bought, and hitDenseRank/hitSparseRank,
+// the rank each route gave the first evidence chunk (null when that route did
+// not return it), so a fusion change shows which route the hits came through.
+// The report's timing holds the ingest and retrieval wall time in ms.
 //
 // Usage (real embeddings, e.g. local Ollama):
 //   OPENAI_BASE_URL=http://127.0.0.1:11434/v1 OPENAI_API_KEY=ollama \
@@ -30,10 +35,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   describeChunkingConfig,
   describeEvaluationCheckout,
+  describeRetrievalConfig,
   describeRunConfigDifferences,
   sumTextChars,
 } from "./eval-run-config.js";
-import { bootstrapMeanInterval, createSeededRandom, roundTo4 } from "./paired-bootstrap.js";
+import {
+  bootstrapClusterMeanInterval,
+  bootstrapMeanInterval,
+  createSeededRandom,
+  roundTo4,
+} from "./paired-bootstrap.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
@@ -76,7 +87,13 @@ export const summarizeRecallRows = (rows) => ({
 
 /**
  * Paired bootstrap of this run minus the other over the questions both ran:
- * resamples questions, so a question's two outcomes stay together.
+ * resamples questions, so a question's two outcomes stay together. Each
+ * recall metric also carries `flips` (questions this run won / lost) and,
+ * when every paired row names its paper (`docKey`), `ci95ByPaper`: the
+ * interval that resamples papers with all their questions, since the
+ * questions of one paper share its chunks and vectors (dev has about three
+ * per paper); it is drawn after every question-level interval, so those stay
+ * what they were before it existed.
  */
 export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 1 } = {}) => {
   const other = new Map(otherRows.map((row) => [row.id, row]));
@@ -84,12 +101,19 @@ export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 
   // Every interval is drawn from this one RNG, in order.
   const random = createSeededRandom(seed);
   const bootstrap = (diffs, roundValue) => bootstrapMeanInterval(diffs, { iterations, random, roundValue });
+  const diffsByMetric = metricsOf(rows).map((metric) => [
+    metric,
+    pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0)),
+  ]);
   const recall = Object.fromEntries(
-    metricsOf(rows).map((metric) => {
-      const diffs = pairs.map(([left, right]) => (left[metric] ? 1 : 0) - (right[metric] ? 1 : 0));
-
-      return [metric, { delta: mean(diffs), ci95: bootstrap(diffs, roundTo4) }];
-    })
+    diffsByMetric.map(([metric, diffs]) => [
+      metric,
+      {
+        delta: mean(diffs),
+        ci95: bootstrap(diffs, roundTo4),
+        flips: { down: diffs.filter((diff) => diff < 0).length, up: diffs.filter((diff) => diff > 0).length },
+      },
+    ])
   );
   // After the recall metrics, so their intervals draw the same samples as
   // before sizes were compared. Only over pairs where both runs measured it.
@@ -111,9 +135,101 @@ export const pairedRecallDeltas = (rows, otherRows, { iterations = 4000, seed = 
           ];
     }).filter(Boolean)
   );
+  const clustered = pairs.length > 0 && pairs.every(([left]) => typeof left.docKey === "string" && left.docKey);
 
-  return { cases: pairs.length, ...recall, ...sizes };
+  if (clustered) {
+    const groupsOf = (diffs) => {
+      const byPaper = new Map();
+
+      pairs.forEach(([left], index) => {
+        byPaper.set(left.docKey, [...(byPaper.get(left.docKey) ?? []), diffs[index]]);
+      });
+
+      return [...byPaper.values()];
+    };
+
+    for (const [metric, diffs] of diffsByMetric) {
+      recall[metric].ci95ByPaper = bootstrapClusterMeanInterval(groupsOf(diffs), { iterations, random, roundValue: roundTo4 });
+    }
+  }
+
+  return {
+    cases: pairs.length,
+    ...(clustered ? { papers: new Set(pairs.map(([left]) => left.docKey)).size } : {}),
+    ...recall,
+    ...sizes,
+  };
 };
+
+// Same fallbacks as citations.js reads a page number with.
+const pageOf = (result) => {
+  const metadata = result?.document?.metadata ?? {};
+
+  return Number(metadata.pageNumber ?? metadata.loc?.pageNumber ?? metadata.page);
+};
+
+const rankOrNull = (value) => (Number.isFinite(value) ? value : null);
+
+// The rank a route gave a candidate: a fused result carries denseRank /
+// sparseRank (null for a route that did not return it); the dense-only route
+// stamps only provenance.routes. Under query decomposition the merged copy is
+// the sub-query's whose copy won, so the rank is within that sub-query's
+// route list.
+const routeRankOf = (result, route) =>
+  rankOrNull(
+    result?.[`${route}Rank`] ?? result?.provenance?.routes?.find((entry) => entry?.route === route)?.rank
+  );
+
+/**
+ * The first candidate on an evidence page: its 1-based position in the
+ * candidate list, and the rank each route gave it. hitRank null when no
+ * candidate is on an evidence page.
+ */
+export const describeEvidenceHit = (results, expectedPages) => {
+  const expected = expectedPages instanceof Set ? expectedPages : new Set(expectedPages);
+  const index = (Array.isArray(results) ? results : []).findIndex((result) => expected.has(pageOf(result)));
+  const hit = index >= 0 ? results[index] : null;
+
+  return {
+    hitDenseRank: hit ? routeRankOf(hit, "dense") : null,
+    hitRank: index >= 0 ? index + 1 : null,
+    hitSparseRank: hit ? routeRankOf(hit, "sparse") : null,
+  };
+};
+
+/**
+ * Candidates the sparse route returned and the dense route did not. Under the
+ * default fusion (RRF, k 60, weights 0.65/0.35, dense pool 8) there can be
+ * none: a sparse-only chunk scores at most 0.35 against 0.583 for dense rank
+ * 8, so every candidate is in the dense top 8. Any row with a count above 0
+ * refutes that for its run.
+ */
+export const countSparseOnlyCandidates = (results) =>
+  (Array.isArray(results) ? results : []).filter(
+    (result) => routeRankOf(result, "sparse") !== null && routeRankOf(result, "dense") === null
+  ).length;
+
+/**
+ * Two reports pair by question id, so they must come from the same sample:
+ * the same corpus file, seed and requested case count. A report from before
+ * a field is not refused on that field.
+ */
+export const assertComparableSample = (config, otherConfig = {}, { label = "the other report" } = {}) => {
+  for (const field of ["corpus", "seed", "cases"]) {
+    const other = otherConfig?.[field];
+
+    if (other !== undefined && other !== null && !Object.is(other, config[field])) {
+      throw new Error(
+        `${label} ran ${field} ${JSON.stringify(other)}, this run ${JSON.stringify(config[field])}: the questions would not pair.`
+      );
+    }
+  }
+};
+
+const formatRetrieval = (retrieval) =>
+  retrieval
+    ? `${retrieval.route}${retrieval.hybridEnabled ? `/${retrieval.fusion}${retrieval.fusion === "rrf" ? ` k=${retrieval.rrfK}` : ""} weights ${retrieval.denseWeight}/${retrieval.sparseWeight}, sparse top-K ${retrieval.sparseTopK}` : " (hybrid off)"}, rerank ${retrieval.rerankEnabled ? `${retrieval.rerankProvider} x${retrieval.rerankCandidateMultiplier} w=${retrieval.rerankWeight}` : "off"}, decomposition ${retrieval.queryDecomposition ? `up to ${retrieval.maxQueryRequirements}` : "off"}, BM25 k1=${retrieval.bm25K1} b=${retrieval.bm25B}, gate relevance ${retrieval.minRelevanceScore} coverage ${retrieval.minQaQueryTermCoverage}${retrieval.qaGateInflection ? " inflection" : ""}${retrieval.qaAnswerVerdict ? " verdict" : ""}`
+    : "unknown";
 
 const formatChunking = (chunking) =>
   chunking
@@ -128,7 +244,10 @@ const formatMarkdown = (report) => {
   const lines = [
     "# QASPER evidence recall (single-document QA route)",
     "",
-    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}; query adapter ${config.queryAdapter ?? "none"}; chunking ${formatChunking(config.chunking)}; commit ${formatCheckout(config.git)}.`,
+    `Generated ${report.generatedAt}; corpus \`${config.corpus}\`; ${report.rows.length} answerable questions, seed ${config.seed}; embedding ${config.embeddingModel} (query prefix ${JSON.stringify(config.queryPrefix)}, document prefix ${JSON.stringify(config.documentPrefix)}); retrieval top-K ${config.retrievalTopK}; query adapter ${config.queryAdapter ?? "none"}; chunking ${formatChunking(config.chunking)}; retrieval ${formatRetrieval(config.retrieval)}; commit ${formatCheckout(config.git)}.`,
+    ...(report.timing
+      ? [`Ingest ${Math.round(report.timing.ingestMs / 1000)} s, retrieval ${Math.round(report.timing.retrievalMs / 1000)} s.`]
+      : []),
     "",
     "| Evidence paragraph ... | Rate |",
     "|---|---|",
@@ -158,15 +277,23 @@ const formatMarkdown = (report) => {
       );
     }
 
+    const byPaper = comparison.papers !== undefined;
+
     lines.push(
       "",
-      `Paired against \`${comparison.against}\` (${comparison.cases} questions; this run minus that one, bootstrap 95% CI):`,
+      `Paired against \`${comparison.against}\` (${comparison.cases} questions${byPaper ? ` of ${comparison.papers} papers` : ""}; this run minus that one, bootstrap 95% CI over questions${byPaper ? ", and over papers with all their questions" : ""}; flips = questions this run won / lost):`,
       "",
-      "| Metric | Delta | 95% CI |",
-      "|---|---|---|",
+      `| Metric | Delta | 95% CI |${byPaper ? " 95% CI by paper |" : ""} Flips |`,
+      `|---|---|---|${byPaper ? "---|" : ""}---|`,
       ...Object.keys(comparison)
         .filter((metric) => comparison[metric]?.ci95 !== undefined)
-        .map((metric) => `| ${metric} | ${comparison[metric].delta} | [${comparison[metric].ci95?.join(", ")}] |`)
+        .map((metric) => {
+          const entry = comparison[metric];
+          const flips = entry.flips ? `+${entry.flips.up} / -${entry.flips.down}` : "";
+          const paper = byPaper ? ` ${entry.ci95ByPaper ? `[${entry.ci95ByPaper.join(", ")}]` : ""} |` : "";
+
+          return `| ${metric} | ${entry.delta} | [${entry.ci95?.join(", ")}] |${paper} ${flips} |`;
+        })
     );
   }
 
@@ -187,6 +314,7 @@ const main = async () => {
   const seed = Math.max(1, Number(option("--seed", "1")) || 1);
   const latestName = option("--latest-name", "latest-qasper-retrieval");
   const comparePath = option("--compare", null);
+  const iterations = Math.max(1, Math.floor(Number(option("--iterations", "4000")) || 4000));
   // A regression floor for CI: exit 1 when evidence among the candidates
   // falls below it.
   const minHitAtAll = option("--min-hit-at-all", null);
@@ -227,14 +355,20 @@ const main = async () => {
 
   if (other) {
     assertSameQueryAdapterFingerprint(queryAdapter, other.config?.queryAdapter, { label: path.basename(comparePath) });
+    assertComparableSample({ cases: caseCount, corpus: path.basename(corpusPath), seed }, other.config, {
+      label: path.basename(comparePath),
+    });
   }
 
   const rows = [];
+  const timing = { ingestMs: null, retrievalMs: null };
 
   try {
     await rag.initializeDocumentRegistry();
     await mkdir(path.join(tempRoot, "sources"), { recursive: true });
     console.log(`Ingesting ${documents.length} papers for ${cases.length} questions...`);
+
+    const ingestStartedAt = performance.now();
 
     for (const doc of documents) {
       const filePath = path.join(tempRoot, "sources", `${doc.key}.txt`);
@@ -263,12 +397,8 @@ const main = async () => {
       }
     }
 
-    // Same fallbacks as citations.js reads a page number with.
-    const pageOf = (result) => {
-      const metadata = result?.document?.metadata ?? {};
-
-      return Number(metadata.pageNumber ?? metadata.loc?.pageNumber ?? metadata.page);
-    };
+    timing.ingestMs = Math.round(performance.now() - ingestStartedAt);
+    const retrievalStartedAt = performance.now();
 
     for (const [index, testCase] of cases.entries()) {
       const expected = new Set(testCase.expectedEvidence[0].pages);
@@ -276,7 +406,8 @@ const main = async () => {
         docIds: [testCase.docKeys[0]],
         resolvedQuery: testCase.question,
       });
-      const hitRank = results.findIndex((result) => expected.has(pageOf(result)));
+      const { hitDenseRank, hitRank, hitSparseRank } = describeEvidenceHit(results, expected);
+      const sparseOnlyCandidateCount = countSparseOnlyCandidates(results);
       const confidence = assessQaConfidence({
         evidenceRequirementCount,
         queryText: testCase.question,
@@ -302,17 +433,24 @@ const main = async () => {
         admitted: confidence.usableResults.some((result) => expected.has(pageOf(result))),
         admittedChars: sumTextChars(confidence.usableResults, (result) => result?.document?.pageContent),
         candidateCount: results.length,
-        hitAt1: hitRank === 0,
-        hitAt3: hitRank >= 0 && hitRank < 3,
-        hitAtAll: hitRank >= 0,
-        hitRank: hitRank >= 0 ? hitRank + 1 : null,
+        docKey: testCase.docKeys[0],
+        evidenceRequirementCount,
+        hitAt1: hitRank === 1,
+        hitAt3: hitRank !== null && hitRank <= 3,
+        hitAtAll: hitRank !== null,
+        hitDenseRank,
+        hitRank,
+        hitSparseRank,
         id: testCase.id,
+        sparseOnlyCandidateCount,
       });
 
       if ((index + 1) % 100 === 0) {
         console.log(`retrieved ${index + 1}/${cases.length}`);
       }
     }
+
+    timing.retrievalMs = Math.round(performance.now() - retrievalStartedAt);
 
     const reportConfig = {
       cases: caseCount,
@@ -323,6 +461,7 @@ const main = async () => {
       git,
       queryAdapter,
       queryPrefix: config.getEmbeddingQueryPrefix(),
+      retrieval: await describeRetrievalConfig(),
       retrievalTopK: config.getRetrievalTopK(),
       seed,
     };
@@ -331,7 +470,7 @@ const main = async () => {
         ? {
             against: path.basename(comparePath),
             configDifferences: describeRunConfigDifferences(reportConfig, other.config ?? {}),
-            ...pairedRecallDeltas(rows, other.rows ?? []),
+            ...pairedRecallDeltas(rows, other.rows ?? [], { iterations }),
           }
         : null,
       config: reportConfig,
@@ -339,6 +478,7 @@ const main = async () => {
       reportType: "qasper-retrieval",
       rows,
       summary: summarizeRecallRows(rows),
+      timing,
     };
 
     await mkdir(resultsDirectory, { recursive: true });

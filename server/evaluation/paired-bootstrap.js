@@ -50,6 +50,48 @@ export const bootstrapMeanInterval = (
   return [roundValue(samples[Math.floor(iterations * 0.025)]), roundValue(samples[Math.floor(iterations * 0.975)])];
 };
 
+/**
+ * The 95% percentile interval of the mean of per-question differences when
+ * the questions come in clusters (the questions of one paper share its
+ * chunks and vectors, so their outcomes move together): each resample draws
+ * clusters with replacement and keeps every question of a drawn cluster, so
+ * correlated questions are not counted as independent. `clusters` is an
+ * array of arrays of differences; `random` is consumed in order, iterations
+ * x clusters.length draws. With one question per cluster it equals
+ * bootstrapMeanInterval over the same differences and draws.
+ */
+export const bootstrapClusterMeanInterval = (
+  clusters,
+  { iterations = 4000, random = createSeededRandom(1), roundValue = roundTo4 } = {}
+) => {
+  const groups = clusters.filter((group) => group.length > 0);
+
+  if (groups.length === 0) {
+    return null;
+  }
+
+  const sums = groups.map((group) => group.reduce((sum, value) => sum + value, 0));
+  const samples = [];
+
+  for (let index = 0; index < iterations; index += 1) {
+    let sum = 0;
+    let count = 0;
+
+    for (let draw = 0; draw < groups.length; draw += 1) {
+      const pick = Math.floor(random() * groups.length);
+
+      sum += sums[pick];
+      count += groups[pick].length;
+    }
+
+    samples.push(sum / count);
+  }
+
+  samples.sort((left, right) => left - right);
+
+  return [roundValue(samples[Math.floor(iterations * 0.025)]), roundValue(samples[Math.floor(iterations * 0.975)])];
+};
+
 /** The paired delta and interval of ready-made per-question differences. */
 export const pairedDeltaOfDiffs = (diffs, { iterations = 4000, seed = 1, roundValue = roundTo4 } = {}) => {
   if (diffs.length === 0) {
