@@ -31,7 +31,7 @@
 
 ### 条件一：编排需求与评测用例
 
-trajectory 用例 `unified_graph_evidence_gated_skill_hand_off`（manifest 1.13.0 加入，现为 1.14.0）固定了 V1 表达不了的路径：
+trajectory 用例 `unified_graph_evidence_gated_skill_hand_off`（manifest 1.13.0 加入，现为 1.15.0）固定了 V1 表达不了的路径：
 - 风险审查请求先由所选文档作答。只有该答案通过自身的 `document_evidence_check`，才运行 `risk_review`，并把已验证的文档答案作为类型化 `priorFindings` 交给它。
 - 证据不足时，Skill 以 `condition_not_met` 跳过，不计费，文档循环向用户澄清。
 - 同一请求在 V1 上（chain 与 V2 DAG 两种执行器、两种证据变体）每次都先无条件运行 Skill，从不运行 `document_rag`，Skill 提示词不含上游段落。原因是 V1 的 `custom_skills` 固定排在 `document_rag` 与 `web_search` 之前，条件只有 `selected_custom_skills`，没有证据谓词。

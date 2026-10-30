@@ -60,7 +60,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest.*` | 主 synthetic regression 报告。`eval:robust-suite` 会用 compare-hard corpus 刷新它，避免长期只追踪 near-duplicate 满分小语料。 |
 | `evaluation/results/latest-quality.*` | PR current gate 专用 deterministic near-duplicate synthetic 报告；不会覆盖 robust/release 使用的 `latest.*`。 |
 | `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
-| `evaluation/baselines/quality-near-duplicate-deterministic-v1.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。 |
+| `evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。2026-10-29 默认 topK 从 6 改为 10 时取代了 v1（regression profile key 含 `retrievalTopK`）：两者的 metrics 和 cases 逐项相同，只差 `config.retrievalTopK`；v1 留作历史，见“候选数 topK 6 → 8 / 10”。 |
 | `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`71/71` checks passed，包含 goal lifecycle completion 和四个钉住 `AGENT_SKILL_GRAPH_ROLLOUT` 的 skill graph case。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback、planner observability，以及 compare-only Intent 下由授权原子 catalog 规划 `compare_documents -> risk_review` 的 guarded case；real provider 调用真实 LLM DAG planner，分别写 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：既有恢复统计与 guarded replan signal，加上从持久化 checkpoint 经新服务实例启动恢复的 `skill_graph_startup_resume` 生产路径检查；当前 `8/8` cases、`29/29` checks。 |
@@ -318,7 +318,7 @@ Synthetic / feedback 报告从 1.9.0 manifest 起带一个 `summary.retrieval` �
 
 `quality:current` 再逐字段校验 `summary.retrieval` 与 manifest 的 `requiredRetrieval`（`pgvector` / `hybridEnabled: true` / `rrf`），从 case 重算路由计数并要求 dense、sparse 两路都至少在一个 case 产生候选；robust gate 对 compare-hard synthetic 报告做同样的检查（`robustSuiteRetrievalContract`）。配置不符、某一路没跑、或出现 fallback 都是 fail。
 
-`summary.config` 故意不包含这些字段：regression profile key 由 `config` 构成，钉住的 deterministic baseline（`quality-near-duplicate-deterministic-v1`）早于 pgvector 默认值，metrics 仍按同一语料比较。CI 的 `quality-gate` job 用真实 `pgvector/pgvector:pg16` service 跑 current profile；本地没有 PostgreSQL 时 `VECTOR_STORE_PROVIDER=local npm run eval:synthetic` 可以跑通，但 `quality:current` 会因 retrieval 合同不符而失败——这是预期行为，不要通过改 manifest 绕过。
+`summary.config` 故意不包含这些字段：regression profile key 由 `config` 构成，钉住的 deterministic baseline 只按 `config` 匹配（最初的 v1 早于 pgvector 默认值；2026-10-29 起是在 pgvector 上生成的 v2），metrics 仍按同一语料比较。CI 的 `quality-gate` job 用真实 `pgvector/pgvector:pg16` service 跑 current profile；本地没有 PostgreSQL 时 `VECTOR_STORE_PROVIDER=local npm run eval:synthetic` 可以跑通，但 `quality:current` 会因 retrieval 合同不符而失败——这是预期行为，不要通过改 manifest 绕过。
 
 ## Rollout readiness
 
@@ -809,7 +809,8 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 答案评测以前不算区间，文档里的区间都来自一次性脚本；干净的确认样本也是手工在一次性目录里拼的。现在：
 
 - `npm run compare:qasper-answers -- <本次报告.json> <对照报告.json> [--iterations 10000] [--seed 12345]`（`evaluation/compare-qasper-answer-reports.mjs`）按题号配对两份 `qasper-answers` 报告，输出本次减对照的配对 bootstrap 95% 区间：官方 F1（全部题）、可答题 F1（拒答记 0）、答题率（只算可答题）、不可答被回答（只算不可答题）、引用证据召回和上下文证据召回（两份都记录了的可答题；旧报告的 `evidenceHit` 只配 `contextEvidenceHit`），以及可答题翻转数 +N / −M；还列出两份报告配置上的差异或无法确认一致的地方（surface、模型、评审、答题率开关、prompt 集的哈希、切块设置、提交号；旧报告没记提交号就算"无法确认"）。两份报告没有共同题号时直接报错，题号重复或缺失、f1 不是数的行也拒绝。`eval:qasper-answers -- --compare <对照报告.json>` 把同一块写进报告的 `comparison`。
-- `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
+- `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；可以重复给多份（2026-10-29 起），去掉的是各份题目的并集，`config.excluded` 这时在 `reports` 里逐份记录（每份单独会去掉多少），旁边是并集的题数和题号摘要，只给一份时形状不变；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
+- 2026-10-29 起答案报告也记录 `config.retrieval`（门控报告 `eval:abstention-gate` 还记 `chunking` 和 `git`），`--compare` 和 `compare:qasper-answers` 多两项配对指标：`answeredBothF1`（两次运行都作答的可答题上的官方 F1，不受作答集合变化的影响）和 `contextCharsBothAnswered`（这些题上模型读到的上下文字符，检索设置的每答成本）。
 - 每行多一个诊断列 `f1DashNormalized`：官方归一化只去 ASCII 标点，连字符会消失、长短破折号却留在词里，一条写法只差破折号的正确答案记 0 分（见"第二轮"的局限）；这一列先把破折号折成连字符再算，只作诊断，不进汇总也不进判定规则。
 - 验收：对第二轮的 D2 和 D0 报告跑 `compare:qasper-answers`（10000 次，seed 12345），点估计与当时一次性脚本逐字相同（答题率 +0.363、翻转 +33 / −0、可答题 F1 +0.123、不可答被回答 +0.222），区间 [0.264, 0.462]、[0.081, 0.170]、[0.000, 0.556] 也一致（相差不超过 0.001）；`--exclude-report D0 --cases 100 --seed 1 --list-cases` 得到第三轮描述的 88 可答、12 不可答、82 篇论文。
 - 配对 bootstrap 的实现收进 `evaluation/paired-bootstrap.js`（`eval:query-adapter` 的 `pairedMeanDelta` 从这里导出，`eval:qasper-retrieval` 的随机数也用它），输出不变。
@@ -1419,6 +1420,100 @@ train 上（400 题）的损失拆解：
 **没测的**：阶段 2（dev）和阶段 3（门控护栏、答案检查、确定性评测）因为没有候选而没有跑；不可回答题在 W50/K4 下的门控误放率；topK 8/10 的答案质量和成本；切块臂和融合臂的组合；pgvector 后端（评测走 local 索引，融合和门控代码两边共用，稠密路的近似搜索和稀疏统计范围不同）。
 
 **下一轮的候选（要先写规则）**：(1) `RAG_RETRIEVAL_TOP_K` 8 或 10：以上下文含证据为主指标，加 dev 答案检查（F1、不可回答题被回答数）和放行字符的成本线；(2) W50 搭配重调门控：以 `context@0` 为主指标、`eval:abstention-gate` 的不可回答题拦截率为护栏；(3) 导入 QASPER test 集做新的确认集。
+
+### 候选数 topK 6 → 8 / 10：答案质量与成本（2026-10-29，规则先于运行）
+
+**为什么**：上一节只记录不裁决的 T8/T10 是整轮最强的信号：train seed 11 上 T10 的候选覆盖 +0.0925 [+0.064, +0.123]、上下文含证据 +0.0475 [+0.027, +0.070]、门控放行 +0.0225 [+0.010, +0.038]，前 3 名 −0.0025 [−0.020, +0.015] 不显著；T8 的前 6 名与 B 零翻转，只在第 7、8 名补了 15 题（+0.0375 [+0.020, +0.057]）。topK 10 能把 9%（37 题）的证据补进候选；B 总体有 27.8% 的题证据不在候选里。它没有进入上一轮的裁决，因为 `RAG_RETRIEVAL_TOP_K` 同时决定答案模型读到的上下文（`selectQaContext` 的上限）：候选多了，模型读得多、更慢、更贵，可能更容易被无关块带偏，不可回答题也更容易有一个块过词覆盖门槛。这一轮把这些量出来，按事先写好的规则决定要不要改默认。
+
+**这个默认值管什么**：Agent `/chat` 的文档检索不读它——`agent-query-planner.js` 的规划器按意图自带 topK（fact 4、timeline 9、comparison 8、analysis 10，`INTENT_OPTIONS`），主检索、follow-up 和自定义 Skill 的调用都带着计划里的值；Agent 里读默认值的只有补缺规划器的补充检索和 `research_brief` 的逐问子调用（`research_question`，不带检索计划）。读默认值的还有：MCP `archive_ask` 走的无规划 `chat()`（含不传 docIds 时把范围扩到全部文档的多文档形态）、直接调用 `chat()` 的地方、`verify:quality`、合成评测和本文档的评测运行器（`eval:qasper-answers --surface rag` 测的正是 `archive_ask` 这条路）。所以这一轮决定的是 `archive_ask` 和评测口径的默认值；要让 Agent 面跟着变得另改 `INTENT_OPTIONS`、另测。比较路线用 `RAG_COMPARE_TOP_K_PER_DOC`，不受影响。
+
+**候选与环境**：T8（`RAG_RETRIEVAL_TOP_K=8`）、T10（`RAG_RETRIEVAL_TOP_K=10`），基线 B（6）。先提交工具改动再跑，三个臂在本轮同一个干净提交上：答案报告和门控报告现在也记录 `config.retrieval`（门控报告还记 `chunking` 和 `git`），`compare:qasper-answers` 新增两项——两臂都作答的可答题上的 F1（`answeredBothF1`）和这些题上模型读到的上下文字符（`contextCharsBothAnswered`）。每次运行 `env -i` 只保留 `PATH`、`HOME`、`TMPDIR`，再加 `DOTENV_CONFIG_PATH=/dev/null`、`OPENAI_BASE_URL=http://127.0.0.1:11434/v1`、`OPENAI_API_KEY=ollama`、`OPENAI_EMBEDDING_MODEL=nomic-embed-text`、`RAG_EMBEDDING_DIMENSIONS=768`、`VECTOR_STORE_PROVIDER=local`、`OPENAI_CHAT_MODEL=qwen2.5:7b`；答案阶段再加 `RAG_OBSERVABILITY_ENABLED=true` 和按臂命名的 `RAG_OBSERVABILITY_EVENTS_PATH`（评测临时目录之外的绝对路径；不指定的话事件写在临时目录里、运行结束就被删）。Ollama 0.34.4 以 `OLLAMA_CONTEXT_LENGTH=8192` 启动（应用不传 `num_ctx`，默认 4096 下 10 块加分解题的合并可能超出上下文，怎么截、截哪头在这个后端上没验证过；运行后按各臂的起止时间在服务日志里数截断相关的消息（`truncating input|input after truncation|exceeds the available context|truncated = 1`，哪一条会触发没离线验证），并报告每臂 QA 事件里带 `error` 的条数；8192 下按估算（10 块约 3k token）预期为 0）。语料和排除用的报告都在主检出的 git 忽略目录里（`server/evaluation/generated/qasper-{train,dev}.json`，`server/evaluation/results/latest-qasper-answers-citations.json`），脚本用绝对路径；结果段记录排除报告的 `generatedAt` 和 `config.excluded.excludedIdsDigest` 前 12 位。报告名 `latest-qasper-retrieval-tk-<臂>-dev`、`latest-abstention-gate-tk-<臂>-{train,dev}`、`latest-qasper-answers-tk-<臂>`。判定由会话记录里的 `judge-topk.py` 按本节逐条执行（缺任何一份报告、任一臂报告的 `config.retrieval.topK` 不等于臂的值或 `config.git.dirty` 不为 false，都判不过；延迟按（问题文本，文档）把事件配到题，配不上的行数要打印），T10 对 T8 的检索配对区间由 `compare-dev.mjs` 调运行器自己的 `pairedRecallDeltas` 算。
+
+**阶段 A（检索核对，dev 全部 821 道可回答题，`--cases 2000 --seed 1`，每臂对本轮的 B-dev 配对，区间按论文聚类，`--iterations 10000`）**：候选的 `context@0` 下界 > 0 且 `hitAtAll` 下界 > 0。T8 的候选和上下文按构造是 B 的超集，这两项只能升，所以对 T8 这是核对而不是证据；T10 的池子变成 10/10、前 6 的组成会变，这才是真的检查。前 3 名照记不裁决（上下文是放行块在前、其余按检索顺序到 topK，前 3 名的洗牌不改变模型读到的集合）。环境核对沿用上一轮的规则：B-dev 与 10-08 的 `chunker-new-dev` 逐题相同就继续；只是 `hitAtAll` 差不超过 0.01 就继续并写明漂移；差更多停下查。dev 821 又一次用作检索确认集（此前前缀、上下文放宽、交叉编码器、查询适配器、稀疏打分、句子切块、切块器 v2 复查和上一节都在它上面确认过），QASPER 的 test 集还没导入。
+
+**阶段 B（门控护栏，`eval:abstention-gate`，不调模型）**：train `--answerable 800 --seed 12`（272 道不可回答题全部）和 dev `--answerable 2000`（95 道不可回答题全部、821 道可回答题全部）各跑一次，三个臂都跑。默认门控那一行（0.51 / 0.32），候选在 train + dev 合计 367 道不可回答题上的拦截率 ≥ B − 0.02（该样本上的点估计硬护栏，没有区间；拦截率约 0.8 时 367 题的标准误约 0.021，所以这条只拦得住明显的恶化）。候选池是超集，拦截率按构造只会降不会升，所以它只会卡候选、不会被运气帮过。可回答题放行率、证据被放行率和 `gateCost` 照记。
+
+**阶段 C（答案，dev，`--exclude-report <主检出>/latest-qasper-answers-citations.json --cases 200 --seed 2`：177 可答 / 23 不可答 / 147 篇，按运行器的抽样函数离线复现过；`--surface rag`，qwen2.5:7b；比较用工具默认的 10000 次、seed 12345，区间按题，不按论文聚类）**：B 跑两次（B、B′，作噪声底：同一作答集合上 F1 和延迟的来回差），T8、T10 各一次，候选 `--compare` B。规则：
+- (c1) 官方 F1（全部 200 题，拒答按"Unanswerable"计分）候选对 B 的配对 CI 上界 ≥ 0。
+- (c2) 可答题 F1（拒答记 0，`answerableF1`）的 delta ≥ 0。
+- (c3) 两臂都作答的可答题上的 F1（`answeredBothF1`）配对 CI 上界 ≥ 0——这才是"同一批题读 10 块是否比读 6 块答得差"。
+- 三条都过只说明"没检出约 0.03 以上的下降"（200 题官方 F1 的半宽约 ±0.03）。
+- 照记不裁决：可答题作答数、不可回答题被回答数（rag 面上这是门控的决定，答案模型的 `NOT_IN_EVIDENCE` 拒答只在 `RAG_QA_ANSWER_VERDICT` 打开时存在；所以模型读到无关块时会不会拿它编答案，本轮测不到）、作答时引用证据召回和上下文证据召回、按类型的 F1；成本：两臂都作答的题上模型读到的上下文字符（`contextCharsBothAnswered`，配对）和这些题的 QA 路线延迟中位数（RAG 事件的 `latencyMs`，按问题文本配到题，只取两臂都作答的题），再加每臂 `llm_completion` 事件的输入 token 分布和 Ollama 的截断次数。成本不设上限、不裁决——两个上下文上限之比是 1.67×，实际字符比随块长和分解数变化、照记，延迟又受机器状态影响——它写进结论供换模型时参考；T10 和 T8 之间按多出的收益取舍（下一条）。
+
+**选择**：T8、T10 各自要过 A、B、C。两个都过时，只有 T10 对 T8 也显示出多出的收益才选 T10：阶段 A 里 T10 − T8 的 dev `context@0` 按论文聚类下界 > 0，且阶段 C 里 T10 − T8 的 `answerableF1` 和 `answeredBothF1` 配对 CI 上界都 ≥ 0（`compare:qasper-answers T10 T8`）；否则选 T8。只有一个过就选它；都不过默认不变。任何一条不过，默认不变，数字照记。
+
+**阶段 D（只对被选的候选，过了才真的改默认）**：(d1) 候选环境下 `verify:quality` 18/18；(d2) near-duplicate 和 compare-hard 两个确定性评测（`VECTOR_STORE_PROVIDER=local --openai-provider deterministic`，临时 `--latest-name`）在候选环境下的报告，去掉 id、时间戳和耗时后与默认环境逐字节相同、只允许 `config.retrievalTopK` 不同（合成语料每篇最多 4 页，候选从来不到 6 个，所以按构造应当相同；任何用例变了即停）；trajectory 评测走 Agent 路径、不读这个默认值，不在 (d2) 里；(d3) 改默认的提交里全套 `npm test` 通过，并在 pgvector 上跑 `quality:current`（CI 或本地 compose）。
+
+**改默认的代价（先写下，不属于测量）**：`rag/config.js` 的默认值、`server/.env.example`、`docs/configuration.md`；`quality-current-suite-manifest.js` 的 `requiredConfig.retrievalTopK` 和版本号（1.14.0 → 1.15.0）；锁定基线 `quality-near-duplicate-deterministic-v1` 的回归键含 `retrievalTopK`，要在改默认后于 pgvector 上重跑 near-duplicate 的确定性评测生成 `…-v2` 基线，其 metrics 和 cases 必须与 v1 逐项相同、只有 `config.retrievalTopK` 不同，否则停；`quality-current-gate.js` 的基线 id 和路径常量、`test/quality-current-gate.test.mjs` 的钉值、docs/evaluation.md 里引用 v1 基线 id 的地方；robust suite 的 `eval-suite.js`（`executionConfig.retrievalTopK` 和 `robustRerankRankingConfig.topK`）与 `test/robust-suite-execution.test.mjs`，改了它 `release:gate` 的 configHash 随之变，git 跟踪的 `evaluation/results/latest.{json,md}`（compare-hard）和 hard-cs / arXiv rerank 报告要用 `npm run eval:robust-suite`（真实模型 + pgvector）同批次重生成；`test/rag.test.mjs` 里断言事件 `retrievalTopK === 6` 的地方；README 第 110 行"旧块上没有重测"那句、CURRENT-TRUTH 里"最多补到 6 条"和"18 个融合候选里重排出 6 个"（重排池是 topK × 3，改后是 24 或 30，交叉编码器的权重和概率门槛是在 18 → 6 上调的，没重测）；CI 真实模型评测的 0.6 门槛不动（候选只会更高）；`RAG_QA_VERDICT_RETRY_TOP_K`（18）仍大于新值，不动。现有档案不用重建（topK 只在检索时读）。
+
+**没测、要主动说的**：Agent `/chat` 的主检索、follow-up 和自定义 Skill 不受这个默认值影响（见上；research_brief 子调用和补缺检索除外，没测）；多文档 `archive_ask`（一个 topK 跨全部文档）的形态没测；只在 qwen2.5:7b 上测，更大的模型对更长上下文的反应可能不同；评测走 local 索引，pgvector 上稠密路的近似搜索可能让第 7–10 名有所不同；延迟是这台机器上本地模型的数字。阶段 C 的 200 题与两份预留样本有重叠（与抽取式作答第二、三轮预留的 dev seed 1 前 100 题重叠 29 题，与 Agent 答题率开关预留的干净确认集重叠 26 题）：这两份此后不再算干净，下一次答案侧确认要同时排除 citations 和本轮的 tk-B 报告（`--exclude-report` 目前只收一份，要先补多报告排除）。
+
+**结果**（2026-10-29 到 30 日；三个臂都在 f42ccedf 上跑，每份报告的 `config.retrieval.topK` 等于臂的值、`config.git.dirty` 为 false；`judge-topk.py` 按上面的规则逐条判定）。环境核对：B-dev 与 10-08 的 `chunker-new-dev` 逐题相同（821 题，各项差 0、翻转 0）。
+
+阶段 A（dev 821 道可回答题，配对本轮的 B-dev，10000 次；召回类指标的区间按论文聚类，“放行字符 / 题”只有按题的区间；括号外是差，后面是翻转）：
+
+| 指标 | B | T8 | T10 | T8 − B | T10 − B |
+| --- | --- | --- | --- | --- | --- |
+| 证据在候选里（`hitAtAll`） | 0.704 | 0.749 | 0.784 | +0.045 [+0.032, +0.059]，+37/−0 | +0.080 [+0.063, +0.099]，+66/−0 |
+| 证据在模型上下文里（`context@0`） | 0.361 | 0.383 | 0.407 | +0.022 [+0.012, +0.032]，+18/−0 | +0.046 [+0.032, +0.061]，+38/−0 |
+| 证据被门控放行（`admitted`） | 0.250 | 0.257 | 0.263 | +0.007 [+0.002, +0.014] | +0.013 [+0.006, +0.022] |
+| 门控决定作答（`gateConfident`） | 0.586 | 0.586 | 0.601 | 0 | +0.015 [+0.007, +0.024]，+12/−0 |
+| 前 3 名（照记） | 0.509 | 0.508 | 0.506 | −0.001 [−0.004, 0]，+0/−1 | −0.004 [−0.019, +0.012]，+18/−21 |
+| 第 1 名（照记） | 0.275 | 0.275 | 0.275 | 0 | 0 [−0.006, +0.006]，+3/−3 |
+| 放行字符 / 题 | 986 | 1065 | 1201 | +78 [+60, +98] | +215 [+181, +251] |
+
+两个臂都过（`context@0` 和 `hitAtAll` 下界都 > 0）。三个臂每道题的稀疏独有候选都是 0：topK 10 时两路的池子都是 10，同样的 RRF 算术让最终 10 个候选落在稠密前 10 里。CI 真实模型评测用的固定样本（dev seed 1 的前 200 题）上 `hitAtAll` 0.685 → 0.715 / 0.775，门槛 0.6 不动。
+
+阶段 B（`eval:abstention-gate`，默认门控行 0.51 / 0.32）：
+
+| | B | T8 | T10 |
+| --- | --- | --- | --- |
+| 不可回答题拦截率：train 272 题 | 0.511 | 0.507 | 0.489 |
+| 不可回答题拦截率：dev 95 题 | 0.589 | 0.589 | 0.589 |
+| 合计 367 题（拦住的题数） | 0.531（195） | 0.529（194） | 0.515（189） |
+| 可回答题放行率 train / dev | 0.561 / 0.586 | 0.563 / 0.586 | 0.576 / 0.601 |
+| 证据被放行率 train / dev | 0.218 / 0.250 | 0.226 / 0.257 | 0.236 / 0.263 |
+| `gateCost` train / dev | 0.557 / 0.508 | 0.557 / 0.508 | 0.551 / 0.495 |
+
+护栏是合计 ≥ B − 0.02 = 0.511：T8 0.529、T10 0.515，都过，但 T10 离线只有 0.004（约 1.4 题）。T10 多放过的 6 道不可回答题都在 train 上，dev 上一题不差。
+
+阶段 C（dev 200 题：177 可答 / 23 不可答 / 147 篇；排除的 `latest-qasper-answers-citations.json` 生成于 2026-10-04T21:29:11Z，去掉 200 题，题号摘要 `a10d4e200485`；rag 面，qwen2.5:7b；配对 bootstrap 10000 次、seed 12345，按题）：
+
+| | B | B′ | T8 | T10 |
+| --- | --- | --- | --- | --- |
+| 官方 F1（200 题） | 0.2013 | 0.2071 | 0.2061 | 0.2146 |
+| 可回答题作答 | 106/177 | 106/177 | 106/177 | 109/177 |
+| 不可回答题被回答 | 12/23 | 12/23 | 12/23 | 12/23 |
+| 作答时上下文含证据 | 0.651 | 0.651 | 0.689 | 0.706 |
+| 作答时引用含证据 | 0.509 | 0.538 | 0.528 | 0.505 |
+| 官方 F1 按类型（照记）：抽取式 120 / 概括式 44 / 是非题 13 / 不可回答 23 题 | 0.1785 / 0.1578 / 0.0134 / 0.5099 | 0.1866 / 0.1614 / 0.0129 / 0.5117 | 0.1803 / 0.1700 / 0.0111 / 0.5206 | 0.1994 / 0.1562 / 0.0113 / 0.5205 |
+| `llm_completion` 输入 token：中位数 / p90 / 最大 | 1254 / 1498 / 1642 | 同 B | 1514 / 1797 / 2017 | 1753 / 2040 / 2354 |
+
+| 配对差（对 B） | B′ − B（噪声底） | T8 − B | T10 − B |
+| --- | --- | --- | --- |
+| (c1) 官方 F1，200 题 | +0.006 [−0.010, +0.021] | +0.005 [−0.011, +0.021] | +0.013 [−0.008, +0.034] |
+| (c2) 可答题 F1（拒答记 0），177 题 | +0.006 [−0.011, +0.023] | +0.004 [−0.013, +0.021] | +0.019 [−0.001, +0.040] |
+| (c3) 两臂都作答的可答题 F1，106 题 | +0.011 [−0.018, +0.038] | +0.007 [−0.022, +0.036] | +0.027 [−0.006, +0.060] |
+| 上下文含证据，177 题 | 0 | +0.023 [+0.006, +0.045] | +0.045 [+0.017, +0.079] |
+| 引用含证据，177 题 | +0.017 [−0.017, +0.051] | +0.011 [−0.034, +0.057] | +0.006 [−0.040, +0.051] |
+| 可回答题作答翻转 | 0 | 0 | +3 / −0 |
+| 这 106 题上模型读到的上下文字符（均值） | 2876 → 2876 | 2876 → 3746（1.30×） | 2876 → 4557（1.58×） |
+| 这 106 题的 QA 延迟中位数（B 1861 ms） | 2152 ms（1.16×） | 1656 ms（0.89×） | 2202 ms（1.18×） |
+
+三条规则 T8、T10 都过。按类型的 F1 没有配对区间（是非题只有 13 题），只照记：抽取式题 T10 − B 为 +0.021，噪声底 B′ − B 为 +0.008。B′ 与 B 的作答集合逐题相同，F1 来回差约 0.01（模型不设温度，生成有随机性），延迟中位数差 16%，所以 T10 的 1.18× 在噪声底里：本轮不能说 T10 更慢，也不能说不更慢，可比的成本是输入 token 和上下文字符。四个臂的 Ollama 日志里截断相关消息都是 0（对话请求 128 / 120 / 129 / 130 次，含下面说的跨睡眠重发），QA 事件里带 `error` 的都是 0；T10 输入最长的一次请求是 2354 输入 + 37 输出 = 2391 token（输出最多的一次是 1776 输入 + 178 输出），放在 Ollama 默认的 4096 上下文里也够，所以 CI 真实模型评测（不设 `OLLAMA_CONTEXT_LENGTH`）不用改。
+
+选择：T8、T10 都过 A、B、C。T10 对 T8：dev 上下文含证据 +0.024 [+0.014, +0.036]（+20/−0，按论文聚类），候选含证据 +0.035 [+0.024, +0.048]，前 3 名 −0.002 [−0.018, +0.013]；阶段 C 可答题 F1 +0.015 [−0.001, +0.032]、两臂都作答的 F1 +0.021 [−0.005, +0.048]，两个上界都 ≥ 0，模型多读 811 字符 / 题。按规则选 T10。
+
+阶段 D（T10）：
+- (d1) `RAG_RETRIEVAL_TOP_K=10` 下 `verify:quality` 18/18（Ollama 0.34.4，`OLLAMA_CONTEXT_LENGTH=8192`，qwen2.5:7b，其余变量同 CI 的真实模型评测；3 次对话请求，截断 0）。合成语料每个问题的候选不超过 6 个（范围最大的是拒答那一问：两份合同各 3 块，topK 6 已全部取到），这一项按构造与 topK 无关，只是核对。
+- (d2) near-duplicate 和 compare-hard 的确定性报告（local，`--openai-provider deterministic`）在默认和 topK 10 下各 8 个用例逐项相同。去掉 id、时间戳和耗时后，JSON 只差 `summary.config.retrievalTopK` 和 `evidence.configHash`（把 T10 报告的 topK 改回 6 重算哈希，正好是默认报告的值，所以哈希的差只来自 topK），Markdown 只差 Retrieval top-k 那一行。
+- (d3) 改默认后在本地一次性 pgvector（Postgres.app 18.6，pgvector 0.8.6）上重跑 near-duplicate 确定性评测：语料、模型、10 项指标和 8 个用例都与 v1 逐项相同，配置只差 `retrievalTopK` 6 → 10，据此写成 `quality-near-duplicate-deterministic-v2`（v1 留作历史）。改默认的提交 72af7c0a 上：全套 `npm test` 4055 项通过 4028、失败 0、跳过 27（要 PostgreSQL 或 Redis 的套件）；用 `scripts/run-pgvector-integration.sh` 在一次性 pgvector 上再跑一遍，4225 项通过 4218、失败 0、跳过 7（Redis、读副本、旧版本升级）；按 CI 的 quality-gate job 在一次性 pgvector 上跑 synthetic、trajectory（19/19，84 项检查）、planner mock（7/7）、recovery-observability（8/8）、feedback（2/2），`quality:current --target-commit 72af7c0a…` 为 `pass`，基线按同语料同配置选中 v2。
+
+**结论**：默认 `RAG_RETRIEVAL_TOP_K` 改为 10（72af7c0a，manifest 1.15.0）。能说的：dev 上证据进入候选 +0.080、进入模型上下文 +0.046，区间都不含 0；200 题上答案 F1 没检出下降（三个点估计都为正，区间都含 0，所以也不能说答案变好）；代价是作答时模型多读约 1,700 字符（输入 token 中位数 1,254 → 1,753，约 +40%），不可回答题的门控拦截率 0.531 → 0.515。不能说的：答案更好；延迟没变（这台机器上量不出来）。
+
+改默认时一并处理的：`rag/config.js`、`server/.env.example`、`docs/configuration.md`；manifest 1.14.0 → 1.15.0（`requiredConfig.retrievalTopK` 10）；`quality-current-gate.js` 改钉 v2；`test/quality-current-gate.test.mjs`、`test/rag.test.mjs`、`test/eval-run-config.test.mjs` 的钉值（最后一个的扫参示例改用 8，免得和新默认相同）。robust suite（`eval-suite.js`）里 compare-hard 那一步声明的是默认检索栈，`executionConfig.retrievalTopK` 跟着改为 10（`test/robust-suite-execution.test.mjs` 的钉值同改）：topK 在 compare-hard 上不起作用（QA 用例只检索到 2 个候选，对比用例按 `RAG_COMPARE_TOP_K_PER_DOC` 取），(d2) 也逐项相同；`release:gate` 的期望配置哈希是加载时从 `eval-suite.js` 现算的，不是钉死的字面量，发布门本来就要求 robust 报告来自目标提交，所以不用额外重跑。两份 rerank 报告走另一套固定的排序配置（不开混合检索、combined 打分），topK 在那里起作用，`robustRerankRankingConfig.topK` 仍是 6。协议的代价清单说 git 跟踪的 `evaluation/results/latest.*` 是 compare-hard 报告，这一点写错了：它是 2026-04-21 的 near-duplicate 报告，也没有 rerank 报告被跟踪。参数扫描 `param-sweep.js` 的 `broad_topk` 臂从 8 改为 12（仍比默认多 2）；`rerank-sweep.js` 的臂保留显式的 topK 6，只改了描述。交叉编码器重排的候选池是 topK × 3，现在是 30 选 10；权重 0.6 和概率门槛是在 18 选 6 上调的，没有重测。`eval:qasper-answers` 的 `--exclude-report` 现在可以重复给（见上面的工具说明）：排除 citations 和本轮的 `latest-qasper-answers-tk-B.json` 后，dev `--cases 200 --seed 1` 是 182 可答 / 18 不可答 / 148 篇，两份样本互不重叠（并集 400 题）。
+
+补充没测的：机器从 10-29 08:19Z 起合盖睡眠，到 19:47Z 才第一次完全唤醒，其间进程只在 DarkWake 里推进；阶段 B 的 T10 train（08:10Z 开跑）大部分、T10 dev 和整个阶段 C 都在睡眠里。门控分析不计时，结果不受影响。阶段 C 的报告和事件里没有报错（QA 事件和 `llm_completion` 事件都不带 error），但那是重试之后的结果：Ollama 日志里阶段 C 的窗口内有 29 次对话请求返回 500（B 10、B′ 1、T8 10、T10 8）、3 次 embedding 请求返回 400（B 1、B′ 2），都出现在长时间睡眠后的唤醒时，看起来是客户端的请求超时（默认 120 s，墙钟把睡眠也算进去）中止了请求；客户端随即重发并成功，`openai.js` 的重试不写事件，所以只在服务日志里看得到。墙钟延迟的 p90 和最大值不能用，中位数也受影响，以 B/B′ 的噪声底为准，而这个噪声底本身也不对称（B 有 10 次这样的重发，B′ 只有 1 次）。Agent 面的 `INTENT_OPTIONS`（fact 4、timeline 9、comparison 8、analysis 10）没有跟着改，要对齐得另开一轮在 Agent 面上测。
 
 ### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
 

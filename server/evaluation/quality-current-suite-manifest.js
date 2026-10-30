@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.14.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.15.0";
 
 // The retrieval architecture every synthetic/feedback report must have run on.
 // It is checked against `summary.retrieval`, which the runner derives from the
@@ -27,7 +27,7 @@ const deterministicSyntheticConfig = {
   chunkStrategy: "structured",
   chunkSize: 900,
   chunkOverlap: 180,
-  retrievalTopK: 6,
+  retrievalTopK: 10,
   compareTopKPerDoc: 3,
   maxComparisonSources: 8,
   minRelevanceScore: 0.32,

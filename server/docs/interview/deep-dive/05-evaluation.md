@@ -27,9 +27,9 @@
 | `server/evaluation/run-llm-resilience-eval.mjs` | startFaultInjectingServer：本地假 OpenAI 服务，RESILIENCE_SCENARIOS 共 8 个场景，故障序列由种子固定 |
 | `server/evaluation/run-prompt-injection-eval.mjs、prompt-injection-cases.js` | 红队：PROMPT_INJECTION_CASES 现有 15 个攻击用例（主测量用的 13 个 + 第一次基线后加的 2 个 evasion 用例，单独对比）加 PROMPT_INJECTION_CONTROLS 4 个对照组，分 rag 和 agent 两个出口，用金丝雀字符串或被篡改的事实判定攻击是否成功；另用 JUDGE_INJECTION_PROBES 测 claim judge 在注入下的表现 |
 | `server/evaluation/eval-evidence.js、eval-evidence-validation.js` | resolveEvaluationGitState、attachEvaluationEvidence 给报告盖证据信封；getEvaluationEvidenceFailureReason 产出稳定的 reason code |
-| `server/evaluation/quality-current-gate.js、quality-current-suite-manifest.js、quality-current-suite-validator.js` | PR 门 quality:current：同 SHA、干净工作区、24h（DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS）、manifest（CURRENT_QUALITY_SUITE_MANIFEST_VERSION 1.14.0）钉死 case/check id 和响应投影、钉死的 baseline |
+| `server/evaluation/quality-current-gate.js、quality-current-suite-manifest.js、quality-current-suite-validator.js` | PR 门 quality:current：同 SHA、干净工作区、24h（DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS）、manifest（CURRENT_QUALITY_SUITE_MANIFEST_VERSION 1.15.0）钉死 case/check id 和响应投影、钉死的 baseline |
 | `server/evaluation/release-evidence-gate.js、eval-evidence-policy.js` | release:gate：完整报告集（RELEASE_EVIDENCE_REPORT_SPECS）；buildPromptLineageCheck、buildRobustLineageCheck、buildReadinessSourceCheck、buildGateWorktreeCheck |
-| `server/evaluation/baselines/quality-near-duplicate-deterministic-v1.json` | PR 门唯一接受的确定性回归基线 |
+| `server/evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR 门唯一接受的确定性回归基线（2026-10-29 默认 topK 改为 10 时取代 v1，指标和用例与 v1 相同） |
 | `server/evaluation/run-llm-judge.mjs、run-claim-judge-eval.mjs` | LLM 评审：measureJudgeAgreement 对人工标签算一致率和 Cohen's kappa 的框架（还没在真实数据上跑）；claim judge 在构造的对照集（CLAIM_JUDGE_CONTRAST_SET、CLAIM_JUDGE_HELD_OUT_SET）上做校准 |
 | `.github/workflows/quality-gate.yml、real-model-eval.yml、release-evidence.yml、planner-real-gate.yml、robust-eval-suite.yml` | PR 三个并行 job；每周一用 Ollama 跑真实模型（不需要 key）；每周一（或手动）跑发布证据（需要 OPENAI_API_KEY）；真实规划器门（需要 key）；robust suite 手动诊断 |
 | `server/test/run.test.mjs、coverage-gate.mjs、coverage-policy.mjs、ci-workflow.test.mjs` | 测试文件自动发现（collectTestFiles），每个文件一个子进程；CI 只跑一遍 coverage:gate；ci-workflow.test.mjs 钉死 workflow 和两处发现逻辑一致，并断言 quality-gate.yml 里不出现 OPENAI_API_KEY |
@@ -42,7 +42,7 @@ A. 一次 PR（.github/workflows/quality-gate.yml 的 quality-gate job，带 pgv
 2) eval:trajectory：runTrajectoryEvaluation 先用 withEnvironmentOverrides 把 AGENT_UNIFIED_GRAPH_ROLLOUT 固定为 off（并关掉经验记忆和长期记忆），再逐个跑 case（runTrajectoryCaseSafely）：buildScopedRagService 脚本化 chat，真实 runAgentRag，buildCheck 断言 trace、预算和作用域。
 3) eval:planner --provider mock：runPlannerEvaluation → configureOpenAIProvider(createMockPlannerProvider())。
 4) eval:recovery-observability、eval:feedback。
-5) quality:current（check-current-quality.mjs）：resolveEvaluationGitState → readCurrentQualityInputs → buildCurrentQualityGateReport，其中 getGateWorktreeReason 检查门禁自身的 checkout；validateCurrentQualitySuiteReport 对照 manifest；getEvaluationEvidenceFailureReason 逐份检查 SHA、dirty、未来时间戳、24h、configHash、语料、provider、profile、modelRoute、semanticCache；baseline 必须是 quality-near-duplicate-deterministic-v1。全部通过才公开 metrics，否则标 unverified。最后上传 artifacts。
+5) quality:current（check-current-quality.mjs）：resolveEvaluationGitState → readCurrentQualityInputs → buildCurrentQualityGateReport，其中 getGateWorktreeReason 检查门禁自身的 checkout；validateCurrentQualitySuiteReport 对照 manifest；getEvaluationEvidenceFailureReason 逐份检查 SHA、dirty、未来时间戳、24h、configHash、语料、provider、profile、modelRoute、semanticCache；baseline 必须是 quality-near-duplicate-deterministic-v2。全部通过才公开 metrics，否则标 unverified。最后上传 artifacts。
 
 B. 离线效果评测（本地 Ollama，或每周的 real-model-eval.yml，后者用 local 向量库、不连数据库）：
 - import-qasper.mjs 的 convertQasperPaper 生成语料。
@@ -425,7 +425,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - 断言大多落在运行时内部状态：拒答、页级引用、多文档数值归属、accessScope、预算、审批续跑
 - LangSmith 在项目里被强制禁止：追踪变量为 "true" 就拒绝启动，因为 LangChain 的 tracer 会把问题、prompt、文档正文发给第三方
 - 证据谱系要接自己的 prompt registry（setHash）和语料哈希
-- 代价：manifest 2215 行、每改一个用例都要升版本（现 1.14.0）、mulberry32 在 9 个文件里各一份、配对 bootstrap 至少 5 份独立实现
+- 代价：manifest 2215 行、每改一个用例都要升版本（现 1.15.0）、mulberry32 在 9 个文件里各一份、配对 bootstrap 至少 5 份独立实现
 
 代码：`server/evaluation/quality-current-suite-manifest.js CURRENT_QUALITY_SUITE_MANIFEST_VERSION`；`server/evaluation/eval-evidence.js attachEvaluationEvidence`；`server/rag/langgraph/langsmith-guard.js LANGSMITH_TRACING_VARIABLES`
 
@@ -589,7 +589,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 | claim judge 构造对照集 | 错误接受 0/54（对照集 0/42 + 留出集 0/12）；合同题 3/21→14/21 被回答且全对 | docs/evaluation.md「Claim 评审：校准与端到端」；CURRENT-TRUTH.md §4「校验器」「Agent 路径的答题率」 | 对照集由 verify:quality 的合同构造，标签由构造保证、不是人工标注；评审模型 qwen2.5:7b，端到端合同题里作答和评审是同一个 7B 模型；QASPER train 上只开评审时不可答题被回答 0/9→2/9 |
 | 后端测试与覆盖率 | 3,250 个测试：3,235 通过、15 跳过、0 失败，全局行覆盖 90.46% | CURRENT-TRUTH.md §3.30 | 覆盖率门禁的最低线是全局行 78、分支 65、函数 80（test/coverage-policy.mjs GLOBAL_GATE） |
 | 真实模型 CI 首次运行 | verify 18/18；QASPER 候选召回 0.655；约 63 分钟 | CURRENT-TRUTH.md §3.14「真实模型 CI」 | 阻断下限是 0.6；10 题 F1 0.164 只作报告 |
-| 统计和门禁的代码常量 | BOOTSTRAP_RESAMPLES=2000、BOOTSTRAP_SEED=1729；pairedRecallDeltas 默认 4000 次、seed 1；WRONG_ANSWER_COST=3、UNANSWERABLE_PRIOR=0.115；DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS=24；CURRENT_QUALITY_SUITE_MANIFEST_VERSION=1.14.0 | run-retrieval-comparison.mjs、run-qasper-retrieval-eval.mjs、run-abstention-gate-analysis.mjs、quality-current-gate.js、quality-current-suite-manifest.js | 各脚本的重采样次数和种子不统一 |
+| 统计和门禁的代码常量 | BOOTSTRAP_RESAMPLES=2000、BOOTSTRAP_SEED=1729；pairedRecallDeltas 默认 4000 次、seed 1；WRONG_ANSWER_COST=3、UNANSWERABLE_PRIOR=0.115；DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS=24；CURRENT_QUALITY_SUITE_MANIFEST_VERSION=1.15.0 | run-retrieval-comparison.mjs、run-qasper-retrieval-eval.mjs、run-abstention-gate-analysis.mjs、quality-current-gate.js、quality-current-suite-manifest.js | 各脚本的重采样次数和种子不统一 |
 | QASPER dev 转换后的题量 | 916 题：821 可答、95 不可答；89 道证据只在图表里，跳过 | docs/evaluation.md「QASPER：外部标注的检索和答案评测」 | 答案评测的主要实验抽 200 题（seed 1，139 篇论文），其中不可答 20 道 |
 
 ## 要主动说出口的边界

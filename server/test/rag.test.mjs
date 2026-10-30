@@ -1474,7 +1474,7 @@ test("observability enabled writes one qa trace plus llmops events", async () =>
       assert.deepEqual(event.docIds, ["benefits-observe-on"]);
       assert.equal(event.retrievalConfig.hybridEnabled, false);
       assert.equal(event.retrievalConfig.rerankEnabled, false);
-      assert.equal(event.retrievalConfig.retrievalTopK, 6);
+      assert.equal(event.retrievalConfig.retrievalTopK, 10);
       assert.ok(event.traceId);
       assert.ok(event.timestamp);
       assert.ok(event.latencyMs >= 0);

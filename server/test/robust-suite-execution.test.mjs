@@ -47,7 +47,7 @@ test("robust suite execution plan hashes the canonical public execution contract
     chunkStrategy: "structured",
     chunkSize: 900,
     chunkOverlap: 180,
-    retrievalTopK: 6,
+    retrievalTopK: 10,
     compareTopKPerDoc: 3,
     maxComparisonSources: 8,
     minRelevanceScore: 0.32,
@@ -135,7 +135,7 @@ test("robust suite child environment overrides every configurable synthetic publ
   assert.equal(environment.RAG_CHUNK_STRATEGY, "structured");
   assert.equal(environment.RAG_CHUNK_SIZE, "900");
   assert.equal(environment.RAG_CHUNK_OVERLAP, "180");
-  assert.equal(environment.RAG_RETRIEVAL_TOP_K, "6");
+  assert.equal(environment.RAG_RETRIEVAL_TOP_K, "10");
   assert.equal(environment.RAG_COMPARE_TOP_K_PER_DOC, "3");
   assert.equal(environment.RAG_MAX_COMPARISON_SOURCES, "8");
   assert.equal(environment.RAG_MIN_RELEVANCE_SCORE, "0.32");

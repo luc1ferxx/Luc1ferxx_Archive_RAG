@@ -199,10 +199,11 @@ export const describeEvidenceHit = (results, expectedPages) => {
 
 /**
  * Candidates the sparse route returned and the dense route did not. Under the
- * default fusion (RRF, k 60, weights 0.65/0.35, dense pool 8) there can be
- * none: a sparse-only chunk scores at most 0.35 against 0.583 for dense rank
- * 8, so every candidate is in the dense top 8. Any row with a count above 0
- * refutes that for its run.
+ * default fusion (RRF, k 60, weights 0.65/0.35, dense pool max(top-K, sparse
+ * top-K), 10 since top-K went to 10) there can be none: a sparse-only chunk
+ * scores at most 0.35 against 0.566 for dense rank 10 (0.583 for rank 8 at
+ * top-K 6), so every candidate is in the dense pool. Any row with a count
+ * above 0 refutes that for its run.
  */
 export const countSparseOnlyCandidates = (results) =>
   (Array.isArray(results) ? results : []).filter(

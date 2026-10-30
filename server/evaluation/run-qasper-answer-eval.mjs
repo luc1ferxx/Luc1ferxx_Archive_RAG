@@ -34,7 +34,8 @@
 // reports). --exclude-report <report.json> takes that report's questions out
 // of the corpus before sampling, so a confirmation sample shares no question
 // with the sample a candidate was tuned on; the report records what was
-// excluded. --list-cases prints the sample and exits before anything is
+// excluded. Given more than once, it takes out every listed report's
+// questions. --list-cases prints the sample and exits before anything is
 // ingested, so a sample can be checked without a model. Each row also carries
 // f1DashNormalized, the official F1 after folding dash variants to a hyphen:
 // a diagnostic, never a summary figure or a decision rule.
@@ -45,7 +46,7 @@
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-qasper-answer-eval.mjs
 //     [--corpus evaluation/generated/qasper-dev.json] [--cases 200] [--seed 1]
 //     [--surface rag|agent] [--latest-name latest-qasper-answers]
-//     [--compare <report.json>] [--exclude-report <report.json>] [--list-cases]
+//     [--compare <report.json>] [--exclude-report <report.json>]... [--list-cases]
 
 import "dotenv/config";
 import { createHash } from "node:crypto";
@@ -73,7 +74,12 @@ import {
   formatComparisonMarkdown,
   readQasperAnswerReport,
 } from "./compare-qasper-answer-reports.mjs";
-import { describeChunkingConfig, describeEvaluationCheckout, sumTextChars } from "./eval-run-config.js";
+import {
+  describeChunkingConfig,
+  describeEvaluationCheckout,
+  describeRetrievalConfig,
+  sumTextChars,
+} from "./eval-run-config.js";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 import { createSeededRandom } from "./paired-bootstrap.js";
 
@@ -116,6 +122,39 @@ export const excludeReportCases = (cases, report, { reportName }) => {
     },
   };
 };
+
+/**
+ * The corpus cases without the questions of any of several reports. One report
+ * is recorded as excludeReportCases records it; several are recorded each on
+ * its own (what it alone would remove) under `reports`, with the count and
+ * digest of the union actually removed beside them.
+ */
+export const excludeReportsCases = (cases, reports) => {
+  if (reports.length === 1) {
+    return excludeReportCases(cases, reports[0].report, { reportName: reports[0].reportName });
+  }
+
+  const reportIds = new Set(reports.flatMap(({ report }) => (report?.rows ?? []).map((row) => row.id)));
+  const removedIds = cases
+    .map((testCase) => testCase.id)
+    .filter((id) => reportIds.has(id))
+    .sort();
+
+  return {
+    cases: cases.filter((testCase) => !reportIds.has(testCase.id)),
+    excluded: {
+      reports: reports.map(({ report, reportName }) => excludeReportCases(cases, report, { reportName }).excluded),
+      excludedIds: removedIds.length,
+      excludedIdsDigest: createHash("sha256").update(removedIds.join("\n")).digest("hex"),
+    },
+  };
+};
+
+/** The excluded report's name, or each report's name with what it removed. */
+export const describeExcludedReports = (excluded, quote = (name) => name) =>
+  excluded.reports
+    ? excluded.reports.map((entry) => `${quote(entry.report)} (${entry.excludedIds})`).join(", ")
+    : quote(excluded.report);
 
 /** What a sample holds, for --list-cases: counts, papers and the ids. */
 export const describeSampledCases = (cases) => ({
@@ -208,7 +247,7 @@ const formatMarkdown = (report) => {
     `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}`,
     ...(report.config.excluded
       ? [
-          `- Sampled after excluding the ${report.config.excluded.excludedIds} questions of \`${report.config.excluded.report}\` (ids digest ${report.config.excluded.excludedIdsDigest.slice(0, 12)})`,
+          `- Sampled after excluding the ${report.config.excluded.excludedIds} questions of ${describeExcludedReports(report.config.excluded, (name) => "`" + name + "`")} (ids digest ${report.config.excluded.excludedIdsDigest.slice(0, 12)})`,
         ]
       : []),
     "",
@@ -232,16 +271,28 @@ const main = async () => {
   const surface = option("--surface", "rag");
   const latestName = option("--latest-name", `latest-qasper-answers${surface === "rag" ? "" : `-${surface}`}`);
   const comparePath = option("--compare", null);
-  const excludeReportPath = option("--exclude-report", null);
+  // Repeatable; a path given twice counts once.
+  const excludeReportPaths = [
+    ...new Set(args.flatMap((arg, index) => (arg === "--exclude-report" ? [args[index + 1]] : []))),
+  ];
   const listCases = args.includes("--list-cases");
 
   if (!["rag", "agent"].includes(surface)) {
     throw new Error("--surface must be rag or agent.");
   }
 
-  // Both reports are read before anything runs, so a wrong path fails fast.
+  if (excludeReportPaths.some((reportPath) => !reportPath || reportPath.startsWith("--"))) {
+    throw new Error("--exclude-report needs a report path.");
+  }
+
+  // Every report is read before anything runs, so a wrong path fails fast.
   const other = comparePath ? await readQasperAnswerReport(comparePath) : null;
-  const excludedReport = excludeReportPath ? await readQasperAnswerReport(excludeReportPath) : null;
+  const excludedReports = [];
+
+  for (const reportPath of excludeReportPaths) {
+    excludedReports.push({ report: await readQasperAnswerReport(reportPath), reportName: path.basename(reportPath) });
+  }
+
   let corpus;
 
   try {
@@ -257,12 +308,15 @@ const main = async () => {
     throw new Error("Build the corpus with import-qasper.mjs --granularity paragraph so evidence is paragraph-level.");
   }
 
-  const { cases: candidateCases, excluded } = excludedReport
-    ? excludeReportCases(corpus.cases, excludedReport, { reportName: path.basename(excludeReportPath) })
-    : { cases: corpus.cases, excluded: null };
+  const { cases: candidateCases, excluded } =
+    excludedReports.length > 0
+      ? excludeReportsCases(corpus.cases, excludedReports)
+      : { cases: corpus.cases, excluded: null };
 
-  if (excluded && excluded.excludedIds === 0) {
-    console.warn(`${excluded.report} shares no question id with the corpus; is it the right report, or the right corpus?`);
+  for (const entry of excluded ? (excluded.reports ?? [excluded]) : []) {
+    if (entry.excludedIds === 0) {
+      console.warn(`${entry.report} shares no question id with the corpus; is it the right report, or the right corpus?`);
+    }
   }
 
   const cases = sampleQasperCases(candidateCases, caseCount, seed);
@@ -270,7 +324,7 @@ const main = async () => {
   if (cases.length === 0) {
     throw new Error(
       excluded
-        ? `No question is left to sample after excluding the ${excluded.excludedIds} questions of ${excluded.report}.`
+        ? `No question is left to sample after excluding the ${excluded.excludedIds} questions of ${describeExcludedReports(excluded)}.`
         : "The corpus has no cases."
     );
   }
@@ -284,7 +338,7 @@ const main = async () => {
 
     console.log(
       `${sample.cases} questions (${sample.answerable} answerable, ${sample.unanswerable} unanswerable) from ${sample.papers} papers; seed ${seed}${
-        excluded ? `; excluding the ${excluded.excludedIds} questions of ${excluded.report}` : ""
+        excluded ? `; excluding the ${excluded.excludedIds} questions of ${describeExcludedReports(excluded)}` : ""
       }`
     );
     console.log(sample.ids.join("\n"));
@@ -462,6 +516,9 @@ const main = async () => {
     promptTemplates: await describePromptTemplates(),
     // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
     queryAdapter: getQueryAdapterReportFingerprint(),
+    // Every retrieval setting of the QA route (top-K, pools, fusion, gate
+    // floors, ...): two answer runs that differ there show it in --compare.
+    retrieval: await describeRetrievalConfig(),
     seed,
     surface,
   };

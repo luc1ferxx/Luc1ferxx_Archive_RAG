@@ -19,8 +19,10 @@ import {
   readAnswered,
 } from "../evaluation/compare-qasper-answer-reports.mjs";
 import {
+  describeExcludedReports,
   describeSampledCases,
   excludeReportCases,
+  excludeReportsCases,
   sampleQasperCases,
 } from "../evaluation/run-qasper-answer-eval.mjs";
 import { pairedMeanDelta as adapterPairedMeanDelta } from "../evaluation/run-query-adapter-eval.mjs";
@@ -263,6 +265,47 @@ test("excluding a report removes its questions before sampling and records an au
   assert.ok(described.papers >= 1 && described.papers <= 5);
 });
 
+test("excluding several reports removes the union and records each report beside the union", () => {
+  const first = {
+    config: { git: { sha: "abc123" } },
+    generatedAt: "2026-10-03T00:00:00.000Z",
+    rows: [{ id: "q1" }, { id: "q2" }],
+  };
+  const second = {
+    config: { git: { sha: "def456" } },
+    generatedAt: "2026-10-29T00:00:00.000Z",
+    rows: [{ id: "q2" }, { id: "q3" }, { id: "q99" }],
+  };
+
+  // One report keeps the single record, so earlier reports read the same.
+  assert.deepEqual(
+    excludeReportsCases(corpusCases, [{ report: first, reportName: "first.json" }]),
+    excludeReportCases(corpusCases, first, { reportName: "first.json" })
+  );
+
+  const { cases, excluded } = excludeReportsCases(corpusCases, [
+    { report: first, reportName: "first.json" },
+    { report: second, reportName: "second.json" },
+  ]);
+
+  assert.equal(cases.length, 17);
+  assert.ok(cases.every((testCase) => !["q1", "q2", "q3"].includes(testCase.id)));
+  assert.deepEqual(excluded, {
+    reports: [
+      excludeReportCases(corpusCases, first, { reportName: "first.json" }).excluded,
+      excludeReportCases(corpusCases, second, { reportName: "second.json" }).excluded,
+    ],
+    excludedIds: 3,
+    excludedIdsDigest: createHash("sha256").update("q1\nq2\nq3").digest("hex"),
+  });
+  assert.equal(excluded.reports[1].excludedIds, 2);
+  assert.equal(describeExcludedReports(excluded), "first.json (2), second.json (2)");
+  assert.equal(
+    describeExcludedReports(excludeReportCases(corpusCases, first, { reportName: "first.json" }).excluded),
+    "first.json"
+  );
+});
+
 // Command line ------------------------------------------------------------
 
 const runNode = (args, { cwd, env }) =>
@@ -313,6 +356,77 @@ test("--list-cases prints the sample without ingesting, and --exclude-report kee
     assert.match(excludedLines[0], /; excluding the 2 questions of other\.json$/);
     assert.equal(excludedLines.length, 7);
     assert.ok(excludedLines.slice(1).every((id) => !lines.slice(1, 3).includes(id)));
+
+    // Repeated, it takes out the union of the reports' questions and names each
+    // report with what it removes on its own (one id is in both).
+    const secondReportPath = path.join(tempRoot, "second.json");
+
+    await writeFile(
+      secondReportPath,
+      JSON.stringify({ reportType: "qasper-answers", rows: lines.slice(2, 5).map((id) => ({ id })) })
+    );
+    const twice = runNode(
+      [
+        runner,
+        "--list-cases",
+        "--corpus",
+        corpusPath,
+        "--cases",
+        "6",
+        "--seed",
+        "1",
+        "--exclude-report",
+        reportPath,
+        "--exclude-report",
+        secondReportPath,
+      ],
+      { cwd: serverDirectory, env }
+    );
+
+    assert.equal(twice.status, 0, twice.stderr);
+    const twiceLines = twice.stdout.trim().split("\n");
+    assert.match(twiceLines[0], /; excluding the 4 questions of other\.json \(2\), second\.json \(3\)$/);
+    assert.equal(twiceLines.length, 7);
+    assert.ok(twiceLines.slice(1).every((id) => !lines.slice(1, 5).includes(id)));
+
+    const missingPath = runNode([runner, "--list-cases", "--corpus", corpusPath, "--exclude-report"], {
+      cwd: serverDirectory,
+      env,
+    });
+
+    assert.notEqual(missingPath.status, 0);
+    assert.match(missingPath.stderr, /--exclude-report needs a report path/);
+
+    // A flag where the path should be is no path either.
+    const flagAsPath = runNode([runner, "--exclude-report", "--list-cases", "--corpus", corpusPath], {
+      cwd: serverDirectory,
+      env,
+    });
+
+    assert.notEqual(flagAsPath.status, 0);
+    assert.match(flagAsPath.stderr, /--exclude-report needs a report path/);
+
+    // The same report twice counts once and keeps the single-report record.
+    const sameTwice = runNode(
+      [
+        runner,
+        "--list-cases",
+        "--corpus",
+        corpusPath,
+        "--cases",
+        "6",
+        "--seed",
+        "1",
+        "--exclude-report",
+        reportPath,
+        "--exclude-report",
+        reportPath,
+      ],
+      { cwd: serverDirectory, env }
+    );
+
+    assert.equal(sameTwice.status, 0, sameTwice.stderr);
+    assert.match(sameTwice.stdout.split("\n")[0], /; excluding the 2 questions of other\.json$/);
 
     // Excluding every question leaves nothing to sample: an error, not an empty run.
     await writeFile(
@@ -422,4 +536,34 @@ test("the comparison command prints the paired table for two saved reports", asy
   } finally {
     await rm(tempRoot, { force: true, recursive: true });
   }
+});
+
+test("the questions both runs answered get their own F1 and context-size deltas", () => {
+  const r = (id, answered, f1, contextChars, shouldAbstain = false) => ({
+    abstained: !answered,
+    answered,
+    contextChars,
+    f1,
+    id,
+    shouldAbstain,
+  });
+  const report = { rows: [r("a", true, 0.5, 1000), r("b", true, 1, 1200), r("c", false, 0, 0), r("u", true, 0, 900, true)] };
+  const other = { rows: [r("a", true, 0.25, 800), r("b", false, 0, 0), r("c", true, 0.5, 700), r("u", false, 1, 0, true)] };
+  const comparison = compareQasperAnswerReports(report, other, { iterations: 200 });
+
+  // Only "a" was answered by both; "b" and "c" each by one run, "u" is unanswerable.
+  assert.deepEqual({ cases: comparison.answeredBothF1.cases, delta: comparison.answeredBothF1.delta }, { cases: 1, delta: 0.25 });
+  assert.deepEqual(
+    { cases: comparison.contextCharsBothAnswered.cases, delta: comparison.contextCharsBothAnswered.delta },
+    { cases: 1, delta: 200 }
+  );
+  // A report whose rows carry no contextChars: paired F1 still, no size delta.
+  const older = { rows: other.rows.map(({ contextChars, ...rest }) => rest) };
+
+  assert.equal(compareQasperAnswerReports(report, older, { iterations: 200 }).answeredBothF1.cases, 1);
+  assert.deepEqual(compareQasperAnswerReports(report, older, { iterations: 200 }).contextCharsBothAnswered, {
+    cases: 0,
+    ci95: null,
+    delta: null,
+  });
 });

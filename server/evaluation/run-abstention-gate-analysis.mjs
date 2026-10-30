@@ -30,6 +30,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { describeChunkingConfig, describeEvaluationCheckout, describeRetrievalConfig } from "./eval-run-config.js";
 import { sampleQasperCases } from "./run-qasper-answer-eval.mjs";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
 
@@ -195,6 +196,8 @@ const main = async () => {
   const seed = Math.max(1, Number(option("--seed", "1")) || 1);
   const latestName = option("--latest-name", "latest-abstention-gate-train");
   const corpus = JSON.parse(await readFile(corpusPath, "utf8"));
+  // The checkout, before the run.
+  const git = await describeEvaluationCheckout();
   const cases = [
     ...corpus.cases.filter((testCase) => testCase.shouldAbstain),
     ...sampleQasperCases(
@@ -335,10 +338,14 @@ const main = async () => {
       vector: auc("vector"),
     },
     config: {
+      chunking: await describeChunkingConfig(),
       corpus: path.basename(corpusPath),
       embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+      git,
       // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
       queryAdapter: getQueryAdapterReportFingerprint(),
+      // The retrieval settings the candidates were fetched with (top-K, pools, fusion, ...).
+      retrieval: await describeRetrievalConfig(),
       seed,
     },
     counts: {

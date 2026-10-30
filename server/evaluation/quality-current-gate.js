@@ -34,10 +34,13 @@ const resultsDirectory = path.join(__dirname, "results");
 export const DEFAULT_CURRENT_QUALITY_BASELINE_PATH = path.join(
   __dirname,
   "baselines",
-  "quality-near-duplicate-deterministic-v1.json"
+  "quality-near-duplicate-deterministic-v2.json"
 );
+// v2 replaced v1 when the retrieval top-K default went from 6 to 10: the
+// regression profile key holds retrievalTopK, and v2's metrics and cases equal
+// v1's (docs/evaluation.md "候选数 topK 6 → 8 / 10").
 export const CURRENT_QUALITY_BASELINE_RUN_ID =
-  "quality-near-duplicate-deterministic-v1";
+  "quality-near-duplicate-deterministic-v2";
 const LATEST_CURRENT_QUALITY_GATE_JSON =
   "latest-current-quality-gate.json";
 const LATEST_CURRENT_QUALITY_GATE_MD = "latest-current-quality-gate.md";
