@@ -379,7 +379,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `RAG_CHUNK_STRATEGY` | `structured` | `structured`、`sentence` 或 `simple`。`sentence` 沿用 structured 的标题与分节规则，节内按整句装箱：整块（含重复的标题）不超过 `RAG_CHUNK_SIZE`，只有单句超长时才在分句/词边界切开；overlap 只取上一块末尾、总长不超过 `RAG_CHUNK_OVERLAP` 的整句；列表项和表格行不与正文合并，chunk 不跨页。其他值（包括拼错的）在入库时直接报错，健康检查出现 `checks.chunking` 错误；空值等于默认值。`structured` 在 1dcc8467（2026-10-04）里改过：超长段落的切分和段落重叠重写，块从此不超过 `RAG_CHUNK_SIZE`（切块器版本 2，见 docs/evaluation.md「按句子装块」末尾）。入库的块和索引版本都记录切块配置的指纹（策略、块大小、重叠、切块器版本、PDF 解析设置），改了这几个设置后，活动版本和当前配置不一致时健康检查给 warning。 |
 | `RAG_CHUNK_SIZE` | `900` | Chunk 最大长度。 |
 | `RAG_CHUNK_OVERLAP` | `180` | Chunk overlap。 |
-| `RAG_RETRIEVAL_TOP_K` | `10` | QA 路径召回数量，也是答案模型读到的上下文块数上限（门控放行的块在前，其余候选按检索顺序补到这个数）。2026-10-29 从 6 改为 10：QASPER dev 上证据进入候选 +0.080、进入模型上下文 +0.046（区间不含 0），200 题答案 F1 没有检出下降，作答时模型多读约 1,700 字符（输入 token 中位数 1,254 → 1,753）；不可回答题的门控拦截率 0.531 → 0.515。Agent `/chat` 的文档检索按意图自带 topK（`agent-query-planner.js` 的 `INTENT_OPTIONS`），不读这个值。见 evaluation.md 的“候选数 topK 6 → 8 / 10”。 |
+| `RAG_RETRIEVAL_TOP_K` | `10` | QA 路径每个检索查询的召回数量；答案模型的上下文也按它补齐（门控放行的块全部在前，其余候选按检索顺序补到这个数；问题被拆成几个子查询时放行的块可能超过它，这时不再补）。2026-10-29 从 6 改为 10：QASPER dev 上证据进入候选 +0.080、进入模型上下文 +0.046（区间不含 0），200 题答案 F1 没有检出下降，作答时模型多读约 1,700 字符（输入 token 中位数 1,254 → 1,753）；不可回答题的门控拦截率 0.531 → 0.515。Agent `/chat` 的主检索、follow-up 和自定义 Skill 调用按意图自带 topK（`agent-query-planner.js` 的 `INTENT_OPTIONS`），不读这个值；Agent 里读它的只有门控拒答后补缺规划器的补充检索和 `research_brief` 的逐问子调用（`research_question`）。见 evaluation.md 的“候选数 topK 6 → 8 / 10”。 |
 | `RAG_COMPARE_TOP_K_PER_DOC` | `3` | Compare 路径每份文档保留证据数。 |
 | `RAG_QUERY_DECOMPOSITION_ENABLED` | `true` | 是否拆分复杂 evidence requirements。 |
 | `RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS` | `4` | 单次最多拆分需求数。 |

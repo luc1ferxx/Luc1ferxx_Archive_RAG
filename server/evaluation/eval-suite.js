@@ -8,7 +8,7 @@ const robustRerankRankingConfig = Object.freeze({
   vectorWeight: 0.82,
   keywordWeight: 0.18,
   // A fixed ranking stack (hybrid off, combined scoring), not the default
-  // one, so it keeps topK 6 when the retrieval default moves.
+  // one: top-K binds here, so it keeps 6 when the retrieval default moves.
   topK: 6,
   topKPerDoc: 3,
   candidateMultiplier: 3,
@@ -30,10 +30,10 @@ export const robustEvalSuite = {
         chunkStrategy: "structured",
         chunkSize: 900,
         chunkOverlap: 180,
-        // Stays 6 although the default is 10 since 2026-10-29: the suite's
-        // config hash is pinned release evidence, and compare-hard never
-        // reaches 6 candidates (its reports are byte-identical at 6 and 10).
-        retrievalTopK: 6,
+        // The default since 2026-10-29 (6 before). Top-K does not bind on
+        // compare-hard: its QA case retrieves 2 candidates and comparisons
+        // are capped per document by compareTopKPerDoc.
+        retrievalTopK: 10,
         compareTopKPerDoc: 3,
         maxComparisonSources: 8,
         minRelevanceScore: 0.32,

@@ -11,7 +11,7 @@ export const PARAM_SWEEP_PROFILES = {
       label: "Broad topK",
       description: "Retrieve more evidence for document and compare flows.",
       env: {
-        RAG_RETRIEVAL_TOP_K: "8",
+        RAG_RETRIEVAL_TOP_K: "12",
         RAG_COMPARE_TOP_K_PER_DOC: "4",
       },
     },

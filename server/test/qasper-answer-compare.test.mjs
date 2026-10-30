@@ -397,6 +397,37 @@ test("--list-cases prints the sample without ingesting, and --exclude-report kee
     assert.notEqual(missingPath.status, 0);
     assert.match(missingPath.stderr, /--exclude-report needs a report path/);
 
+    // A flag where the path should be is no path either.
+    const flagAsPath = runNode([runner, "--exclude-report", "--list-cases", "--corpus", corpusPath], {
+      cwd: serverDirectory,
+      env,
+    });
+
+    assert.notEqual(flagAsPath.status, 0);
+    assert.match(flagAsPath.stderr, /--exclude-report needs a report path/);
+
+    // The same report twice counts once and keeps the single-report record.
+    const sameTwice = runNode(
+      [
+        runner,
+        "--list-cases",
+        "--corpus",
+        corpusPath,
+        "--cases",
+        "6",
+        "--seed",
+        "1",
+        "--exclude-report",
+        reportPath,
+        "--exclude-report",
+        reportPath,
+      ],
+      { cwd: serverDirectory, env }
+    );
+
+    assert.equal(sameTwice.status, 0, sameTwice.stderr);
+    assert.match(sameTwice.stdout.split("\n")[0], /; excluding the 2 questions of other\.json$/);
+
     // Excluding every question leaves nothing to sample: an error, not an empty run.
     await writeFile(
       reportPath,

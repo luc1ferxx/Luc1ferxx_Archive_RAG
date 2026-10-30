@@ -889,7 +889,9 @@ export const getChunkOverlap = () =>
   toNonNegativeNumber(process.env.RAG_CHUNK_OVERLAP, 180);
 
 // 10 since 2026-10-29 (6 before; docs/evaluation.md "候选数 topK 6 → 8 / 10").
-// It also caps the chunks the QA answer model reads (selectQaContext).
+// Applied per retrieval query. selectQaContext also fills the QA answer
+// model's context up to it, but never drops gate-admitted chunks, so a
+// decomposed question can read more.
 export const getRetrievalTopK = () =>
   Math.floor(toPositiveNumber(process.env.RAG_RETRIEVAL_TOP_K, 10));
 

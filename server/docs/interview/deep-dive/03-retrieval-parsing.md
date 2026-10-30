@@ -379,11 +379,11 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 *L1 是什么*
 
 - 两路并发：pgvector 余弦（HNSW m16/efc64，doc_id 过滤 + iterative scan），加上 PG FTS 匹配、Okapi BM25 打分
-- sparse topK 取 max(topK, 8)，dense 取 max(topK, sparseTopK)，加权 RRF k=60 后取 6
+- sparse topK 取 max(topK, 8)，dense 取 max(topK, sparseTopK)，加权 RRF k=60 后取 topK（默认 10，2026-10-29 前是 6；现在两路各取 10）
 - rerank 默认关；打开后取 topK×3 个候选，交叉编码器重排
 - 多部分问题拆子查询（最多 4 个），各自检索后合并去重、全局重排
 - 对比路径每篇文档各自跑 hybrid，每篇 3 条
-- /chat 走 agent 时用 agent-query-planner 的计划（fact 意图 topK 4，另加一条模板子查询）；MCP archive_ask 用默认的 6
+- /chat 走 agent 时用 agent-query-planner 的计划（fact 意图 topK 4，另加一条模板子查询）；MCP archive_ask 用默认的 10（2026-10-29 前是 6，见 CURRENT-TRUTH 3.37）
 
 代码：`server/rag/vector-store.js searchHybridDocumentsWithRoutes`；`server/rag/config.js getRetrievalTopK / getSparseRetrievalTopK / getRrfK / getComparisonTopKPerDoc`；`server/rag/agent-query-planner.js INTENT_OPTIONS`
 
@@ -497,7 +497,7 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 *L3 为什么不用 X / 怎么证明*
 
 - 启发式重排在 QASPER 上 −0.007，不显著
-- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的）
+- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的；默认 topK 改为 10 后是 30 选 10，权重和概率门槛没在新值上重测）
 - dev：上下文里的证据 +0.063，显著；F1 +0.008，不显著；可回答题被拒答 −4.4pp，显著
 - 默认关是因为要单独的模型服务；服务挂了，这次查询退回融合顺序并告警
 - 开重排时默认用重排概率做门控（阈值 0.02）：AUC 0.641 vs 0.588，误拒大幅下降，但不可回答题识别从 80% 降到 45%（只有 20 题）
@@ -618,7 +618,7 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 | 按句子装块 | dev 前三名命中 −0.027 [−0.050, −0.004]，显著更差；候选覆盖 +0.004 [−0.017, 0.026] | CURRENT-TRUTH 3.27；evaluation.md "按句子装块" | train 上的显著增益在 dev 上没有复现 |
 | 查询适配器 | hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；F1 0.2576→0.2562，不显著 | CURRENT-TRUTH 3.18 | QASPER + nomic 专用；dense-only 下前三名 −0.032 |
 | 语义缓存 | 留出 confirm 集误命中 0/59（旧守卫 25/59，单侧 95% 上界 5%）；改写命中 11/17；每次命中省约 1.35 s [0.65, 2.19] | CURRENT-TRUTH 3.18；docs/retrieval-tuning.md | 省时数字是旧守卫、无争用、n=26；confirm 集不是盲测；默认关；别说成"0 误命中" |
-| 代码默认值 | 切块 900/180；topK 6；sparse topK 8；RRF k=60，权重 0.65/0.35；rerank ×3、权重 0.6；稀疏查询最多 64 个词；剪枝门槛 1000 块、DF 比例 0.1、常见词候选上限 2000；HNSW m16/efc64；指针 TTL 2 s；双写 24 h；DOCLING_MAX_CONCURRENCY 2；每任务 32 页；语义缓存阈值 0.97 | server/rag/config.js getChunkSize / getRetrievalTopK / getRrfK / getHybridDenseWeight / getRerankWeight / getPgvectorHnswM / getIndexVersionPointerTtlMs / DEFAULT_SEMANTIC_CACHE_THRESHOLD / DEFAULT_SPARSE_COMMON_TERM_CAP；sparse-query-terms.js SPARSE_MAX_QUERY_TERMS；vector-store-pgvector-sparse.js PGVECTOR_SPARSE_PRUNE_MIN_CHUNKS | rerank 权重 0.6 是在 train 上选的（3.14a），其余多数是默认值，不是调出来的最优值 |
+| 代码默认值 | 切块 900/180；topK 10（2026-10-29 前是 6）；sparse topK 8；RRF k=60，权重 0.65/0.35；rerank ×3、权重 0.6；稀疏查询最多 64 个词；剪枝门槛 1000 块、DF 比例 0.1、常见词候选上限 2000；HNSW m16/efc64；指针 TTL 2 s；双写 24 h；DOCLING_MAX_CONCURRENCY 2；每任务 32 页；语义缓存阈值 0.97 | server/rag/config.js getChunkSize / getRetrievalTopK / getRrfK / getHybridDenseWeight / getRerankWeight / getPgvectorHnswM / getIndexVersionPointerTtlMs / DEFAULT_SEMANTIC_CACHE_THRESHOLD / DEFAULT_SPARSE_COMMON_TERM_CAP；sparse-query-terms.js SPARSE_MAX_QUERY_TERMS；vector-store-pgvector-sparse.js PGVECTOR_SPARSE_PRUNE_MIN_CHUNKS | rerank 权重 0.6 是在 train 上选的（3.14a），其余多数是默认值，不是调出来的最优值 |
 
 ## 要主动说出口的边界
 

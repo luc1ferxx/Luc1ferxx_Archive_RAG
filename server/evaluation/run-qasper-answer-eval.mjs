@@ -46,7 +46,7 @@
 //   RAG_EMBEDDING_DIMENSIONS=768 node evaluation/run-qasper-answer-eval.mjs
 //     [--corpus evaluation/generated/qasper-dev.json] [--cases 200] [--seed 1]
 //     [--surface rag|agent] [--latest-name latest-qasper-answers]
-//     [--compare <report.json>] [--exclude-report <report.json> ...] [--list-cases]
+//     [--compare <report.json>] [--exclude-report <report.json>]... [--list-cases]
 
 import "dotenv/config";
 import { createHash } from "node:crypto";
@@ -271,14 +271,17 @@ const main = async () => {
   const surface = option("--surface", "rag");
   const latestName = option("--latest-name", `latest-qasper-answers${surface === "rag" ? "" : `-${surface}`}`);
   const comparePath = option("--compare", null);
-  const excludeReportPaths = args.flatMap((arg, index) => (arg === "--exclude-report" ? [args[index + 1]] : []));
+  // Repeatable; a path given twice counts once.
+  const excludeReportPaths = [
+    ...new Set(args.flatMap((arg, index) => (arg === "--exclude-report" ? [args[index + 1]] : []))),
+  ];
   const listCases = args.includes("--list-cases");
 
   if (!["rag", "agent"].includes(surface)) {
     throw new Error("--surface must be rag or agent.");
   }
 
-  if (excludeReportPaths.some((reportPath) => !reportPath)) {
+  if (excludeReportPaths.some((reportPath) => !reportPath || reportPath.startsWith("--"))) {
     throw new Error("--exclude-report needs a report path.");
   }
 

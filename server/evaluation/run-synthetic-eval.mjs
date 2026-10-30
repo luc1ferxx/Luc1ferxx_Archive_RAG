@@ -661,8 +661,10 @@ const main = async () => {
       uploadChunkSizeBytes,
     },
     // Kept out of `config` on purpose: the regression profile key is built
-    // from `config`, and the pinned deterministic baseline predates pgvector.
-    // The gate checks this block against the manifest separately.
+    // from `config`, and the pinned deterministic baseline keeps the config
+    // shape of v1, which predates pgvector (v2 was written from a pgvector run
+    // in that shape). The gate checks this block against the manifest
+    // separately.
     retrieval: retrievalEvidence,
     metrics: {
       overallPassRate: ratio(

@@ -2,7 +2,7 @@ export const RERANK_SWEEP_BASE_VARIANTS = [
   {
     id: "default_heuristic",
     label: "Default heuristic",
-    description: "Current deterministic embedding and heuristic rerank defaults.",
+    description: "Heuristic rerank defaults on deterministic embeddings at top-K 6, the retrieval default before 2026-10-29; the arms keep 6 so sweeps stay comparable.",
     embeddingProvider: "deterministic",
     topK: 6,
     topKPerDoc: 3,
@@ -15,7 +15,7 @@ export const RERANK_SWEEP_BASE_VARIANTS = [
   {
     id: "broad_topk",
     label: "Broad topK",
-    description: "Keep more final evidence to improve recall.",
+    description: "Keep more final evidence to improve recall (top-K 10, the retrieval default since 2026-10-29).",
     embeddingProvider: "deterministic",
     topK: 10,
     topKPerDoc: 5,
