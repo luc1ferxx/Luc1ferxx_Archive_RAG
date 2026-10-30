@@ -42,7 +42,7 @@ const TARGET_COMMIT = "a".repeat(40);
 const NOW = "2026-07-30T08:00:00.000Z";
 const GENERATED_AT = "2026-07-30T07:30:00.000Z";
 const PINNED_BASELINE_RUN_ID =
-  "quality-near-duplicate-deterministic-v1";
+  "quality-near-duplicate-deterministic-v2";
 const passingHistory = {
   regressionGate: {
     baselineRunId: PINNED_BASELINE_RUN_ID,
@@ -2089,7 +2089,7 @@ test("current quality reader does not let newer result files replace the pinned 
 
     assert.equal(
       history.regressionGate.baselineRunId,
-      "quality-near-duplicate-deterministic-v1"
+      "quality-near-duplicate-deterministic-v2"
     );
     assert.ok(
       history.runs.every((run) => run.runId !== "hostile-newer-baseline")
@@ -2125,7 +2125,7 @@ test("current quality reader compares deterministic reports to the pinned determ
 
     assert.equal(
       history.regressionGate.baselineRunId,
-      "quality-near-duplicate-deterministic-v1"
+      "quality-near-duplicate-deterministic-v2"
     );
     assert.equal(
       history.regressionGate.baselineSelection.strategy,

@@ -38,7 +38,7 @@ OPENAI_CHAT_MODEL=gpt-5
 RAG_CHUNK_STRATEGY=structured
 RAG_CHUNK_SIZE=900
 RAG_CHUNK_OVERLAP=180
-RAG_RETRIEVAL_TOP_K=6
+RAG_RETRIEVAL_TOP_K=10
 RAG_COMPARE_TOP_K_PER_DOC=3
 
 STARTUP_HEALTH_STRICT=false
@@ -379,7 +379,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `RAG_CHUNK_STRATEGY` | `structured` | `structured`、`sentence` 或 `simple`。`sentence` 沿用 structured 的标题与分节规则，节内按整句装箱：整块（含重复的标题）不超过 `RAG_CHUNK_SIZE`，只有单句超长时才在分句/词边界切开；overlap 只取上一块末尾、总长不超过 `RAG_CHUNK_OVERLAP` 的整句；列表项和表格行不与正文合并，chunk 不跨页。其他值（包括拼错的）在入库时直接报错，健康检查出现 `checks.chunking` 错误；空值等于默认值。`structured` 在 1dcc8467（2026-10-04）里改过：超长段落的切分和段落重叠重写，块从此不超过 `RAG_CHUNK_SIZE`（切块器版本 2，见 docs/evaluation.md「按句子装块」末尾）。入库的块和索引版本都记录切块配置的指纹（策略、块大小、重叠、切块器版本、PDF 解析设置），改了这几个设置后，活动版本和当前配置不一致时健康检查给 warning。 |
 | `RAG_CHUNK_SIZE` | `900` | Chunk 最大长度。 |
 | `RAG_CHUNK_OVERLAP` | `180` | Chunk overlap。 |
-| `RAG_RETRIEVAL_TOP_K` | `6` | QA 路径召回数量。 |
+| `RAG_RETRIEVAL_TOP_K` | `10` | QA 路径召回数量，也是答案模型读到的上下文块数上限（门控放行的块在前，其余候选按检索顺序补到这个数）。2026-10-29 从 6 改为 10：QASPER dev 上证据进入候选 +0.080、进入模型上下文 +0.046（区间不含 0），200 题答案 F1 没有检出下降，作答时模型多读约 1,700 字符（输入 token 中位数 1,254 → 1,753）；不可回答题的门控拦截率 0.531 → 0.515。Agent `/chat` 的文档检索按意图自带 topK（`agent-query-planner.js` 的 `INTENT_OPTIONS`），不读这个值。见 evaluation.md 的“候选数 topK 6 → 8 / 10”。 |
 | `RAG_COMPARE_TOP_K_PER_DOC` | `3` | Compare 路径每份文档保留证据数。 |
 | `RAG_QUERY_DECOMPOSITION_ENABLED` | `true` | 是否拆分复杂 evidence requirements。 |
 | `RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS` | `4` | 单次最多拆分需求数。 |
@@ -404,8 +404,8 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `RAG_HYBRID_SPARSE_WEIGHT` | `0.35` | Weighted fusion 的 sparse 权重。 |
 | `RAG_RRF_K` | `60` | RRF 平滑常数。 |
 | `RAG_RERANK_ENABLED` | `false` | 是否启用 rerank。 |
-| `RAG_RERANK_PROVIDER` | `heuristic` | `heuristic`、`cross-encoder` 或代码内注入的 `custom`。启发式重排在 QASPER 上没有收益。有重排服务时推荐 `cross-encoder` 加 BAAI/bge-reranker-v2-m3：dev 上证据进入模型上下文 +0.063，可回答题的拒答率下降 4.4 个百分点，不可回答题识别率不变（见 evaluation.md 的“交叉编码器重排”）。重排服务不可用时，该次查询退回融合排序并打印警告，不会失败。 |
-| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数。 |
+| `RAG_RERANK_PROVIDER` | `heuristic` | `heuristic`、`cross-encoder` 或代码内注入的 `custom`。启发式重排在 QASPER 上没有收益。有重排服务时推荐 `cross-encoder` 加 BAAI/bge-reranker-v2-m3：dev 上证据进入模型上下文 +0.063（topK 6 时测得），可回答题的拒答率下降 4.4 个百分点，不可回答题识别率不变（见 evaluation.md 的“交叉编码器重排”）。重排服务不可用时，该次查询退回融合排序并打印警告，不会失败。 |
+| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数：重排 `RAG_RETRIEVAL_TOP_K` × 这个数个融合候选，留下 topK 个。交叉编码器的权重 0.6 和概率门槛是在 topK 6（18 选 6）上调的，默认 topK 改为 10（30 选 10）后没有重测。 |
 | `RAG_RERANK_WEIGHT` | `0.6` | Rerank 分数与粗排分数混合权重。 |
 | `RAG_CROSS_ENCODER_ENDPOINT` | 空 | Cross-encoder HTTP endpoint，请求 `{query, texts}`、返回 `{scores}`，和 Hugging Face TEI 的 `/rerank` 格式相同。本地用 `npm run rerank:cross-encoder` 启动，地址是 `http://127.0.0.1:8081/rerank`。 |
 | `RAG_QA_MIN_RERANK_PROBABILITY` | `0.02` | 开启交叉编码器重排后，单文档问答是否作答，由重排模型给出的相关概率决定，不再看问题词覆盖率。只对带重排分数的结果生效：没开重排或重排失败时，仍用词面门控。设为 `off` 可关闭。0.02 是在 QASPER train 上按事先定的代价规则选出的。dev 上可回答题被拒答从 37.8% 降到 13.9%，F1 不变；但不可回答题的识别率从 80% 降到 45%（见 evaluation.md 的"重排概率做拒答门控"）。 |

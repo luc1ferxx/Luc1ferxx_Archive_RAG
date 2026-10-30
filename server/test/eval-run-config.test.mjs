@@ -110,7 +110,7 @@ test("config.retrieval names every setting of the QA route as the route reads it
     scoringMode: "combined",
     sparseTopK: 8,
     sparseWeight: 0.35,
-    topK: 6,
+    topK: 10,
     vectorWeight: 0.82,
   };
 
@@ -120,7 +120,7 @@ test("config.retrieval names every setting of the QA route as the route reads it
   process.env.RAG_RRF_K = "4";
   process.env.RAG_HYBRID_DENSE_WEIGHT = "0.5";
   process.env.RAG_HYBRID_SPARSE_WEIGHT = "0.5";
-  process.env.RAG_RETRIEVAL_TOP_K = "10";
+  process.env.RAG_RETRIEVAL_TOP_K = "8";
   process.env.RAG_HYBRID_FUSION = "weighted";
   process.env.RAG_QA_MIN_RERANK_PROBABILITY = "off";
   // The host of the embedding endpoint, never its URL.
@@ -133,7 +133,7 @@ test("config.retrieval names every setting of the QA route as the route reads it
     qaMinRerankProbability: null,
     rrfK: 4,
     sparseWeight: 0.5,
-    topK: 10,
+    topK: 8,
   });
 
   // The dense-only route, cosine only.

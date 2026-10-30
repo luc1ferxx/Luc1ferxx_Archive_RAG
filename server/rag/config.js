@@ -888,8 +888,10 @@ export const getChunkSize = () =>
 export const getChunkOverlap = () =>
   toNonNegativeNumber(process.env.RAG_CHUNK_OVERLAP, 180);
 
+// 10 since 2026-10-29 (6 before; docs/evaluation.md "候选数 topK 6 → 8 / 10").
+// It also caps the chunks the QA answer model reads (selectQaContext).
 export const getRetrievalTopK = () =>
-  Math.floor(toPositiveNumber(process.env.RAG_RETRIEVAL_TOP_K, 6));
+  Math.floor(toPositiveNumber(process.env.RAG_RETRIEVAL_TOP_K, 10));
 
 export const getSparseRetrievalTopK = () =>
   Math.floor(toPositiveNumber(process.env.RAG_SPARSE_TOP_K, 8));

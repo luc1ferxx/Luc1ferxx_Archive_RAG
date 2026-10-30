@@ -7,6 +7,8 @@ const robustRerankRankingConfig = Object.freeze({
   retrievalScoringMode: "combined",
   vectorWeight: 0.82,
   keywordWeight: 0.18,
+  // A fixed ranking stack (hybrid off, combined scoring), not the default
+  // one, so it keeps topK 6 when the retrieval default moves.
   topK: 6,
   topKPerDoc: 3,
   candidateMultiplier: 3,
@@ -28,6 +30,9 @@ export const robustEvalSuite = {
         chunkStrategy: "structured",
         chunkSize: 900,
         chunkOverlap: 180,
+        // Stays 6 although the default is 10 since 2026-10-29: the suite's
+        // config hash is pinned release evidence, and compare-hard never
+        // reaches 6 candidates (its reports are byte-identical at 6 and 10).
         retrievalTopK: 6,
         compareTopKPerDoc: 3,
         maxComparisonSources: 8,

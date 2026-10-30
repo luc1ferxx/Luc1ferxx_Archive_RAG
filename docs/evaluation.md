@@ -809,7 +809,7 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 答案评测以前不算区间，文档里的区间都来自一次性脚本；干净的确认样本也是手工在一次性目录里拼的。现在：
 
 - `npm run compare:qasper-answers -- <本次报告.json> <对照报告.json> [--iterations 10000] [--seed 12345]`（`evaluation/compare-qasper-answer-reports.mjs`）按题号配对两份 `qasper-answers` 报告，输出本次减对照的配对 bootstrap 95% 区间：官方 F1（全部题）、可答题 F1（拒答记 0）、答题率（只算可答题）、不可答被回答（只算不可答题）、引用证据召回和上下文证据召回（两份都记录了的可答题；旧报告的 `evidenceHit` 只配 `contextEvidenceHit`），以及可答题翻转数 +N / −M；还列出两份报告配置上的差异或无法确认一致的地方（surface、模型、评审、答题率开关、prompt 集的哈希、切块设置、提交号；旧报告没记提交号就算"无法确认"）。两份报告没有共同题号时直接报错，题号重复或缺失、f1 不是数的行也拒绝。`eval:qasper-answers -- --compare <对照报告.json>` 把同一块写进报告的 `comparison`。
-- `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
+- `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；可以重复给多份（2026-10-29 起），去掉的是各份题目的并集，`config.excluded` 这时在 `reports` 里逐份记录（每份单独会去掉多少），旁边是并集的题数和题号摘要，只给一份时形状不变；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
 - 2026-10-29 起答案报告也记录 `config.retrieval`（门控报告 `eval:abstention-gate` 还记 `chunking` 和 `git`），`--compare` 和 `compare:qasper-answers` 多两项配对指标：`answeredBothF1`（两次运行都作答的可答题上的官方 F1，不受作答集合变化的影响）和 `contextCharsBothAnswered`（这些题上模型读到的上下文字符，检索设置的每答成本）。
 - 每行多一个诊断列 `f1DashNormalized`：官方归一化只去 ASCII 标点，连字符会消失、长短破折号却留在词里，一条写法只差破折号的正确答案记 0 分（见"第二轮"的局限）；这一列先把破折号折成连字符再算，只作诊断，不进汇总也不进判定规则。
 - 验收：对第二轮的 D2 和 D0 报告跑 `compare:qasper-answers`（10000 次，seed 12345），点估计与当时一次性脚本逐字相同（答题率 +0.363、翻转 +33 / −0、可答题 F1 +0.123、不可答被回答 +0.222），区间 [0.264, 0.462]、[0.081, 0.170]、[0.000, 0.556] 也一致（相差不超过 0.001）；`--exclude-report D0 --cases 100 --seed 1 --list-cases` 得到第三轮描述的 88 可答、12 不可答、82 篇论文。
