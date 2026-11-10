@@ -90,6 +90,7 @@ import {
 } from "./rag/workspace-artifacts/index.js";
 import {
   assertAgentRuntimeSupported,
+  assertAnswerGenerationSettings,
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
@@ -299,6 +300,10 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // instead of running LangGraph regardless (ADR 0001 phase 6; server.js and
   // startServiceRole check earlier still).
   assertAgentRuntimeSupported();
+  // RAG_ANSWER_TEMPERATURE, RAG_ANSWER_MAX_TOKENS and RAG_LLM_MAX_TOKENS_FIELD:
+  // a wrong value refuses the start rather than failing every answer call,
+  // which /chat would carry on past to the Web stage.
+  assertAnswerGenerationSettings();
 
   // What a document delete also cleans up in the stores built below
   // (rag/document-deletion-cascade.js); assigned once they exist, read when a

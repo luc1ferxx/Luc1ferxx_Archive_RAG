@@ -1052,6 +1052,9 @@ export const getClaimJudgeTemperature = () => {
     : null;
 };
 
+// A refused answer-generation setting, with a stable code that names it.
+const invalidAnswerGenerationSetting = (code, message) => Object.assign(new Error(message), { code });
+
 // RAG_ANSWER_TEMPERATURE: sampling temperature of the document answer calls
 // (single-document QA, its extractive mode and comparison). Unset (default)
 // sends none, so the endpoint's default applies (1.0 on Ollama's and OpenAI's
@@ -1068,10 +1071,79 @@ export const getAnswerTemperature = () => {
   const parsedValue = Number(rawValue.trim());
 
   if (!Number.isFinite(parsedValue) || parsedValue < 0 || parsedValue > 2) {
-    throw new Error(`RAG_ANSWER_TEMPERATURE must be a number from 0 to 2; got ${JSON.stringify(rawValue)}.`);
+    throw invalidAnswerGenerationSetting(
+      "RAG_ANSWER_TEMPERATURE_INVALID",
+      `RAG_ANSWER_TEMPERATURE must be a number from 0 to 2; got ${JSON.stringify(rawValue)}.`
+    );
   }
 
   return parsedValue;
+};
+
+// RAG_ANSWER_MAX_TOKENS: the most tokens a document answer call (single-document
+// QA, its extractive mode and comparison) may write. Unset, empty or 0 (default)
+// sends no limit, so the request is what it always was; the answer calls had
+// none, and qwen2.5:7b at temperature 0 once wrote on one QASPER question until
+// the client timeout, on every retry (2026-11-10). The field it travels in is
+// RAG_LLM_MAX_TOKENS_FIELD's. Anything but a whole number refuses the call
+// instead of being dropped, so a run that meant a limit never runs without one.
+export const getAnswerMaxTokens = () => {
+  const rawValue = process.env.RAG_ANSWER_MAX_TOKENS;
+
+  if (!hasEnvValue(rawValue)) {
+    return null;
+  }
+
+  const parsedValue = Number(rawValue.trim());
+
+  if (!Number.isSafeInteger(parsedValue) || parsedValue < 0) {
+    throw invalidAnswerGenerationSetting(
+      "RAG_ANSWER_MAX_TOKENS_INVALID",
+      `RAG_ANSWER_MAX_TOKENS must be a whole number of tokens (0 or unset: no limit); got ${JSON.stringify(rawValue)}.`
+    );
+  }
+
+  return parsedValue === 0 ? null : parsedValue;
+};
+
+// RAG_LLM_MAX_TOKENS_FIELD: the request field a chat call's output limit travels
+// in. max_tokens (default) is the one OpenAI-compatible servers read (Ollama,
+// vLLM, llama.cpp, LM Studio) and OpenAI's non-reasoning models still accept;
+// OpenAI's reasoning models refuse it and take max_completion_tokens, which
+// there also counts their hidden reasoning tokens, so a limit sized for the
+// visible answer can leave the reply empty. Read for each call that carries a
+// limit, by the process that calls the model endpoint (the model gateway in a
+// split deployment). Ollama (0.34.4) ignores max_completion_tokens.
+export const LLM_MAX_TOKENS_FIELDS = Object.freeze(["max_tokens", "max_completion_tokens"]);
+
+export const getLlmMaxTokensField = () => {
+  const rawValue = process.env.RAG_LLM_MAX_TOKENS_FIELD;
+
+  if (!hasEnvValue(rawValue)) {
+    return LLM_MAX_TOKENS_FIELDS[0];
+  }
+
+  const field = rawValue.trim().toLowerCase();
+
+  if (!LLM_MAX_TOKENS_FIELDS.includes(field)) {
+    throw invalidAnswerGenerationSetting(
+      "RAG_LLM_MAX_TOKENS_FIELD_INVALID",
+      `RAG_LLM_MAX_TOKENS_FIELD must be one of ${LLM_MAX_TOKENS_FIELDS.join(", ")}; got ${JSON.stringify(rawValue)}.`
+    );
+  }
+
+  return field;
+};
+
+// The three settings above, checked where an app is built (createAppServices)
+// and before an answer evaluation ingests anything, so a wrong value refuses
+// the start: read per call, it fails every answer call instead, and the agent
+// carries on past a failed document step to the Web stage. Each getter still
+// refuses a value changed at run time.
+export const assertAnswerGenerationSettings = () => {
+  getAnswerTemperature();
+  getAnswerMaxTokens();
+  getLlmMaxTokensField();
 };
 
 // AGENT_SINGLE_DOCUMENT_ROUTING: the deterministic intent rules stop sending

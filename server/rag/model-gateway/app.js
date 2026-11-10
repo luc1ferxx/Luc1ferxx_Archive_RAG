@@ -5,6 +5,7 @@ import express from "express";
 import { bindDatabaseTenant } from "../../auth.js";
 import { ADMIN_PERMISSION_IDS, buildAdminAccessDecision } from "../admin-permissions.js";
 import {
+  getLlmMaxTokensField,
   getModelGatewayChatUpstreams,
   getModelGatewayEmbeddingUpstreams,
   getModelGatewayRerankUpstreams,
@@ -263,6 +264,10 @@ export const createModelGatewayApp = ({
   quotas = createModelGatewayQuotas(),
   upstreams = createModelGatewayUpstreams(),
 } = {}) => {
+  // The gateway sends its callers' output limits upstream in this field; a
+  // wrong value refuses the start (RAG_LLM_MAX_TOKENS_FIELD_INVALID) instead
+  // of failing every capped call with an opaque 500.
+  getLlmMaxTokensField();
   configureModelUpstreamPools({ chat: upstreams.chat, embedding: upstreams.embedding });
 
   const app = express();
@@ -389,6 +394,21 @@ export const createModelGatewayApp = ({
       throw badRequest();
     }
 
+    // An output limit the gateway cannot send is refused, not dropped, so a
+    // call never runs without the limit its caller set (RAG_ANSWER_MAX_TOKENS).
+    const hasMaxTokens = body.max_tokens !== undefined && body.max_tokens !== null;
+
+    if (hasMaxTokens && !(Number.isSafeInteger(body.max_tokens) && body.max_tokens > 0)) {
+      throw badRequest();
+    }
+
+    // This gateway's own RAG_LLM_MAX_TOKENS_FIELD, read before the streamed
+    // and plain answers part ways: a wrong value fails here, and serve() logs
+    // its code (RAG_LLM_MAX_TOKENS_FIELD_INVALID) for both.
+    if (hasMaxTokens) {
+      getLlmMaxTokensField();
+    }
+
     const routeId = typeof extension.routeId === "string" ? extension.routeId.trim() : "";
 
     return {
@@ -398,6 +418,7 @@ export const createModelGatewayApp = ({
       ...(typeof body.temperature === "number" && Number.isFinite(body.temperature) && body.temperature >= 0 && body.temperature <= 2
         ? { temperature: body.temperature }
         : {}),
+      ...(hasMaxTokens ? { maxTokens: body.max_tokens } : {}),
       ...(routeId ? { routeId } : {}),
       signal,
       ...(isPlainObject(extension.workspacePolicy) ? { workspacePolicy: extension.workspacePolicy } : {}),

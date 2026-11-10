@@ -779,6 +779,19 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     typeof options.temperature === "number" && Number.isFinite(options.temperature)
       ? { temperature: options.temperature }
       : {};
+  // Likewise an output limit (RAG_ANSWER_MAX_TOKENS on the document answer
+  // calls): a positive whole number of tokens, else the request carries none.
+  const maxTokensOption =
+    Number.isSafeInteger(options.maxTokens) && options.maxTokens > 0 ? { maxTokens: options.maxTokens } : {};
+  // `onFinishReason` hears the finish reason of the reply this call returns
+  // ("length": the output limit cut it off), once, after any retry or
+  // failover; a configured stand-in provider reports none. The returned shape
+  // stays { modelRoute, text }.
+  const reportFinishReason = (finishReason) => {
+    if (typeof options.onFinishReason === "function") {
+      options.onFinishReason(finishReason ?? null);
+    }
+  };
   // The caller's signal plus the bound request's (request-deadline.js): a
   // cancelled agent request aborts the call and stops its retries and failover.
   const signal = withRequestSignal(options.signal);
@@ -800,6 +813,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
           onTextDelta: options.onTextDelta,
           responseFormat,
           ...temperatureOption,
+          ...maxTokensOption,
           ...(signal ? { signal } : {}),
         });
       },
@@ -838,9 +852,11 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
     return completeThroughModelGateway({
       capability,
       inputText,
+      maxTokensOption,
       options: { ...options, signal },
       prompt,
       promptTemplate,
+      reportFinishReason,
       responseFormat,
       temperatureOption,
     });
@@ -863,8 +879,9 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
             responseFormat,
             signal,
             ...temperatureOption,
+            ...maxTokensOption,
           })
-        : await instance.invoke(prompt, { responseFormat, signal, ...temperatureOption });
+        : await instance.invoke(prompt, { responseFormat, signal, ...temperatureOption, ...maxTokensOption });
 
     if (!normalizeContent(result?.content) && result?.finishReason !== "length") {
       const error = new Error("Chat completion returned empty content.");
@@ -918,6 +935,7 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
         finishReason: response?.finishReason ?? null,
         modelName,
       });
+      reportFinishReason(response?.finishReason);
 
       return {
         modelRoute,
@@ -965,9 +983,11 @@ export const completeTextWithMetadata = async (prompt, options = {}) => {
 const completeThroughModelGateway = ({
   capability,
   inputText,
+  maxTokensOption = {},
   options,
   prompt,
   promptTemplate,
+  reportFinishReason = () => {},
   responseFormat,
   temperatureOption = {},
 }) => {
@@ -990,6 +1010,7 @@ const completeThroughModelGateway = ({
         signal: options.signal,
         workspacePolicy: options.workspacePolicy,
         ...temperatureOption,
+        ...maxTokensOption,
       }),
     metric: {
       ...buildUsageMetricFields(estimate),
@@ -1011,8 +1032,13 @@ const completeThroughModelGateway = ({
       modelRoute: result.modelRoute ?? modelRoute,
       outputCharacters: getTextCharacters(result?.text),
     }),
-  }).then((result) => ({
-    modelRoute: result.modelRoute ?? modelRoute,
-    text: normalizeContent(result.text),
-  }));
+  }).then((result) => {
+    // The gateway's answer carries the finish reason of the reply it returns.
+    reportFinishReason(result?.finishReason);
+
+    return {
+      modelRoute: result.modelRoute ?? modelRoute,
+      text: normalizeContent(result.text),
+    };
+  });
 };

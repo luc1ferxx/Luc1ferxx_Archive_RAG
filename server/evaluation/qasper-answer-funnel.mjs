@@ -138,9 +138,10 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
   }
 
   const staged = answerable.map((row) => ({ retrieval: retrievalById.get(row.id), row }));
-  // The retrieval run stops at the gate, so a refusal by the answer model
-  // (verdict on) is no disagreement with it.
-  const comparable = ({ row }) => (row.abstainSource ?? null) !== "answer_model";
+  // The retrieval run stops at the gate, so a refusal after it -- the answer
+  // model's (verdict on), or a reply the output limit cut before it wrote
+  // anything (RAG_ANSWER_MAX_TOKENS) -- is no disagreement with it.
+  const comparable = ({ row }) => !["answer_model", "output_limit"].includes(row.abstainSource ?? null);
   const stages = FUNNEL_STAGES.map((id) => {
     const members = staged.filter(({ retrieval, row }) => classifyFunnelStage(row, retrieval) === id);
     const answered = members.filter(({ row }) => readAnswered(row));

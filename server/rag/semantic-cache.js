@@ -95,7 +95,10 @@ const CONFIG_ENV_EXCLUDED_PREFIXES = [
   "RAG_DATA_DIRECTORY",
   "RAG_SHARED_STATE",
 ];
-const SECRET_ENV_PATTERN = /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i;
+// A secret is named by a whole underscore-separated part (OPENAI_API_KEY,
+// QDRANT_API_KEY). A substring match also dropped RAG_ANSWER_MAX_TOKENS and
+// RAG_KEYWORD_WEIGHT, which change the answer, so neither moved the key.
+const SECRET_ENV_PATTERN = /(^|_)(KEYS?|TOKEN|SECRETS?|PASSWORDS?|CREDENTIALS?)(_|$)/i;
 
 const createState = () => ({
   // entryId -> entry, in LRU order (oldest first).
@@ -652,6 +655,12 @@ export const storeSemanticCacheAnswer = (lookup, response) => {
 
   if (!response || response.abstained) {
     return { stored: false, storeSkipReason: "abstained" };
+  }
+
+  // An answer an output limit cut off (RAG_ANSWER_MAX_TOKENS, or the
+  // endpoint's own) is not kept for the next asker.
+  if (response.answerTruncated === true) {
+    return { stored: false, storeSkipReason: "answer_truncated" };
   }
 
   let snapshot;

@@ -80,7 +80,8 @@ server.registerTool(
       "Pass two or more docIds to get a structured comparison instead of a single-document answer. " +
       "IMPORTANT: when abstained is true the archive has no sufficient evidence — report abstainReason " +
       "verbatim and do not invent an answer, a page number, or a quotation. Never cite a page that is not " +
-      "present in citations[].",
+      "present in citations[]. answerTruncated: true (present only then) means the answer model's reply " +
+      "was cut off at an output limit, so the answer may be incomplete; say so instead of completing it.",
     inputSchema: {
       question: z.string().describe("The question to answer from the archive."),
       docIds: z

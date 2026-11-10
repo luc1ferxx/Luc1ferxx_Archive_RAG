@@ -115,6 +115,20 @@ test("an abstention returns the reason and withholds all citations", () => {
   assert.deepEqual(result.evidence, []);
 });
 
+test("an answer the output limit cut off says so; one that finished keeps its shape", () => {
+  const cut = formatAskResult({
+    abstained: false,
+    answerTruncated: true,
+    text: "Thirty days notice is required for",
+    citations: [{ rank: 1, score: 0.5, docId: "doc-1", pageNumber: 12 }],
+  });
+  const finished = formatAskResult({ abstained: false, text: "Thirty days notice is required." });
+
+  assert.equal(cut.answerTruncated, true);
+  assert.equal(cut.answer, "Thirty days notice is required for");
+  assert.equal("answerTruncated" in finished, false);
+});
+
 test("an abstention without an explicit reason falls back to the answer text", () => {
   const result = formatAskResult({
     abstained: true,

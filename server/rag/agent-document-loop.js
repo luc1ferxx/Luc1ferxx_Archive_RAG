@@ -30,9 +30,10 @@ import {
 const noop = () => {};
 
 // verdictOverridden appears only when RAG_QA_VERDICT_OVERRIDE answered a
-// NOT_IN_EVIDENCE reply (answer-verdict-override.js), and directAnswer only
-// when RAG_QA_EXTRACTIVE_OUTPUT grounded one, so with the flags off the step
-// output keeps its shape.
+// NOT_IN_EVIDENCE reply (answer-verdict-override.js), directAnswer only when
+// RAG_QA_EXTRACTIVE_OUTPUT grounded one, and answerTruncated only when an
+// output limit cut the answer model's reply off, so with the flags off and no
+// reply cut the step output keeps its shape.
 const buildRagStepOutput = (result = {}) =>
   result.ok
     ? {
@@ -43,6 +44,7 @@ const buildRagStepOutput = (result = {}) =>
         ...(typeof result.value?.directAnswer === "string"
           ? { directAnswer: result.value.directAnswer }
           : {}),
+        ...(result.value?.answerTruncated === true ? { answerTruncated: true } : {}),
       }
     : null;
 

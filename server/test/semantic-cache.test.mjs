@@ -375,6 +375,32 @@ test("nothing crosses tenant, doc set, document version, answer mode, prompt con
   assert.equal((await lookup()).hit, true, "the original key still hits");
 });
 
+test("the answer output limit and the keyword weight move the key; a rotated API key does not", async () => {
+  process.env.RAG_SEMANTIC_CACHE = "on";
+  await prime();
+
+  const flip = async (name, value) => {
+    const saved = process.env[name];
+
+    process.env[name] = value;
+
+    try {
+      return (await lookup()).hit;
+    } finally {
+      if (saved === undefined) delete process.env[name];
+      else process.env[name] = saved;
+    }
+  };
+
+  // Both names hold a secret-like part as a substring (TOKEN, KEY), which used
+  // to leave them out of the key.
+  assert.equal(await flip("RAG_ANSWER_MAX_TOKENS", "256"), false, "output limit");
+  assert.equal(await flip("RAG_KEYWORD_WEIGHT", "0.9"), false, "keyword weight");
+  // A secret never enters the key.
+  assert.equal(await flip("OPENAI_API_KEY", "rotated-key"), true, "API key");
+  assert.equal((await lookup()).hit, true, "the original key still hits");
+});
+
 test("a lookup without an access scope, for a follow-up plan or an unknown document bypasses", async () => {
   process.env.RAG_SEMANTIC_CACHE = "on";
 

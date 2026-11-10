@@ -59,6 +59,15 @@ export const isAgentVerdictOverridden = (body = {}) =>
     (step) => RAG_STEP_TYPES.has(step?.type) && step?.output?.verdictOverridden === true
   );
 
+/**
+ * True when an output limit cut off the answer model's reply in a document RAG
+ * call of the run (RAG_ANSWER_MAX_TOKENS; its trace step output says so).
+ */
+export const isAgentAnswerTruncated = (body = {}) =>
+  (Array.isArray(body?.agentTrace) ? body.agentTrace : []).some(
+    (step) => RAG_STEP_TYPES.has(step?.type) && step?.output?.answerTruncated === true
+  );
+
 /** Counts over rows that carry classifyAgentAnswer and describeAgentFollowUp fields. */
 export const summarizeAgentOutcomes = (rows = []) => {
   const agentRows = rows.filter((row) => typeof row.answered === "boolean");

@@ -145,6 +145,9 @@ export const formatAskResult = (response = {}) => {
     evidence: abstained ? [] : formatEvidence(response.retrievedContexts),
     resolvedQuestion: response.resolvedQuery ?? null,
     comparison: response.comparisonAnalysisSummary ?? null,
+    // The answer model's reply was cut off at an output limit
+    // (RAG_ANSWER_MAX_TOKENS), so the answer may be incomplete; present only then.
+    ...(response.answerTruncated === true ? { answerTruncated: true } : {}),
   };
 };
 
