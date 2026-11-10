@@ -7,7 +7,8 @@ name: Real Model Eval
 #   - QASPER dev evidence recall on a fixed 200-question sample (blocking below
 #     the floor; 0.655 when the floor was set);
 #   - QASPER dev answers on a small sample (report only: a 7B model on a CPU
-#     runner answers about one question a minute).
+#     runner answers about one question a minute), under the answer-side
+#     protocol: temperature 0 with the 1024-token answer limit.
 
 on:
   workflow_dispatch:
@@ -104,6 +105,14 @@ jobs:
 
       - name: QASPER answers
         if: env.QASPER_ANSWER_CASES != '0'
+        env:
+          # The answer-side protocol since 2026-11-10 (docs/evaluation.md
+          # "答案温度 0 重测：带输出上限"): greedy decoding, so two runs of one
+          # setting answer alike, and an output limit, without which one
+          # question once generated until every retry timed out. Only this
+          # step: verify:quality above keeps the endpoint default.
+          RAG_ANSWER_TEMPERATURE: "0"
+          RAG_ANSWER_MAX_TOKENS: "1024"
         run: npm run eval:qasper-answers -- --corpus evaluation/generated/qasper-dev.json --cases "$QASPER_ANSWER_CASES"
 
       - name: Upload real-model reports

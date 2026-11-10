@@ -685,4 +685,18 @@ test("real model eval workflow runs a real local model with no API key and gates
   }
   assert.match(content, /eval:qasper-retrieval -- .*--min-hit-at-all 0\.6/);
   assert.match(content, /if: always\(\)\s*\n\s*uses: actions\/upload-artifact@v7/);
+
+  // The answer sample runs under the answer-side protocol (temperature 0 with
+  // the output limit, docs/evaluation.md), set on its own step: the blocking
+  // steps before it keep the endpoint default.
+  const answerStepStart = content.indexOf("- name: QASPER answers");
+  const answerStepEnd = content.indexOf("- name: Upload real-model reports");
+
+  assert.ok(answerStepStart > 0 && answerStepEnd > answerStepStart, "the answer step precedes the upload step");
+
+  const answerStep = content.slice(answerStepStart, answerStepEnd);
+
+  assert.match(answerStep, /\n\s*env:\s*\n(?:\s*#[^\n]*\n)*\s*RAG_ANSWER_TEMPERATURE: "0"\s*\n\s*RAG_ANSWER_MAX_TOKENS: "1024"\s*\n/);
+  assert.match(answerStep, /npm run eval:qasper-answers/);
+  assert.doesNotMatch(content.slice(0, answerStepStart), /RAG_ANSWER_TEMPERATURE|RAG_ANSWER_MAX_TOKENS/);
 });
