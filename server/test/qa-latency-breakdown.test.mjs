@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  compareQaLatency,
+  formatLatencyComparisonMarkdown,
   formatLatencyMarkdown,
   groupQaEvents,
   percentile,
@@ -54,6 +56,8 @@ test("each qa trace closes one question and takes the model calls logged since t
     abstained: false,
     completion: { calls: 1, failedCalls: 0, inputTokens: 1500, ms: 2000, outputTokens: 50 },
     embedding: { calls: 1, failedCalls: 0, inputTokens: 20, ms: 20, outputTokens: 0 },
+    // These traces carry no question text.
+    key: null,
     latencyMs: 2030,
     otherModelCalls: 0,
     routeMs: 10,
@@ -162,6 +166,115 @@ test("the Markdown names every stage and, with prices, the cost", () => {
   assert.match(refusedOnly, /answer model n\/a/);
 });
 
+// One run as its events: every question embeds its query once, an answered one
+// then calls the answer model.
+const buildRun = (questions) =>
+  questions.flatMap(({ completion = null, latencyMs, query }) => [
+    call("embed_query", { inputTokens: 10, latencyMs: 5 }),
+    ...(completion ? [call("complete_text", completion)] : []),
+    trace({ abstained: !completion, latencyMs, query }),
+  ]);
+
+// The same five questions under two settings: the first and the third answered
+// by both, the second refused by both, the fourth answered only here, the
+// fifth only there.
+const buildHere = () =>
+  buildRun([
+    { completion: { inputTokens: 1800, latencyMs: 1900, outputTokens: 60 }, latencyMs: 2000, query: "What is alpha?" },
+    { latencyMs: 20, query: "What is beta?" },
+    { completion: { inputTokens: 2000, latencyMs: 2900, outputTokens: 100 }, latencyMs: 3000, query: "What is gamma?" },
+    { completion: { inputTokens: 1700, latencyMs: 2400, outputTokens: 80 }, latencyMs: 2500, query: "What is delta?" },
+    { latencyMs: 25, query: "What is epsilon?" },
+  ]);
+const buildThere = () =>
+  buildRun([
+    { completion: { inputTokens: 1300, latencyMs: 1400, outputTokens: 60 }, latencyMs: 1500, query: "What is alpha?" },
+    { latencyMs: 18, query: "What is beta?" },
+    { completion: { inputTokens: 1400, latencyMs: 2500, outputTokens: 120 }, latencyMs: 2600, query: "What is gamma?" },
+    { latencyMs: 22, query: "What is delta?" },
+    { completion: { inputTokens: 900, latencyMs: 950, outputTokens: 30 }, latencyMs: 1000, query: "What is epsilon?" },
+  ]);
+
+test("a question's text is kept only as a fingerprint", () => {
+  const grouped = groupQaEvents(buildHere());
+
+  assert.match(grouped.questions[0].key, /^[0-9a-f]{16}$/);
+  assert.equal(new Set(grouped.questions.map((question) => question.key)).size, 5);
+  assert.equal(grouped.questions[0].key, groupQaEvents(buildThere()).questions[0].key);
+  assert.equal(/alpha|What is/.test(JSON.stringify(grouped)), false);
+  assert.equal(/alpha|What is/.test(JSON.stringify(summarizeQaLatency(grouped))), false);
+});
+
+test("two runs over the same questions are paired by position: both answered, both refused, and the flips", () => {
+  const comparison = compareQaLatency(groupQaEvents(buildHere()), groupQaEvents(buildThere()));
+
+  assert.deepEqual([comparison.questions, comparison.answeredOnlyHere, comparison.answeredOnlyThere], [5, 1, 1]);
+  assert.deepEqual([comparison.iterations, comparison.seed], [10000, 12345]);
+  assert.equal(comparison.answeredBoth.questions, 2);
+  // 2000 - 1500 and 3000 - 2600. With two differences every resampled mean is
+  // 400, 450 or 500, so the interval is their range.
+  assert.deepEqual(comparison.answeredBoth.latencyMs, {
+    cases: 2,
+    ci95: [400, 500],
+    current: { mean: 2500, p50: 2000 },
+    delta: 450,
+    medianDelta: 400,
+    other: { mean: 2050, p50: 1500 },
+  });
+  assert.deepEqual(
+    [comparison.answeredBoth.completionMs.delta, comparison.answeredBoth.inputTokens.delta, comparison.answeredBoth.inputTokens.ci95],
+    [450, 550, [500, 600]]
+  );
+  // 60 - 60 and 100 - 120: this run wrote less on one question.
+  assert.deepEqual(
+    [comparison.answeredBoth.outputTokens.delta, comparison.answeredBoth.outputTokens.medianDelta, comparison.answeredBoth.outputTokens.ci95],
+    [-10, -20, [-20, 0]]
+  );
+  assert.deepEqual(comparison.refusedBoth, {
+    latencyMs: { cases: 1, ci95: [2, 2], current: { mean: 20, p50: 20 }, delta: 2, medianDelta: 2, other: { mean: 18, p50: 18 } },
+    questions: 1,
+  });
+
+  // The first question dropped from both runs as warm-up.
+  const skipped = compareQaLatency(groupQaEvents(buildHere()), groupQaEvents(buildThere()), { iterations: 200, seed: 7, skip: 1 });
+
+  assert.deepEqual([skipped.questions, skipped.answeredBoth.questions, skipped.answeredBoth.latencyMs.delta, skipped.iterations, skipped.seed], [4, 1, 400, 200, 7]);
+
+  const markdown = formatLatencyComparisonMarkdown(comparison, "there.jsonl").join("\n");
+
+  assert.match(
+    markdown,
+    /^Paired with `there\.jsonl` by question \(5 questions: 2 answered in both runs, 1 refused in both, 1 answered only in this run, 1 only in the other\); this run minus that one, 95% CI of the mean difference \(bootstrap over questions, 10000 iterations, seed 12345\):/
+  );
+  assert.match(markdown, /\| Answered in both: whole question, ms \| 2 \| 2000 \| 1500 \| \+450 \| \[400, 500\] \| \+400 \|/);
+  assert.match(markdown, /\| Answered in both: input tokens \| 2 \| 1800 \| 1300 \| \+550 \| \[500, 600\] \| \+500 \|/);
+  assert.match(markdown, /\| Answered in both: output tokens \| 2 \| 60 \| 60 \| -10 \| \[-20, 0\] \| -20 \|/);
+  assert.match(markdown, /\| Refused in both: whole question, ms \| 1 \| 20 \| 18 \| \+2 \| \[2, 2\] \| \+2 \|/);
+});
+
+test("runs that did not ask the same questions in the same order are refused, not compared", () => {
+  const here = groupQaEvents(buildHere());
+  const shorter = groupQaEvents(buildThere().slice(0, -2));
+  const reordered = groupQaEvents([...buildThere().slice(3), ...buildThere().slice(0, 3)]);
+  const withoutText = groupQaEvents(buildThere().map((event) => ({ ...event, query: undefined })));
+
+  assert.throws(() => compareQaLatency(here, shorter), /The runs hold 5 and 4 questions; a paired comparison needs the same questions in the same order/);
+  assert.throws(() => compareQaLatency(here, reordered), /Question 1 is not the same in both runs/);
+  assert.throws(() => compareQaLatency(here, withoutText), /Question 1 is not the same in both runs, or its trace holds no question text to check/);
+  assert.throws(() => compareQaLatency(withoutText, withoutText), /Question 1 is not the same in both runs, or its trace holds no question text to check/);
+
+  // Nothing answered by both: the rows read n/a instead of failing.
+  const refusedOnly = compareQaLatency(
+    groupQaEvents(buildRun([{ latencyMs: 20, query: "What is beta?" }])),
+    groupQaEvents(buildRun([{ latencyMs: 18, query: "What is beta?" }]))
+  );
+
+  assert.deepEqual([refusedOnly.answeredBoth.questions, refusedOnly.refusedBoth.questions, refusedOnly.refusedBoth.latencyMs.delta], [0, 1, 2]);
+
+  assert.deepEqual(refusedOnly.answeredBoth.latencyMs, { cases: 0, ci95: null, current: { mean: null, p50: null }, delta: null, medianDelta: null, other: { mean: null, p50: null } });
+  assert.match(formatLatencyComparisonMarkdown(refusedOnly, "x").join("\n"), /\| Answered in both: whole question, ms \| 0 \| n\/a \| n\/a \| n\/a \| n\/a \| n\/a \|/);
+});
+
 test("the command reads a JSONL file, skips broken lines and names what it refuses", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "qa-latency-"));
 
@@ -190,6 +303,50 @@ test("the command reads a JSONL file, skips broken lines and names what it refus
       [["--events", eventsPath, "--chat-price", "2"], /--chat-price takes <input>,<output>/],
       [["--events", eventsPath, "--chat-price", "2,10"], /Give both --chat-price and --embedding-price, or neither/],
       [["--events", eventsPath, "--chat-price", "2,10", "--embedding-price", "x"], /--embedding-price takes <input>/],
+    ]) {
+      const refused = run(args);
+
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, message);
+    }
+
+    // Two runs over the same questions, compared.
+    const herePath = path.join(tempRoot, "here.jsonl");
+    const therePath = path.join(tempRoot, "there.jsonl");
+    const toJsonl = (events) => `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+
+    await writeFile(herePath, toJsonl(buildHere()));
+    await writeFile(therePath, toJsonl(buildThere()));
+
+    const compared = run(["--events", herePath, "--compare", therePath]);
+
+    assert.equal(compared.status, 0, compared.stderr);
+    assert.match(compared.stdout, /^QA latency over 5 questions asked one at a time \(3 answered, 2 refused\), in ms:/);
+    assert.match(compared.stdout, /Paired with `there\.jsonl` by question \(5 questions: 2 answered in both runs, 1 refused in both, 1 answered only in this run, 1 only in the other\)/);
+    assert.match(compared.stdout, /\| Answered in both: whole question, ms \| 2 \| 2000 \| 1500 \| \+450 \| \[400, 500\] \| \+400 \|/);
+    assert.equal(/alpha|What is/.test(compared.stdout), false);
+
+    const comparedJson = run(["--events", herePath, "--compare", therePath, "--iterations", "300", "--seed", "9", "--skip", "1", "--json"]);
+
+    assert.equal(comparedJson.status, 0, comparedJson.stderr);
+    assert.deepEqual(
+      [
+        JSON.parse(comparedJson.stdout).comparison.other,
+        JSON.parse(comparedJson.stdout).comparison.questions,
+        JSON.parse(comparedJson.stdout).comparison.iterations,
+        JSON.parse(comparedJson.stdout).comparison.seed,
+        JSON.parse(comparedJson.stdout).comparison.answeredBoth.latencyMs.delta,
+      ],
+      ["there.jsonl", 4, 300, 9, 400]
+    );
+    assert.equal(JSON.parse(json.stdout).comparison, undefined);
+
+    for (const [args, message] of [
+      [["--events", herePath, "--compare", therePath, "--iterations", "0"], /--iterations must be a positive integer/],
+      [["--events", herePath, "--compare", therePath, "--seed", "x"], /--seed must be a positive integer/],
+      // The first file's events carry no question text and hold three questions.
+      [["--events", herePath, "--compare", eventsPath], /The runs hold 5 and 3 questions/],
+      [["--events", herePath, "--compare", path.join(tempRoot, "missing.jsonl")], /missing\.jsonl/],
     ]) {
       const refused = run(args);
 

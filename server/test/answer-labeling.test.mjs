@@ -243,6 +243,237 @@ test("the page embeds the items as data no answer can break out of, and its scri
   }
 });
 
+// The page's own script, run against a stand-in for the few DOM and browser
+// APIs it uses, so the tests below drive what a person's browser would run.
+const openPage = (html, { storage = new Map(), failingStorage = false } = {}) => {
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const alerts = [];
+  const downloads = [];
+  const createElement = (attributes = {}) => {
+    const listeners = {};
+    const element = {
+      checked: false,
+      children: [],
+      files: [],
+      offsetHeight: 96,
+      style: {},
+      value: "",
+      addEventListener: (type, handler) => {
+        listeners[type] = handler;
+      },
+      appendChild: (child) => {
+        element.children.push(child);
+        return child;
+      },
+      click: () => (element.download ? downloads.push({ href: element.href, name: element.download }) : element.fire("click")),
+      fire: (type, event = {}) => listeners[type]?.({ preventDefault() {}, target: element, ...event }),
+      getAttribute: (name) => attributes[name] ?? null,
+      remove: () => {},
+      setAttribute: (name, value) => {
+        attributes[name] = String(value);
+      },
+    };
+    let text = "";
+
+    // Setting the text replaces the children, as in a browser.
+    Object.defineProperty(element, "textContent", {
+      get: () => text,
+      set: (value) => {
+        text = String(value);
+        element.children = [];
+      },
+    });
+
+    return element;
+  };
+  const byId = new Map();
+  const verdictButtons = ["correct", "partially_correct", "incorrect", "abstention"].map((verdict) => createElement({ "data-verdict": verdict }));
+  const regions = { footer: createElement(), main: createElement() };
+  const body = createElement();
+  const documentListeners = {};
+  const blobs = [];
+  const document = {
+    addEventListener: (type, handler) => {
+      documentListeners[type] = handler;
+    },
+    body,
+    createElement: () => createElement(),
+    getElementById: (id) => {
+      if (!byId.has(id)) {
+        byId.set(id, createElement());
+      }
+
+      return byId.get(id);
+    },
+    querySelector: (selector) => regions[selector],
+    querySelectorAll: (selector) => (selector === "button[data-verdict]" ? verdictButtons : []),
+  };
+
+  document.getElementById("labeling-data").textContent = html.match(/<script type="application\/json" id="labeling-data">([\s\S]*?)<\/script>/)[1];
+
+  const window = {
+    addEventListener: () => {},
+    alert: (message) => alerts.push(message),
+    getComputedStyle: () => ({ position: "fixed" }),
+    scrollTo: () => {},
+  };
+  const localStorage = {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => {
+      if (failingStorage) {
+        throw new Error("storage is not available");
+      }
+
+      storage.set(key, String(value));
+    },
+  };
+  const url = {
+    createObjectURL: (blob) => {
+      blobs.push(blob);
+      return `blob:${blobs.length}`;
+    },
+  };
+  // Reads at once, as a file this small does within one task in a browser.
+  const FileReaderStandIn = function FileReaderStandIn() {
+    this.readAsText = (file) => {
+      this.result = file.text;
+      this.onload();
+    };
+  };
+
+  new Function("document", "window", "localStorage", "URL", "FileReader", script)(document, window, localStorage, url, FileReaderStandIn);
+
+  const get = (id) => document.getElementById(id);
+
+  return {
+    alerts,
+    blobs,
+    downloads,
+    get,
+    importFile: (text) => {
+      get("import").files = [{ text }];
+      get("import").fire("change");
+    },
+    pressed: () => verdictButtons.filter((button) => button.getAttribute("aria-pressed") === "true").map((button) => button.getAttribute("data-verdict")),
+    press: (key, target = body) => documentListeners.keydown({ key, preventDefault() {}, target }),
+    stored: () => [...storage.values()].map((value) => JSON.parse(value)),
+    storage,
+    verdictButtons,
+  };
+};
+
+// The three answered questions in a known order: q1 and q3 answerable, q2 annotated unanswerable.
+const buildPageItems = () =>
+  buildLabelingItems({ corpus: buildCorpus(), report: buildReport() }).sort((left, right) => left.id.localeCompare(right.id));
+
+test("the page labels with the keyboard, keeps the labels in the browser and restores them when reopened", () => {
+  const items = buildPageItems();
+  const html = renderLabelingPage({ items, name: "run", source: { report: "report.json" } });
+  const page = openPage(html);
+  const [first, second, third] = items;
+
+  assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  assert.equal(page.get("question").textContent, first.question);
+  assert.equal(page.get("answer").textContent, first.answer);
+  assert.deepEqual(page.get("references").children.map((child) => child.textContent), first.references);
+  assert.deepEqual(page.pressed(), []);
+  assert.equal(page.get("warning").style.display, undefined);
+
+  // A verdict labels the answer shown and moves on.
+  page.press("1");
+  assert.equal(page.get("progress").textContent, "第 2 / 3 条，已标 1 条");
+  assert.equal(page.get("question").textContent, second.question);
+  assert.deepEqual([...page.storage.keys()], ["answer-labels:run"]);
+  assert.deepEqual(page.stored(), [{ [first.id]: { verdict: "correct" } }]);
+
+  // "It is a refusal" becomes the abstention verdict the annotation implies.
+  page.press("4");
+  page.press("4");
+  assert.equal(page.stored()[0][second.id].verdict, second.unanswerable ? "correct_abstention" : "wrong_abstention");
+  assert.equal(page.stored()[0][third.id].verdict, third.unanswerable ? "correct_abstention" : "wrong_abstention");
+  assert.notEqual(second.unanswerable, third.unanswerable);
+  // The last answer stays on screen, with its choice shown.
+  assert.equal(page.get("progress").textContent, "第 3 / 3 条，已标 3 条");
+  assert.deepEqual(page.pressed(), ["abstention"]);
+  assert.equal(page.get("counts").textContent, "correct 1 · correct_abstention 1 · wrong_abstention 1");
+
+  // Back to the first: its verdict is shown; the flag and a note are saved with it.
+  page.press("ArrowLeft");
+  page.press("ArrowLeft");
+  page.press("ArrowLeft");
+  assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 3 条");
+  assert.deepEqual(page.pressed(), ["correct"]);
+  page.press("f");
+  assert.equal(page.get("issue").checked, true);
+  page.get("note").value = "the second reference is wrong";
+  page.get("note").fire("input");
+  // A digit typed into the note is text, not a verdict.
+  page.press("3", page.get("note"));
+  assert.deepEqual(page.stored()[0][first.id], { annotationIssue: true, note: "the second reference is wrong", verdict: "correct" });
+  page.verdictButtons[1].fire("click");
+  assert.equal(page.stored()[0][first.id].verdict, "partially_correct");
+
+  // Reopened on the same storage, the page has everything back.
+  const reopened = openPage(html, { storage: page.storage });
+
+  assert.equal(reopened.get("progress").textContent, "第 1 / 3 条，已标 3 条");
+  assert.deepEqual(reopened.pressed(), ["partially_correct"]);
+  assert.equal(reopened.get("issue").checked, true);
+  assert.equal(reopened.get("note").value, "the second reference is wrong");
+  assert.equal(reopened.get("warning").style.display, undefined);
+});
+
+test("the page jumps to the next unlabelled answer, and a browser that cannot store says so without losing the session", async () => {
+  const items = buildPageItems();
+  const html = renderLabelingPage({ items, name: "run", source: { report: "report.json" } });
+  const [first, second, third] = items;
+  // Stored text that is not JSON is ignored, not fatal.
+  const page = openPage(html, { failingStorage: true, storage: new Map([["answer-labels:run", "{not json"]]) });
+
+  assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  page.press("ArrowRight");
+  page.press("2");
+  assert.equal(page.get("warning").style.display, "block");
+  assert.equal(page.get("progress").textContent, "第 3 / 3 条，已标 1 条");
+  // From the third answer the next unlabelled one is the first; then the third again.
+  page.press("u");
+  assert.equal(page.get("question").textContent, first.question);
+  page.press("u");
+  assert.equal(page.get("question").textContent, third.question);
+  page.press("f");
+
+  // The export still holds the session: one label, and the flagged answer without a verdict.
+  page.get("export").fire("click");
+  assert.deepEqual(page.downloads, [{ href: "blob:1", name: "run-labels.json" }]);
+  assert.equal(page.blobs[0].type, "application/json");
+
+  const exported = JSON.parse(await page.blobs[0].text());
+
+  assert.match(exported.exportedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(
+    { ...exported, exportedAt: "t" },
+    buildLabelExport({ items, name: "run", source: { report: "report.json" } }, { [second.id]: { verdict: "partially_correct" }, [third.id]: { annotationIssue: true } }, "t")
+  );
+  assert.deepEqual([exported.items.length, exported.unlabeled.length], [1, 1]);
+
+  // Imported into a fresh page, the session is back and saved.
+  const fresh = openPage(html);
+
+  fresh.importFile(JSON.stringify(exported));
+  assert.equal(fresh.get("progress").textContent, "第 1 / 3 条，已标 1 条");
+  assert.deepEqual(fresh.stored(), [
+    { [second.id]: { annotationIssue: false, note: "", verdict: "partially_correct" }, [third.id]: { annotationIssue: true, note: "" } },
+  ]);
+  assert.deepEqual(fresh.alerts, []);
+
+  // What is not an export, or holds nothing for this page, is said and changes nothing.
+  fresh.importFile("not json");
+  fresh.importFile(JSON.stringify({ rows: [] }));
+  fresh.importFile(JSON.stringify({ items: [{ id: "elsewhere", verdict: "correct" }] }));
+  assert.deepEqual(fresh.alerts, ["这个文件不是导出的标注。", "这个文件不是导出的标注。", "这个文件里没有这一页答案的标注。"]);
+  assert.equal(fresh.get("progress").textContent, "第 1 / 3 条，已标 1 条");
+});
+
 test("the command writes the page and the judge input, and names what it refuses", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "answer-labeling-"));
 

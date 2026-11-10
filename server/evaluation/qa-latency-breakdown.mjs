@@ -8,26 +8,40 @@
 // answered, its completion. What is left of the question's latency after
 // those calls is the route's own work (search, fusion, gate, context, checks).
 // Document embeddings are the ingest. Only timings, token counts and flags are
-// read, never a question or an answer.
+// reported, never a question or an answer; a question's text is only hashed,
+// so --compare can check that two runs asked the same questions.
 //
 // With prices (USD per million tokens) it also estimates cost through the
 // model contract's own formula (estimateLlmOpsCost); without them it reports
 // tokens only. Embedding tokens are the events' own figures, which are
 // estimates from characters unless the endpoint reported usage.
 //
+// With --compare <other events.jsonl> it pairs this run with another one over
+// the same questions in the same order (a retrieval setting's latency cost,
+// or the same setting twice for the noise): this run minus the other on the
+// questions both answered and on the ones both refused.
+//
 // Usage:
 //   node evaluation/qa-latency-breakdown.mjs --events <events.jsonl>
-//     [--skip 0] [--chat-price <input>,<output>] [--embedding-price <input>] [--json]
+//     [--skip 0] [--chat-price <input>,<output>] [--embedding-price <input>]
+//     [--compare <other events.jsonl>] [--iterations 10000] [--seed 12345] [--json]
 
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { estimateLlmOpsCost } from "../rag/llmops-usage.js";
 import { getArgValue } from "./eval-cli.js";
+import { pairedDeltaOfDiffs } from "./paired-bootstrap.js";
 
 const round = (value, digits = 1) => (Number.isFinite(value) ? Number(value.toFixed(digits)) : null);
 const sum = (values) => values.reduce((total, value) => total + value, 0);
 const mean = (values) => (values.length > 0 ? sum(values) / values.length : null);
+
+// What a question was, without keeping it: enough to tell that position i of
+// two runs is the same question.
+const fingerprintQuestion = (text) =>
+  typeof text === "string" && text.length > 0 ? createHash("sha256").update(text).digest("hex").slice(0, 16) : null;
 
 /** Nearest-rank percentile (p in 0..100), null for no samples; as in run-api-load-bench.mjs. */
 export const percentile = (values, p) => {
@@ -93,6 +107,7 @@ export const groupQaEvents = (events) => {
         abstained: Boolean(event.abstained),
         completion: pending.completion,
         embedding: pending.embedding,
+        key: fingerprintQuestion(event.query),
         latencyMs: event.latencyMs,
         otherModelCalls: pending.other,
         // Clamped: the calls are timed inside the question, but each on its own clock.
@@ -201,6 +216,92 @@ export const summarizeQaLatency = ({ ingest, otherTraces = 0, questions }, { cha
   return summary;
 };
 
+const PAIRED_ANSWERED_FIELDS = [
+  ["latencyMs", (question) => question.latencyMs],
+  ["completionMs", (question) => question.completion.ms],
+  ["inputTokens", (question) => question.completion.inputTokens],
+  ["outputTokens", (question) => question.completion.outputTokens],
+];
+
+/**
+ * Two sequential runs over the same questions in the same order, paired by
+ * position: this run minus the other on the questions both answered (whole
+ * latency, answer-model time, tokens) and on the ones both refused (whole
+ * latency). Each pair's fingerprints must agree, so a run over another sample
+ * or in another order is refused instead of compared. The interval is a
+ * bootstrap over questions of the mean difference; the median difference
+ * stands next to it because one long generation moves a mean. `skip` drops the
+ * first questions of both runs.
+ */
+export const compareQaLatency = (current, other, { iterations = 10000, seed = 12345, skip = 0 } = {}) => {
+  if (current.questions.length !== other.questions.length) {
+    throw new Error(
+      `The runs hold ${current.questions.length} and ${other.questions.length} questions; a paired comparison needs the same questions in the same order.`
+    );
+  }
+
+  const pairs = current.questions.map((question, index) => [question, other.questions[index]]).slice(skip);
+  const mismatch = pairs.findIndex(([here, there]) => !here.key || here.key !== there.key);
+
+  if (mismatch !== -1) {
+    throw new Error(
+      `Question ${skip + mismatch + 1} is not the same in both runs, or its trace holds no question text to check; a paired comparison needs the same questions in the same order.`
+    );
+  }
+
+  const describe = (group, read) => {
+    const diffs = group.map(([here, there]) => read(here) - read(there));
+    const side = (index) => {
+      const values = group.map((pair) => read(pair[index]));
+
+      return { mean: round(mean(values)), p50: round(percentile(values, 50)) };
+    };
+
+    return {
+      ...pairedDeltaOfDiffs(diffs, { iterations, roundValue: (value) => (value === null ? null : round(value)), seed }),
+      current: side(0),
+      medianDelta: round(percentile(diffs, 50)),
+      other: side(1),
+    };
+  };
+  const answeredBoth = pairs.filter(([here, there]) => !here.abstained && !there.abstained);
+  const refusedBoth = pairs.filter(([here, there]) => here.abstained && there.abstained);
+
+  return {
+    answeredBoth: {
+      questions: answeredBoth.length,
+      ...Object.fromEntries(PAIRED_ANSWERED_FIELDS.map(([name, read]) => [name, describe(answeredBoth, read)])),
+    },
+    answeredOnlyHere: pairs.filter(([here, there]) => !here.abstained && there.abstained).length,
+    answeredOnlyThere: pairs.filter(([here, there]) => here.abstained && !there.abstained).length,
+    iterations,
+    questions: pairs.length,
+    refusedBoth: { latencyMs: describe(refusedBoth, (question) => question.latencyMs), questions: refusedBoth.length },
+    seed,
+  };
+};
+
+const formatSigned = (value) => (value === null ? "n/a" : `${value > 0 ? "+" : ""}${value}`);
+
+const formatPairedRow = (label, stats) =>
+  `| ${label} | ${stats.cases} | ${stats.current.p50 ?? "n/a"} | ${stats.other.p50 ?? "n/a"} | ${formatSigned(stats.delta)} | ${
+    stats.ci95 ? `[${stats.ci95[0]}, ${stats.ci95[1]}]` : "n/a"
+  } | ${formatSigned(stats.medianDelta)} |`;
+
+/** The comparison as Markdown lines. */
+export const formatLatencyComparisonMarkdown = (comparison, otherName) => [
+  `Paired with \`${otherName}\` by question (${comparison.questions} questions: ${comparison.answeredBoth.questions} answered in both runs, ${comparison.refusedBoth.questions} refused in both, ${comparison.answeredOnlyHere} answered only in this run, ${comparison.answeredOnlyThere} only in the other); this run minus that one, 95% CI of the mean difference (bootstrap over questions, ${comparison.iterations} iterations, seed ${comparison.seed}):`,
+  "",
+  "| | Questions | This run p50 | Other p50 | Mean difference | 95% CI | Median difference |",
+  "|---|---|---|---|---|---|---|",
+  formatPairedRow("Answered in both: whole question, ms", comparison.answeredBoth.latencyMs),
+  formatPairedRow("Answered in both: answer model, ms", comparison.answeredBoth.completionMs),
+  formatPairedRow("Answered in both: input tokens", comparison.answeredBoth.inputTokens),
+  formatPairedRow("Answered in both: output tokens", comparison.answeredBoth.outputTokens),
+  formatPairedRow("Refused in both: whole question, ms", comparison.refusedBoth.latencyMs),
+  "",
+];
+
 const formatMsRow = (label, group, stats) =>
   `| ${label} | ${group.questions} | ${stats.p50 ?? "n/a"} | ${stats.p90 ?? "n/a"} | ${stats.p95 ?? "n/a"} | ${stats.max ?? "n/a"} |`;
 
@@ -269,13 +370,25 @@ const main = async () => {
   const eventsPath = getArgValue("--events");
 
   if (!eventsPath) {
-    throw new Error("Usage: qa-latency-breakdown.mjs --events <events.jsonl> [--skip 0] [--chat-price <input>,<output>] [--embedding-price <input>] [--json]");
+    throw new Error(
+      "Usage: qa-latency-breakdown.mjs --events <events.jsonl> [--skip 0] [--chat-price <input>,<output>] [--embedding-price <input>] [--compare <other events.jsonl>] [--iterations 10000] [--seed 12345] [--json]"
+    );
   }
 
   const skip = Number(getArgValue("--skip") ?? 0);
 
   if (!Number.isInteger(skip) || skip < 0) {
     throw new Error(`--skip must be a non-negative integer; got ${JSON.stringify(getArgValue("--skip"))}.`);
+  }
+
+  const comparePath = getArgValue("--compare");
+  const iterations = Number(getArgValue("--iterations") ?? 10000);
+  const seed = Number(getArgValue("--seed") ?? 12345);
+
+  for (const [name, value] of [["--iterations", iterations], ["--seed", seed]]) {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`${name} must be a positive integer; got ${JSON.stringify(getArgValue(name))}.`);
+    }
   }
 
   const chatPrice = parsePrices("--chat-price", getArgValue("--chat-price"), 2);
@@ -292,8 +405,16 @@ const main = async () => {
   }
 
   const summary = summarizeQaLatency(grouped, { chatPrice, embeddingPrice, skip });
+  const otherName = comparePath ? path.basename(comparePath) : null;
+  const comparison = comparePath
+    ? compareQaLatency(grouped, groupQaEvents(await readEvents(comparePath)), { iterations, seed, skip })
+    : null;
 
-  process.stdout.write(process.argv.includes("--json") ? `${JSON.stringify(summary, null, 2)}\n` : formatLatencyMarkdown(summary).join("\n"));
+  process.stdout.write(
+    process.argv.includes("--json")
+      ? `${JSON.stringify(comparison ? { ...summary, comparison: { ...comparison, other: otherName } } : summary, null, 2)}\n`
+      : [...formatLatencyMarkdown(summary), ...(comparison ? formatLatencyComparisonMarkdown(comparison, otherName) : [])].join("\n")
+  );
 };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
