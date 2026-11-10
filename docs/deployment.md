@@ -486,6 +486,6 @@ prometheus --config.file=/etc/prometheus/prometheus.example.yml
 - 三步评测：
   1. `verify:quality`：18 项端到端检查，任何一项阻断失败，整个 job 就失败；
   2. QASPER dev 抽样 200 题，测证据能否进入问答候选；召回低于 0.6 就失败（设定下限时实测为 0.655）；
-  3. QASPER dev 答题，默认 40 题，只出报告，不设门槛。CPU 上 7B 模型大约一分钟答一题。
+  3. QASPER dev 答题，默认 40 题，只出报告，不设门槛。CPU 上 7B 模型大约一分钟答一题。2026-11-10 起这一步按答案侧评测口径跑：`RAG_ANSWER_TEMPERATURE=0`、`RAG_ANSWER_MAX_TOKENS=1024`，只设在这一步上，前两步仍用端点默认（见 evaluation.md“答案温度 0 重测：带输出上限”）。没有上限时，温度 0 下曾有一道题生成到每次重试都超时。
 - 报告作为 `real-model-eval` artifact 上传；前面的步骤失败也会上传。
 - 首次运行（2026-09-26）约 63 分钟通过：`verify:quality` 18/18，召回 0.655，和本机结果一致。
