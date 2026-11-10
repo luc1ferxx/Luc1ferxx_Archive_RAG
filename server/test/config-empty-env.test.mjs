@@ -258,6 +258,12 @@ const CHOICE_SETTINGS = [
     read: () => config.getPdfParser(),
     unset: "pdfjs",
   },
+  {
+    allowed: config.LLM_MAX_TOKENS_FIELDS,
+    name: "RAG_LLM_MAX_TOKENS_FIELD",
+    read: () => config.getLlmMaxTokensField(),
+    unset: "max_tokens",
+  },
 ];
 
 test("the choice getters read a blank value as unset and refuse an unknown one", () => {

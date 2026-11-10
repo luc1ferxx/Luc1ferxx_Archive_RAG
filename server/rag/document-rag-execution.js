@@ -890,6 +890,11 @@ const executeQaRag = async ({
     traceFields,
     response: {
       ...finalAnswer,
+      // A first reply the output limit cut off keeps the answer marked when
+      // the verdict retry wrote it, as a cut extractive or comparison call
+      // does when a fallback wrote the text. The trace keeps each attempt's
+      // own mark: the first at the top, the retry's under verdictRetry.
+      ...(answer.answerTruncated === true ? { answerTruncated: true } : {}),
       retrievedContexts: final.bundle.retrievedContexts,
       evidenceSummary,
       retrieval,

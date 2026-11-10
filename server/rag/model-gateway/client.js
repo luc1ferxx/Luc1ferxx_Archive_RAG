@@ -222,8 +222,11 @@ const toResult = (extension) => ({
   modelRoute: extension.modelRoute ?? null,
 });
 
+// An output limit always travels to the gateway as max_tokens; the gateway
+// sends it upstream in the field its own RAG_LLM_MAX_TOKENS_FIELD names.
 const buildChatBody = ({
   capability,
+  maxTokens,
   messages,
   promptTemplate,
   responseFormat,
@@ -235,6 +238,7 @@ const buildChatBody = ({
   messages,
   ...(responseFormat ? { response_format: responseFormat } : {}),
   ...(typeof temperature === "number" && Number.isFinite(temperature) ? { temperature } : {}),
+  ...(Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { max_tokens: maxTokens } : {}),
   ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
   [MODEL_GATEWAY_EXTENSION_FIELD]: {
     capability,
@@ -393,6 +397,7 @@ const streamCompletion = async (body, { onAttemptStart, onTextDelta, signal: cal
  */
 export const requestModelGatewayCompletion = async ({
   capability,
+  maxTokens,
   messages,
   onAttemptStart,
   onTextDelta,
@@ -406,6 +411,7 @@ export const requestModelGatewayCompletion = async ({
   const stream = typeof onTextDelta === "function";
   const body = buildChatBody({
     capability,
+    maxTokens,
     messages,
     promptTemplate,
     responseFormat,

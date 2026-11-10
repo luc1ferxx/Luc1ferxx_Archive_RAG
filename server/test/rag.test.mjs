@@ -1,6 +1,7 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import chat, {
@@ -3942,6 +3943,96 @@ test("a not-in-evidence reply retries once with chunks the model has not seen", 
   assert.equal(response.text, "Up to 5 days carry over [Source 1].");
   assert.equal(response.citations.length, 1);
   assert.equal(response.citations[0].pageNumber, shownFirst === 1 ? 2 : 1);
+});
+
+test("a first reply the output limit cut keeps the answer marked when the verdict retry writes it", async (t) => {
+  // The chat model is a local fake endpoint, so a reply can stop at
+  // finish_reason "length" (the stand-in provider reports no finish reason);
+  // embeddings stay with the stand-in.
+  const answerLimits = [];
+  const server = http.createServer((request, response) => {
+    let raw = "";
+
+    request.on("data", (chunk) => {
+      raw += chunk;
+    });
+    request.on("end", () => {
+      const body = JSON.parse(raw);
+      const prompt = body.messages.map((message) => String(message.content ?? "")).join("\n");
+      let content;
+      let finishReason = "stop";
+
+      if (prompt.includes("preserved_ambiguity")) {
+        content = JSON.stringify({ rewritten_query: "How many annual leave days carry over?", preserved_ambiguity: false });
+      } else if (prompt.includes("Standalone retrieval question:")) {
+        content = "How many annual leave days carry over?";
+      } else {
+        answerLimits.push(body.max_tokens);
+        // The first answer refuses and runs on to the limit; the retry answers.
+        [content, finishReason] =
+          answerLimits.length === 1
+            ? ["NOT_IN_EVIDENCE: The shown clause does not say. The shown clause does not say. The shown", "length"]
+            : ["Up to 5 days carry over [Source 1].", "stop"];
+      }
+
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          choices: [{ finish_reason: finishReason, index: 0, message: { content, role: "assistant" } }],
+          usage: { completion_tokens: 8, prompt_tokens: 5, total_tokens: 13 },
+        })
+      );
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const settings = {
+    ARCHIVE_RAG_ROLE: undefined,
+    MODEL_GATEWAY_URL: undefined,
+    OPENAI_API_KEY: "test-key",
+    OPENAI_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`,
+    OPENAI_CHAT_FALLBACK_MODEL: "",
+    OPENAI_CHAT_MODEL: "cap-chat",
+    RAG_ANSWER_MAX_TOKENS: "64",
+    RAG_QA_ANSWER_VERDICT: "true",
+    RAG_QA_VERDICT_RETRY_TOP_K: "4",
+    RAG_RETRIEVAL_TOP_K: "1",
+  };
+  const saved = Object.fromEntries(Object.keys(settings).map((key) => [key, process.env[key]]));
+
+  for (const [key, value] of Object.entries(settings)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+
+  t.after(async () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  configureOpenAIProvider({ embedQuery: provider.embedQuery, embedTexts: provider.embedTexts });
+
+  await ingestFixture({
+    docId: "leave-retry-cut",
+    fileName: "leave-retry-cut.pdf",
+    pages: [
+      "Annual leave policy: employees receive 10 paid annual leave days each year.",
+      "Annual leave carry over: up to 5 unused annual leave days carry over to the next year.",
+    ],
+  });
+
+  const response = await chat(["leave-retry-cut"], "How many annual leave days carry over?");
+
+  assert.deepEqual(answerLimits, [64, 64]);
+  assert.equal(response.abstained, false);
+  assert.equal(response.text, "Up to 5 days carry over [Source 1].");
+  // The delivered answer finished, but a reply this answer depended on was cut.
+  assert.equal(response.answerTruncated, true);
 });
 
 // RAG_QA_VERDICT_OVERRIDE end to end (rag/answer-verdict-override.js). The

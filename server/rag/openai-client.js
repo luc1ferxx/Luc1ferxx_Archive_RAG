@@ -1,4 +1,4 @@
-import { getLlmRequestTimeoutMs } from "./config.js";
+import { getLlmMaxTokensField, getLlmRequestTimeoutMs } from "./config.js";
 import { guardModelCall, MODEL_CALL_LANES } from "./model-call-guard.js";
 
 const EMBEDDING_BATCH_SIZE = 512;
@@ -298,9 +298,18 @@ export const toChatMessages = (prompt) => {
 const toTemperatureField = (temperature) =>
   typeof temperature === "number" && Number.isFinite(temperature) ? { temperature } : {};
 
+// A positive whole `maxTokens` (RAG_ANSWER_MAX_TOKENS on the document answer
+// calls) is sent in the field RAG_LLM_MAX_TOKENS_FIELD names; without one the
+// request carries no output limit and the server's own applies. Resolved
+// before the request enters the model-call guard: an invalid field refuses the
+// call there, so it takes no slot and the circuit breaker never counts it.
+const toMaxTokensField = (maxTokens) =>
+  Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { [getLlmMaxTokensField()]: maxTokens } : {};
+
 export const createChatClient = ({ apiKey, model }) => ({
-  async invoke(prompt, { responseFormat, signal, temperature } = {}) {
+  async invoke(prompt, { maxTokens, responseFormat, signal, temperature } = {}) {
     const messages = toChatMessages(prompt);
+    const maxTokensField = toMaxTokensField(maxTokens);
 
     // Every request, including each retry, passes the endpoint's circuit and
     // concurrency cap; see model-call-guard.js.
@@ -319,6 +328,7 @@ export const createChatClient = ({ apiKey, model }) => ({
             messages,
             ...(responseFormat ? { response_format: responseFormat } : {}),
             ...toTemperatureField(temperature),
+            ...maxTokensField,
           }),
           signal,
         }),
@@ -334,7 +344,9 @@ export const createChatClient = ({ apiKey, model }) => ({
 
   // Same request with `stream: true`. include_usage asks for a final usage
   // chunk; servers that ignore it leave usage null and LLMOps estimates it.
-  async invokeStream(prompt, { onDelta, responseFormat, signal, temperature } = {}) {
+  async invokeStream(prompt, { maxTokens, onDelta, responseFormat, signal, temperature } = {}) {
+    const maxTokensField = toMaxTokensField(maxTokens);
+
     return sendToUpstream(
       "chat",
       model,
@@ -354,6 +366,7 @@ export const createChatClient = ({ apiKey, model }) => ({
               stream_options: { include_usage: true },
               ...(responseFormat ? { response_format: responseFormat } : {}),
               ...toTemperatureField(temperature),
+              ...maxTokensField,
             }),
             signal,
           },

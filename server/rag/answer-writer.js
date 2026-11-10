@@ -3,6 +3,7 @@ import {
   createPromptTemplate,
 } from "../lib/prompt-template.js";
 import {
+  getAnswerMaxTokens,
   getAnswerTemperature,
   getMaxComparisonSources,
   getPromptVersion,
@@ -1345,18 +1346,13 @@ const writeProseQaAnswer = async ({
 }) => {
   const qaPrompt = selectPrompt(selectProseQaPrompts());
   const prompt = qaPrompt.render(blocks);
+  const completion = await completeAnswerText(prompt, {
+    ...drafts?.completionOptions,
+    promptTemplate: qaPrompt.descriptor,
+  });
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
-  const guarded = guardAnswerLinks(
-    normalizeGroupedSourceLabels(
-      await completeText(prompt, {
-        ...drafts?.completionOptions,
-        promptTemplate: qaPrompt.descriptor,
-        ...answerTemperatureOption(),
-      })
-    ),
-    { allowedText }
-  );
+  const guarded = guardAnswerLinks(normalizeGroupedSourceLabels(completion.text), { allowedText });
   const verdict = isQaAnswerVerdictEnabled()
     ? readQaAnswerVerdict(guarded.text)
     : { abstained: false, text: guarded.text };
@@ -1381,35 +1377,65 @@ const writeProseQaAnswer = async ({
         : null;
 
     if (override?.overridden) {
-      return {
-        text: override.text,
-        citations: bundle.citations,
-        injectionScreen,
-        abstainSource: null,
-        verdictOverridden: true,
-        trace: { verdictOverride: describeVerdictOverride(override) },
-      };
+      return markTruncated(
+        {
+          text: override.text,
+          citations: bundle.citations,
+          injectionScreen,
+          abstainSource: null,
+          verdictOverridden: true,
+          trace: { verdictOverride: describeVerdictOverride(override) },
+        },
+        completion.truncated
+      );
     }
 
-    return {
-      text: verdict.reason,
-      citations: [],
-      abstained: true,
-      abstainReason: verdict.reason,
-      abstainSource: "answer_model",
-      injectionScreen,
-      ...(override ? { trace: { verdictOverride: describeVerdictOverride(override) } } : {}),
-    };
+    return markTruncated(
+      {
+        text: verdict.reason,
+        citations: [],
+        abstained: true,
+        abstainReason: verdict.reason,
+        abstainSource: "answer_model",
+        injectionScreen,
+        ...(override ? { trace: { verdictOverride: describeVerdictOverride(override) } } : {}),
+      },
+      completion.truncated
+    );
   }
 
   const text = verdict.text;
+
+  // A reply the output limit cut before it wrote anything (a reasoning model
+  // can spend the whole budget out of sight) is no answer: an abstention, not
+  // the canned sentence below with every citation. Not "answer_model", so the
+  // deeper retrieval retry does not spend another capped call on it.
+  if (completion.truncated && !text.trim()) {
+    const reason = "The answer model reached its output limit before it wrote an answer.";
+
+    return markTruncated(
+      {
+        text: reason,
+        citations: [],
+        abstained: true,
+        abstainReason: reason,
+        abstainSource: "output_limit",
+        injectionScreen,
+      },
+      true
+    );
+  }
+
   drafts?.finish(text);
 
-  return {
-    text: text || "I couldn't synthesize an answer from the retrieved document evidence.",
-    citations: bundle.citations,
-    injectionScreen,
-  };
+  return markTruncated(
+    {
+      text: text || "I couldn't synthesize an answer from the retrieved document evidence.",
+      citations: bundle.citations,
+      injectionScreen,
+    },
+    completion.truncated
+  );
 };
 
 // --- Structured comparison output (RAG_COMPARISON_STRUCTURED_OUTPUT) ---------
@@ -1435,14 +1461,34 @@ const evidenceQuoteSchema = (sourceRanks) =>
     source: { enum: sourceRanks, type: "integer" },
   });
 
-// RAG_ANSWER_TEMPERATURE on the three document answer calls (QA prose, QA
-// extractive, comparison): sent only when set, so by default the request is
-// what it always was and the endpoint's default applies.
-const answerTemperatureOption = () => {
+// The three document answer calls (QA prose, QA extractive, comparison):
+// RAG_ANSWER_TEMPERATURE and RAG_ANSWER_MAX_TOKENS go with each, each only when
+// set, so by default the request is what it always was and the endpoint's
+// defaults apply. `truncated` says the reply stopped at an output limit (that
+// one, or the endpoint's own): finish_reason "length".
+const completeAnswerText = async (prompt, options) => {
   const temperature = getAnswerTemperature();
+  const maxTokens = getAnswerMaxTokens();
+  let finishReason = null;
+  const text = await completeText(prompt, {
+    ...options,
+    ...(temperature === null ? {} : { temperature }),
+    ...(maxTokens === null ? {} : { maxTokens }),
+    onFinishReason: (reason) => {
+      finishReason = reason;
+    },
+  });
 
-  return temperature === null ? {} : { temperature };
+  return { text, truncated: finishReason === "length" };
 };
+
+// An answer whose answer call was cut off at an output limit carries
+// answerTruncated: true, on the answer and in its trace. The text is what the
+// writer made of the cut reply: the reply as written, or what replaced it (the
+// comparison template or an abstention, the extractive mode's prose call).
+// Nothing is added otherwise, so an answer keeps its shape.
+const markTruncated = (answer, truncated) =>
+  truncated ? { ...answer, answerTruncated: true, trace: { ...answer.trace, answerTruncated: true } } : answer;
 
 // The completion options of a structured call: its response format, or
 // nothing when no block was shown (an empty `source` enum is no schema).
@@ -1766,9 +1812,8 @@ export const writeComparisonAnswer = async ({
     context: bundle.context,
   });
   const structuredOutputEnabled = isComparisonStructuredOutputEnabled();
-  const completion = await completeText(selectedPrompt, {
+  const completion = await completeAnswerText(selectedPrompt, {
     promptTemplate: comparisonPrompt.descriptor,
-    ...answerTemperatureOption(),
     ...(structuredOutputEnabled
       ? structuredResponseFormatOptions(bundle, buildComparisonStructuredResponseFormat)
       : {}),
@@ -1777,13 +1822,13 @@ export const writeComparisonAnswer = async ({
   // and the text the gate sees is rendered from it; the counts of what the
   // reply held (integers only) go to the trace.
   const rendered = structuredOutputEnabled
-    ? renderStructuredComparisonAnswer({ analysis, bundle, parsed: parseFirstJsonValue(completion) })
+    ? renderStructuredComparisonAnswer({ analysis, bundle, parsed: parseFirstJsonValue(completion.text) })
     : null;
   // This answer's trace-only diagnostics (codes and counts); the caller moves
   // them to the RAG trace and keeps them out of the response.
   const trace = rendered ? { comparisonStructuredOutput: rendered.counts } : {};
   const guarded = guardAnswerLinks(
-    normalizeGroupedSourceLabels(rendered ? rendered.text ?? "" : completion),
+    normalizeGroupedSourceLabels(rendered ? rendered.text ?? "" : completion.text),
     { allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }) }
   );
   const text = guarded.text;
@@ -1792,7 +1837,7 @@ export const writeComparisonAnswer = async ({
     : assessStructuredDifferenceAnswer({ analysis, bundle, text });
 
   if (modelGate.safe) {
-    return { text, citations: bundle.citations, ...withTrace(trace) };
+    return markTruncated({ text, citations: bundle.citations, ...withTrace(trace) }, completion.truncated);
   }
 
   const groundedDifferenceAnswer = buildGroundedDifferenceAnswer({
@@ -1816,10 +1861,13 @@ export const writeComparisonAnswer = async ({
     const abstainReason =
       "I do not have enough citation-backed evidence to identify a concrete difference reliably.";
 
-    return { text: abstainReason, citations: bundle.citations, abstained: true, abstainReason, trace };
+    return markTruncated(
+      { text: abstainReason, citations: bundle.citations, abstained: true, abstainReason, trace },
+      completion.truncated
+    );
   }
 
-  return { text: groundedDifferenceAnswer, citations: bundle.citations, trace };
+  return markTruncated({ text: groundedDifferenceAnswer, citations: bundle.citations, trace }, completion.truncated);
 };
 
 // An answer's `trace` field only when it holds something, so an answer that
@@ -2082,14 +2130,13 @@ export const renderExtractiveQaAnswer = ({ bundle, parsed, queryText = "" }) => 
 const writeExtractiveQaAnswer = async (call) => {
   const { allowedText, blocks, bundle, drafts } = call;
   const qaPrompt = selectPrompt(QA_EXTRACTIVE_PROMPTS);
-  const completion = await completeText(qaPrompt.render(blocks), {
+  const completion = await completeAnswerText(qaPrompt.render(blocks), {
     promptTemplate: qaPrompt.descriptor,
-    ...answerTemperatureOption(),
     ...structuredResponseFormatOptions(bundle, buildQaExtractiveResponseFormat),
   });
   const rendered = renderExtractiveQaAnswer({
     bundle,
-    parsed: parseFirstJsonValue(completion),
+    parsed: parseFirstJsonValue(completion.text),
     queryText: call.query || call.resolvedQuery || "",
   });
   // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
@@ -2106,21 +2153,27 @@ const writeExtractiveQaAnswer = async (call) => {
     // the attempt's failure was the model's abstention.
     const fallback = await writeProseQaAnswer(call);
 
-    return {
-      ...fallback,
-      trace: { ...fallback.trace, qaStructuredOutput: { ...qaStructuredOutput, fallback: "prose" } },
-    };
+    return markTruncated(
+      {
+        ...fallback,
+        trace: { ...fallback.trace, qaStructuredOutput: { ...qaStructuredOutput, fallback: "prose" } },
+      },
+      completion.truncated
+    );
   }
 
   const guarded = guardAnswerLinks(rendered.text, { allowedText });
 
   drafts?.finish(guarded.text);
 
-  return {
-    text: guarded.text,
-    citations: bundle.citations,
-    directAnswer: rendered.directAnswer,
-    injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
-    trace: { qaStructuredOutput },
-  };
+  return markTruncated(
+    {
+      text: guarded.text,
+      citations: bundle.citations,
+      directAnswer: rendered.directAnswer,
+      injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
+      trace: { qaStructuredOutput },
+    },
+    completion.truncated
+  );
 };

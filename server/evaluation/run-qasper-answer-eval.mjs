@@ -66,6 +66,7 @@ import {
 import {
   classifyAgentAnswer,
   describeAgentFollowUp,
+  isAgentAnswerTruncated,
   isAgentVerdictOverridden,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
@@ -199,6 +200,9 @@ export const describeRagSurfaceAnswer = (result) => {
     // "answer_model" when the model said the evidence does not answer;
     // otherwise an abstention is the confidence gate's.
     abstainSource: abstained ? result.abstainSource ?? "gate" : null,
+    // An output limit (RAG_ANSWER_MAX_TOKENS, or the endpoint's own) cut the
+    // answer model's reply off.
+    answerTruncated: result?.answerTruncated === true,
     citedPages: citedSourcePages({ abstained, citations: result?.citations ?? [], text: result?.text }),
     contextChars: sumTextChars(result?.retrievedContexts, (context) => context?.text),
     contextPages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
@@ -217,6 +221,36 @@ const summarizeVerdictOverrides = (rows) => {
   return {
     answeredAnswerable: answered.filter((row) => !row.shouldAbstain).length,
     answeredUnanswerable: answered.filter((row) => row.shouldAbstain).length,
+  };
+};
+
+/**
+ * Questions whose answer model reply an output limit cut off
+ * (RAG_ANSWER_MAX_TOKENS, or the endpoint's own), split by whether the
+ * question was answerable. A row from before the field counts as not cut.
+ */
+export const summarizeAnswerTruncations = (rows) => {
+  const truncated = rows.filter((row) => row.answerTruncated === true);
+
+  return {
+    answerable: truncated.filter((row) => !row.shouldAbstain).length,
+    unanswerable: truncated.filter((row) => row.shouldAbstain).length,
+  };
+};
+
+// The output limit the run sent (RAG_ANSWER_MAX_TOKENS) and the field it
+// travelled in (RAG_LLM_MAX_TOKENS_FIELD); both null when it sent none. Through
+// a model gateway the gateway's own setting picks the field, which this
+// process cannot read, so it is recorded as "model_gateway".
+export const describeAnswerOutputLimit = (
+  { getAnswerMaxTokens, getLlmMaxTokensField },
+  { routedToGateway = false } = {}
+) => {
+  const maxTokens = getAnswerMaxTokens();
+
+  return {
+    answerMaxTokens: maxTokens,
+    answerMaxTokensField: maxTokens === null ? null : routedToGateway ? "model_gateway" : getLlmMaxTokensField(),
   };
 };
 
@@ -244,7 +278,10 @@ const formatMarkdown = (report) => {
         ]
       : []),
     `- Answers through the verdict override (RAG_QA_VERDICT_OVERRIDE): answerable ${summary.verdictOverrides?.answeredAnswerable ?? 0}, unanswerable ${summary.verdictOverrides?.answeredUnanswerable ?? 0}`,
-    `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}; answer temperature: ${report.config.answerTemperature ?? "not sent (the endpoint's default)"}`,
+    `- Answer replies cut off at an output limit: answerable ${summary.answerTruncations?.answerable ?? 0}, unanswerable ${summary.answerTruncations?.unanswerable ?? 0}`,
+    `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}; answer temperature: ${report.config.answerTemperature ?? "not sent (the endpoint's default)"}; answer output limit: ${
+      report.config.answerMaxTokens ? `${report.config.answerMaxTokens} tokens (${report.config.answerMaxTokensField})` : "not sent (the endpoint's own)"
+    }`,
     ...(report.config.excluded
       ? [
           `- Sampled after excluding the ${report.config.excluded.excludedIds} questions of ${describeExcludedReports(report.config.excluded, (name) => "`" + name + "`")} (ids digest ${report.config.excluded.excludedIdsDigest.slice(0, 12)})`,
@@ -372,6 +409,15 @@ const main = async () => {
   applyStandaloneProfile();
   const rag = await import("../chat.js");
   const { runAgentRag } = await import("../rag/agent.js");
+  const ragConfig = await import("../rag/config.js");
+  const { isModelCallRoutedToGateway } = await import("../rag/openai.js");
+  // Read once, before anything is ingested: a wrong value stops the run here
+  // instead of failing every answer call (on the agent surface the run would
+  // carry on to the end and only then fail to write its report).
+  const answerGeneration = {
+    ...describeAnswerOutputLimit(ragConfig, { routedToGateway: isModelCallRoutedToGateway() }),
+    answerTemperature: ragConfig.getAnswerTemperature(),
+  };
   const rows = [];
 
   try {
@@ -445,6 +491,7 @@ const main = async () => {
           abstained: !outcome.answered,
           abstainSource: outcome.abstainSource,
           agent: { ...outcome, ...describeAgentFollowUp(body) },
+          answerTruncated: isAgentAnswerTruncated(body),
           // The agent body carries its cited sources as ragSources; it has no
           // citations field, so reading that gave every agent row no pages.
           // An abstention counts as returning no sources. contextPages keeps
@@ -475,6 +522,7 @@ const main = async () => {
         abstained: answer.abstained,
         abstainSource: answer.abstainSource ?? null,
         ...(answer.agent ?? {}),
+        answerTruncated: answer.answerTruncated === true,
         answerType: testCase.answerType,
         citationPrecision: evidence.citationPrecision,
         citedEvidenceHit: evidence.citedEvidenceHit,
@@ -505,11 +553,15 @@ const main = async () => {
   }
 
   const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
-  const { getAnswerTemperature, getEmbeddingModel } = await import("../rag/config.js");
+  const { getEmbeddingModel } = ragConfig;
   const config = {
+    // RAG_ANSWER_MAX_TOKENS and the field it went in (null: no limit sent), and
+    // RAG_ANSWER_TEMPERATURE (null: none sent, the endpoint's default applied),
+    // as read before the run.
+    answerMaxTokens: answerGeneration.answerMaxTokens,
+    answerMaxTokensField: answerGeneration.answerMaxTokensField,
     answerRateFlags: await describeAnswerRateFlags(),
-    // RAG_ANSWER_TEMPERATURE; null: none sent, the endpoint's default applied.
-    answerTemperature: getAnswerTemperature(),
+    answerTemperature: answerGeneration.answerTemperature,
     cases: caseCount,
     chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
     chunking: await describeChunkingConfig(),
@@ -544,6 +596,7 @@ const main = async () => {
     summary: {
       ...summarizeQasperRuns(rows),
       ...(surface === "agent" ? { agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
+      answerTruncations: summarizeAnswerTruncations(rows),
       verdictOverrides: summarizeVerdictOverrides(rows),
     },
   };
