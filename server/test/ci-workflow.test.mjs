@@ -699,4 +699,23 @@ test("real model eval workflow runs a real local model with no API key and gates
   assert.match(answerStep, /\n\s*env:\s*\n(?:\s*#[^\n]*\n)*\s*RAG_ANSWER_TEMPERATURE: "0"\s*\n\s*RAG_ANSWER_MAX_TOKENS: "1024"\s*\n/);
   assert.match(answerStep, /npm run eval:qasper-answers/);
   assert.doesNotMatch(content.slice(0, answerStepStart), /RAG_ANSWER_TEMPERATURE|RAG_ANSWER_MAX_TOKENS/);
+
+  // Right before the answer sample, under the same condition, a probe that the
+  // endpoint honours the limit's field (evaluation/probe-output-limit.mjs):
+  // Ollama ignores max_completion_tokens, and a pinned version that stopped
+  // honouring max_tokens would leave the answer step without a limit. Neither
+  // step sets the field, so the probe checks the one the answers use.
+  const probeStepStart = content.indexOf("- name: Check the answer output limit");
+  const retrievalStepStart = content.indexOf("- name: QASPER evidence recall");
+
+  assert.ok(probeStepStart > retrievalStepStart && probeStepStart < answerStepStart, "the probe runs after retrieval, before the answers");
+
+  const probeStep = content.slice(probeStepStart, answerStepStart);
+
+  assert.equal(probeStep.match(/- name:/g).length, 1, "no other step between the probe and the answers");
+  assert.match(probeStep, /\n\s*if: env\.QASPER_ANSWER_CASES != '0'\s*\n/);
+  assert.match(answerStep, /\n\s*if: env\.QASPER_ANSWER_CASES != '0'\s*\n/);
+  assert.match(probeStep, /\n\s*run: npm run probe:output-limit\s*$/);
+  assert.equal(serverPackage.scripts["probe:output-limit"], "node evaluation/probe-output-limit.mjs");
+  assert.doesNotMatch(content, /RAG_LLM_MAX_TOKENS_FIELD/);
 });
