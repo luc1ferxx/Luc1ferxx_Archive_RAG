@@ -6,14 +6,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  buildLabelExport,
   buildLabelingItems,
   countPossiblyTruncatedAnswers,
   LEGACY_PREDICTION_LIMIT,
   MAX_EVIDENCE_PARAGRAPHS,
+  mergeLabelExport,
   renderLabelingPage,
   toJudgeInput,
 } from "../evaluation/build-answer-labeling.mjs";
-import { JUDGE_VERDICTS } from "../evaluation/run-llm-judge.mjs";
+import { JUDGE_VERDICTS, measureJudgeAgreement } from "../evaluation/run-llm-judge.mjs";
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -123,6 +125,96 @@ test("the judge input carries every reference, and none for a question annotated
   assert.equal(byId.q2.referenceAnswer, null);
 });
 
+test("an export holds the labelled answers in the judge's shape and keeps what was noted on the others", () => {
+  const items = buildLabelingItems({ corpus: buildCorpus(), report: buildReport() });
+  const data = { items, name: "run", source: { report: "report.json" } };
+  const [first, second, third] = items.map((item) => item.id);
+  const labels = {
+    [first]: { annotationIssue: true, note: "the reference is wrong", verdict: "incorrect" },
+    // Flagged and noted, but no verdict: not a label, and not lost either.
+    [second]: { annotationIssue: true, note: "cannot tell" },
+    // Touched and cleared again: nothing to keep.
+    [third]: { annotationIssue: false, note: "" },
+    // A label of an answer this page does not show.
+    elsewhere: { verdict: "correct" },
+  };
+  const exported = buildLabelExport(data, labels, "2026-11-10T00:00:00.000Z");
+
+  assert.deepEqual(exported, {
+    exportedAt: "2026-11-10T00:00:00.000Z",
+    items: [{ annotationIssue: true, id: first, note: "the reference is wrong", verdict: "incorrect" }],
+    name: "run",
+    source: { report: "report.json" },
+    unlabeled: [{ annotationIssue: true, id: second, note: "cannot tell" }],
+  });
+  // Every entry of `items` has a verdict, so the judge's agreement counts only real labels.
+  assert.deepEqual(
+    measureJudgeAgreement({
+      judgments: [
+        { id: first, verdict: "incorrect" },
+        { id: second, verdict: "correct" },
+      ],
+      labels: exported.items,
+    }),
+    { agreement: 1, cohensKappa: null, labeledItems: 1 }
+  );
+
+  // Labels come out in the page's order whatever order they were made in.
+  const all = Object.fromEntries(items.map((item) => [item.id, { verdict: "correct" }]).reverse());
+
+  assert.deepEqual(buildLabelExport(data, all, "t").items.map((entry) => entry.id), items.map((item) => item.id));
+});
+
+test("an import restores an export, replaces the page's label for the same answer and skips what it cannot use", () => {
+  const items = buildLabelingItems({ corpus: buildCorpus(), report: buildReport() });
+  const data = { items, name: "run", source: {} };
+  const [first, second, third] = items.map((item) => item.id);
+  const exported = buildLabelExport(
+    data,
+    {
+      [first]: { annotationIssue: false, note: "", verdict: "partially_correct" },
+      [second]: { annotationIssue: true, note: "cannot tell" },
+    },
+    "t"
+  );
+  // The page already holds a verdict for the first answer and a label the file does not mention.
+  const labels = { [first]: { verdict: "correct" }, [third]: { note: "kept", verdict: "incorrect" } };
+
+  assert.equal(mergeLabelExport(data, labels, JSON.parse(JSON.stringify(exported))), 2);
+  assert.deepEqual(labels, {
+    [first]: { annotationIssue: false, note: "", verdict: "partially_correct" },
+    [second]: { annotationIssue: true, note: "cannot tell" },
+    [third]: { note: "kept", verdict: "incorrect" },
+  });
+
+  // An export written before `unlabeled` existed, or the judge's own label array wrapped in { items }.
+  const older = {};
+
+  assert.equal(mergeLabelExport(data, older, { items: [{ id: first, verdict: "wrong_abstention" }] }), 1);
+  assert.deepEqual(older, { [first]: { annotationIssue: false, note: "", verdict: "wrong_abstention" } });
+
+  // Skipped: an answer the page does not show, a verdict the judge does not know, an empty note.
+  const untouched = {};
+
+  assert.equal(
+    mergeLabelExport(data, untouched, {
+      items: [{ id: "elsewhere", verdict: "correct" }, { id: first, verdict: "perfect" }, null],
+      unlabeled: [{ id: second }, { annotationIssue: true, id: "elsewhere" }],
+    }),
+    0
+  );
+  assert.deepEqual(untouched, {});
+
+  for (const notAnExport of [null, [], { items: "x" }, { labels: [] }, "text"]) {
+    assert.throws(() => mergeLabelExport(data, {}, notAnExport), /not a label export/);
+  }
+
+  // The verdicts an import accepts are exactly the judge's.
+  for (const verdict of JUDGE_VERDICTS) {
+    assert.equal(mergeLabelExport(data, {}, { items: [{ id: first, verdict }] }), 1, verdict);
+  }
+});
+
 const readEmbeddedData = (html) =>
   JSON.parse(html.match(/<script type="application\/json" id="labeling-data">([\s\S]*?)<\/script>/)[1]);
 
@@ -141,6 +233,9 @@ test("the page embeds the items as data no answer can break out of, and its scri
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
   assert.doesNotThrow(() => new Function(script));
+  // The export and the import the page runs are the two functions tested above, as written.
+  assert.ok(script.includes(buildLabelExport.toString()));
+  assert.ok(script.includes(mergeLabelExport.toString()));
   // Every verdict the page can write is one the judge knows.
   for (const verdict of ["correct", "partially_correct", "incorrect", "correct_abstention", "wrong_abstention"]) {
     assert.ok(JUDGE_VERDICTS.includes(verdict));

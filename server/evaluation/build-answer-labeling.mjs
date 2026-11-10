@@ -10,8 +10,11 @@
 // from the annotation alone.
 //
 // The page keeps labels in the browser (localStorage) and exports them as
-// { items: [{ id, verdict, annotationIssue, note }] }, the shape --labels of
-// eval:judge reads. Everything it shows is set as text, never as markup.
+// { items: [{ id, verdict, annotationIssue, note }], unlabeled: [...] }: `items`
+// is the shape --labels of eval:judge reads (every entry has a verdict), and
+// `unlabeled` keeps the note or annotation flag of an answer that got no
+// verdict, which the judge does not read. Everything the page shows is set as
+// text, never as markup.
 //
 // Usage:
 //   node evaluation/build-answer-labeling.mjs --report <answers report.json> --corpus <qasper corpus.json>
@@ -152,10 +155,69 @@ label.check { display: inline-flex; gap: 6px; align-items: center; font-size: 14
 }
 `;
 
+// The two functions below run in the page exactly as written here (their
+// source is embedded through toString) and in the tests, so they stay ES5 and
+// self-contained: no imports, nothing from this module's scope.
+
+/**
+ * What "导出标注" writes. `items` holds every labelled answer of the page, in
+ * the page's order, each with a verdict; `unlabeled` holds the answers that
+ * only carry a note or the annotation flag. Labels of ids the page does not
+ * show are left out.
+ */
+export function buildLabelExport(data, labels, exportedAt) {
+  var labelled = [];
+  var unlabeled = [];
+
+  data.items.forEach(function (item) {
+    var label = labels[item.id];
+
+    if (!label) { return; }
+    if (label.verdict) {
+      labelled.push({ annotationIssue: Boolean(label.annotationIssue), id: item.id, note: label.note || "", verdict: label.verdict });
+    } else if (label.annotationIssue || label.note) {
+      unlabeled.push({ annotationIssue: Boolean(label.annotationIssue), id: item.id, note: label.note || "" });
+    }
+  });
+
+  return { exportedAt: exportedAt, items: labelled, name: data.name, source: data.source, unlabeled: unlabeled };
+}
+
+/**
+ * Reads an export back into `labels` and returns how many entries it took. An
+ * entry of the file replaces the label the page holds for that answer; entries
+ * for answers the page does not show, or with a verdict the judge does not
+ * know, are skipped. Throws when the file is not an export.
+ */
+export function mergeLabelExport(data, labels, payload) {
+  var verdicts = ["correct", "partially_correct", "incorrect", "correct_abstention", "wrong_abstention"];
+  var shown = {};
+  var taken = 0;
+
+  if (!payload || !Array.isArray(payload.items)) { throw new Error("not a label export"); }
+  data.items.forEach(function (item) { shown[item.id] = true; });
+  (Array.isArray(payload.unlabeled) ? payload.unlabeled : []).forEach(function (entry) {
+    if (entry && shown[entry.id] === true && (entry.annotationIssue || entry.note)) {
+      labels[entry.id] = { annotationIssue: Boolean(entry.annotationIssue), note: String(entry.note || "") };
+      taken += 1;
+    }
+  });
+  payload.items.forEach(function (entry) {
+    if (entry && shown[entry.id] === true && verdicts.indexOf(entry.verdict) !== -1) {
+      labels[entry.id] = { annotationIssue: Boolean(entry.annotationIssue), note: String(entry.note || ""), verdict: entry.verdict };
+      taken += 1;
+    }
+  });
+
+  return taken;
+}
+
 // The page's script: plain ES5-style strings on purpose, so nothing in it
 // needs escaping inside this module's template literal.
 const PAGE_SCRIPT = `
 (function () {
+  ${buildLabelExport.toString()}
+  ${mergeLabelExport.toString()}
   var data = JSON.parse(document.getElementById("labeling-data").textContent);
   var items = data.items;
   var storageKey = "answer-labels:" + data.name;
@@ -246,17 +308,7 @@ const PAGE_SCRIPT = `
     render();
   };
   var exportLabels = function () {
-    var payload = {
-      exportedAt: new Date().toISOString(),
-      items: items
-        .filter(function (item) { return labels[item.id] && labels[item.id].verdict; })
-        .map(function (item) {
-          var label = labels[item.id];
-          return { annotationIssue: Boolean(label.annotationIssue), id: item.id, note: label.note || "", verdict: label.verdict };
-        }),
-      name: data.name,
-      source: data.source,
-    };
+    var payload = buildLabelExport(data, labels, new Date().toISOString());
     var link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2) + "\\n"], { type: "application/json" }));
     link.download = data.name + "-labels.json";
@@ -267,15 +319,12 @@ const PAGE_SCRIPT = `
   var importLabels = function (file) {
     var reader = new FileReader();
     reader.onload = function () {
-      try {
-        (JSON.parse(String(reader.result)).items || []).forEach(function (entry) {
-          if (entry && entry.id && entry.verdict) {
-            labels[entry.id] = { annotationIssue: Boolean(entry.annotationIssue), note: entry.note || "", verdict: entry.verdict };
-          }
-        });
-        save();
-        render();
-      } catch (error) { window.alert("这个文件不是导出的标注。"); }
+      var taken;
+      try { taken = mergeLabelExport(data, labels, JSON.parse(String(reader.result))); }
+      catch (error) { window.alert("这个文件不是导出的标注。"); return; }
+      if (taken === 0) { window.alert("这个文件里没有这一页答案的标注。"); return; }
+      save();
+      render();
     };
     reader.readAsText(file);
   };
