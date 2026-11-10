@@ -347,6 +347,8 @@ test("the command reads a JSONL file, skips broken lines and names what it refus
       // The first file's events carry no question text and hold three questions.
       [["--events", herePath, "--compare", eventsPath], /The runs hold 5 and 3 questions/],
       [["--events", herePath, "--compare", path.join(tempRoot, "missing.jsonl")], /missing\.jsonl/],
+      [["--events", herePath, "--compare"], /--compare takes the other run's events file/],
+      [["--events", herePath, "--compare", "--json"], /--compare takes the other run's events file/],
     ]) {
       const refused = run(args);
 

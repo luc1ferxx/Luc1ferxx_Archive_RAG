@@ -155,10 +155,20 @@ test("reports of other settings, another surface or another sample are refused",
   otherCorpus.retrieval.config.corpus = "qasper-train.json";
   assert.throws(() => buildQasperAnswerFunnel(otherCorpus.answers, otherCorpus.retrieval), /corpus: "qasper-dev\.json" vs "qasper-train\.json"/);
 
+  // A report from before the retrieval settings were recorded cannot be shown
+  // to match, whether one of the two lacks them or both do.
   const unrecorded = buildReports();
 
   delete unrecorded.retrieval.config.retrieval;
-  assert.throws(() => buildQasperAnswerFunnel(unrecorded.answers, unrecorded.retrieval), /retrieval: "recorded" vs null/);
+  assert.throws(
+    () => buildQasperAnswerFunnel(unrecorded.answers, unrecorded.retrieval),
+    /The retrieval report did not record its retrieval settings \(config\.retrieval\), so the two runs cannot be shown to share them/
+  );
+  delete unrecorded.answers.config.retrieval;
+  assert.throws(
+    () => buildQasperAnswerFunnel(unrecorded.answers, unrecorded.retrieval),
+    /The answer and the retrieval report did not record its retrieval settings/
+  );
 
   const agent = buildReports();
 
@@ -187,6 +197,22 @@ test("the Markdown names every stage, the refusal sources and the unanswerable q
   assert.match(markdown, /Unanswerable questions: 1 of 2 refused, 1 answered\./);
   assert.match(markdown, /The reports differ in git\.sha \("answers-sha" vs "retrieval-sha"\)\./);
   assert.doesNotMatch(markdown, /disagree/);
+  // Both reports came from a clean checkout.
+  assert.doesNotMatch(markdown, /checkout/);
+});
+
+test("a report from an unclean or unrecorded checkout is joined, and said to be one", () => {
+  const { answers, retrieval } = buildReports();
+
+  answers.config.git.dirty = true;
+  delete retrieval.config.git;
+
+  const funnel = buildQasperAnswerFunnel(answers, retrieval);
+  const markdown = formatFunnelMarkdown(funnel).join("\n");
+
+  assert.deepEqual([funnel.against.answers.dirty, funnel.against.retrieval.dirty, funnel.against.retrieval.gitSha], [true, null, null]);
+  assert.match(markdown, /The answer report was written from a checkout with uncommitted changes; the recorded settings cannot vouch for its code\./);
+  assert.match(markdown, /The retrieval report did not record whether its checkout was clean; the recorded settings cannot vouch for its code\./);
 });
 
 test("the command prints the funnel, or its JSON, and names what it refuses", async () => {

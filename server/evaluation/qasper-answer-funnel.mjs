@@ -76,8 +76,9 @@ const isCommitField = (difference) => difference.field.startsWith("git.");
 
 /**
  * The funnel of an answer report against a retrieval report of the same
- * corpus and settings. Throws when the settings differ (other than the
- * commit) or when an answerable question has no retrieval row.
+ * corpus and settings. Throws when either report did not record its retrieval
+ * settings, when the settings differ (the checkout, `git.*`, may differ and is
+ * listed), or when an answerable question has no retrieval row.
  */
 export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 = DEFAULT_HIGH_F1 } = {}) => {
   // The agent surface retrieves with its planner's own plan (another top-K per
@@ -85,6 +86,21 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
   if ((answerReport.config?.surface ?? "rag") !== "rag") {
     throw new Error(
       `The funnel reads rag-surface answer reports only; this one is ${JSON.stringify(answerReport.config.surface)}, whose retrieval the retrieval report does not describe.`
+    );
+  }
+
+  // Two reports from before the retrieval settings were recorded show no
+  // difference, and nothing shows they agree either: joining them would be a guess.
+  const unrecorded = [
+    ["answer", answerReport],
+    ["retrieval", retrievalReport],
+  ]
+    .filter(([, report]) => !report.config?.retrieval || typeof report.config.retrieval !== "object")
+    .map(([name]) => name);
+
+  if (unrecorded.length > 0) {
+    throw new Error(
+      `The ${unrecorded.join(" and the ")} report did not record its retrieval settings (config.retrieval), so the two runs cannot be shown to share them; rerun it with the current eval.`
     );
   }
 
@@ -140,8 +156,17 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
 
   return {
     against: {
-      answers: { generatedAt: answerReport.generatedAt ?? null, gitSha: answerReport.config?.git?.sha ?? null, surface: answerReport.config?.surface ?? null },
-      retrieval: { generatedAt: retrievalReport.generatedAt ?? null, gitSha: retrievalReport.config?.git?.sha ?? null },
+      answers: {
+        dirty: answerReport.config?.git?.dirty ?? null,
+        generatedAt: answerReport.generatedAt ?? null,
+        gitSha: answerReport.config?.git?.sha ?? null,
+        surface: answerReport.config?.surface ?? null,
+      },
+      retrieval: {
+        dirty: retrievalReport.config?.git?.dirty ?? null,
+        generatedAt: retrievalReport.generatedAt ?? null,
+        gitSha: retrievalReport.config?.git?.sha ?? null,
+      },
     },
     answerable: {
       cases: answerable.length,
@@ -208,6 +233,15 @@ export const formatFunnelMarkdown = (funnel) => {
             .join("; ")}.`,
         ]
       : []),
+    // The recorded settings say nothing about uncommitted code.
+    ...Object.entries(funnel.against)
+      .filter(([, report]) => report.dirty !== false)
+      .map(
+        ([name, report]) =>
+          `The ${name === "answers" ? "answer" : "retrieval"} report ${
+            report.dirty === true ? "was written from a checkout with uncommitted changes" : "did not record whether its checkout was clean"
+          }; the recorded settings cannot vouch for its code.`
+      ),
     "",
   ];
 };

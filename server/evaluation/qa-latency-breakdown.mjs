@@ -382,6 +382,12 @@ const main = async () => {
   }
 
   const comparePath = getArgValue("--compare");
+
+  // A flag without its file would otherwise print the breakdown alone, as if nothing had been asked.
+  if (process.argv.includes("--compare") && (!comparePath || comparePath.startsWith("--"))) {
+    throw new Error("--compare takes the other run's events file.");
+  }
+
   const iterations = Number(getArgValue("--iterations") ?? 10000);
   const seed = Number(getArgValue("--seed") ?? 12345);
 
