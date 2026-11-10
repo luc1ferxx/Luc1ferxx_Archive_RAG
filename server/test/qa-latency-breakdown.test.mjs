@@ -92,6 +92,45 @@ test("traces of other routes are left out, calls of unknown stages are counted, 
   assert.throws(() => groupQaEvents([{ traceType: "agent" }]), /agent traces; the breakdown reads rag-surface runs/);
 });
 
+test("a failed question closes itself: its model calls are not the next question's", () => {
+  // chat() names the route only after it returned, so the trace of a failed question has none.
+  const events = [
+    call("embed_query", { inputTokens: 10, latencyMs: 10 }),
+    call("complete_text", { errorName: "Error", latencyMs: 700, status: "error" }),
+    { error: "upstream failed", latencyMs: 720, routeMode: null, traceId: "failed" },
+    call("embed_query", { inputTokens: 10, latencyMs: 10 }),
+    call("complete_text", { inputTokens: 1000, latencyMs: 900, outputTokens: 40 }),
+    trace({ latencyMs: 915 }),
+  ];
+  const grouped = groupQaEvents(events);
+
+  assert.deepEqual([grouped.questions.length, grouped.failedTraces, grouped.otherTraces], [1, 1, 0]);
+  assert.deepEqual(
+    [grouped.questions[0].completion.calls, grouped.questions[0].completion.failedCalls, grouped.questions[0].embedding.calls, grouped.questions[0].routeMs],
+    [1, 0, 1, 5]
+  );
+
+  const summary = summarizeQaLatency(grouped);
+
+  assert.equal(summary.failedTraces, 1);
+  assert.match(formatLatencyMarkdown(summary).join("\n"), /1 failed question\(s\) were left out, with their model calls\./);
+});
+
+test("other model calls inside a question are said, and a file holding a gateway's events twice is refused", () => {
+  const withReranker = groupQaEvents([call("embed_query", { latencyMs: 10 }), call("cross_encoder_score", { latencyMs: 40 }), trace({ latencyMs: 60 })]);
+  const summary = summarizeQaLatency(withReranker);
+
+  assert.equal(summary.answered.otherModelCalls, 1);
+  assert.match(formatLatencyMarkdown(summary).join("\n"), /1 other model call\(s\) \(a reranker, for example\) ran inside these questions; their time is under the route's own work\./);
+
+  const mirror = call("complete_text", { annotations: [{ id: "model_gateway_mirror" }], latencyMs: 900 });
+  const metered = call("complete_text", { annotations: [{ id: "model_gateway_metered" }], latencyMs: 900 });
+
+  // The caller's mirror alone is the only record of the call and is read.
+  assert.equal(groupQaEvents([mirror, trace({ latencyMs: 910 })]).questions[0].completion.calls, 1);
+  assert.throws(() => groupQaEvents([mirror, metered, trace({ latencyMs: 910 })]), /both the model gateway's metered events and the callers' mirrors/);
+});
+
 test("the summary splits answered from refused questions and reports percentiles, shares and tokens", () => {
   const summary = summarizeQaLatency(groupQaEvents(buildEvents()));
 
@@ -149,7 +188,8 @@ test("the Markdown names every stage and, with prices, the cost", () => {
   // 30 of 3540 ms is 0.85%, which one decimal may print either way.
   assert.match(plain, /Share of the answered questions' time: answer model 98\.9%, query embedding 0\.[89]%, the route 0\.3%\./);
   assert.match(plain, /Tokens per answered question: input p50 2500 \/ p95 2500 \/ max 2500, output p50 150 \/ p95 150 \/ max 150/);
-  assert.match(plain, /Ingest: 2 documents, 60 chunks, 6000 embedding tokens, 12 s of embedding calls\./);
+  assert.match(plain, /Ingest: 2 document embedding call\(s\), 60 chunks, 6000 embedding tokens, 12 s of embedding calls\./);
+  assert.doesNotMatch(plain, /other model call|failed question/);
   assert.match(plain, /Failed model calls: 1 in questions, 0 in the ingest; their time is counted\./);
   assert.doesNotMatch(plain, /Cost at/);
 
@@ -157,7 +197,15 @@ test("the Markdown names every stage and, with prices, the cost", () => {
     summarizeQaLatency(grouped, { chatPrice: { input: 2, output: 10 }, embeddingPrice: { input: 0.1 } })
   ).join("\n");
 
-  assert.match(priced, /Cost at \$2 \/ \$10 per million chat input \/ output tokens and \$0\.1 per million embedding tokens: \$5\.002 per 1,000 answered questions, \$0\.004 per 1,000 refused, \$3\.336 per 1,000 questions at this run's answer rate; ingest \$0\.3 per 1,000 documents\./);
+  assert.match(priced, /Cost at \$2 \/ \$10 per million chat input \/ output tokens and \$0\.1 per million embedding tokens: \$5\.002 per 1,000 answered questions, \$0\.004 per 1,000 refused, \$3\.336 per 1,000 questions at this run's answer rate; ingest \$0\.3 per 1,000 document embedding calls\./);
+
+  // A group without questions has no cost to print, not "$null".
+  const refusedPriced = formatLatencyMarkdown(
+    summarizeQaLatency(groupQaEvents(buildEvents().slice(5, 8)), { chatPrice: { input: 2, output: 10 }, embeddingPrice: { input: 0.1 } })
+  ).join("\n");
+
+  assert.match(refusedPriced, /: n\/a per 1,000 answered questions, \$0\.004 per 1,000 refused, \$0\.004 per 1,000 questions at this run's answer rate; ingest n\/a per 1,000 document embedding calls\./);
+  assert.doesNotMatch(refusedPriced, /null/);
 
   // Nothing answered: the answered rows read n/a instead of failing.
   const refusedOnly = formatLatencyMarkdown(summarizeQaLatency(groupQaEvents(buildEvents().slice(5, 8)))).join("\n");
@@ -349,6 +397,9 @@ test("the command reads a JSONL file, skips broken lines and names what it refus
       [["--events", herePath, "--compare", path.join(tempRoot, "missing.jsonl")], /missing\.jsonl/],
       [["--events", herePath, "--compare"], /--compare takes the other run's events file/],
       [["--events", herePath, "--compare", "--json"], /--compare takes the other run's events file/],
+      [["--events", herePath, "--compare="], /--compare takes the other run's events file/],
+      [["--events", herePath, "--skip", "5"], /--skip 5 leaves none of the 5 questions/],
+      [["--events", herePath, "--chat-price", ",4", "--embedding-price", "0.02"], /--chat-price takes <input>,<output>/],
     ]) {
       const refused = run(args);
 

@@ -74,6 +74,9 @@ export const groupQaEvents = (events) => {
   const ingest = { chunks: 0, documents: 0, ...emptyCalls() };
   let pending = { completion: emptyCalls(), embedding: emptyCalls(), other: 0 };
   let otherTraces = 0;
+  let failedTraces = 0;
+  let sawGatewayMirror = false;
+  let sawGatewayMetered = false;
 
   for (const event of events) {
     if (event?.traceType === "agent") {
@@ -81,6 +84,11 @@ export const groupQaEvents = (events) => {
     }
 
     if (event?.traceType === "llmops") {
+      const annotations = Array.isArray(event.annotations) ? event.annotations.map((annotation) => annotation?.id) : [];
+
+      sawGatewayMirror ||= annotations.includes("model_gateway_mirror");
+      sawGatewayMetered ||= annotations.includes("model_gateway_metered");
+
       if (event.stage === "embed_documents") {
         addCall(ingest, event);
         ingest.documents += 1;
@@ -96,7 +104,12 @@ export const groupQaEvents = (events) => {
       continue;
     }
 
-    if (typeof event?.routeMode !== "string") {
+    // A RAG trace closes a question whatever became of it. One that failed
+    // names no route (chat() sets it only after the route returned): its model
+    // calls are its own, not the next question's.
+    const failed = typeof event?.routeMode !== "string";
+
+    if (failed && typeof event?.traceId !== "string") {
       continue;
     }
 
@@ -110,9 +123,12 @@ export const groupQaEvents = (events) => {
         key: fingerprintQuestion(event.query),
         latencyMs: event.latencyMs,
         otherModelCalls: pending.other,
-        // Clamped: the calls are timed inside the question, but each on its own clock.
+        // Clamped: a question's query embeddings can run at the same time, so their
+        // durations may add up to more than the question took.
         routeMs: Math.max(0, event.latencyMs - modelMs),
       });
+    } else if (failed) {
+      failedTraces += 1;
     } else {
       otherTraces += 1;
     }
@@ -120,7 +136,15 @@ export const groupQaEvents = (events) => {
     pending = { completion: emptyCalls(), embedding: emptyCalls(), other: 0 };
   }
 
-  return { ingest, otherTraces, questions };
+  // A caller and the model gateway each log a gateway call (the caller's is the
+  // mirror): in one file every such call would count twice.
+  if (sawGatewayMirror && sawGatewayMetered) {
+    throw new Error(
+      "These events hold both the model gateway's metered events and the callers' mirrors of the same calls; give the events of one process."
+    );
+  }
+
+  return { failedTraces, ingest, otherTraces, questions };
 };
 
 const describeMs = (values) => ({
@@ -149,6 +173,7 @@ const describeGroup = (questions) => {
     failedCalls: sum(questions.map((question) => question.embedding.failedCalls + question.completion.failedCalls)),
     inputTokens: describeTokens(questions.map((question) => question.completion.inputTokens)),
     latencyMs: describeMs(questions.map((question) => question.latencyMs)),
+    otherModelCalls: sum(questions.map((question) => question.otherModelCalls)),
     outputTokens: describeTokens(questions.map((question) => question.completion.outputTokens)),
     questions: questions.length,
     routeMs: describeMs(questions.map((question) => question.routeMs)),
@@ -168,12 +193,16 @@ const costOf = (pricing, usage) => estimateLlmOpsCost({ pricing, usage }).estima
  * after dropping the first `skip` questions as warm-up. With prices, the cost
  * of 1,000 questions and of the ingest.
  */
-export const summarizeQaLatency = ({ ingest, otherTraces = 0, questions }, { chatPrice = null, embeddingPrice = null, skip = 0 } = {}) => {
+export const summarizeQaLatency = (
+  { failedTraces = 0, ingest, otherTraces = 0, questions },
+  { chatPrice = null, embeddingPrice = null, skip = 0 } = {}
+) => {
   const measured = questions.slice(skip);
   const answered = measured.filter((question) => !question.abstained);
   const refused = measured.filter((question) => question.abstained);
   const summary = {
     answered: describeGroup(answered),
+    failedTraces,
     ingest: {
       chunks: ingest.chunks,
       documents: ingest.documents,
@@ -306,6 +335,7 @@ const formatMsRow = (label, group, stats) =>
   `| ${label} | ${group.questions} | ${stats.p50 ?? "n/a"} | ${stats.p90 ?? "n/a"} | ${stats.p95 ?? "n/a"} | ${stats.max ?? "n/a"} |`;
 
 const formatShare = (value) => (value === null ? "n/a" : `${round(value * 100)}%`);
+const formatUsd = (value) => (value === null ? "n/a" : `$${value}`);
 
 /** The summary as Markdown lines. */
 export const formatLatencyMarkdown = (summary) => {
@@ -326,14 +356,20 @@ export const formatLatencyMarkdown = (summary) => {
     "",
     `Share of the answered questions' time: answer model ${formatShare(answered.timeShare.completion)}, query embedding ${formatShare(answered.timeShare.embedding)}, the route ${formatShare(answered.timeShare.route)}.`,
     `Tokens per answered question: input p50 ${answered.inputTokens.p50 ?? "n/a"} / p95 ${answered.inputTokens.p95 ?? "n/a"} / max ${answered.inputTokens.max ?? "n/a"}, output p50 ${answered.outputTokens.p50 ?? "n/a"} / p95 ${answered.outputTokens.p95 ?? "n/a"} / max ${answered.outputTokens.max ?? "n/a"}; query embedding ${answered.embeddingTokens.mean ?? "n/a"} tokens over ${answered.embeddingCalls ?? "n/a"} call(s) on average (refused: ${refused.embeddingTokens.mean ?? "n/a"} tokens over ${refused.embeddingCalls ?? "n/a"}).`,
-    `Ingest: ${summary.ingest.documents} documents, ${summary.ingest.chunks} chunks, ${summary.ingest.tokens} embedding tokens, ${summary.ingest.seconds} s of embedding calls.`,
+    `Ingest: ${summary.ingest.documents} document embedding call(s), ${summary.ingest.chunks} chunks, ${summary.ingest.tokens} embedding tokens, ${summary.ingest.seconds} s of embedding calls.`,
+    ...(answered.otherModelCalls + refused.otherModelCalls > 0
+      ? [
+          `${answered.otherModelCalls + refused.otherModelCalls} other model call(s) (a reranker, for example) ran inside these questions; their time is under the route's own work.`,
+        ]
+      : []),
+    ...(summary.failedTraces > 0 ? [`${summary.failedTraces} failed question(s) were left out, with their model calls.`] : []),
     ...(answered.failedCalls + refused.failedCalls + summary.ingest.failedCalls > 0
       ? [`Failed model calls: ${answered.failedCalls + refused.failedCalls} in questions, ${summary.ingest.failedCalls} in the ingest; their time is counted.`]
       : []),
     ...(summary.otherTraces > 0 ? [`${summary.otherTraces} trace(s) of another route were left out.`] : []),
     ...(summary.cost
       ? [
-          `Cost at $${summary.cost.chatPrice.input} / $${summary.cost.chatPrice.output} per million chat input / output tokens and $${summary.cost.embeddingPrice.input} per million embedding tokens: $${summary.cost.usdPer1000Answered} per 1,000 answered questions, $${summary.cost.usdPer1000Refused} per 1,000 refused, $${summary.cost.usdPer1000Questions} per 1,000 questions at this run's answer rate; ingest $${summary.cost.ingestUsdPer1000Documents} per 1,000 documents.`,
+          `Cost at $${summary.cost.chatPrice.input} / $${summary.cost.chatPrice.output} per million chat input / output tokens and $${summary.cost.embeddingPrice.input} per million embedding tokens: ${formatUsd(summary.cost.usdPer1000Answered)} per 1,000 answered questions, ${formatUsd(summary.cost.usdPer1000Refused)} per 1,000 refused, ${formatUsd(summary.cost.usdPer1000Questions)} per 1,000 questions at this run's answer rate; ingest ${formatUsd(summary.cost.ingestUsdPer1000Documents)} per 1,000 document embedding calls.`,
         ]
       : []),
     "",
@@ -357,9 +393,11 @@ const parsePrices = (name, value, count) => {
     return null;
   }
 
-  const numbers = String(value).split(",").map(Number);
+  const parts = String(value).split(",");
+  const numbers = parts.map(Number);
 
-  if (numbers.length !== count || numbers.some((number) => !Number.isFinite(number) || number < 0)) {
+  // Number("") is 0: an empty part is a missing price, not a free one.
+  if (numbers.length !== count || parts.some((part) => part.trim() === "") || numbers.some((number) => !Number.isFinite(number) || number < 0)) {
     throw new Error(`${name} takes ${count === 2 ? "<input>,<output>" : "<input>"} in USD per million tokens; got ${JSON.stringify(value)}.`);
   }
 
@@ -384,7 +422,7 @@ const main = async () => {
   const comparePath = getArgValue("--compare");
 
   // A flag without its file would otherwise print the breakdown alone, as if nothing had been asked.
-  if (process.argv.includes("--compare") && (!comparePath || comparePath.startsWith("--"))) {
+  if (process.argv.some((arg) => arg === "--compare" || arg.startsWith("--compare=")) && (!comparePath || comparePath.startsWith("--"))) {
     throw new Error("--compare takes the other run's events file.");
   }
 
@@ -408,6 +446,10 @@ const main = async () => {
 
   if (grouped.questions.length === 0) {
     throw new Error(`${eventsPath} holds no qa trace; run with RAG_OBSERVABILITY_ENABLED=true and RAG_OBSERVABILITY_EVENTS_PATH set.`);
+  }
+
+  if (skip >= grouped.questions.length) {
+    throw new Error(`--skip ${skip} leaves none of the ${grouped.questions.length} questions.`);
   }
 
   const summary = summarizeQaLatency(grouped, { chatPrice, embeddingPrice, skip });

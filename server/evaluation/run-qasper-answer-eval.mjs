@@ -505,6 +505,7 @@ const main = async () => {
   }
 
   const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
+  const { getEmbeddingModel } = await import("../rag/config.js");
   const config = {
     answerRateFlags: await describeAnswerRateFlags(),
     cases: caseCount,
@@ -512,7 +513,9 @@ const main = async () => {
     chunking: await describeChunkingConfig(),
     claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
     corpus: path.basename(corpusPath),
-    embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+    // The model the run embedded with (the default when the variable is unset), as
+    // eval:qasper-retrieval records it, so the two kinds of report can be compared.
+    embeddingModel: getEmbeddingModel(),
     ...(excluded ? { excluded } : {}),
     git,
     promptTemplates: await describePromptTemplates(),

@@ -128,6 +128,35 @@ test("a refusal by the answer model is a refusal, and no disagreement with the r
   assert.deepEqual(funnel.answerable.inconsistent, { context: 0, gate: 0 });
 });
 
+test("a run with the answer verdict on is said to be one, because its retried answers read other chunks", () => {
+  const { answers, retrieval } = buildReports();
+
+  assert.equal(buildQasperAnswerFunnel(answers, retrieval).verdictSeen, false);
+  answers.rows[4] = answerRow("q5", { abstained: true, abstainSource: "answer_model" });
+  assert.equal(buildQasperAnswerFunnel(answers, retrieval).verdictSeen, true);
+  assert.match(formatFunnelMarkdown(buildQasperAnswerFunnel(answers, retrieval)).join("\n"), /This run had the answer verdict on: an answer written after the verdict's deeper retrieval retry/);
+
+  const overridden = buildReports();
+
+  overridden.answers.rows[4].verdictOverridden = true;
+  assert.equal(buildQasperAnswerFunnel(overridden.answers, overridden.retrieval).verdictSeen, true);
+});
+
+test("the settings that must match are the retrieval's, the chunking's, the corpus, the embedding model and the query adapter", () => {
+  for (const [change, message] of [
+    [(config) => { config.chunking.size = 600; }, /chunking\.size/],
+    [(config) => { config.chunking.chunkerVersion = 1; }, /chunking\.chunkerVersion/],
+    [(config) => { config.retrieval.fusion = "weighted"; }, /retrieval\.fusion/],
+    [(config) => { config.embeddingModel = "text-embedding-3-small"; }, /embeddingModel: "nomic-embed-text" vs "text-embedding-3-small"/],
+    [(config) => { config.queryAdapter = "fingerprint-a"; }, /queryAdapter: null vs "fingerprint-a"/],
+  ]) {
+    const { answers, retrieval } = buildReports();
+
+    change(retrieval.config);
+    assert.throws(() => buildQasperAnswerFunnel(answers, retrieval), message);
+  }
+});
+
 test("rows the two runs disagree on are counted, not corrected", () => {
   const { answers, retrieval } = buildReports();
 
@@ -195,8 +224,9 @@ test("the Markdown names every stage, the refusal sources and the unanswerable q
   assert.match(markdown, /\| Answered, evidence in the context \| 2 \| 0\.3333 \| 2 \| 0 \| 0\.4 \| 1 \| 1 \|/);
   assert.match(markdown, /Refusals by source: gate 2\./);
   assert.match(markdown, /Unanswerable questions: 1 of 2 refused, 1 answered\./);
-  assert.match(markdown, /The reports differ in git\.sha \("answers-sha" vs "retrieval-sha"\)\./);
+  assert.match(markdown, /The reports differ, or cannot be shown to match, in git\.sha \("answers-sha" vs "retrieval-sha"\)\./);
   assert.doesNotMatch(markdown, /disagree/);
+  assert.doesNotMatch(markdown, /answer verdict/);
   // Both reports came from a clean checkout.
   assert.doesNotMatch(markdown, /checkout/);
 });
@@ -238,6 +268,13 @@ test("the command prints the funnel, or its JSON, and names what it refuses", as
     assert.equal(json.status, 0, json.stderr);
     assert.equal(JSON.parse(json.stdout).highF1, 0.9);
     assert.equal(JSON.parse(json.stdout).answerable.cases, 6);
+
+    for (const args of [[answersPath, retrievalPath, "--high-f1"], [answersPath, retrievalPath, "--high-f1", "--json"]]) {
+      const missing = run(args);
+
+      assert.notEqual(missing.status, 0);
+      assert.match(missing.stderr, /--high-f1 takes a number in \(0, 1\]/);
+    }
 
     const badBar = run([answersPath, retrievalPath, "--high-f1", "2"]);
 

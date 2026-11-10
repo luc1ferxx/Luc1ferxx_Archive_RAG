@@ -15,6 +15,17 @@
 // answer model was actually given a fair chance on. Only ids, flags and
 // scores are read, never a prediction.
 //
+// Whether the evidence was among the candidates comes from the retrieval
+// report alone (an answer row does not record it), so that stage is as good as
+// the match between the two runs' retrieval. Two things can break the match
+// without showing as a settings difference: on the local index the sparse
+// statistics span everything the run ingested, which can change the candidates
+// when top-K is below the dense pool (top-K 6 picks from the dense top 8;
+// from top-K 8 on the candidates are the dense top-K whatever was ingested);
+// and with RAG_QA_ANSWER_VERDICT on, an answer written after the verdict's
+// deeper retrieval retry read chunks the retrieval report does not describe.
+// The second is said in the output when the report shows the verdict was on.
+//
 // Usage:
 //   node evaluation/qasper-answer-funnel.mjs <answers report.json> <retrieval report.json>
 //     [--high-f1 0.5] [--json]
@@ -197,6 +208,9 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
       cases: unanswerable.length,
       refused: unanswerable.filter((row) => !readAnswered(row)).length,
     },
+    // The report does not record RAG_QA_ANSWER_VERDICT; a refusal by the answer
+    // model, or an overridden one, shows it was on.
+    verdictSeen: answerReport.rows.some((row) => row.abstainSource === "answer_model" || row.verdictOverridden === true),
   };
 };
 
@@ -228,9 +242,14 @@ export const formatFunnelMarkdown = (funnel) => {
       : []),
     ...(funnel.configDifferences.length > 0
       ? [
-          `The reports differ in ${funnel.configDifferences
+          `The reports differ, or cannot be shown to match, in ${funnel.configDifferences
             .map(({ current, field, other }) => `${field} (${JSON.stringify(current)} vs ${JSON.stringify(other)})`)
             .join("; ")}.`,
+        ]
+      : []),
+    ...(funnel.verdictSeen
+      ? [
+          "This run had the answer verdict on: an answer written after the verdict's deeper retrieval retry read other chunks than the retrieval report describes, so it may sit in the wrong stage and count as a disagreement.",
         ]
       : []),
     // The recorded settings say nothing about uncommitted code.
@@ -272,7 +291,14 @@ const main = async () => {
     throw new Error("Usage: qasper-answer-funnel.mjs <answers report.json> <retrieval report.json> [--high-f1 0.5] [--json]");
   }
 
-  const highF1 = Number(getArgValue("--high-f1") ?? DEFAULT_HIGH_F1);
+  const highF1Value = getArgValue("--high-f1");
+
+  // The flag without its number would otherwise run with the default, unasked.
+  if (args.some((arg) => arg === "--high-f1" || arg.startsWith("--high-f1=")) && (!highF1Value || highF1Value.startsWith("--"))) {
+    throw new Error("--high-f1 takes a number in (0, 1].");
+  }
+
+  const highF1 = Number(highF1Value ?? DEFAULT_HIGH_F1);
 
   if (!Number.isFinite(highF1) || highF1 <= 0 || highF1 > 1) {
     throw new Error(`--high-f1 must be a number in (0, 1]; got ${JSON.stringify(getArgValue("--high-f1"))}.`);
