@@ -100,7 +100,7 @@ flowchart LR
 | `cd server && bash scripts/run-pgvector-integration.sh` | 在一次性 PostgreSQL 上跑数据库集成测试（用本机装的 PostgreSQL 和 pgvector，不用 Docker） |
 | `cd server && npm run verify:quality` | 用真实模型检查问答、对比和拒答 |
 | `cd server && npm run quality:current` | PR 质量门禁（只检查当前提交的评测报告，要先跑评测） |
-| `cd server && npm run eval:qasper-retrieval` / `eval:qasper-answers` | QASPER 证据召回 / 答案 F1（先下载 QASPER 并用 `corpus:qasper` 生成语料） |
+| `cd server && npm run eval:qasper-retrieval` / `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024 npm run eval:qasper-answers` | QASPER 证据召回 / 答案 F1（先下载 QASPER 并用 `corpus:qasper` 生成语料；答案评测从 2026-11-10 起用温度 0 加上限 1024） |
 | `cd server && npm run funnel:qasper-answers` / `latency:qa` / `label:answers` | 读上面两项写下的报告和事件，不调模型：每道题卡在哪一步 / 一次问答的时间和 token 拆分 / 人工标注页 |
 | `cd server && npm run vector:index -- status` | 查看索引版本 |
 
