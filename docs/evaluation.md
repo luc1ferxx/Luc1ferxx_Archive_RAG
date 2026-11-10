@@ -1678,6 +1678,48 @@ train 上（400 题）的损失拆解：
 - 它不说明温度 0 的答案质量。那要按新规则另做一轮，样本还要排除 `latest-qasper-answers-temp-default.json`。
 - 被截断的散文答案原样保留，评测按作答计分。要不要把被截断的回复改成拒答，留到下一轮看数据再定。
 
+### 答案温度 0 重测：带输出上限（`RAG_ANSWER_TEMPERATURE` + `RAG_ANSWER_MAX_TOKENS`，2026-11-10，规则先于运行）
+
+**为什么**：上一轮（“答案温度设为 0”）的 Z1 卡在一道题上，规则无从判定。现在答案调用有了输出上限（上一节），最坏情况是约 20 秒后返回一个带标记的截断答案。这一轮回答上一轮没答出的问题：温度 0 能不能去掉 1.0 下约 0.01 的 F1 噪声，同时不降低质量、不经常截断。
+
+**改了什么**：代码不改，只测设置。
+
+**样本与环境**：
+- dev，`--exclude-report latest-qasper-answers-citations.json --exclude-report latest-qasper-answers-tk-B.json --exclude-report latest-qasper-answers-temp-default.json --cases 200 --seed 1`：181 可答 / 19 不可答 / 136 篇，`--list-cases` 离线复现过。第三个报告是上一轮的 B，它用掉了上一份干净样本；上一节的机制检查只跑了那份样本的前 24 题，也在排除范围里。
+- 排除这三份报告后 dev 还剩 316 题，这一轮再用掉 200 题，之后只剩 116 题没用过。
+- rag 面，qwen2.5:7b + nomic-embed-text，Ollama 0.34.4（`OLLAMA_CONTEXT_LENGTH=8192`），local 索引，一次问一题，机器醒着、接电源。
+- 环境变量用 `env -i` 白名单加 `DOTENV_CONFIG_PATH=/dev/null`，再加 `RAG_OBSERVABILITY_ENABLED=true` 和按臂命名的事件路径。
+
+**臂**：三臂都设 `RAG_ANSWER_MAX_TOKENS=1024`（字段 `max_tokens`），只有温度不同。
+- Z：设 `RAG_ANSWER_TEMPERATURE=0`，跑两次（Z1、Z2）。
+- B：不设温度（端点默认 1.0），跑一次。
+- 顺序 Z1、B、Z2，每臂各起一个新的 Ollama 进程。B 夹在中间，延迟比较里机器的漂移两边对称。
+- 报告名 `latest-qasper-answers-tz-z1`、`latest-qasper-answers-tz-b`、`latest-qasper-answers-tz-z2`。
+
+**规则**（配对 bootstrap 10000 次、seed 12345，按题）：
+- (z1) 可复现：Z1 和 Z2 的作答集合相同，且两次都作答的题里至少 98% 的答案逐字相同。
+- (z2) 质量没有检出下降：Z1 − B 的官方 F1（200 题）和两次都作答的可答题 F1（`answeredBothF1`），配对区间上界都 ≥ 0。
+- (z3) 在 `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024` 下 `verify:quality` 18/18（它也含对比答案）。在 Z2 之后、同一个 Ollama 进程里跑，其余变量同 CI 的真实模型评测。
+- (z4) 截断少：Z1、Z2 各自被上限截断的答案（报告的 `summary.answerTruncations` 两项之和）不超过 200 题的 2%，即最多 4 题。截断的题每题多花约 20 秒，返回的是重复的长文本；超过这个比例，去掉的噪声抵不上它带来的坏答案和延迟。
+- 截断怎么计分：按应用的实际行为。被截断的散文答案原样当作作答计分；一个字都没写就被截断的算拒答（`output_limit`）。
+- 只记录、不裁决：
+  - 作答数、不可回答题被回答数；
+  - 可答题 F1（拒答记 0）、按类型的 F1、引用和上下文证据召回；
+  - Z2 − B，看 z2 的结论是否只靠 Z1；
+  - B 的截断数（预计 0）、答案长度；
+  - QA 路线延迟（`latency:qa --compare`，B 对 Z1、对 Z2 各一次）。
+
+**判定**：
+- 四条都过：答案侧评测口径固定 `RAG_ANSWER_TEMPERATURE=0` 加 `RAG_ANSWER_MAX_TOKENS=1024`（文档里的 `eval:qasper-answers` 命令，以及以后的答案侧比较）。configuration.md 建议：接受温度参数的部署设 0 时必须同时设上限。
+- 应用默认值不变，两个变量都不设。CI 真实模型评测的答案样本只报告、不裁决，这一轮不动。
+- 任何一条不过：口径不改，结果照记。
+
+**没测、先写下**：
+- 只测 qwen2.5:7b 和 Ollama；托管模型在温度 0 下也不保证逐字可复现。
+- Agent 面没测；对比答案只靠 `verify:quality` 里的几道题。
+- 上限只试了 1024 一个值。
+- 这一轮用掉这份样本；下一次答案侧确认要再排除这一轮的报告，dev 只剩 116 题。
+
 ### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
 
 **改了什么**：pdf.js 每个视觉行给一个换行，一段话折成几行，切块器就把每一行当成一个单元。`PDF_PARAGRAPH_DETECTION` 按行的几何信息切段落、把段内软换行并回去（规则见 docs/configuration.md）。只改 pdf.js 路径，Docling 和切块器不变。
