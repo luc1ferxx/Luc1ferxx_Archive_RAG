@@ -1611,6 +1611,34 @@ train 上（400 题）的损失拆解：
 
 **没测、要主动说的**：一台机器、一个本地 7B 模型、串行，没有并发和排队；延迟是 QA 路线进程内的数字，Agent `/chat` 路径（规划、自检、定稿，每个请求还有数据库往返）没有在真实模型下拆过；local 索引、单篇文档，pgvector 的检索时间引用的是另一个基准；成本只有公式和示意单价，没有真实账单；漏斗的“证据”是标注的段落，答对但引了别的段落的情况它分不出来；四次运行都是同一个 200 题样本，这个样本上一轮用过，这一节只测量、不做选择，所以没有再抽新样本；标注页和评审输入给人和给评审的参考不完全一样（标注为不可回答的题，页面列出每位标注者的答案，评审输入的参考答案是空；证据段落页面最多 6 段），校准评审之前要先对齐。
 
+### 答案温度设为 0（`RAG_ANSWER_TEMPERATURE`，2026-11-10，规则先于运行）
+
+**为什么**：上一节发现应用不传 temperature，Ollama 按端点默认的 1.0 采样。同一设置、同一批题重复跑，作答集合逐题相同，官方 F1 却在 0.2046–0.2146 之间来回，和多数改动想检出的效应一样大。温度 0（贪心解码）应当去掉这份噪声，但也可能改变答案质量。这一轮把这两件事量出来，再决定答案评测是否固定用温度 0。
+
+**改了什么**：新增 `RAG_ANSWER_TEMPERATURE`（0–2），只加在文档答案的三种调用上（单文档问答、它的抽取式模式、对比）。默认不设、不发送，请求和以前逐字节相同；值不合法时答案调用直接报错，不会悄悄按默认值采样。`eval:qasper-answers` 记为 `config.answerTemperature`，`compare:qasper-answers` 比较时会列出它的差别（没有这个字段的旧报告按“没发送”算，那时应用从不发送）。**应用默认值不在这一轮的决定范围内**：有的模型只接受默认温度（例如 OpenAI 的推理模型），默认发送会让这些部署的请求失败。所以这一轮只决定评测口径，并给能用温度 0 的部署一条建议。
+
+**样本与环境**：dev，`--exclude-report latest-qasper-answers-citations.json --exclude-report latest-qasper-answers-tk-B.json --cases 200 --seed 1`：182 可答 / 18 不可答 / 148 篇，是 AGENTS.md 留给下一次答案侧确认的干净样本，`--list-cases` 离线复现过。rag 面，qwen2.5:7b + nomic-embed-text，Ollama 0.34.4（`OLLAMA_CONTEXT_LENGTH=8192`），local 索引，一次问一题，机器醒着。环境变量同上一节（`env -i` 白名单加 `DOTENV_CONFIG_PATH=/dev/null`），加 `RAG_OBSERVABILITY_ENABLED=true` 和按臂命名的事件路径。
+
+**臂**：Z 设 `RAG_ANSWER_TEMPERATURE=0`，跑两次（Z1、Z2）；B 不设（端点默认 1.0），跑一次。顺序是 Z1、B、Z2，每次各起一个新的 Ollama 进程：上一节发现同一进程里后跑的一臂会复用前一臂的提示缓存。B 夹在中间，机器越跑越慢的漂移在延迟比较里两边对称。报告名 `latest-qasper-answers-temp0-1`、`latest-qasper-answers-temp-default`、`latest-qasper-answers-temp0-2`。
+
+**规则**（配对 bootstrap 10000 次、seed 12345，按题）：
+- (z1) 可复现：Z1 和 Z2 的作答集合相同，且两次都作答的题里至少 98% 的答案逐字相同。
+- (z2) 质量没有检出下降：Z1 − B 的官方 F1（200 题）和两次都作答的可答题 F1（`answeredBothF1`），配对区间上界都 ≥ 0。
+- (z3) `RAG_ANSWER_TEMPERATURE=0` 下 `verify:quality` 18/18（它也含对比答案）。在 Z2 之后同一个 Ollama 进程里跑，其余变量同 CI 的真实模型评测。
+- 照记不裁决：
+  - 作答数和不可回答题被回答数。门控是确定性的，三次应当相同，不同就说明还有别的东西在变。
+  - 可答题 F1（拒答记 0）、按类型的 F1、引用和上下文证据召回。
+  - Z2 − B，看 z2 的结论是否只靠 Z1。
+  - 答案长度（输出 token）和 QA 路线延迟（`latency:qa --compare`，B 对 Z1、对 Z2 各一次）。
+
+**判定**：三条都过，答案侧评测从此固定 `RAG_ANSWER_TEMPERATURE=0`，包括 `eval:qasper-answers` 的文档命令和以后的答案侧比较。configuration.md 建议接受温度参数的部署（例如本地 Ollama）设 0，应用默认仍不设。z1 不过：温度 0 去不掉噪声，口径不改，照记。z2 或 z3 不过：口径不改，照记。
+
+**没测、先写下**：
+- 只在 qwen2.5:7b 和 Ollama 上测。托管模型在温度 0 下也不保证逐字可复现（服务端批处理）。
+- Agent 面没测。
+- 对比答案只靠 `verify:quality` 里的几道题。
+- 这次用掉了这份干净样本；下一次答案侧确认要再排除这一轮的报告。
+
 ### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
 
 **改了什么**：pdf.js 每个视觉行给一个换行，一段话折成几行，切块器就把每一行当成一个单元。`PDF_PARAGRAPH_DETECTION` 按行的几何信息切段落、把段内软换行并回去（规则见 docs/configuration.md）。只改 pdf.js 路径，Docling 和切块器不变。

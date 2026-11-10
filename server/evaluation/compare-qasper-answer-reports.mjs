@@ -32,7 +32,8 @@ export const readAnswered = (row) =>
 // scalar settings, the answer-rate flags and the prompt set (a prompt version
 // is this project's usual A/B, and RAG_QA_ANSWER_VERDICT shows only there).
 const COMPARED_CONFIG_FIELDS = Object.freeze([
-  ...["surface", "corpus", "chatModel", "embeddingModel", "queryAdapter", "claimJudge", "cases", "seed", "answerRateFlags"].map(
+  // answerTemperature: a report from before the field ran without one, as null says.
+  ...["surface", "corpus", "chatModel", "embeddingModel", "queryAdapter", "claimJudge", "answerTemperature", "cases", "seed", "answerRateFlags"].map(
     (field) => [field, (config) => config?.[field]]
   ),
   ["promptTemplates.setHash", (config) => config?.promptTemplates?.setHash],

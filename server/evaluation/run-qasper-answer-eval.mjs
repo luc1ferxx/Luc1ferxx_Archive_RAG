@@ -244,7 +244,7 @@ const formatMarkdown = (report) => {
         ]
       : []),
     `- Answers through the verdict override (RAG_QA_VERDICT_OVERRIDE): answerable ${summary.verdictOverrides?.answeredAnswerable ?? 0}, unanswerable ${summary.verdictOverrides?.answeredUnanswerable ?? 0}`,
-    `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}`,
+    `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}; answer temperature: ${report.config.answerTemperature ?? "not sent (the endpoint's default)"}`,
     ...(report.config.excluded
       ? [
           `- Sampled after excluding the ${report.config.excluded.excludedIds} questions of ${describeExcludedReports(report.config.excluded, (name) => "`" + name + "`")} (ids digest ${report.config.excluded.excludedIdsDigest.slice(0, 12)})`,
@@ -505,9 +505,11 @@ const main = async () => {
   }
 
   const { getQueryAdapterReportFingerprint } = await import("../rag/query-adapter.js");
-  const { getEmbeddingModel } = await import("../rag/config.js");
+  const { getAnswerTemperature, getEmbeddingModel } = await import("../rag/config.js");
   const config = {
     answerRateFlags: await describeAnswerRateFlags(),
+    // RAG_ANSWER_TEMPERATURE; null: none sent, the endpoint's default applied.
+    answerTemperature: getAnswerTemperature(),
     cases: caseCount,
     chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
     chunking: await describeChunkingConfig(),
