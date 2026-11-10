@@ -3,6 +3,7 @@ import {
   createPromptTemplate,
 } from "../lib/prompt-template.js";
 import {
+  getAnswerTemperature,
   getMaxComparisonSources,
   getPromptVersion,
   getQaVerdictOverrideMode,
@@ -1351,6 +1352,7 @@ const writeProseQaAnswer = async ({
       await completeText(prompt, {
         ...drafts?.completionOptions,
         promptTemplate: qaPrompt.descriptor,
+        ...answerTemperatureOption(),
       })
     ),
     { allowedText }
@@ -1432,6 +1434,15 @@ const evidenceQuoteSchema = (sourceRanks) =>
     quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
     source: { enum: sourceRanks, type: "integer" },
   });
+
+// RAG_ANSWER_TEMPERATURE on the three document answer calls (QA prose, QA
+// extractive, comparison): sent only when set, so by default the request is
+// what it always was and the endpoint's default applies.
+const answerTemperatureOption = () => {
+  const temperature = getAnswerTemperature();
+
+  return temperature === null ? {} : { temperature };
+};
 
 // The completion options of a structured call: its response format, or
 // nothing when no block was shown (an empty `source` enum is no schema).
@@ -1757,6 +1768,7 @@ export const writeComparisonAnswer = async ({
   const structuredOutputEnabled = isComparisonStructuredOutputEnabled();
   const completion = await completeText(selectedPrompt, {
     promptTemplate: comparisonPrompt.descriptor,
+    ...answerTemperatureOption(),
     ...(structuredOutputEnabled
       ? structuredResponseFormatOptions(bundle, buildComparisonStructuredResponseFormat)
       : {}),
@@ -2072,6 +2084,7 @@ const writeExtractiveQaAnswer = async (call) => {
   const qaPrompt = selectPrompt(QA_EXTRACTIVE_PROMPTS);
   const completion = await completeText(qaPrompt.render(blocks), {
     promptTemplate: qaPrompt.descriptor,
+    ...answerTemperatureOption(),
     ...structuredResponseFormatOptions(bundle, buildQaExtractiveResponseFormat),
   });
   const rendered = renderExtractiveQaAnswer({

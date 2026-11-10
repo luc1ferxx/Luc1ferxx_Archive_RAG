@@ -1052,6 +1052,28 @@ export const getClaimJudgeTemperature = () => {
     : null;
 };
 
+// RAG_ANSWER_TEMPERATURE: sampling temperature of the document answer calls
+// (single-document QA, its extractive mode and comparison). Unset (default)
+// sends none, so the endpoint's default applies (1.0 on Ollama's and OpenAI's
+// chat endpoints), because some models accept only their default (OpenAI's
+// reasoning models, for example). A value outside 0..2 refuses the call instead
+// of being dropped, so a run that meant 0 cannot quietly sample at 1.
+export const getAnswerTemperature = () => {
+  const rawValue = process.env.RAG_ANSWER_TEMPERATURE;
+
+  if (!hasEnvValue(rawValue)) {
+    return null;
+  }
+
+  const parsedValue = Number(rawValue.trim());
+
+  if (!Number.isFinite(parsedValue) || parsedValue < 0 || parsedValue > 2) {
+    throw new Error(`RAG_ANSWER_TEMPERATURE must be a number from 0 to 2; got ${JSON.stringify(rawValue)}.`);
+  }
+
+  return parsedValue;
+};
+
 // AGENT_SINGLE_DOCUMENT_ROUTING: the deterministic intent rules stop sending
 // single-document questions to a Skill on incidental wording (comparison words
 // with one selected document and no other document named, "sequence" inside a
