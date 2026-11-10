@@ -6,6 +6,9 @@ name: Real Model Eval
 #   - verify:quality: the 18 end-to-end checks against a real model (blocking);
 #   - QASPER dev evidence recall on a fixed 200-question sample (blocking below
 #     the floor; 0.655 when the floor was set);
+#   - a probe that the endpoint honours the answer output limit: one request
+#     with a limit of 8 tokens must stop for length (blocking, before the
+#     answer sample);
 #   - QASPER dev answers on a small sample (report only: a 7B model on a CPU
 #     runner answers about one question a minute), under the answer-side
 #     protocol: temperature 0 with the 1024-token answer limit.
@@ -102,6 +105,16 @@ jobs:
 
       - name: QASPER evidence recall
         run: npm run eval:qasper-retrieval -- --corpus evaluation/generated/qasper-dev.json --cases 200 --min-hit-at-all 0.6
+
+      - name: Check the answer output limit
+        if: env.QASPER_ANSWER_CASES != '0'
+        # The answer step's limit holds only if Ollama honours the field it
+        # travels in (0.34.4 honours max_tokens and ignores
+        # max_completion_tokens), so every run checks the version pinned
+        # above: one request with a limit of 8 tokens must stop for length
+        # within 8. Otherwise the job fails here, in seconds, before a greedy
+        # reply can run to the request timeout.
+        run: npm run probe:output-limit
 
       - name: QASPER answers
         if: env.QASPER_ANSWER_CASES != '0'

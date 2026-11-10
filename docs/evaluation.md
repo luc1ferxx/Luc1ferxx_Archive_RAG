@@ -616,6 +616,7 @@ npm run rerank:cross-encoder:local
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20\|all] [--granularity paragraph\|section]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式。默认按段落切"页"：摘要是第 1 页，之后每个段落一页并带上所在章节的标题，证据精确到被标注的段落；`section` 按整节切，长节里任何一块都算命中，召回会偏高。保留所有标注者的答案（官方 F1 取最优），不可回答题成为 `shouldAbstain`，证据只在图表里的题跳过。输出默认在已忽略的 `evaluation/generated/`。 |
 | `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024 npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`。2026-11-10 起答案侧评测固定温度 0 加输出上限 1024（见“答案温度 0 重测：带输出上限”）；之前的答案报告除 24 题的机制检查（`latest-qasper-answers-cap-smoke`）外都是端点默认 1.0、无上限，`compare:qasper-answers` 会列出这两项差别。 |
+| `npm run probe:output-limit [-- --max-tokens 8] [--json]` | 检查模型端点认不认答案的输出上限。经应用自己的对话客户端发一个请求，端点、模型、字段都按答案调用的设置，要的回复远长于上限 8 token。结果按退出码区分：回复在上限内因长度停下算认（0）；超过上限算不认（1）；请求失败、设置不对，或回复在上限内自己结束，算没有结论（2）。只打印结束原因、token 数、字段、模型和端点主机，不打印回复。真实模型 CI 在答题前跑它。见“答案输出上限”。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
 | `npm run label:answers -- --report <答案报告.json> --corpus <QASPER 语料.json>` | 不调模型。为答案报告里每道作答的题生成人工标注页（自包含 HTML，结论用评审的判定词表，可导出成 `eval:judge --labels` 读的形状）和同一批题的 `eval:judge` 输入。见“默认配置的答案漏斗、延迟和 token”。 |
 | `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json>` | 不调模型。把 rag 面的答案报告和同一设置的检索报告按题拼起来，每道可回答题归到一档：证据不在候选里、在候选里但拒答、作答但证据不在上下文里、作答且证据在上下文里。 |
@@ -1677,6 +1678,13 @@ train 上（400 题）的损失拆解：
 - 上限把这类请求的最坏情况，从约 8 分钟后失败，压到约 20 秒后返回一个被截断、带标记的答案。
 - 它不说明温度 0 的答案质量。那要按新规则另做一轮，样本还要排除 `latest-qasper-answers-temp-default.json`。
 - 被截断的散文答案原样保留，评测按作答计分。要不要把被截断的回复改成拒答，留到下一轮看数据再定。
+
+**检查端点认不认上限**（2026-11-10 补）：
+- **命令**：上面机制检查里手发的那个请求，现在是一条命令 `npm run probe:output-limit`（`evaluation/probe-output-limit.mjs`，测试 `test/output-limit-probe.test.mjs`）。它经应用自己的对话客户端发一个“数到 200”的请求，上限 8；端点、模型、字段、超时都和答案调用一样。
+- **本机 Ollama 0.34.4**：
+  - `max_tokens`：写 8 个 token 后因长度停下，通过；
+  - `max_completion_tokens`：写了 723 个 token 后自己结束，不通过。
+- **为什么放进 CI**：真实模型 CI 按答案侧口径的第一次运行（2026-11-10）没有一个答案碰到上限，所以看不出它固定的 Ollama 0.40.3 认不认 `max_tokens`。从此 CI 在答题前先跑这个检查，不认就在这一步失败。
 
 ### 答案温度 0 重测：带输出上限（`RAG_ANSWER_TEMPERATURE` + `RAG_ANSWER_MAX_TOKENS`，2026-11-10，规则先于运行）
 

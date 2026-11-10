@@ -3,7 +3,8 @@ import { guardModelCall, MODEL_CALL_LANES } from "./model-call-guard.js";
 
 const EMBEDDING_BATCH_SIZE = 512;
 
-const resolveBaseUrl = () => {
+// Exported for evaluation/probe-output-limit.mjs, which names the host it probed.
+export const resolveBaseUrl = () => {
   const envUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE;
   if (envUrl) return envUrl.replace(/\/+$/, "");
   return "https://api.openai.com/v1";

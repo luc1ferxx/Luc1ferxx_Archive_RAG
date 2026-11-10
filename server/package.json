@@ -42,6 +42,7 @@
     "funnel:qasper-answers": "node evaluation/qasper-answer-funnel.mjs",
     "latency:qa": "node evaluation/qa-latency-breakdown.mjs",
     "label:answers": "node evaluation/build-answer-labeling.mjs",
+    "probe:output-limit": "node evaluation/probe-output-limit.mjs",
     "eval:unified-graph-planner": "node evaluation/run-unified-graph-planner-eval.mjs",
     "eval:sparse-scoring": "node evaluation/run-sparse-scoring-eval.mjs",
     "eval:semantic-cache": "node evaluation/run-semantic-cache-eval.mjs",
