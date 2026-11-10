@@ -110,10 +110,12 @@ jobs:
         if: env.QASPER_ANSWER_CASES != '0'
         # The answer step's limit holds only if Ollama honours the field it
         # travels in (0.34.4 honours max_tokens and ignores
-        # max_completion_tokens), so every run checks the version pinned
-        # above: one request with a limit of 8 tokens must stop for length
-        # within 8. Otherwise the job fails here, in seconds, before a greedy
-        # reply can run to the request timeout.
+        # max_completion_tokens), so every run that answers checks the
+        # version pinned above: one request with a limit of 8 tokens must stop
+        # for length within 8. Otherwise the job fails here once that
+        # unlimited reply has ended (723 tokens on 0.34.4; on this runner
+        # probably a minute or two, not measured). Without this step, every
+        # attempt of a runaway answer would wait out the request timeout.
         run: npm run probe:output-limit
 
       - name: QASPER answers

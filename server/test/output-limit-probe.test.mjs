@@ -1,7 +1,9 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,8 +20,8 @@ import {
 // holds only if the endpoint honours the field it travels in, and Ollama
 // ignores max_completion_tokens. These tests pin the verdicts, the request it
 // sends (the app's own chat client, so the answer calls' field and endpoint),
-// that nothing is sent on a bad argument or setting, and that neither the reply
-// nor the key is ever printed.
+// that nothing is sent on a bad argument or setting, how failures are told
+// apart, and that neither the reply nor a secret is ever printed.
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const probeScript = path.join(serverDirectory, "evaluation", "probe-output-limit.mjs");
@@ -31,6 +33,7 @@ const ENVIRONMENT_KEYS = [
   "OPENAI_CHAT_MODEL",
   "RAG_LLM_MAX_TOKENS_FIELD",
   "RAG_LLM_REQUEST_TIMEOUT_MS",
+  "RAG_LLM_CIRCUIT_FAILURE_THRESHOLD",
 ];
 const REPLY_SENTINEL = "SENTINEL-REPLY-TEXT";
 const API_KEY = "probe-test-key";
@@ -97,7 +100,9 @@ const completion = ({ finishReason, completionTokens }) => ({
     : { usage: { prompt_tokens: 20, completion_tokens: completionTokens, total_tokens: 20 + completionTokens } }),
 });
 
-const stubEndpoint = (reply) => {
+// `buildRequest` builds a Request first, as Node's fetch does, so a header
+// value or URL that fetch would refuse throws the error fetch would throw.
+const stubEndpoint = (reply, { buildRequest = false } = {}) => {
   globalThis.fetch = async (url, options) => {
     const request = {
       url: String(url),
@@ -106,6 +111,10 @@ const stubEndpoint = (reply) => {
     };
 
     requests.push(request);
+
+    if (buildRequest) {
+      new Request(url, options);
+    }
 
     if (reply instanceof Error) {
       throw reply;
@@ -133,13 +142,14 @@ const runProbe = async (argv = []) => {
   return run;
 };
 
-test("a reply is judged by its finish reason and its token count against the limit", () => {
+test("a reply is judged by its finish reason and the endpoint's token count against the limit", () => {
   const cases = [
     [{ finishReason: "length", completionTokens: 8 }, { verdict: "honoured", reason: "stopped_for_length" }],
     [{ finishReason: "length", completionTokens: 5 }, { verdict: "honoured", reason: "stopped_for_length" }],
+    // Without a count, a stop for length may have been the endpoint's own limit.
     [
       { finishReason: "length", completionTokens: null },
-      { verdict: "honoured", reason: "stopped_for_length_without_token_count" },
+      { verdict: "no_verdict", reason: "stopped_for_length_without_token_count" },
     ],
     [{ finishReason: "length", completionTokens: 2048 }, { verdict: "not_honoured", reason: "stopped_at_another_limit" }],
     [{ finishReason: "stop", completionTokens: 185 }, { verdict: "not_honoured", reason: "finished_past_limit" }],
@@ -185,7 +195,7 @@ test("a reply that stops for length within the limit passes, sent as the answer 
   });
   assert.equal(
     run.output,
-    `Output limit honoured: the reply stopped for length after 8 tokens (limit 8 sent as max_tokens, model probe-model, endpoint ${host}).\n`
+    `Output limit honoured: the reply stopped for length after 8 tokens (limit 8 in max_tokens, model probe-model, endpoint ${host}).\n`
   );
 });
 
@@ -208,7 +218,7 @@ test("max_completion_tokens against an endpoint that ignores it fails, as with O
   assert.equal(
     run.output,
     [
-      `Output limit NOT honoured: the reply finished on its own ("stop") after 185 tokens, past the limit (limit 8 sent as max_completion_tokens, model probe-model, endpoint ${host}).`,
+      `Output limit NOT honoured: the reply finished on its own ("stop") after 185 tokens, past the limit (limit 8 in max_completion_tokens, model probe-model, endpoint ${host}).`,
       "Answer calls would run without a limit here; the endpoint may read the other field (RAG_LLM_MAX_TOKENS_FIELD: max_tokens or max_completion_tokens).\n",
     ].join(" ")
   );
@@ -225,7 +235,7 @@ test("a reply cut at a longer limit of the endpoint's own fails", async () => {
   assert.match(run.output, /^Output limit NOT honoured: the reply stopped for length after 2048 tokens, past the limit, so at a limit of the endpoint's own \(/);
 });
 
-test("a reply that ends on its own within the limit, or without a token count, gives no verdict", async () => {
+test("a reply that ends on its own within the limit, or comes without a token count, gives no verdict", async () => {
   useEndpoint();
   stubEndpoint({ payload: completion({ finishReason: "stop", completionTokens: 3 }) });
 
@@ -243,14 +253,15 @@ test("a reply that ends on its own within the limit, or without a token count, g
   assert.equal(uncounted.result.reason, "finished_without_token_count");
   assert.equal(uncounted.result.completionTokens, null);
 
-  // Stopping for length is the endpoint's own word that the limit applied.
+  // An endpoint that ignores the field and stops at a cap of its own without
+  // reporting usage would look the same, so a stop for length alone passes nothing.
   stubEndpoint({ payload: completion({ finishReason: "length" }) });
 
   const lengthOnly = await runProbe();
 
-  assert.equal(lengthOnly.exitCode, 0);
+  assert.equal(lengthOnly.exitCode, 2);
   assert.equal(lengthOnly.result.reason, "stopped_for_length_without_token_count");
-  assert.match(lengthOnly.output, /^Output limit honoured: the reply stopped for length; the endpoint reported no token count \(/);
+  assert.match(lengthOnly.output, /^No verdict: the reply stopped for length, but the endpoint reported no token count, so the stop may have been a limit of its own \(/);
 });
 
 test("--max-tokens sets the limit and --json prints the result as it was judged", async () => {
@@ -270,10 +281,10 @@ test("--max-tokens sets the limit and --json prints the result as it was judged"
 
   assert.equal(inline.exitCode, 0);
   assert.equal(requests[1].body.max_tokens, 12);
-  assert.match(inline.output, /after 12 tokens \(limit 12 sent as max_tokens,/);
+  assert.match(inline.output, /after 12 tokens \(limit 12 in max_tokens,/);
 });
 
-test("a failed request gives no verdict, once, with the status and the endpoint's message", async () => {
+test("a failed request gives no verdict, once: the endpoint's status and message, or only the name and code of an error before any answer", async () => {
   const host = useEndpoint();
 
   stubEndpoint({ status: 404, payload: { error: { message: 'model "probe-model" not found' } } });
@@ -286,18 +297,24 @@ test("a failed request gives no verdict, once, with the status and the endpoint'
   assert.equal(missing.result.status, 404);
   assert.equal(
     missing.output,
-    `No verdict: the request failed with HTTP 404: model "probe-model" not found (limit 8 sent as max_tokens, model probe-model, endpoint ${host}).\n`
+    `No verdict: the endpoint answered HTTP 404: model "probe-model" not found (limit 8 in max_tokens, model probe-model, endpoint ${host}).\n`
   );
 
-  stubEndpoint(new TypeError("fetch failed"));
+  const refused = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:11434"), { code: "ECONNREFUSED" });
+
+  stubEndpoint(Object.assign(new TypeError("fetch failed"), { cause: refused }));
 
   const unreachable = await runProbe();
 
   assert.equal(unreachable.exitCode, 2);
   assert.equal(unreachable.result.status, null);
-  assert.match(unreachable.output, /^No verdict: the request failed: fetch failed \(limit 8 sent as max_tokens,/);
+  assert.equal(unreachable.result.code, "ECONNREFUSED");
+  assert.equal(
+    unreachable.output,
+    `No verdict: the request failed before the endpoint answered (TypeError ECONNREFUSED); check that the endpoint is reachable and that OPENAI_BASE_URL and OPENAI_API_KEY are well formed (limit 8 in max_tokens, model probe-model, endpoint ${host}).\n`
+  );
 
-  // A long error is cut, so an endpoint cannot flood the log.
+  // A long message from the endpoint is cut, so it cannot flood the log.
   stubEndpoint({ status: 500, payload: { error: { message: "x".repeat(1000) } } });
 
   const long = await runProbe();
@@ -306,10 +323,74 @@ test("a failed request gives no verdict, once, with the status and the endpoint'
   assert.ok(long.result.error.endsWith("…"));
 });
 
+test("a refusal by the model-call guard says that nothing was sent, not an HTTP status", async () => {
+  const host = useEndpoint({ RAG_LLM_CIRCUIT_FAILURE_THRESHOLD: "1" });
+
+  stubEndpoint({ status: 503, payload: { error: { message: "busy" } } });
+
+  const unavailable = await runProbe();
+
+  assert.equal(unavailable.result.status, 503);
+
+  // The failure opened the endpoint's circuit: the next call never leaves the process.
+  const refusal = await runProbe();
+
+  assert.equal(requests.length, 1);
+  assert.equal(refusal.exitCode, 2);
+  assert.deepEqual(
+    { reason: refusal.result.reason, status: refusal.result.status, code: refusal.result.code },
+    { reason: "refused_by_guard", status: null, code: "CIRCUIT_OPEN" }
+  );
+  assert.equal(
+    refusal.output,
+    `No verdict: the model-call guard refused the request (CIRCUIT_OPEN); nothing was sent (limit 8 in max_tokens, model probe-model, endpoint ${host}).\n`
+  );
+});
+
+test("an error message never carries the key or the base URL's credentials", async () => {
+  // fetch quotes a header value it refuses (here a key with a line break in it) ...
+  useEndpoint({ OPENAI_API_KEY: "sk-DUMMY-KEY-PART-ONE\nsk-DUMMY-KEY-PART-TWO" });
+  stubEndpoint({ payload: completion({ finishReason: "length", completionTokens: 8 }) }, { buildRequest: true });
+
+  const badHeader = await runProbe(["--json"]);
+
+  assert.equal(badHeader.exitCode, 2);
+  assert.equal(badHeader.result.error, "TypeError");
+  assert.doesNotMatch(badHeader.output, /DUMMY-KEY/);
+
+  // ... and the whole URL, user name and password included, for a URL with credentials.
+  useEndpoint({ OPENAI_BASE_URL: "https://proxyuser:S3CRET%40PASSWORD@llm-proxy.invalid/v1" });
+  stubEndpoint({ payload: completion({ finishReason: "length", completionTokens: 8 }) }, { buildRequest: true });
+
+  const credentialUrl = await runProbe(["--json"]);
+
+  assert.equal(credentialUrl.exitCode, 2);
+  assert.equal(credentialUrl.result.endpointHost, "llm-proxy.invalid");
+  assert.doesNotMatch(credentialUrl.output, /proxyuser|S3CRET/);
+
+  // An endpoint's own message keeps its text, with the secrets removed.
+  useEndpoint({ OPENAI_BASE_URL: "https://proxyuser:S3CRET%40PASSWORD@llm-proxy.invalid/v1" });
+  stubEndpoint({
+    status: 401,
+    payload: { error: { message: `Incorrect API key provided: ${API_KEY} (proxy login proxyuser / S3CRET@PASSWORD)` } },
+  });
+
+  const echoed = await runProbe();
+
+  assert.equal(echoed.exitCode, 2);
+  assert.equal(
+    echoed.output,
+    "No verdict: the endpoint answered HTTP 401: Incorrect API key provided: [redacted] (proxy login [redacted] / [redacted]) (limit 8 in max_tokens, model probe-model, endpoint llm-proxy.invalid).\n"
+  );
+});
+
 test("a bad argument or setting refuses the probe before any request", async () => {
   const refusals = [
     { argv: ["--max-tokens", "0"], message: /--max-tokens must be a positive integer/ },
     { argv: ["--max-tokens", "eight"], message: /--max-tokens must be a positive integer/ },
+    // Values the client would drop without a word, so the request would carry no limit.
+    { argv: ["--max-tokens", "1e21"], message: /no larger than 9007199254740991/ },
+    { argv: ["--max-tokens", "9007199254740993"], message: /no larger than 9007199254740991/ },
     { argv: ["--max-tokens"], message: /--max-tokens requires a value/ },
     { argv: ["--max-tokens", "--verbose"], message: /--max-tokens requires a value/ },
     { argv: ["--verbose"], message: /Unknown argument "--verbose"; usage: probe-output-limit\.mjs/ },
@@ -343,7 +424,7 @@ test("a bad argument or setting refuses the probe before any request", async () 
   assert.equal(requests.length, 0);
 });
 
-test("as a command it reads only the given environment and exits with the verdict's code", { timeout: 60_000 }, async () => {
+test("as a command it reads only the given environment, exits with the verdict's code, also through a symlink and with shared state on", { timeout: 60_000 }, async () => {
   // A stand-in that, like Ollama, honours max_tokens and ignores max_completion_tokens.
   const server = createServer((request, response) => {
     let body = "";
@@ -364,10 +445,11 @@ test("as a command it reads only the given environment and exits with the verdic
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "output-limit-probe-"));
   const { port } = server.address();
-  const runCommand = (environment) =>
+  const runCommand = (environment, script = probeScript) =>
     new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [probeScript], {
+      const child = spawn(process.execPath, [script], {
         cwd: serverDirectory,
         // DOTENV_CONFIG_PATH keeps a developer's server/.env out of the run.
         env: {
@@ -392,27 +474,44 @@ test("as a command it reads only the given environment and exits with the verdic
       child.on("error", reject);
       child.on("close", (code) => resolve({ code, stdout, stderr }));
     });
+  const honouredLine = `Output limit honoured: the reply stopped for length after 8 tokens (limit 8 in max_tokens, model probe-model, endpoint 127.0.0.1:${port}).\n`;
 
   try {
     const honoured = await runCommand({});
 
     assert.equal(honoured.code, 0, honoured.stderr);
-    assert.equal(
-      honoured.stdout,
-      `Output limit honoured: the reply stopped for length after 8 tokens (limit 8 sent as max_tokens, model probe-model, endpoint 127.0.0.1:${port}).\n`
-    );
+    assert.equal(honoured.stdout, honouredLine);
+    assert.equal(honoured.stderr, "");
 
     const ignored = await runCommand({ RAG_LLM_MAX_TOKENS_FIELD: "max_completion_tokens" });
 
     assert.equal(ignored.code, 1, ignored.stderr);
     assert.match(ignored.stdout, /^Output limit NOT honoured: the reply finished on its own \("stop"\) after 185 tokens/);
+    assert.equal(ignored.stderr, "");
 
-    for (const run of [honoured, ignored]) {
+    // Through a symlink the command still runs: a silent exit 0 would read as "honoured".
+    const linked = path.join(scratch, "probe-link.mjs");
+
+    await symlink(probeScript, linked);
+
+    const throughLink = await runCommand({}, linked);
+
+    assert.equal(throughLink.code, 0, throughLink.stderr);
+    assert.equal(throughLink.stdout, honouredLine);
+
+    // With shared state on and no Redis to reach, the guard falls back to
+    // per-process state, and the command still exits once it has printed.
+    const shared = await runCommand({ RAG_SHARED_STATE: "redis", REDIS_URL: path.join(scratch, "no-redis.sock") });
+
+    assert.equal(shared.code, 0, shared.stderr);
+    assert.equal(shared.stdout, honouredLine);
+
+    for (const run of [honoured, ignored, throughLink, shared]) {
       assert.equal(run.stdout.includes(REPLY_SENTINEL), false);
       assert.equal(run.stdout.includes(API_KEY), false);
-      assert.equal(run.stderr, "");
     }
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await rm(scratch, { recursive: true, force: true });
   }
 });

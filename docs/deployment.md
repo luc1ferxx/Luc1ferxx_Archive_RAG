@@ -486,8 +486,8 @@ prometheus --config.file=/etc/prometheus/prometheus.example.yml
 - 四步评测：
   1. `verify:quality`：18 项端到端检查，任何一项阻断失败，整个 job 就失败；
   2. QASPER dev 抽样 200 题，测证据能否进入问答候选；召回低于 0.6 就失败（设定下限时实测为 0.655）；
-  3. 答题之前检查 Ollama 认不认输出上限：`npm run probe:output-limit` 发一个上限 8 token 的请求，回复必须在 8 个 token 内因长度停下，否则 job 在这一步失败。条件和答题那步相同，题数为 0 时一起跳过。答题那步的上限只有在 Ollama 认 `max_tokens` 时才管用。本机 0.34.4 认 `max_tokens`、不认 `max_completion_tokens`；CI 固定的版本从此每次运行都查一遍。不认的话几秒内就失败，不用等答案一直写到请求超时；
+  3. 答题之前检查 Ollama 认不认输出上限：`npm run probe:output-limit` 发一个上限 8 token 的请求，回复必须在 8 个 token 内因长度停下，否则 job 在这一步失败。条件和答题那步相同，题数为 0 时一起跳过。答题那步的上限只有在 Ollama 认 `max_tokens` 时才管用。本机 0.34.4 认 `max_tokens`、不认 `max_completion_tokens`；CI 固定的版本从此在每次答题的运行里都查一遍。不认的话，这一步要等探测的回复自己写完才失败（本机用 `max_completion_tokens` 时写了 723 个 token；CPU 上估计一两分钟，没测过），最多等一个请求超时。没有这一步，答题时遇到停不下来的回复，每次尝试都要等满请求超时，还要重试；
   4. QASPER dev 答题，默认 40 题，只出报告，不设门槛。CPU 上 7B 模型大约一分钟答一题。2026-11-10 起这一步按答案侧评测口径跑：`RAG_ANSWER_TEMPERATURE=0`、`RAG_ANSWER_MAX_TOKENS=1024`，只设在这一步上，前面的步骤仍用端点默认（见 evaluation.md“答案温度 0 重测：带输出上限”）。没有上限时，温度 0 下曾有一道题生成到每次重试都超时。
 - 报告作为 `real-model-eval` artifact 上传；前面的步骤失败也会上传。
 - 首次运行（2026-09-26）约 63 分钟通过：`verify:quality` 18/18，召回 0.655，和本机结果一致。
-- 答题第一次按新口径跑（2026-11-10，手动运行 42909240063，27 分钟）：全部通过。`verify:quality` 18/18，召回 0.775，和前一周逐项相同；答案报告记的是温度 0、上限 1024（`max_tokens`），截断 0。没有一个答案碰到上限，所以那次看不出 Ollama 0.40.3 认不认 `max_tokens`，于是加了第 3 步。
+- 答题第一次按新口径跑（2026-11-10，手动运行 42909240063，27 分钟）：全部通过。`verify:quality` 18/18，召回 0.775，和前一天（2026-11-09）的每周定时运行逐项相同；答案报告记的是温度 0、上限 1024（`max_tokens`），截断 0。没有一个答案碰到上限，所以那次看不出 Ollama 0.40.3 认不认 `max_tokens`，于是加了第 3 步。
