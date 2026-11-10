@@ -9,6 +9,7 @@ import {
   buildLabelExport,
   buildLabelingItems,
   countPossiblyTruncatedAnswers,
+  fingerprintLabelingItems,
   LEGACY_PREDICTION_LIMIT,
   MAX_EVIDENCE_PARAGRAPHS,
   mergeLabelExport,
@@ -142,6 +143,8 @@ test("an export holds the labelled answers in the judge's shape and keeps what w
 
   assert.deepEqual(exported, {
     exportedAt: "2026-11-10T00:00:00.000Z",
+    // This hand-made page data names no fingerprint.
+    fingerprint: null,
     items: [{ annotationIssue: true, id: first, note: "the reference is wrong", verdict: "incorrect" }],
     name: "run",
     source: { report: "report.json" },
@@ -180,28 +183,37 @@ test("an import restores an export, replaces the page's label for the same answe
   // The page already holds a verdict for the first answer and a label the file does not mention.
   const labels = { [first]: { verdict: "correct" }, [third]: { note: "kept", verdict: "incorrect" } };
 
-  assert.equal(mergeLabelExport(data, labels, JSON.parse(JSON.stringify(exported))), 2);
+  // Two entries taken; one of them changed a verdict the page held.
+  assert.deepEqual(mergeLabelExport(data, labels, JSON.parse(JSON.stringify(exported))), { replaced: 1, taken: 2 });
   assert.deepEqual(labels, {
     [first]: { annotationIssue: false, note: "", verdict: "partially_correct" },
     [second]: { annotationIssue: true, note: "cannot tell" },
     [third]: { note: "kept", verdict: "incorrect" },
   });
+  // The same file again changes nothing it would have to ask about.
+  assert.deepEqual(mergeLabelExport(data, labels, JSON.parse(JSON.stringify(exported))), { replaced: 0, taken: 2 });
 
   // An export written before `unlabeled` existed, or the judge's own label array wrapped in { items }.
   const older = {};
 
-  assert.equal(mergeLabelExport(data, older, { items: [{ id: first, verdict: "wrong_abstention" }] }), 1);
+  assert.deepEqual(mergeLabelExport(data, older, { items: [{ id: first, verdict: "wrong_abstention" }] }), { replaced: 0, taken: 1 });
   assert.deepEqual(older, { [first]: { annotationIssue: false, note: "", verdict: "wrong_abstention" } });
+
+  // A note without a verdict never takes away a verdict the page holds.
+  const judged = { [first]: { note: "mine", verdict: "correct" } };
+
+  assert.deepEqual(mergeLabelExport(data, judged, { items: [], unlabeled: [{ annotationIssue: true, id: first, note: "older note" }] }), { replaced: 0, taken: 0 });
+  assert.deepEqual(judged, { [first]: { note: "mine", verdict: "correct" } });
 
   // Skipped: an answer the page does not show, a verdict the judge does not know, an empty note.
   const untouched = {};
 
-  assert.equal(
+  assert.deepEqual(
     mergeLabelExport(data, untouched, {
       items: [{ id: "elsewhere", verdict: "correct" }, { id: first, verdict: "perfect" }, null],
       unlabeled: [{ id: second }, { annotationIssue: true, id: "elsewhere" }],
     }),
-    0
+    { replaced: 0, taken: 0 }
   );
   assert.deepEqual(untouched, {});
 
@@ -211,8 +223,19 @@ test("an import restores an export, replaces the page's label for the same answe
 
   // The verdicts an import accepts are exactly the judge's.
   for (const verdict of JUDGE_VERDICTS) {
-    assert.equal(mergeLabelExport(data, {}, { items: [{ id: first, verdict }] }), 1, verdict);
+    assert.equal(mergeLabelExport(data, {}, { items: [{ id: first, verdict }] }).taken, 1, verdict);
   }
+
+  // The export of a page built from other answers is refused whole; one that names no
+  // fingerprint (an older export) or the same one is read.
+  const fingerprinted = { ...data, fingerprint: "aaaa" };
+  const target = {};
+
+  assert.throws(() => mergeLabelExport(fingerprinted, target, { fingerprint: "bbbb", items: [{ id: first, verdict: "correct" }] }), /another report/);
+  assert.deepEqual(target, {});
+  assert.equal(mergeLabelExport(fingerprinted, {}, { fingerprint: "aaaa", items: [{ id: first, verdict: "correct" }] }).taken, 1);
+  assert.equal(mergeLabelExport(fingerprinted, {}, { items: [{ id: first, verdict: "correct" }] }).taken, 1);
+  assert.equal(buildLabelExport(fingerprinted, {}, "t").fingerprint, "aaaa");
 });
 
 const readEmbeddedData = (html) =>
@@ -224,7 +247,17 @@ test("the page embeds the items as data no answer can break out of, and its scri
 
   // The hostile answer is still there as data, and closed no element: the page
   // has its two script elements and nothing else.
-  assert.deepEqual(readEmbeddedData(html), { items, name: "sample<run>", source: { report: "report.json" } });
+  assert.deepEqual(readEmbeddedData(html), {
+    adoptLegacyLabels: false,
+    fingerprint: fingerprintLabelingItems(items),
+    items,
+    name: "sample<run>",
+    source: { report: "report.json" },
+  });
+  // The fingerprint follows the answers shown, and their order.
+  assert.match(fingerprintLabelingItems(items), /^[0-9a-f]{16}$/);
+  assert.notEqual(fingerprintLabelingItems(items), fingerprintLabelingItems(items.map((item) => ({ ...item, answer: `${item.answer}!` }))));
+  assert.notEqual(fingerprintLabelingItems(items), fingerprintLabelingItems([...items].reverse()));
   assert.equal(html.match(/<\/script>/g).length, 2);
   assert.equal(html.includes("alert(1)</script>"), false);
   assert.match(html, /<title>答案标注 · sample&lt;run&gt;<\/title>/);
@@ -245,13 +278,16 @@ test("the page embeds the items as data no answer can break out of, and its scri
 
 // The page's own script, run against a stand-in for the few DOM and browser
 // APIs it uses, so the tests below drive what a person's browser would run.
-const openPage = (html, { storage = new Map(), failingStorage = false } = {}) => {
+const openPage = (html, { confirmAnswer = true, failingStorage = false, storage = new Map() } = {}) => {
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   const alerts = [];
+  const confirms = [];
   const downloads = [];
+  const windowListeners = {};
   const createElement = (attributes = {}) => {
     const listeners = {};
     const element = {
+      blurred: 0,
       checked: false,
       children: [],
       files: [],
@@ -264,6 +300,9 @@ const openPage = (html, { storage = new Map(), failingStorage = false } = {}) =>
       appendChild: (child) => {
         element.children.push(child);
         return child;
+      },
+      blur: () => {
+        element.blurred += 1;
       },
       click: () => (element.download ? downloads.push({ href: element.href, name: element.download }) : element.fire("click")),
       fire: (type, event = {}) => listeners[type]?.({ preventDefault() {}, target: element, ...event }),
@@ -312,8 +351,14 @@ const openPage = (html, { storage = new Map(), failingStorage = false } = {}) =>
   document.getElementById("labeling-data").textContent = html.match(/<script type="application\/json" id="labeling-data">([\s\S]*?)<\/script>/)[1];
 
   const window = {
-    addEventListener: () => {},
+    addEventListener: (type, handler) => {
+      windowListeners[type] = handler;
+    },
     alert: (message) => alerts.push(message),
+    confirm: (message) => {
+      confirms.push(message);
+      return confirmAnswer;
+    },
     getComputedStyle: () => ({ position: "fixed" }),
     scrollTo: () => {},
   };
@@ -348,14 +393,17 @@ const openPage = (html, { storage = new Map(), failingStorage = false } = {}) =>
   return {
     alerts,
     blobs,
+    confirms,
     downloads,
+    // What another tab's save looks like from this one.
+    fireStorage: (key) => windowListeners.storage?.({ key }),
     get,
     importFile: (text) => {
       get("import").files = [{ text }];
       get("import").fire("change");
     },
     pressed: () => verdictButtons.filter((button) => button.getAttribute("aria-pressed") === "true").map((button) => button.getAttribute("data-verdict")),
-    press: (key, target = body) => documentListeners.keydown({ key, preventDefault() {}, target }),
+    press: (key, target = body, extra = {}) => documentListeners.keydown({ key, preventDefault() {}, target, ...extra }),
     stored: () => [...storage.values()].map((value) => JSON.parse(value)),
     storage,
     verdictButtons,
@@ -383,8 +431,22 @@ test("the page labels with the keyboard, keeps the labels in the browser and res
   page.press("1");
   assert.equal(page.get("progress").textContent, "第 2 / 3 条，已标 1 条");
   assert.equal(page.get("question").textContent, second.question);
-  assert.deepEqual([...page.storage.keys()], ["answer-labels:run"]);
+  // The key names the page and the answers it shows.
+  assert.deepEqual([...page.storage.keys()], [`answer-labels:run:${fingerprintLabelingItems(items)}`]);
   assert.deepEqual(page.stored(), [{ [first.id]: { verdict: "correct" } }]);
+
+  // A key held down repeats: it labels nothing further. Neither does a key that an input method is composing with.
+  page.press("1", undefined, { repeat: true });
+  page.press("2", undefined, { repeat: true });
+  page.press("f", undefined, { repeat: true });
+  page.press("3", undefined, { isComposing: true });
+  assert.equal(page.get("progress").textContent, "第 2 / 3 条，已标 1 条");
+  assert.deepEqual(page.stored(), [{ [first.id]: { verdict: "correct" } }]);
+  // The arrows may repeat.
+  page.press("ArrowLeft", undefined, { repeat: true });
+  assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 1 条");
+  page.press("ArrowRight", undefined, { repeat: true });
+  assert.equal(page.get("progress").textContent, "第 2 / 3 条，已标 1 条");
 
   // "It is a refusal" becomes the abstention verdict the annotation implies.
   page.press("4");
@@ -412,6 +474,13 @@ test("the page labels with the keyboard, keeps the labels in the browser and res
   assert.deepEqual(page.stored()[0][first.id], { annotationIssue: true, note: "the second reference is wrong", verdict: "correct" });
   page.verdictButtons[1].fire("click");
   assert.equal(page.stored()[0][first.id].verdict, "partially_correct");
+  // A clicked button gives up the focus, so Space or Enter cannot press it again on the next answer.
+  assert.equal(page.verdictButtons[1].blurred, 1);
+  page.get("next").fire("click");
+  page.get("previous").fire("click");
+  page.get("previous").fire("click");
+  assert.deepEqual([page.get("next").blurred, page.get("previous").blurred], [1, 2]);
+  assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 3 条");
 
   // Reopened on the same storage, the page has everything back.
   const reopened = openPage(html, { storage: page.storage });
@@ -427,8 +496,10 @@ test("the page jumps to the next unlabelled answer, and a browser that cannot st
   const items = buildPageItems();
   const html = renderLabelingPage({ items, name: "run", source: { report: "report.json" } });
   const [first, second, third] = items;
+  const fingerprint = fingerprintLabelingItems(items);
+  const key = `answer-labels:run:${fingerprint}`;
   // Stored text that is not JSON is ignored, not fatal.
-  const page = openPage(html, { failingStorage: true, storage: new Map([["answer-labels:run", "{not json"]]) });
+  const page = openPage(html, { failingStorage: true, storage: new Map([[key, "{not json"]]) });
 
   assert.equal(page.get("progress").textContent, "第 1 / 3 条，已标 0 条");
   page.press("ArrowRight");
@@ -452,9 +523,13 @@ test("the page jumps to the next unlabelled answer, and a browser that cannot st
   assert.match(exported.exportedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(
     { ...exported, exportedAt: "t" },
-    buildLabelExport({ items, name: "run", source: { report: "report.json" } }, { [second.id]: { verdict: "partially_correct" }, [third.id]: { annotationIssue: true } }, "t")
+    buildLabelExport(
+      { fingerprint, items, name: "run", source: { report: "report.json" } },
+      { [second.id]: { verdict: "partially_correct" }, [third.id]: { annotationIssue: true } },
+      "t"
+    )
   );
-  assert.deepEqual([exported.items.length, exported.unlabeled.length], [1, 1]);
+  assert.deepEqual([exported.items.length, exported.unlabeled.length, exported.fingerprint], [1, 1, fingerprint]);
 
   // Imported into a fresh page, the session is back and saved.
   const fresh = openPage(html);
@@ -470,8 +545,111 @@ test("the page jumps to the next unlabelled answer, and a browser that cannot st
   fresh.importFile("not json");
   fresh.importFile(JSON.stringify({ rows: [] }));
   fresh.importFile(JSON.stringify({ items: [{ id: "elsewhere", verdict: "correct" }] }));
-  assert.deepEqual(fresh.alerts, ["这个文件不是导出的标注。", "这个文件不是导出的标注。", "这个文件里没有这一页答案的标注。"]);
+  fresh.importFile(JSON.stringify({ fingerprint: "of-another-report", items: [{ id: second.id, verdict: "correct" }] }));
+  assert.deepEqual(fresh.alerts, [
+    "这个文件不是导出的标注。",
+    "这个文件不是导出的标注。",
+    "这个文件里没有这一页答案的标注。",
+    "这个文件是另一份报告的标注，不能导入这一页。",
+  ]);
   assert.equal(fresh.get("progress").textContent, "第 1 / 3 条，已标 1 条");
+  assert.deepEqual(fresh.confirms, []);
+
+  // A file that would change a verdict the page holds asks first; a no leaves everything as it was.
+  const changed = JSON.stringify({ fingerprint, items: [{ id: second.id, verdict: "incorrect" }, { id: first.id, verdict: "correct" }] });
+  const careful = openPage(html, { confirmAnswer: false, storage: fresh.storage });
+
+  careful.importFile(changed);
+  assert.deepEqual(careful.confirms, ["文件里有 1 条结论与这一页现有的不同。用文件里的覆盖吗？"]);
+  assert.equal(careful.stored()[0][second.id].verdict, "partially_correct");
+  assert.equal(careful.stored()[0][first.id], undefined);
+
+  const agreeing = openPage(html, { storage: fresh.storage });
+
+  agreeing.importFile(changed);
+  assert.equal(agreeing.confirms.length, 1);
+  assert.deepEqual([agreeing.stored()[0][second.id].verdict, agreeing.stored()[0][first.id].verdict], ["incorrect", "correct"]);
+  assert.equal(agreeing.get("progress").textContent, "第 1 / 3 条，已标 2 条");
+
+  // Stored JSON that is not a label map is not used as one, and saving still works.
+  const odd = openPage(html, { storage: new Map([[key, "[]"]]) });
+
+  assert.equal(odd.get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  odd.press("1");
+  assert.deepEqual(odd.stored(), [{ [first.id]: { verdict: "correct" } }]);
+});
+
+test("two tabs of the page do not roll each other back", () => {
+  const items = buildPageItems();
+  const html = renderLabelingPage({ items, name: "run", source: {} });
+  const key = `answer-labels:run:${fingerprintLabelingItems(items)}`;
+  const [first, second, third] = items;
+  const storage = new Map();
+  const tabA = openPage(html, { storage });
+  const tabB = openPage(html, { storage });
+
+  tabA.press("1");
+  // The other tab was opened before that label and does not show it yet.
+  assert.equal(tabB.get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  tabB.press("ArrowRight");
+  tabB.press("3");
+  // Its save changes its own answer and keeps the first tab's label.
+  assert.deepEqual(JSON.parse(storage.get(key)), { [first.id]: { verdict: "correct" }, [second.id]: { verdict: "incorrect" } });
+  assert.equal(tabB.get("progress").textContent, "第 3 / 3 条，已标 2 条");
+
+  // The first tab hears of that save and shows it, staying on its answer.
+  tabA.fireStorage("some-other-key");
+  assert.equal(tabA.get("progress").textContent, "第 2 / 3 条，已标 1 条");
+  tabA.fireStorage(key);
+  assert.equal(tabA.get("progress").textContent, "第 2 / 3 条，已标 2 条");
+  assert.deepEqual(tabA.pressed(), ["incorrect"]);
+
+  // A tab whose own saves fail keeps what it holds instead of taking older stored labels over it.
+  const stuck = openPage(html, { failingStorage: true, storage });
+
+  stuck.press("2");
+  assert.equal(stuck.get("warning").style.display, "block");
+  storage.set(key, JSON.stringify({ [first.id]: { verdict: "correct" }, [second.id]: { verdict: "incorrect" }, [third.id]: { verdict: "correct" } }));
+  stuck.press("2");
+  stuck.get("export").fire("click");
+  assert.equal(stuck.downloads.length, 1);
+  assert.equal(stuck.get("progress").textContent, "第 3 / 3 条，已标 2 条");
+});
+
+test("labels stay with the answers they were made on, and an earlier build's labels are taken over only when asked", () => {
+  const items = buildPageItems();
+  const [first] = items;
+  const html = renderLabelingPage({ items, name: "run", source: {} });
+  const key = `answer-labels:run:${fingerprintLabelingItems(items)}`;
+  const page = openPage(html);
+
+  page.press("1");
+
+  // The page rebuilt under the same name from another run's answers starts clean.
+  const rerun = items.map((item) => ({ ...item, answer: `${item.answer} (another run)` }));
+  const rebuilt = openPage(renderLabelingPage({ items: rerun, name: "run", source: {} }), { storage: page.storage });
+
+  assert.equal(rebuilt.get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  rebuilt.press("3");
+  assert.equal(page.storage.size, 2);
+  assert.deepEqual(JSON.parse(page.storage.get(key)), { [first.id]: { verdict: "correct" } });
+
+  // Labels saved by a build from before the key named the answers sit under the name alone.
+  const legacy = new Map([["answer-labels:run", JSON.stringify({ [first.id]: { note: "from the first build", verdict: "incorrect" } })]]);
+
+  assert.equal(openPage(html, { storage: legacy }).get("progress").textContent, "第 1 / 3 条，已标 0 条");
+  assert.equal(legacy.size, 1);
+
+  const adopting = openPage(renderLabelingPage({ adoptLegacyLabels: true, items, name: "run", source: {} }), { storage: legacy });
+
+  assert.equal(adopting.get("progress").textContent, "第 1 / 3 条，已标 1 条");
+  assert.deepEqual(adopting.pressed(), ["incorrect"]);
+  assert.equal(adopting.get("note").value, "from the first build");
+  // Taken over once: saved under the new key, and what is saved there since wins.
+  assert.deepEqual(JSON.parse(legacy.get(key)), { [first.id]: { note: "from the first build", verdict: "incorrect" } });
+  adopting.press("1");
+  legacy.set("answer-labels:run", JSON.stringify({}));
+  assert.deepEqual(openPage(renderLabelingPage({ adoptLegacyLabels: true, items, name: "run", source: {} }), { storage: legacy }).pressed(), ["correct"]);
 });
 
 test("the command writes the page and the judge input, and names what it refuses", async () => {
@@ -496,6 +674,13 @@ test("the command writes the page and the judge input, and names what it refuses
     const judgeInput = JSON.parse(await readFile(path.join(outDirectory, "latest-run-judge-input.json"), "utf8"));
 
     assert.equal(page.name, "latest-run");
+    assert.equal(page.adoptLegacyLabels, false);
+    assert.match(page.fingerprint, /^[0-9a-f]{16}$/);
+
+    const adopting = run(["--report", reportPath, "--corpus", corpusPath, "--out", outDirectory, "--name", "adopting", "--adopt-legacy-labels"]);
+
+    assert.equal(adopting.status, 0, adopting.stderr);
+    assert.equal(readEmbeddedData(await readFile(path.join(outDirectory, "adopting.html"), "utf8")).adoptLegacyLabels, true);
     assert.deepEqual(page.source, { corpus: "corpus.json", generatedAt: "2026-11-10T00:00:00.000Z", gitSha: "abc123", report: "latest-run.json", seed: 1 });
     assert.deepEqual(judgeInput.items.map((item) => item.id), page.items.map((item) => item.id));
     assert.deepEqual(judgeInput.source, page.source);

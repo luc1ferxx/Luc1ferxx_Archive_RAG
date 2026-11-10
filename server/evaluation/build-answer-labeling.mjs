@@ -9,7 +9,8 @@
 // of the judge's verdicts. Abstentions are left out: their verdict follows
 // from the annotation alone.
 //
-// The page keeps labels in the browser (localStorage) and exports them as
+// The page keeps labels in the browser (localStorage, under a key that names
+// the page and a fingerprint of its answers) and exports them as
 // { items: [{ id, verdict, annotationIssue, note }], unlabeled: [...] }: `items`
 // is the shape --labels of eval:judge reads (every entry has a verdict), and
 // `unlabeled` keeps the note or annotation flag of an answer that got no
@@ -19,8 +20,11 @@
 // Usage:
 //   node evaluation/build-answer-labeling.mjs --report <answers report.json> --corpus <qasper corpus.json>
 //     [--out evaluation/generated/labeling] [--name <report file name>] [--seed 1]
+//     [--adopt-legacy-labels]   (a rebuild of a page generated before 2026-11-10
+//                                takes over the labels that page saved)
 // Writes <out>/<name>.html and <out>/<name>-judge-input.json.
 
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -180,36 +184,49 @@ export function buildLabelExport(data, labels, exportedAt) {
     }
   });
 
-  return { exportedAt: exportedAt, items: labelled, name: data.name, source: data.source, unlabeled: unlabeled };
+  return {
+    exportedAt: exportedAt,
+    fingerprint: data.fingerprint || null,
+    items: labelled,
+    name: data.name,
+    source: data.source,
+    unlabeled: unlabeled,
+  };
 }
 
 /**
- * Reads an export back into `labels` and returns how many entries it took. An
- * entry of the file replaces the label the page holds for that answer; entries
- * for answers the page does not show, or with a verdict the judge does not
- * know, are skipped. Throws when the file is not an export.
+ * Reads an export back into `labels` and returns { taken, replaced }: how many
+ * entries it took, and how many of them changed a verdict the page already
+ * held. A labelled entry of the file replaces the page's label for that
+ * answer; a note without a verdict never takes a verdict away. Entries for
+ * answers the page does not show, or with a verdict the judge does not know,
+ * are skipped. Throws "not a label export" for another kind of file and
+ * "another report" for the export of a page built from other answers.
  */
 export function mergeLabelExport(data, labels, payload) {
   var verdicts = ["correct", "partially_correct", "incorrect", "correct_abstention", "wrong_abstention"];
   var shown = {};
+  var replaced = 0;
   var taken = 0;
 
   if (!payload || !Array.isArray(payload.items)) { throw new Error("not a label export"); }
+  if (payload.fingerprint && data.fingerprint && payload.fingerprint !== data.fingerprint) { throw new Error("another report"); }
   data.items.forEach(function (item) { shown[item.id] = true; });
   (Array.isArray(payload.unlabeled) ? payload.unlabeled : []).forEach(function (entry) {
-    if (entry && shown[entry.id] === true && (entry.annotationIssue || entry.note)) {
+    if (entry && shown[entry.id] === true && (entry.annotationIssue || entry.note) && !(labels[entry.id] && labels[entry.id].verdict)) {
       labels[entry.id] = { annotationIssue: Boolean(entry.annotationIssue), note: String(entry.note || "") };
       taken += 1;
     }
   });
   payload.items.forEach(function (entry) {
     if (entry && shown[entry.id] === true && verdicts.indexOf(entry.verdict) !== -1) {
+      if (labels[entry.id] && labels[entry.id].verdict && labels[entry.id].verdict !== entry.verdict) { replaced += 1; }
       labels[entry.id] = { annotationIssue: Boolean(entry.annotationIssue), note: String(entry.note || ""), verdict: entry.verdict };
       taken += 1;
     }
   });
 
-  return taken;
+  return { replaced: replaced, taken: taken };
 }
 
 // The page's script: plain ES5-style strings on purpose, so nothing in it
@@ -220,17 +237,40 @@ const PAGE_SCRIPT = `
   ${mergeLabelExport.toString()}
   var data = JSON.parse(document.getElementById("labeling-data").textContent);
   var items = data.items;
-  var storageKey = "answer-labels:" + data.name;
+  // Labels belong to these answers: a page rebuilt from another report under
+  // the same name gets another key, so old verdicts never attach to new answers.
+  var storageKey = "answer-labels:" + data.name + ":" + data.fingerprint;
   var labels = {};
+  var unsaved = false;
   var index = 0;
   var byId = function (id) { return document.getElementById(id); };
-
-  try { labels = JSON.parse(localStorage.getItem(storageKey) || "{}") || {}; } catch (error) { labels = {}; }
-
-  var save = function () {
-    try { localStorage.setItem(storageKey, JSON.stringify(labels)); }
-    catch (error) { byId("warning").style.display = "block"; }
+  var readStored = function (key) {
+    var stored = null;
+    try { stored = JSON.parse(localStorage.getItem(key) || "null"); } catch (error) { stored = null; }
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : null;
   };
+  var save = function () {
+    try { localStorage.setItem(storageKey, JSON.stringify(labels)); unsaved = false; }
+    catch (error) { unsaved = true; byId("warning").style.display = "block"; }
+  };
+  // Another tab of this page may have saved since this one last did. Start
+  // from what is stored, so a write here changes one answer and rolls nothing
+  // back; what this tab could not save stays its own.
+  var refresh = function () {
+    var stored = unsaved ? null : readStored(storageKey);
+    if (!stored) { return; }
+    Object.keys(labels).forEach(function (id) {
+      if (!Object.prototype.hasOwnProperty.call(stored, id)) { stored[id] = labels[id]; }
+    });
+    labels = stored;
+  };
+
+  labels = readStored(storageKey) || {};
+  if (data.adoptLegacyLabels && !readStored(storageKey)) {
+    // The page generated before the key carried the fingerprint saved under the name alone.
+    var legacy = readStored("answer-labels:" + data.name);
+    if (legacy) { labels = legacy; save(); }
+  }
   var setText = function (id, text) { byId(id).textContent = text; };
   var fill = function (id, tag, texts, emptyText) {
     var node = byId(id);
@@ -258,7 +298,7 @@ const PAGE_SCRIPT = `
     var fixed = window.getComputedStyle(footer).position === "fixed";
     document.querySelector("main").style.paddingBottom = (fixed ? footer.offsetHeight + 24 : 16) + "px";
   };
-  var render = function () {
+  var render = function (keepPosition) {
     var item = items[index];
     var label = labels[item.id] || {};
     var done = items.filter(function (entry) { return labels[entry.id] && labels[entry.id].verdict; }).length;
@@ -283,7 +323,7 @@ const PAGE_SCRIPT = `
     byId("issue").checked = Boolean(label.annotationIssue);
     byId("note").value = label.note || "";
     fitFooter();
-    window.scrollTo(0, 0);
+    if (!keepPosition) { window.scrollTo(0, 0); }
   };
   var move = function (step) {
     index = Math.max(0, Math.min(items.length - 1, index + step));
@@ -291,6 +331,7 @@ const PAGE_SCRIPT = `
   };
   var update = function (change) {
     var item = items[index];
+    refresh();
     var label = labels[item.id] || {};
     Object.keys(change).forEach(function (field) { label[field] = change[field]; });
     labels[item.id] = label;
@@ -319,28 +360,49 @@ const PAGE_SCRIPT = `
   var importLabels = function (file) {
     var reader = new FileReader();
     reader.onload = function () {
-      var taken;
-      try { taken = mergeLabelExport(data, labels, JSON.parse(String(reader.result))); }
-      catch (error) { window.alert("这个文件不是导出的标注。"); return; }
-      if (taken === 0) { window.alert("这个文件里没有这一页答案的标注。"); return; }
+      var payload;
+      var preview;
+      refresh();
+      try {
+        payload = JSON.parse(String(reader.result));
+        // On a copy first: nothing changes until the file is known to fit and the person agreed.
+        preview = mergeLabelExport(data, JSON.parse(JSON.stringify(labels)), payload);
+      } catch (error) {
+        window.alert(error && error.message === "another report" ? "这个文件是另一份报告的标注，不能导入这一页。" : "这个文件不是导出的标注。");
+        return;
+      }
+      if (preview.taken === 0) { window.alert("这个文件里没有这一页答案的标注。"); return; }
+      if (preview.replaced > 0 && !window.confirm("文件里有 " + preview.replaced + " 条结论与这一页现有的不同。用文件里的覆盖吗？")) { return; }
+      mergeLabelExport(data, labels, payload);
       save();
       render();
     };
     reader.readAsText(file);
   };
 
+  // A clicked button keeps the focus, and Space or Enter would then press it
+  // again on the next answer, unseen. Give the focus up before acting.
+  var onClick = function (button, action) {
+    button.addEventListener("click", function () {
+      if (typeof button.blur === "function") { button.blur(); }
+      action();
+    });
+  };
   Array.prototype.forEach.call(document.querySelectorAll("button[data-verdict]"), function (button) {
-    button.addEventListener("click", function () { choose(button.getAttribute("data-verdict")); });
+    onClick(button, function () { choose(button.getAttribute("data-verdict")); });
   });
-  byId("previous").addEventListener("click", function () { move(-1); });
-  byId("next").addEventListener("click", function () { move(1); });
-  byId("unlabeled").addEventListener("click", nextUnlabeled);
-  byId("export").addEventListener("click", exportLabels);
+  onClick(byId("previous"), function () { move(-1); });
+  onClick(byId("next"), function () { move(1); });
+  onClick(byId("unlabeled"), nextUnlabeled);
+  onClick(byId("export"), exportLabels);
   byId("import").addEventListener("change", function (event) { if (event.target.files[0]) { importLabels(event.target.files[0]); } });
   byId("issue").addEventListener("change", function (event) { update({ annotationIssue: event.target.checked }); });
   byId("note").addEventListener("input", function (event) { update({ note: event.target.value }); });
   document.addEventListener("keydown", function (event) {
-    if (event.target === byId("note") || event.metaKey || event.ctrlKey || event.altKey) { return; }
+    if (event.target === byId("note") || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) { return; }
+    // A key held down repeats. One press labels one answer, never the ones
+    // after it; only the arrows may repeat.
+    if (event.repeat && event.key !== "ArrowLeft" && event.key !== "ArrowRight") { return; }
     var choice = { "1": "correct", "2": "partially_correct", "3": "incorrect", "4": "abstention" }[event.key];
     if (choice) { choose(choice); }
     else if (event.key === "ArrowLeft") { move(-1); }
@@ -351,12 +413,27 @@ const PAGE_SCRIPT = `
     event.preventDefault();
   });
   window.addEventListener("resize", fitFooter);
+  // Another tab of this page saved: show its labels here too.
+  window.addEventListener("storage", function (event) {
+    if (!event || event.key === storageKey || event.key === null) { refresh(); render(true); }
+  });
   render();
 })();
 `;
 
-/** The labelling page as one self-contained HTML document. */
-export const renderLabelingPage = ({ items, name, source = {} }) => `<!doctype html>
+/** What the page's labels belong to: the questions and the answers shown, in order. */
+export const fingerprintLabelingItems = (items) =>
+  createHash("sha256")
+    .update(JSON.stringify(items.map((item) => [item.id, item.answer])))
+    .digest("hex")
+    .slice(0, 16);
+
+/**
+ * The labelling page as one self-contained HTML document. `adoptLegacyLabels`
+ * lets a page rebuilt from the same report take over labels that an earlier
+ * build saved under the name alone.
+ */
+export const renderLabelingPage = ({ adoptLegacyLabels = false, items, name, source = {} }) => `<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -407,7 +484,13 @@ export const renderLabelingPage = ({ items, name, source = {} }) => `<!doctype h
     <input id="note" type="text" placeholder="备注（可不填）" aria-label="备注">
   </div>
 </footer>
-<script type="application/json" id="labeling-data">${toEmbeddedJson({ items, name, source })}</script>
+<script type="application/json" id="labeling-data">${toEmbeddedJson({
+  adoptLegacyLabels: Boolean(adoptLegacyLabels),
+  fingerprint: fingerprintLabelingItems(items),
+  items,
+  name,
+  source,
+})}</script>
 <script>${PAGE_SCRIPT}</script>
 </body>
 </html>
@@ -418,7 +501,9 @@ const main = async () => {
   const corpusPath = getArgValue("--corpus");
 
   if (!reportPath || !corpusPath) {
-    throw new Error("Usage: build-answer-labeling.mjs --report <answers report.json> --corpus <qasper corpus.json> [--out <directory>] [--name <slug>] [--seed 1]");
+    throw new Error(
+      "Usage: build-answer-labeling.mjs --report <answers report.json> --corpus <qasper corpus.json> [--out <directory>] [--name <slug>] [--seed 1] [--adopt-legacy-labels]"
+    );
   }
 
   const seed = Number(getArgValue("--seed") ?? 1);
@@ -466,7 +551,10 @@ const main = async () => {
   };
 
   await mkdir(outDirectory, { recursive: true });
-  await writeFile(path.join(outDirectory, `${name}.html`), renderLabelingPage({ items, name, source }));
+  await writeFile(
+    path.join(outDirectory, `${name}.html`),
+    renderLabelingPage({ adoptLegacyLabels: process.argv.includes("--adopt-legacy-labels"), items, name, source })
+  );
   await writeFile(path.join(outDirectory, `${name}-judge-input.json`), `${JSON.stringify({ items: toJudgeInput(items), source }, null, 2)}\n`);
   console.log(
     `${items.length} answers to label (${items.filter((item) => item.unanswerable).length} on questions annotated unanswerable): ${path.join(outDirectory, `${name}.html`)}`
