@@ -487,7 +487,9 @@ const main = async () => {
         // The short-answer score: directAnswer, else the first sentence.
         f1Direct: score(toQasperDirectPrediction(answer)),
         id: testCase.id,
-        prediction: prediction.slice(0, 400),
+        // Whole since 2026-11-10 (cut at 400 characters before), so a person
+        // can label what was scored (build-answer-labeling.mjs).
+        prediction,
         references: testCase.referenceAnswers,
         shouldAbstain: Boolean(testCase.shouldAbstain),
         verdictOverridden: answer.verdictOverridden === true,
