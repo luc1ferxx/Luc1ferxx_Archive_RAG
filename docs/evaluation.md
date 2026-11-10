@@ -615,7 +615,7 @@ npm run rerank:cross-encoder:local
 | --- | --- |
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20\|all] [--granularity paragraph\|section]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式。默认按段落切"页"：摘要是第 1 页，之后每个段落一页并带上所在章节的标题，证据精确到被标注的段落；`section` 按整节切，长节里任何一块都算命中，召回会偏高。保留所有标注者的答案（官方 F1 取最优），不可回答题成为 `shouldAbstain`，证据只在图表里的题跳过。输出默认在已忽略的 `evaluation/generated/`。 |
-| `npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`。 |
+| `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024 npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`。2026-11-10 起答案侧评测固定温度 0 加输出上限 1024（见“答案温度 0 重测：带输出上限”）；之前的答案报告除 24 题的机制检查（`latest-qasper-answers-cap-smoke`）外都是端点默认 1.0、无上限，`compare:qasper-answers` 会列出这两项差别。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
 | `npm run label:answers -- --report <答案报告.json> --corpus <QASPER 语料.json>` | 不调模型。为答案报告里每道作答的题生成人工标注页（自包含 HTML，结论用评审的判定词表，可导出成 `eval:judge --labels` 读的形状）和同一批题的 `eval:judge` 输入。见“默认配置的答案漏斗、延迟和 token”。 |
 | `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json>` | 不调模型。把 rag 面的答案报告和同一设置的检索报告按题拼起来，每道可回答题归到一档：证据不在候选里、在候选里但拒答、作答但证据不在上下文里、作答且证据在上下文里。 |
@@ -1732,9 +1732,10 @@ train 上（400 题）的损失拆解：
   - 可答题 F1（拒答记 0）+0.0027 [−0.0145, +0.0179]；短答案 F1 +0.0084 [−0.0088, +0.0246]。
   - 引用证据召回、上下文证据召回两边相同（0.2431、0.3425）。B 有 2 个答案一页都没引，Z 没有。
   - 按类型的 F1（Z 对 B）：抽取式 0.186 对 0.181，生成式 0.161 对 0.151，是非题 0.168 对 0.206（16 题）。
-  - 温度 0 的答案更短：中位数 30 个词对 36 个词；输出 token 平均 −4.4 [−11.6, +2.6]。
-  - QA 路线延迟，两边都作答的 113 题，平均差：Z1 − B −157 ms [−293, −26]，Z2 − B −126 ms [−263, +6]。中位数 2.20 / 2.28 秒对 2.45 秒。
-- **这一轮说明的**：在这个模型和端点上，温度 0 加上限让同一设置的两次运行逐字相同，去掉了 1.0 下约 0.01 的 F1 来回（同一设置在 1.0 下跑过 0.2046–0.2146），没有检出质量下降，也没有截断。
+  - 温度 0 的答案更短：中位数 30 个词对 36 个词；按题配对，61 题更短、43 题更长、9 题一样；输出 token 平均 −4.4 [−11.6, +2.6]。
+  - QA 路线延迟，两边都作答的 113 题，平均差：Z1 − B −157 ms [−293, −26]，Z2 − B −126 ms [−263, +6]。中位数 2.20 / 2.28 秒对 2.45 秒。拒答的 87 题不调模型，不变。
+  - 这个延迟差不能都算给温度。按 Ollama 日志逐题配对：同样的提示，B 的进程预填就慢，Z1 − B −52 ms [−60, −45]，Z2 − B −29 ms [−37, −22]，而预填与温度无关；解码时间的差 −109 ms [−244, +19]、−95 ms [−230, +33]，区间含 0。
+- **这一轮说明的**：在这个模型和端点上，温度 0 加上限让同一设置的两次运行逐字相同，没有检出质量下降，也没有截断。1.0 下约 0.01 的 F1 来回是在另一份样本上量的（同一设置、同一批题跑过四次，0.2046–0.2146）；这一轮的 B 只跑了一次（0.2283，Z 是 0.2308），没有在这份样本上重测 1.0 的来回。
 - **不说明的**：上限只证明能兜住卡死的题，这份样本里没有这种题；没有截断，所以上一节留下的“截断的回复要不要算拒答”这一轮也无从判断。“没有检出下降”不等于“一样好”，区间宽约 ±0.015。只测了一个本地 7B 模型。以后的答案侧比较要和以前 1.0、无上限的报告分开看：`compare:qasper-answers` 会列出 `answerTemperature` 和 `answerMaxTokens` 的差别。
 
 ### pdf.js 段落识别（`PDF_PARAGRAPH_DETECTION`，2026-10-04）
