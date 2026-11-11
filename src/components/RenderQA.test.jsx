@@ -1,6 +1,144 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { vi } from "vitest";
+import { createTranslator } from "../archiveI18n";
 import RenderQA from "./RenderQA";
+
+const citationTurn = (ragSources) => [
+  {
+    question: "Where is the revenue figure?",
+    answer: {
+      ragAnswer: "Revenue grew 12% [Source 1].",
+      ragSources,
+      mcpAnswer: "Web search not used.",
+    },
+  },
+];
+
+const getCitationLocations = () =>
+  within(document.querySelector(".archive-source-list"))
+    .getAllByRole("button")
+    .map((citation) =>
+      citation.querySelector(".archive-source-head span:last-child").textContent
+    );
+
+const MIXED_SOURCES = [
+  {
+    docId: "policy",
+    fileName: "policy.pdf",
+    filePath: "documents/policy/file",
+    pageNumber: 4,
+    chunkIndex: 2,
+    rank: 1,
+    excerpt: "Remote work requires manager approval.",
+  },
+  {
+    docId: "deck",
+    fileName: "review.pptx",
+    filePath: "documents/deck/file",
+    pageNumber: 3,
+    chunkIndex: 5,
+    rank: 2,
+    locationUnit: "slide",
+    locationLabel: "Q3 results",
+    excerpt: "Revenue grew 12%.",
+  },
+  {
+    docId: "budget",
+    fileName: "budget.xlsx",
+    filePath: "documents/budget/file",
+    pageNumber: 2,
+    chunkIndex: 0,
+    rank: 3,
+    locationUnit: "sheet",
+    locationLabel: "Revenue",
+    excerpt: "Sheet: Revenue",
+  },
+  {
+    docId: "contract",
+    fileName: "contract.docx",
+    filePath: "documents/contract/file",
+    pageNumber: 2,
+    chunkIndex: 1,
+    rank: 4,
+    locationUnit: "section",
+    locationLabel: "Scope",
+    excerpt: "Scope",
+  },
+];
+
+describe("RenderQA citation locations", () => {
+  test("keeps the PDF page label and names slides, sheets and sections", () => {
+    render(<RenderQA conversation={citationTurn(MIXED_SOURCES)} />);
+
+    expect(getCitationLocations()).toEqual([
+      "Page 4",
+      "Slide 3 · Q3 results",
+      "Sheet Revenue",
+      "Section 2 · Scope",
+    ]);
+    // The PDF badge keeps its markup; only a slide title, sheet name or
+    // section heading opts out of the upper-casing.
+    expect(screen.getByText("Page 4")).not.toHaveAttribute("class");
+    expect(screen.getByText("Slide 3 · Q3 results")).toHaveClass("archive-source-location");
+  });
+
+  test("renders a PDF citation exactly as before without a translator", () => {
+    render(
+      <RenderQA
+        conversation={citationTurn([
+          MIXED_SOURCES[0],
+          { ...MIXED_SOURCES[0], chunkIndex: 3, pageNumber: null, rank: 2 },
+        ])}
+      />
+    );
+
+    expect(getCitationLocations()).toEqual(["Page 4", ""]);
+    expect(screen.getByText("1. policy.pdf")).toBeInTheDocument();
+    expect(screen.getByText("Rank #1")).toBeInTheDocument();
+    expect(screen.getByText("Chunk 2")).toBeInTheDocument();
+  });
+
+  test("follows the app's locale", () => {
+    render(
+      <RenderQA
+        conversation={citationTurn([
+          ...MIXED_SOURCES,
+          {
+            ...MIXED_SOURCES[2],
+            chunkIndex: 9,
+            locationLabel: undefined,
+            pageNumber: 5,
+            rank: 5,
+          },
+        ])}
+        t={createTranslator("zh")}
+      />
+    );
+
+    expect(getCitationLocations()).toEqual([
+      "第 4 页",
+      "第 3 张幻灯片 · Q3 results",
+      "工作表 Revenue",
+      "第 2 节 · Scope",
+      "第 5 个工作表",
+    ]);
+  });
+
+  test("selects an Office citation like any other", () => {
+    const handleSelectSource = vi.fn();
+
+    render(
+      <RenderQA
+        conversation={citationTurn(MIXED_SOURCES)}
+        onSelectSource={handleSelectSource}
+      />
+    );
+
+    fireEvent.click(screen.getByText("Slide 3 · Q3 results"));
+
+    expect(handleSelectSource).toHaveBeenCalledWith(MIXED_SOURCES[1]);
+  });
+});
 
 describe("RenderQA", () => {
   test("renders agent trace details for plan, evidence checks, budgets, and retry", () => {

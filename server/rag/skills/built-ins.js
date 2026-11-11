@@ -11,6 +11,7 @@ import { isAgentRunInterrupt } from "../agent-interrupts.js";
 import { toDependencyOutageError } from "../dependency-outage.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
+import { getDocumentFormatForMimeType } from "../document-formats.js";
 import { buildAgentRetrievalPlan } from "../agent-query-planner.js";
 import {
   buildFollowUpQuestion,
@@ -258,11 +259,26 @@ const requireCapabilityRegistry = (capabilityRegistry, capabilityId) => {
   return capabilityRegistry;
 };
 
+// What an Office document's pageCount counts: rag/document-loader.js makes a
+// page per section, slide or visible sheet. A PDF, or a document of no known
+// type, keeps the page wording it always had.
+const OFFICE_PAGE_UNITS = Object.freeze({
+  docx: ["section", "sections"],
+  pptx: ["slide", "slides"],
+  xlsx: ["sheet", "sheets"],
+});
+
+const formatPageCount = (document, pageCount) => {
+  const units = OFFICE_PAGE_UNITS[getDocumentFormatForMimeType(document?.mimeType)];
+
+  return units ? `${pageCount} ${pageCount === 1 ? units[0] : units[1]}` : `${pageCount} pages`;
+};
+
 const getDocumentLabel = (document) => {
   const pageCount = Number.parseInt(document?.pageCount ?? "0", 10);
   const chunkCount = Number.parseInt(document?.chunkCount ?? "0", 10);
   const stats = [
-    Number.isFinite(pageCount) && pageCount > 0 ? `${pageCount} pages` : null,
+    Number.isFinite(pageCount) && pageCount > 0 ? formatPageCount(document, pageCount) : null,
     Number.isFinite(chunkCount) && chunkCount > 0 ? `${chunkCount} chunks` : null,
   ].filter(Boolean);
 

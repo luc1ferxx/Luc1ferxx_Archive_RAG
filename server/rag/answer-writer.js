@@ -25,7 +25,9 @@ import {
   buildContextSection,
   dedupeCitations,
   getAdmissionScore,
+  getContextLocationLabel,
   getResultKey,
+  pickDocumentLocation,
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
 import { ensureTerminalPunctuation } from "./grounded-answer-finalizer.js";
@@ -551,6 +553,7 @@ const buildRetrievedContextEntry = (result, rank) => ({
   docId: result.document.metadata?.docId ?? null,
   fileName: result.document.metadata?.fileName ?? "Unknown document",
   pageNumber: getPageNumber(result.document.metadata),
+  ...pickDocumentLocation(result.document.metadata),
   chunkIndex: result.document.metadata?.chunkIndex ?? null,
   sectionHeading: result.document.metadata?.sectionHeading ?? null,
   text: result.document.pageContent,
@@ -1134,12 +1137,20 @@ const buildNoMaterialDifferenceAnswer = ({ bundle, analysis }) => {
 
 // Retrieved text and upload file names are untrusted: the model sees them
 // through the injection screen, while citations keep the original text so the
-// user still sees what the document says.
+// user still sees what the document says. So is a sheet's name, the one
+// location label the context section prints ("Sheet: <name>"); a PDF chunk has
+// none, so its screen summary is what it was.
 const buildScreenedContextSection = (document, score, rank, screenSummary) => {
   const content = screenUntrustedText(document.pageContent);
   const fileName = screenUntrustedText(document.metadata?.fileName ?? "");
+  const contextLabel = getContextLocationLabel(document.metadata);
+  const screenedLabel = contextLabel === null ? null : screenUntrustedText(contextLabel);
 
-  addToInjectionScreenSummary(screenSummary, [...content.removed, ...fileName.removed]);
+  addToInjectionScreenSummary(screenSummary, [
+    ...content.removed,
+    ...fileName.removed,
+    ...(screenedLabel?.removed ?? []),
+  ]);
 
   return buildContextSection(
     {
@@ -1147,6 +1158,7 @@ const buildScreenedContextSection = (document, score, rank, screenSummary) => {
       metadata: {
         ...document.metadata,
         ...(document.metadata?.fileName ? { fileName: fileName.text } : {}),
+        ...(screenedLabel ? { locationLabel: screenedLabel.text } : {}),
       },
       pageContent: content.text,
     },

@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-// Ingests PDFs into the archive from the command line, so a zero-infrastructure
-// install does not need a browser to get documents in.
+// Ingests documents into the archive from the command line, so a
+// zero-infrastructure install does not need a browser to get documents in:
+// PDFs, and Word .docx, PowerPoint .pptx and Excel .xlsx files when
+// RAG_DOCUMENT_FORMATS enables them (all four by default). The file's bytes
+// decide its format, as on POST /upload; with RAG_DOCUMENT_FORMATS=pdf the
+// checks and their messages are exactly the PDF-only ones.
 //
 // The web workbench's POST /upload does the same thing and works in standalone
 // mode too; this exists for the CLI-only product shape and for scripting. It is a
@@ -11,7 +15,7 @@
 //
 // It replicates the validations the HTTP route performs *outside* ingestDocument
 // (routes/uploads.js), because ingestDocument itself does not validate: handed a
-// non-PDF it fails deep inside pdfjs with an opaque error.
+// non-PDF as a PDF it fails deep inside pdfjs with an opaque error.
 
 import "dotenv/config";
 
@@ -20,7 +24,12 @@ import path from "path";
 import { randomUUID } from "crypto";
 
 import { ingestDocument } from "./chat.js";
-import { isPdfFileName, hasPdfMagicBytes } from "./routes/helpers.js";
+import { enablesOfficeFormats } from "./rag/document-formats.js";
+import {
+  checkUploadedDocument,
+  getUploadDocumentFormats,
+  isAcceptedUploadFileName,
+} from "./routes/helpers.js";
 import { isPostgresDatabaseConfigured } from "./rag/config.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataDirectory } from "./rag/storage.js";
@@ -31,10 +40,12 @@ import {
   isStandaloneProfileEnabled,
 } from "./standalone-profile.js";
 
-const USAGE = `Usage: node archive-ingest.mjs [options] <file.pdf> [more.pdf ...]
+const USAGE = `Usage: node archive-ingest.mjs [options] <file> [more files ...]
 
-Adds PDFs to the archive so the workbench, the MCP bridge and this CLI all see
-them. Prints one JSON object per ingested document.
+Adds documents to the archive so the workbench, the MCP bridge and this CLI all
+see them: PDFs, and Word .docx, PowerPoint .pptx and Excel .xlsx files when
+RAG_DOCUMENT_FORMATS enables them (all four by default). Prints one JSON object
+per ingested document.
 
 Options
   --user-id <id>       Owner user id. Default: $ARCHIVE_MCP_USER_ID, else empty.
@@ -49,8 +60,8 @@ Storage
   The API server and the MCP server must resolve the SAME directory or they will
   not see what this command ingests.
 
-  Your source PDF is not modified, moved, or deleted -- its bytes are copied into
-  the archive.
+  Your source file is not modified, moved, or deleted -- its bytes are copied
+  into the archive.
 
 Zero infrastructure
   Set DOCCOMPARE_STANDALONE=1 to store documents as files instead of in
@@ -58,7 +69,7 @@ Zero infrastructure
   workbench does.
 
 Caveats
-  There is no duplicate detection: ingesting the same PDF twice produces two
+  There is no duplicate detection: ingesting the same file twice produces two
   documents with different ids. Ingesting concurrently with the web server can
   interleave writes to the shared index files, so prefer one writer at a time.
 `;
@@ -114,8 +125,11 @@ const parseArgs = (argv) => {
 
 // The same four checks POST /upload applies before it reaches ingestDocument.
 // Reporting which one failed matters more here than over HTTP: there is no
-// browser to show a friendlier message.
-const validatePdf = async (filePath) => {
+// browser to show a friendlier message. `formats` is RAG_DOCUMENT_FORMATS;
+// with PDF alone every check and message is the PDF-only one it always was.
+// Resolves to { fileName, fileSize, format }.
+const validateDocument = async (filePath, formats) => {
+  const officeEnabled = enablesOfficeFormats(formats);
   const fileName = path.basename(filePath);
   let stats = null;
 
@@ -131,8 +145,12 @@ const validatePdf = async (filePath) => {
     throw new Error(`Not a file: ${filePath}`);
   }
 
-  if (!isPdfFileName(fileName)) {
-    throw new Error(`Not an acceptable PDF file name: ${fileName}`);
+  if (!isAcceptedUploadFileName(fileName, formats)) {
+    throw new Error(
+      officeEnabled
+        ? `Not an acceptable document file name (.pdf, .docx, .pptx or .xlsx): ${fileName}`
+        : `Not an acceptable PDF file name: ${fileName}`
+    );
   }
 
   if (stats.size > MAX_DIRECT_UPLOAD_SIZE) {
@@ -141,13 +159,22 @@ const validatePdf = async (filePath) => {
     );
   }
 
-  if (!(await hasPdfMagicBytes(filePath))) {
-    throw new Error(`${fileName} does not contain a %PDF header, so it is not a PDF.`);
+  // The bytes decide (routes/helpers.js checkUploadedDocument; with PDF alone
+  // the %PDF check of hasPdfMagicBytes).
+  const checked = await checkUploadedDocument(filePath, formats);
+
+  if (checked.refusal) {
+    throw new Error(
+      officeEnabled
+        ? `${fileName}: ${checked.refusal.message}${checked.refusal.code ? ` (${checked.refusal.code})` : ""}`
+        : `${fileName} does not contain a %PDF header, so it is not a PDF.`
+    );
   }
 
   return {
     fileName,
     fileSize: stats.size,
+    format: checked.format,
   };
 };
 
@@ -164,6 +191,10 @@ const main = async () => {
     process.exitCode = 1;
     return;
   }
+
+  // RAG_DOCUMENT_FORMATS, read once: an invalid value (its coded error,
+  // RAG_DOCUMENT_FORMATS_INVALID) ends the command before any file is read.
+  const formats = getUploadDocumentFormats();
 
   const standalone = isStandaloneProfileEnabled();
 
@@ -196,13 +227,16 @@ const main = async () => {
     const filePath = path.resolve(process.cwd(), rawFilePath);
 
     try {
-      const { fileName } = await validatePdf(filePath);
+      const { fileName, format } = await validateDocument(filePath, formats);
       const document = await ingestDocument({
         docId: randomUUID(),
         filePath,
         fileName,
         ownerUserId: String(parsed.ownerUserId).trim(),
         workspaceId: String(parsed.workspaceId).trim(),
+        // A Word, PowerPoint or Excel file is read as the format its bytes
+        // are; a PDF's ingest is the one it always was.
+        ...(format !== "pdf" ? { formats: [format] } : {}),
       });
 
       console.log(
@@ -219,7 +253,7 @@ const main = async () => {
         )
       );
     } catch (error) {
-      // Keep going: one unreadable PDF in a batch should not discard the ones
+      // Keep going: one unreadable file in a batch should not discard the ones
       // that already succeeded, and ingestDocument has already rolled back its
       // own index writes for the failed one.
       failures += 1;

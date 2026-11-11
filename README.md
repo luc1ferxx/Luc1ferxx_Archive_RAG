@@ -2,7 +2,7 @@
 
 # Luc1ferxx Archive RAG
 
-**可信文档智能体：上传 PDF 后提问、对比、审查，每个结论都能追溯到页级证据；证据不够就补检索、澄清或拒答。**
+**可信文档智能体：上传 PDF、Word、PowerPoint 或 Excel 文件后提问、对比、审查，每个结论都能追溯到页、幻灯片、工作表或章节级的证据；证据不够就补检索、澄清或拒答。**
 
 <p>
   <a href="https://github.com/luc1ferxx/Luc1ferxx_Archive_RAG/actions/workflows/quality-gate.yml"><img alt="Quality Gate" src="https://github.com/luc1ferxx/Luc1ferxx_Archive_RAG/actions/workflows/quality-gate.yml/badge.svg" /></a>
@@ -15,7 +15,8 @@
 
 ## 它能做什么
 
-- **带出处的问答**：在选中的文档或整个工作区里提问，回答附带页码、摘录和来源文件。
+- **多种格式**：PDF、Word（.docx）、PowerPoint（.pptx）和 Excel（.xlsx）。PDF 按页定位，PowerPoint 按幻灯片（含标题和演讲者备注），Excel 按工作表（每行按表头标注），Word 按章节（按文档里最高一级的标题切分）。旧版 .doc / .ppt / .xls、设了打开密码的文件和启用宏的文件不收；`RAG_DOCUMENT_FORMATS=pdf` 时只收 PDF。
+- **带出处的问答**：在选中的文档或整个工作区里提问，回答附带位置（页码，或幻灯片、工作表、章节）、摘录和来源文件。
 - **多文档对比**：每份文档单独检索，差异绑定到各自的出处，也能识别"没有实质差异"。
 - **证据不够不硬答**：逐条检查结论有没有证据支持，必要时补检索一轮、请用户澄清或拒答。
 - **可恢复的 Agent 运行**：运行、审批和检查点存在 PostgreSQL，崩溃后可以从检查点恢复；状态不明的步骤转人工处理，不会自动重放；有副作用的动作要人工审批。
@@ -60,6 +61,7 @@ RAG_EMBEDDING_DIMENSIONS=768
 | --- | --- |
 | `DOCCOMPARE_STANDALONE=1` | 不连 PostgreSQL 单机试用：文档存本地文件，运行记录和任务只在内存里，不做租户隔离 |
 | `RAG_INGEST_MODE=async` | 上传立即返回 202，由后台 worker 入库 |
+| `RAG_DOCUMENT_FORMATS=pdf` | 只收 PDF，上传的检查和报错和加入 Office 格式之前一样（默认 PDF、Word、PowerPoint、Excel 都收；压缩包和单元格上限见 [docs/configuration.md](docs/configuration.md#文档格式)） |
 | `PDF_PARSER=auto` | 表格页和扫描页交给 Docling，其余页用 pdf.js（需要 docling-serve，见 [docs/deployment.md](docs/deployment.md#版面解析可选)） |
 | `RAG_RERANK_ENABLED=true` + `RAG_RERANK_PROVIDER=cross-encoder` + `RAG_CROSS_ENCODER_ENDPOINT` | 交叉编码器重排（需要重排服务，见 [docs/deployment.md](docs/deployment.md#交叉编码器重排可选推荐)） |
 | `API_AUTH_ENABLED=true` + `API_AUTH_TOKENS` | 按 token 鉴权并区分用户和 workspace；OIDC 和 RBAC 见 [docs/deployment.md](docs/deployment.md#oidc-登录和-rbac可选) |
@@ -146,6 +148,7 @@ BM25 和 `ts_rank_cd` 没有显著差异，默认用 BM25 是产品选择。测�
 - **评测**：外部标注只用了 QASPER，没有人工标注的黄金集（标注页能生成了，还没有人标）；LLM 评审没有在真实数据上校准过，默认关闭。答案模型的采样温度没有固定，同一设置重复运行的答案 F1 有 0.01 以内的来回差。
 - **校验偏严**：默认的词法校验对改写很严，Agent 路径常常转为请用户澄清；为提高答题率试过的开关都没通过事先定的规则，保持关闭。
 - **拒答**：判断证据够不够的信号很弱（AUC 约 0.59–0.64），既会拒掉不少可答题，也会回答一部分不可答题。
+- **Office 文件**：只取文字，页眉页脚、批注、图表、SmartArt 和图片都不提取，也不做 OCR；工作台里没有内联预览，只能下载；检索和答案的评测都只用 PDF 和文本语料，Office 文件上的效果没有量过；答案 prompt 里仍写着 "PDF"（改了会改变所有 prompt 的指纹和固定的基线）。
 - **安全**：提示注入筛查挡不住刻意改写；行级安全防的是漏写过滤条件，不防 SQL 注入；加密只覆盖原始文件，切块文本和向量是明文，KMS 只有演示用的本地实现；OIDC 只在内置的开发 IdP 上端到端测过。
 - **规模**：所有压测都在一台机器上、用假模型；`compose.services.yml`（按层拆分）还没真正构建和启动过；告警规则没在真实的 Prometheus 里跑过。
 

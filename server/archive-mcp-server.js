@@ -76,6 +76,9 @@ server.registerTool(
       "Ask the PDF archive a question and get an answer grounded in page-level citations. " +
       "Returns { abstained, abstainReason, answer, citations[], evidence[] }. " +
       "Each citation carries fileName, pageNumber, chunkIndex, rank, score, excerpt and sectionHeading; " +
+      "a citation from a Word, PowerPoint or Excel file also carries locationUnit (\"section\", \"slide\" or " +
+      "\"sheet\": its pageNumber then counts sections, slides or sheets, not pages) and, when present, " +
+      "locationLabel (the section heading, slide title or sheet name). " +
       "evidence[] carries the full chunk text. " +
       "Pass two or more docIds to get a structured comparison instead of a single-document answer. " +
       "IMPORTANT: when abstained is true the archive has no sufficient evidence — report abstainReason " +

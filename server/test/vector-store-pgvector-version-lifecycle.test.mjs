@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
 import { describeChunkProfile } from "../rag/chunk-profile.js";
 import { configureEmbeddingDimensions } from "../rag/config.js";
+import { DOCUMENT_MIME_TYPES } from "../rag/document-formats.js";
+import { getMammothVersion } from "../rag/office/docx-loader.js";
+import { PPTX_EXTRACTOR_VERSION } from "../rag/office/pptx-loader.js";
 import {
   createEmbeddingBatcher,
   getDefaultEmbeddingBatcher,
@@ -25,6 +28,7 @@ import {
   claimIndexVersionBuild,
   createDefaultBuilderId,
   createIndexVersion,
+  loadStoredDocument,
   loadStoredDocumentPages,
   resolveBuildEmbeddingBatcher,
   resolveBuildEmbeddingSpace,
@@ -43,6 +47,7 @@ import {
   readIndexVersionSnapshot,
   toIndexVersion,
 } from "../rag/vector-store-pgvector-versions.js";
+import { buildDocx, buildPptx, buildXlsx } from "./office-fixture-builder.mjs";
 import { createFakeVersionDatabase, loadFakePages } from "./pgvector-version-fake-database.mjs";
 
 // Database-free tests of the index-version lifecycle: creation DDL and
@@ -827,6 +832,145 @@ test("the default page loader parses the stored PDF bytes", async () => {
   });
 
   assert.deepEqual(pages.map((page) => page.text), ["Alpha page one.", "Beta page two."]);
+});
+
+// A stored Word, PowerPoint or Excel document: its row's bytes and MIME type.
+const addStoredFile = (database, { bytes, docId, mimeType = undefined, owner = "alice" }) => {
+  database.addDocument({ docId, owner, pages: [] });
+  database.state.documents.get(docId).file_bytes = bytes;
+
+  if (mimeType !== undefined) {
+    database.state.documents.get(docId).mime_type = mimeType;
+  }
+};
+
+test("a build re-parses a stored Word, PowerPoint or Excel document as the format it was registered as, with its own chunk profile", async () => {
+  useProvider();
+  const database = useDatabase();
+  const previousFormats = process.env.RAG_DOCUMENT_FORMATS;
+
+  addStoredFile(database, {
+    bytes: buildDocx({
+      blocks: [
+        { heading: 1, text: "Retention" },
+        { text: "Alpha contracts are kept for seven years." },
+        { heading: 1, text: "Approval" },
+        { text: "Beta changes need two approvals." },
+      ],
+    }),
+    docId: "doc-word",
+    mimeType: DOCUMENT_MIME_TYPES.docx,
+  });
+  addStoredFile(database, {
+    bytes: buildPptx({
+      slides: [
+        { shapes: [{ paragraphs: ["Gamma pilot budget approved."], x: 1, y: 2 }], title: "Kickoff" },
+        { hidden: true, title: "Backup" },
+        { shapes: [{ paragraphs: ["Delta timeline agreed."], x: 1, y: 2 }], title: "Plan" },
+      ],
+    }),
+    docId: "doc-deck",
+    mimeType: DOCUMENT_MIME_TYPES.pptx,
+  });
+  // Stored before Office formats: no MIME type in the row, a PDF.
+  addStoredFile(database, { bytes: buildTextPdf({ pages: [["Epsilon policy text."]] }), docId: "doc-pdf" });
+
+  try {
+    // What new uploads accept does not decide what a build re-reads.
+    process.env.RAG_DOCUMENT_FORMATS = "pdf";
+
+    // The default document loader (loadStoredDocument), no test loader.
+    const result = await startIndexVersionBuild({ builderId: "builder-1", space: NEW_SPACE() });
+
+    assert.deepEqual({ failed: result.failed, indexed: result.indexed }, { failed: 0, indexed: 3 });
+
+    const rows = [...database.state.tables.get("rag_document_chunks_v2").rows.values()];
+    const rowsOf = (docId) => rows.filter((row) => row.doc_id === docId);
+    const locations = (docId) =>
+      [...new Map(rowsOf(docId).map(({ metadata }) => [metadata.pageNumber, [metadata.pageNumber, metadata.locationUnit, metadata.locationLabel]])).values()];
+
+    assert.deepEqual(locations("doc-word"), [
+      [1, "section", "Retention"],
+      [2, "section", "Approval"],
+    ]);
+    assert.deepEqual(locations("doc-deck"), [
+      [1, "slide", "Kickoff"],
+      [3, "slide", "Plan"],
+    ]);
+
+    const wordProfile = describeChunkProfile({ extractor: "mammoth", extractorVersion: getMammothVersion(), format: "docx" });
+    const deckProfile = describeChunkProfile({
+      extractor: "ooxml-pptx",
+      extractorVersion: PPTX_EXTRACTOR_VERSION,
+      format: "pptx",
+    });
+
+    assert.ok(rowsOf("doc-word").every((row) => row.metadata.chunkProfileId === wordProfile.id));
+    assert.ok(rowsOf("doc-deck").every((row) => row.metadata.chunkProfileId === deckProfile.id));
+
+    // The PDF's chunks are the ones a build always cut: the build's profile,
+    // no location.
+    assert.ok(rowsOf("doc-pdf").length > 0);
+    assert.ok(rowsOf("doc-pdf").every((row) => row.metadata.chunkProfileId === describeChunkProfile().id));
+    assert.ok(rowsOf("doc-pdf").every((row) => !("locationUnit" in row.metadata)));
+  } finally {
+    if (previousFormats === undefined) {
+      delete process.env.RAG_DOCUMENT_FORMATS;
+    } else {
+      process.env.RAG_DOCUMENT_FORMATS = previousFormats;
+    }
+  }
+});
+
+test("a stored Office document the loader refuses is recorded as unreadable with its DOCUMENT_* code, and the gate says why", async () => {
+  useProvider();
+  const database = useDatabase();
+  const previousCells = process.env.RAG_XLSX_MAX_CELLS;
+
+  seedDocuments(database);
+  addStoredFile(database, {
+    bytes: buildXlsx({ sheets: [{ name: "Budget", rows: [["Item", "Amount"], ["Gamma", 1200], ["Delta", 800]] }] }),
+    docId: "doc-sheet",
+    mimeType: DOCUMENT_MIME_TYPES.xlsx,
+    owner: "carol",
+  });
+  // Indexed when it was uploaded, under a higher cell limit than now.
+  seedActiveChunks(database, "doc-sheet", ["Gamma budget sheet."], { owner: "carol" });
+
+  try {
+    process.env.RAG_XLSX_MAX_CELLS = "2";
+
+    // The seeded PDFs' bytes are the fake JSON pages: the test loader reads
+    // those, and the document loader the workbook.
+    const loadPages = (input) => (input.mimeType ? loadStoredDocument(input) : loadFakePages(input));
+    const result = await build({ loadPages });
+    const progress = [...database.state.progress.values()].find((entry) => entry.doc_id === "doc-sheet");
+
+    assert.deepEqual(
+      { failed: result.failed, indexed: result.indexed, unreadable: result.unreadable },
+      { failed: 1, indexed: 2, unreadable: 1 }
+    );
+    assert.match(
+      progress.error,
+      /^unreadable_source DOCUMENT_SPREADSHEET_TOO_LARGE: Parsing the stored file of doc-sheet failed: .*RAG_XLSX_MAX_CELLS/
+    );
+
+    const held = await validateIndexVersion({ versionId: 2 });
+
+    assert.equal(held.ok, false);
+    assert.deepEqual(held.unreadable, [
+      { activeCount: 1, code: "DOCUMENT_SPREADSHEET_TOO_LARGE", docId: "doc-sheet", targetCount: 0 },
+    ]);
+    assert.match(held.reasons.join(" "), /could not read their stored PDF \(DOCUMENT_SPREADSHEET_TOO_LARGE; first: doc-sheet\)/);
+    assert.match(held.reasons.join(" "), /A DOCUMENT_\* code is the document loader refusing a stored Word, PowerPoint or Excel file/);
+    assert.equal((await validateIndexVersion({ allowUnreadableSources: true, versionId: 2 })).ok, true);
+  } finally {
+    if (previousCells === undefined) {
+      delete process.env.RAG_XLSX_MAX_CELLS;
+    } else {
+      process.env.RAG_XLSX_MAX_CELLS = previousCells;
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

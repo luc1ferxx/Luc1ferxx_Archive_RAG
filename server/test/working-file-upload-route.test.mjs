@@ -14,6 +14,7 @@ import path from "node:path";
 import { createApp } from "../app.js";
 import { isWorkingFileEnvelope, readWorkingFile } from "../rag/working-files.js";
 import { MAX_DIRECT_UPLOAD_SIZE } from "../upload-policy.js";
+import { buildDocx } from "./office-fixture-builder.mjs";
 
 const MARKER = "pangolin-marker-5d1e";
 const PDF = Buffer.from(`%PDF-1.4\n${MARKER}\n${"stream text ".repeat(400)}\n%%EOF\n`);
@@ -119,17 +120,46 @@ test("the upload rests encrypted; the ingest sees the plaintext and its hash", a
   }
 });
 
-test("the PDF check reads the plaintext of the encrypted file", async () => {
+// Deliberately changed with Office formats: the document check (routes/
+// helpers.js checkUploadedDocument) answers bytes of no supported format with
+// its own message and code by default, and with the old "not a valid PDF"
+// under RAG_DOCUMENT_FORMATS=pdf; either way it reads the plaintext.
+test("the document check reads the plaintext of the encrypted file", async () => {
+  const previousFormats = process.env.RAG_DOCUMENT_FORMATS;
   const server = await startApp();
 
   try {
-    const response = await postFile(server.port, Buffer.from("not a pdf at all"));
+    delete process.env.RAG_DOCUMENT_FORMATS;
+
+    let response = await postFile(server.port, Buffer.from("not a pdf at all"));
 
     assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /not a valid PDF/);
-    assert.equal(server.ingested.length, 0);
+    assert.deepEqual(await response.json(), {
+      code: "DOCUMENT_FORMAT_UNSUPPORTED",
+      error: "The uploaded file is not a supported document (PDF, Word .docx, PowerPoint .pptx or Excel .xlsx).",
+    });
+
+    // A Word document's ZIP is only recognised through its plaintext.
+    response = await postFile(server.port, buildDocx({ blocks: [{ text: MARKER }] }), "notes.docx");
+
+    assert.equal(response.status, 201);
+    assert.deepEqual(server.ingested.at(-1).formats, ["docx"], "the ingest reads it as the format its bytes are");
+    assert.ok(isWorkingFileEnvelope(server.ingested.at(-1).stored), "multer's file is a working file");
+
+    process.env.RAG_DOCUMENT_FORMATS = "pdf";
+    response = await postFile(server.port, Buffer.from("not a pdf at all"));
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "The uploaded file is not a valid PDF." });
+    assert.equal(server.ingested.length, 1);
     assert.deepEqual(await waitForCleanup(server.uploadsDirectory), []);
   } finally {
+    if (previousFormats === undefined) {
+      delete process.env.RAG_DOCUMENT_FORMATS;
+    } else {
+      process.env.RAG_DOCUMENT_FORMATS = previousFormats;
+    }
+
     await server.close();
   }
 });

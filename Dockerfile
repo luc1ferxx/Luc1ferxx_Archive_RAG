@@ -29,6 +29,10 @@ ENV NODE_ENV=production \
     FEEDBACK_DIRECTORY=/data/feedback
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json ./
+# The vendored dependency tarballs ("xlsx": "file:vendor/xlsx-0.20.3.tgz",
+# SheetJS CE, which is not published on the npm registry) must be in place
+# before npm ci resolves them.
+COPY server/vendor ./vendor
 # --legacy-peer-deps: @qdrant/js-client-rest declares typescript as a peer,
 # which npm 11 leaves out of the lock file and npm 10.9 then insists on. The
 # client needs no TypeScript at runtime.

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pickDocumentLocation } from "./rag/citations.js";
 import { getFeedbackPostgresTable, getFeedbackStoreConfigStatus } from "./rag/config.js";
 import {
   createPostgresFeedbackStore,
@@ -89,12 +90,17 @@ export const recordMatchesAccessScope = (record = {}, accessScope = {}) => {
   );
 };
 
+// A citation of a Word, PowerPoint or Excel file keeps the unit its
+// pageNumber counts and that unit's title (rag/citations.js), so a reviewer
+// reads "Slide 3", not "Page 3". Only a known unit is kept, and its label is
+// bounded; a PDF citation, which has neither, is stored exactly as before.
 const sanitizeCitation = (citation = {}) => ({
   docId: normalizeString(citation.docId),
   fileName: normalizeString(citation.fileName),
   pageNumber: Number.isFinite(Number(citation.pageNumber))
     ? Number(citation.pageNumber)
     : null,
+  ...pickDocumentLocation(citation),
   chunkIndex: Number.isFinite(Number(citation.chunkIndex))
     ? Number(citation.chunkIndex)
     : null,

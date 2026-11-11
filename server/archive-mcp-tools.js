@@ -11,6 +11,7 @@ import {
   isApiAuthOidcEnabled,
   isApiAuthWorkspaceRequired,
 } from "./rag/config.js";
+import { pickDocumentLocation } from "./rag/citations.js";
 
 const EXCERPT_LIMIT = 220;
 
@@ -90,7 +91,10 @@ const toFiniteNumber = (value) =>
 /**
  * Projects a `buildCitation` record (server/rag/citations.js) onto the wire.
  * Field names are preserved verbatim so an MCP consumer sees the same citation
- * contract the web workbench renders.
+ * contract the web workbench renders: a citation from a Word, PowerPoint or
+ * Excel file also names its unit (locationUnit "section", "slide" or "sheet",
+ * which pageNumber then counts) and, when the unit has one, its heading, slide
+ * title or sheet name (locationLabel). A PDF citation has neither key.
  */
 export const formatCitation = (citation = {}) => ({
   rank: toFiniteNumber(citation.rank),
@@ -99,6 +103,7 @@ export const formatCitation = (citation = {}) => ({
   fileName: citation.fileName ?? "Unknown document",
   filePath: citation.filePath ?? "",
   pageNumber: toFiniteNumber(citation.pageNumber),
+  ...pickDocumentLocation(citation),
   chunkIndex: toFiniteNumber(citation.chunkIndex),
   excerpt: normalizeText(citation.excerpt).slice(0, EXCERPT_LIMIT),
   sectionHeading: citation.sectionHeading ?? null,
@@ -110,7 +115,8 @@ export const formatCitations = (citations) =>
 /**
  * Projects `retrievedContexts` entries (server/rag/answer-writer.js). These
  * carry the full chunk text and are matched to citations by
- * docId + chunkIndex + pageNumber.
+ * docId + chunkIndex + pageNumber; an Office entry names its unit and label
+ * as its citation does.
  */
 export const formatEvidence = (retrievedContexts) =>
   toArray(retrievedContexts).map((context = {}) => ({
@@ -118,6 +124,7 @@ export const formatEvidence = (retrievedContexts) =>
     docId: context.docId ?? null,
     fileName: context.fileName ?? "Unknown document",
     pageNumber: toFiniteNumber(context.pageNumber),
+    ...pickDocumentLocation(context),
     chunkIndex: toFiniteNumber(context.chunkIndex),
     sectionHeading: context.sectionHeading ?? null,
     text: String(context.text ?? ""),

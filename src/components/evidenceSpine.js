@@ -1,5 +1,11 @@
 import { getAnswerTraceOverview } from "../chatResponseContract";
 import {
+  formatDocumentLocation,
+  getDocumentFormat,
+  getLocationUnit,
+  hasInlineDocumentPreview,
+} from "../documentLocation";
+import {
   formatBudgetCounter,
   formatDetailValue,
   formatGapType,
@@ -301,12 +307,35 @@ const formatSourceScore = (value) => {
   return Number.isFinite(score) ? score.toFixed(2) : null;
 };
 
-export const buildSourceEvidenceObject = (source = {}) => {
+// The Office formats' own type label (DOCX, PPTX, XLSX) when the stored MIME
+// type reached the preview; a PDF and an unknown type keep today's label from
+// the file name's extension.
+const getOfficeFileType = (source) => {
+  const format = getDocumentFormat(source.mimeType);
+
+  return format && format.id !== "pdf" ? format.label : null;
+};
+
+/**
+ * The evidence object the preview renders for one source. `t` localizes the
+ * location ("Page 4", "Slide 3 · Revenue"); without it the labels are English,
+ * as they always were. Only a page the PDF viewer can open defaults to page 1,
+ * as before: a slide, sheet or section, or a file the browser cannot show,
+ * keeps whatever number the citation gave it, or none.
+ */
+export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
   const previewMeta = isPlainObject(source.demoPreview) ? source.demoPreview : {};
   const fileName = source.fileName ?? "Untitled source";
   const fileType =
-    previewMeta.type ?? fileName.split(".").pop()?.toUpperCase() ?? "DOC";
-  const pageNumber = source.pageNumber ?? source.page ?? source.loc?.pageNumber ?? 1;
+    previewMeta.type ??
+    getOfficeFileType(source) ??
+    fileName.split(".").pop()?.toUpperCase() ??
+    "DOC";
+  const locationUnit = getLocationUnit(source);
+  const hasInlinePreview = hasInlineDocumentPreview(source);
+  const sourcePageNumber = source.pageNumber ?? source.page ?? source.loc?.pageNumber;
+  const pageNumber = hasInlinePreview ? sourcePageNumber ?? 1 : sourcePageNumber ?? null;
+  const locationText = formatDocumentLocation({ ...source, pageNumber }, t);
   const chunkIndex = source.chunkIndex ?? source.metadata?.chunkIndex ?? null;
   const excerpt =
     source.excerpt ?? source.text ?? source.pageContent ?? previewMeta.description ?? "";
@@ -329,7 +358,9 @@ export const buildSourceEvidenceObject = (source = {}) => {
         ].filter((chunk) => chunk.excerpt);
   const metadataRows = [
     { label: "Document", value: fileName },
-    { label: "Page", value: pageNumber ? `Page ${pageNumber}` : null },
+    locationUnit
+      ? { label: "Location", value: locationText || null }
+      : { label: "Page", value: pageNumber ? locationText : null },
     {
       label: "Chunk",
       value: chunkIndex !== null && chunkIndex !== undefined ? String(chunkIndex) : null,
@@ -350,17 +381,22 @@ export const buildSourceEvidenceObject = (source = {}) => {
     fileName,
     filePath: source.filePath ?? "",
     fileType,
+    hasInlinePreview,
     isDemoPreview: Boolean(source.demoPreview || !source.filePath),
+    locationText,
+    locationUnit,
     metadataRows,
     pageNumber,
-    pageRange: previewMeta.pageRange ?? (pageNumber ? String(pageNumber) : "1"),
+    pageRange:
+      previewMeta.pageRange ??
+      (pageNumber ? String(pageNumber) : hasInlinePreview ? "1" : null),
     previewDescription:
       previewMeta.description || excerpt || "Selected evidence from the answer source.",
     previewTags: normalizeArray(previewMeta.tags),
     rank: source.rank,
     score: sourceScore,
     source,
-    title: `${fileName}${pageNumber ? ` · Page ${pageNumber}` : ""}`,
+    title: `${fileName}${locationText ? ` · ${locationText}` : ""}`,
     chunks: relatedChunks,
   };
 };

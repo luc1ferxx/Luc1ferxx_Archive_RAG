@@ -1,4 +1,5 @@
 import { evaluateClaimSupport } from "../agent-self-check.js";
+import { pickDocumentLocation } from "../citations.js";
 import {
   BUILT_IN_CAPABILITY_VERSION,
   CAPABILITY_IDS,
@@ -32,6 +33,9 @@ const verifyCitations = ({ answerText = "", citations = [] } = {}) => {
     hasEvidenceText: Boolean(getCitationText(citation)),
     hasLocation: hasCitationLocation(citation),
     pageNumber: citation?.pageNumber ?? null,
+    // The slide, sheet or section an Office citation's pageNumber counts
+    // (rag/citations.js); absent for a PDF citation.
+    ...pickDocumentLocation(citation),
     docId: normalizeText(citation?.docId),
     fileName: normalizeText(citation?.fileName),
   }));

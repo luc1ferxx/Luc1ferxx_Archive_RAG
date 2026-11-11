@@ -140,12 +140,21 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 ```
 
 - 上传在校验后立即返回 202，解析、向量化和写索引由 worker 完成。默认每个 API 进程同时运行 worker（每进程 2 个任务）。
-- 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、上传目录），只跑 worker、不监听端口。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务不会同时交给两个 worker。
+- 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、`RAG_DOCUMENT_FORMATS`、Office 文件的 `RAG_OFFICE_*` 和 `RAG_XLSX_MAX_CELLS` 上限、上传目录；这几个格式设置不合法时 worker 拒绝启动），只跑 worker、不监听端口。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务不会同时交给两个 worker。
 - 跨进程入库需要共享的向量库（pgvector 或 qdrant）。`VECTOR_STORE_PROVIDER=local` 的索引在每个进程自己的内存和文件里：独立 worker 拒绝启动，API 进程忽略 `RAG_INGEST_WORKER_ENABLED=false`、在本进程运行 worker 并打印错误。没有 PostgreSQL 时队列在 API 进程内存里，同样只由本进程处理。
 - 每个运行 worker 的进程额外保持一个不走连接池的 PostgreSQL 连接，用来 `LISTEN` 新任务的通知，算连接数时要算上。它必须直连数据库或经过会话池：PgBouncer 事务池下收不到 `NOTIFY`，worker 退回每 `RAG_INGEST_WORKER_POLL_MS` 轮询一次。
 - 多实例部署时，每个实例按请求租户从 PostgreSQL 重读文档注册表（`GET /documents`、每个 `/chat` 开头、arXiv 查重），删除前按 id 重读，所以别的实例上传或删除的文档在这里立即可见；代价是每个 `/chat` 多一次按租户列出文档的查询。这对 `sync` 和 `async` 都成立。
 - 停机：收到 SIGTERM 或 SIGINT 后停止领取新任务，给运行中的任务 5 秒；没完成的归还队列（不计入尝试次数），其他 worker 可以立即接手。进程被强制结束时，任务在租约过期后由其他 worker 重试。
 - 从 `async` 切回 `sync` 前先等队列清空：`sync` 下 API 进程不运行 worker，剩下的任务要靠 `npm run worker:ingest`。
+
+### Office 文档
+
+- 默认就接收 Word（.docx）、PowerPoint（.pptx）和 Excel（.xlsx），不需要额外的服务：解析器（mammoth、SheetJS 和仓库自带的 PowerPoint 读取器）都在 Node 进程里运行。只想收 PDF 就设 `RAG_DOCUMENT_FORMATS=pdf`，上传的检查、报错和保存的文件名和以前完全一样。变量、拒绝码和不提取的内容见 [configuration.md 的"文档格式"](configuration.md#文档格式)。
+- **SheetJS 来自仓库里的 tarball**：`server/vendor/xlsx-0.20.3.tgz` 是 SheetJS Community Edition 0.20.3（Apache-2.0，没有依赖，没有安装脚本），从 SheetJS 官方 CDN 下载（`https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz`，sha256 `8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8`），`server/package.json` 以 `"xlsx": "file:vendor/xlsx-0.20.3.tgz"` 安装，代码里照常 `import ... from "xlsx"`。npm registry 上的 `xlsx` 包停在 0.18.5，带 CVE-2023-30533 和 CVE-2024-22363，修复只发布在 SheetJS 的 CDN 上：不要换成 registry 上的包，也不要运行 `npm install xlsx`（装上的就是那个旧版本）。
+- **镜像构建**：Dockerfile 在 `npm ci` 之前 `COPY server/vendor ./vendor`，构建时不从网络下载 SheetJS；`.dockerignore` 不能排除 `vendor` 目录或 `.tgz` 文件。`test/deployment-contract.test.mjs` 检查这两点，以及 `server/package.json` 里每个 `file:` 依赖都是 `server/vendor/` 下真实存在的 `.tgz`。加入这个 tarball 之后的镜像还没有实际 `docker build` 过。
+- **升级 SheetJS**：从 CDN 下载新版本的 tarball，算出它的 sha256 记在提交说明里（当前版本的见上），放进 `server/vendor/` 并删掉旧文件，改 `server/package.json` 里的 `file:` 路径，再在 `server/` 里运行 `npm install`，让锁文件记下新的 integrity。SheetJS 的版本号是 Excel 分块切块配置的一部分，新切出的分块的 `metadata.chunkProfileId` 会随之改变；已入库的工作簿仍是旧版本切出的分块，需要时用 `cd server && npm run vector:reindex -- --from documents --apply` 重建；索引版本记录的切块配置只含 PDF 设置，所以升级不会出现在 `chunk_profile_differs_*` 警告里。
+- **资源**：Office 文件在调用线程里解析（`PDF_PARSE_WORKERS` 的 worker 池只管 pdf.js），大工作簿或大文档解析期间会占住进程的事件循环，也没有 worker 的内存上限兜底：防止一个文件耗尽堆、让整个进程退出，靠的是解析前的几个上限。mammoth 建出的树约是所读 XML 的 60–115 倍，PowerPoint 读取器约 25–50 倍（实测），`RAG_OFFICE_MAX_XML_BYTES`（默认 16 MiB：Word 文档的 XML 合计、演示文稿和工作簿的单个部件）因此在默认值下最多可能要约 2 GB 堆，适合 64 位主机的默认 V8 堆；内存小的容器（V8 默认堆约为可用内存的四分之一）要调低它。SheetJS 把解析出的每个单元格都放在内存里（实测数值单元格约 130 字节）；`RAG_XLSX_MAX_CELLS` 的预检拒绝可见工作表里单元格元素超过上限两倍的工作簿，按这个数估算，默认设置下解析一个大工作簿可能要几百 MB 内存（没有端到端测过）。内存小的容器调低 `RAG_XLSX_MAX_CELLS`；`RAG_OFFICE_MAX_TEXT_CHARS` 限制一个文件最多展开成多少文字（也就限制了要向量化的量）。大的 Office 文件多时用 `RAG_INGEST_MODE=async`，把 worker 放到单独的进程（见上面的"异步入库"）。同步上传的 Office 文件会解压两次（上传检查一次、解析一次），两次都受 `RAG_OFFICE_*` 上限约束。
+- **限制**：不收旧版 .doc / .ppt / .xls、设了打开密码的文件、启用宏的文件、模板和幻灯片放映（.ppsx）；只取文字，页眉页脚、批注、图表、SmartArt 和图片都不提取，也不做 OCR。工作台里 Office 文件没有内联预览，只提供下载和被引用的原文。Office 文档的检索和答案质量还没有评测过。
 
 ### 停机（`docker stop`、`docker compose down`、重新部署）
 

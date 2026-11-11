@@ -3,6 +3,54 @@ import { vi } from "vitest";
 import axios from "axios";
 import App from "./App";
 
+const DOCX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const XLSX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+// GET /documents for a workspace holding every format the server ingests.
+const MIXED_DOCUMENTS = [
+  {
+    docId: "doc-1",
+    fileName: "benefits-2025.pdf",
+    mimeType: "application/pdf",
+    pageCount: 3,
+  },
+  { docId: "deck-1", fileName: "review.pptx", mimeType: PPTX_MIME_TYPE, pageCount: 12 },
+  { docId: "budget-1", fileName: "budget.xlsx", mimeType: XLSX_MIME_TYPE, pageCount: 3 },
+  {
+    docId: "contract-1",
+    fileName: "contract.docx",
+    mimeType: DOCX_MIME_TYPE,
+    pageCount: 4,
+  },
+];
+
+// vi.mock factories are hoisted above these constants but run only when the
+// mocked module renders, so the mock below can read them.
+const MOCK_DECK_CITATION = {
+  docId: "deck-1",
+  fileName: "review.pptx",
+  filePath: "documents/deck-1/file",
+  pageNumber: 3,
+  chunkIndex: 0,
+  rank: 1,
+  locationUnit: "slide",
+  locationLabel: "Q3 results",
+  excerpt: "Revenue grew 12%.",
+};
+const MOCK_PDF_CITATION = {
+  docId: "doc-1",
+  fileName: "benefits-2025.pdf",
+  filePath: "documents/doc-1/file",
+  pageNumber: 4,
+  chunkIndex: 1,
+  rank: 1,
+  excerpt: "Benefits renew in January.",
+};
+
 vi.mock("axios", () => ({
   default: {
     get: vi.fn(),
@@ -63,6 +111,25 @@ vi.mock("./components/ChatComponent", () => ({ default: (props) => (
     >
       Submit mock chat
     </button>
+    {[
+      ["Submit deck chat", MOCK_DECK_CITATION],
+      ["Submit pdf chat", MOCK_PDF_CITATION],
+    ].map(([label, citation]) => (
+      <button
+        key={label}
+        type="button"
+        onClick={() =>
+          props.handleResp?.("Mock cited question", {
+            agentAnswer: "Mock cited answer",
+            ragAnswer: "Mock cited document answer",
+            ragSources: [citation],
+            agentTrace: [],
+          })
+        }
+      >
+        {label}
+      </button>
+    ))}
     {(props.chatScopeOptions ?? []).map((option) => (
       <button
         key={option.id}
@@ -100,7 +167,17 @@ vi.mock("./components/RenderQA", () => ({ default: (props) => (
     </button>
   </div>
 ) }));
-vi.mock("./components/PdfPreview", () => ({ default: () => <div>Preview</div> }));
+vi.mock("./components/PdfPreview", () => ({
+  default: ({ source }) => (
+    <div
+      data-testid="preview"
+      data-doc-id={source?.docId ?? ""}
+      data-mime-type={source?.mimeType ?? ""}
+    >
+      Preview
+    </div>
+  ),
+}));
 
 const openWorkspace = async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Open workspace" }));
@@ -155,7 +232,7 @@ describe("App", () => {
     });
 
     [
-      "Upload PDFs",
+      "Upload documents",
       "Cited QA",
       "Compare documents",
       "Risk review",
@@ -198,7 +275,7 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: /来源 · 已上传 \d+/ })
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "上传 PDF" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "上传文档" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "引用问答" })).toBeInTheDocument();
     expect(window.localStorage.getItem("archive-rag.locale")).toBe("zh");
 
@@ -217,6 +294,84 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "切换语言到English" })
     ).toBeInTheDocument();
+  });
+
+  const mockMixedDocuments = () => {
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({ data: { runs: [] } });
+      }
+
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({ data: { tasks: [] } });
+      }
+
+      return Promise.resolve({ data: MIXED_DOCUMENTS });
+    });
+  };
+
+  test("counts slides, sheets and sections by the document's type and keeps PDF pages", async () => {
+    mockMixedDocuments();
+    const { container } = render(<App />);
+
+    const homeNavigation = await screen.findByRole("navigation", {
+      name: "Home navigation",
+    });
+    fireEvent.click(within(homeNavigation).getByRole("button", { name: "Drive" }));
+
+    const drive = await screen.findByRole("region", { name: "Workspace drive" });
+    await within(drive).findByText("review.pptx");
+
+    expect(within(drive).getByText("3 pages")).toBeInTheDocument();
+    expect(within(drive).getByText("12 slides")).toBeInTheDocument();
+    expect(within(drive).getByText("3 sheets")).toBeInTheDocument();
+    expect(within(drive).getByText("4 sections")).toBeInTheDocument();
+    expect(drive.querySelectorAll(".anticon-file-pdf")).toHaveLength(1);
+    expect(drive.querySelectorAll(".anticon-file-ppt")).toHaveLength(1);
+    expect(drive.querySelectorAll(".anticon-file-excel")).toHaveLength(1);
+    expect(drive.querySelectorAll(".anticon-file-word")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch language to 中文" }));
+
+    expect(await within(drive).findByText("12 张幻灯片")).toBeInTheDocument();
+    expect(within(drive).getByText("3 页")).toBeInTheDocument();
+    expect(within(drive).getByText("3 个工作表")).toBeInTheDocument();
+    expect(within(drive).getByText("4 节")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换语言到English" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Open workspace" })[0]);
+
+    await screen.findByText("Corpus");
+    expect(
+      [...container.querySelectorAll(".document-item-meta")].map((meta) =>
+        meta.textContent.split(" · ")[0]
+      )
+    ).toEqual(["3 pages", "12 slides", "3 sheets", "4 sections"]);
+  });
+
+  test("hands the preview the document's type for an Office citation only", async () => {
+    mockMixedDocuments();
+    render(<App />);
+
+    expect(await screen.findByText("Archive RAG Workspace")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Sources · Uploaded 4/ })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Submit deck chat" }));
+
+    const preview = await screen.findByTestId("preview");
+    expect(preview).toHaveAttribute("data-doc-id", "deck-1");
+    expect(preview).toHaveAttribute("data-mime-type", PPTX_MIME_TYPE);
+    expect(screen.getByText("review.pptx · Slide 3 · Q3 results")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Submit pdf chat" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("preview")).toHaveAttribute("data-doc-id", "doc-1");
+    });
+    expect(screen.getByTestId("preview")).toHaveAttribute("data-mime-type", "");
+    expect(screen.getByText("benefits-2025.pdf · page 4")).toBeInTheDocument();
   });
 
   test("keeps home navigation on the launch surface until the workspace is opened", async () => {

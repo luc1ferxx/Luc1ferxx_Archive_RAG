@@ -13,11 +13,14 @@
 
 export const DELETED_SOURCE_TEXT_MARKER = "[source document deleted]";
 
+// locationLabel is an Office chunk's slide title, sheet name or section
+// heading (rag/citations.js): the document's own words, like sectionHeading.
 const REDACTED_TEXT_FIELDS = Object.freeze([
   "content",
   "evidence",
   "evidenceText",
   "excerpt",
+  "locationLabel",
   "pageContent",
   "quote",
   "sectionHeading",

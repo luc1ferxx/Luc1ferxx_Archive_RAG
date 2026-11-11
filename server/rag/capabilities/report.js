@@ -9,6 +9,7 @@ import {
   sanitizeWorkspaceArtifactStructuredValue,
 } from "../workspace-artifacts/index.js";
 import { persistCapabilityArtifact } from "./artifacts.js";
+import { formatCitationLocation } from "../citations.js";
 
 const slugify = (value = "report") => {
   const slug = normalizeText(value)
@@ -37,7 +38,9 @@ const formatCitationLine = (citation = {}, index) => {
     `Source ${index + 1}`;
   const location = [
     normalizeText(citation.docId) ? `docId: ${normalizeText(citation.docId)}` : "",
-    citation.pageNumber ? `page ${citation.pageNumber}` : "",
+    // "page 4" for a PDF, as before; "slide 3 · Title", "sheet Revenue" or
+    // "section 2 · Heading" for an Office citation (rag/citations.js).
+    formatCitationLocation(citation, { withLabel: true }),
     normalizeText(citation.url),
   ]
     .filter(Boolean)

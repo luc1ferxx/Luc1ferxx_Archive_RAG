@@ -40,7 +40,18 @@
 // TENANT_* coded error, rag/kms/errors.js: a key destroyed by a standalone
 // `tenant:keys destroy`, a changed byte, bytes that only look like an
 // envelope) is reported as unreadable and skipped -- its chunks stay as they
-// are -- and the run goes on with every other tenant's documents.
+// are -- and the run goes on with every other tenant's documents. So is a
+// stored Word, PowerPoint or Excel document the document loader refuses (a
+// DOCUMENT_* coded error, rag/document-format-errors.js: an archive over
+// RAG_OFFICE_* limits lowered since its upload, a workbook over
+// RAG_XLSX_MAX_CELLS): one document the loader will not read again must not
+// end the run for every other one.
+//
+// --from documents reads every document as the format it was registered as
+// (its MIME type; rag/document-formats.js resolveStoredDocumentFormats),
+// whatever RAG_DOCUMENT_FORMATS says now: a PDF goes straight to loadPdfPages
+// as it always did, a Word, PowerPoint or Excel document through its own
+// loader, and its chunks carry its own chunk profile (rag/chunk-profile.js).
 //
 // This rewrites the ACTIVE index version in place (and, like every write, the
 // versions it dual-writes). Moving to another embedding model without
@@ -62,7 +73,13 @@ import path from "path";
 import { pathToFileURL } from "url";
 
 import { chunkDocumentWithConfig } from "./rag/chunker.js";
-import { MIXED_CHUNK_PROFILE, describeChunkProfile, stampChunkProfile } from "./rag/chunk-profile.js";
+import { copyDocumentLocationFields } from "./rag/citations.js";
+import {
+  MIXED_CHUNK_PROFILE,
+  describeChunkProfile,
+  readOfficeParse,
+  stampChunkProfile,
+} from "./rag/chunk-profile.js";
 import {
   getEmbeddingDimensions,
   getEmbeddingIndexIdentity,
@@ -77,9 +94,11 @@ import {
   lockDocumentForContentReplace,
   readDocumentRegistrySnapshot,
 } from "./rag/doc-registry.js";
+import { isDocumentFormatError } from "./rag/document-format-errors.js";
+import { getDocumentFormatForMimeType, resolveStoredDocumentFormats } from "./rag/document-formats.js";
+import { loadDocumentPages } from "./rag/document-loader.js";
 import { buildPublicFilePath } from "./rag/document-utils.js";
 import { isTenantEncryptionError } from "./rag/kms/errors.js";
-import { loadPdfPages } from "./rag/pdf-loader.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataPath, readJsonFileSync } from "./rag/storage.js";
 import { flushTenantUsageOnExit } from "./rag/tenant-usage.js";
@@ -172,6 +191,40 @@ const readLocalEntries = () => {
   };
 };
 
+/**
+ * One Qdrant point as a stored chunk entry ({ id, metadata, pageContent,
+ * vector }), or null for a point without a document id or a dense vector.
+ * The metadata keeps the payload fields the Qdrant store writes, the location
+ * of an Office chunk (locationUnit, locationLabel) included, exactly as they
+ * were written; a PDF chunk's payload has neither and its metadata is as
+ * before.
+ */
+export const toQdrantChunkEntry = (point) => {
+  const payload = point?.payload ?? {};
+  const vector = Array.isArray(point?.vector?.dense) ? point.vector.dense : null;
+
+  if (!payload.docId || !vector) {
+    return null;
+  }
+
+  return {
+    id: String(point.id),
+    metadata: {
+      docId: payload.docId,
+      fileName: payload.fileName,
+      filePath: payload.filePath,
+      publicFilePath: payload.publicFilePath,
+      pageNumber: payload.pageNumber ?? null,
+      ...copyDocumentLocationFields(payload),
+      chunkIndex: payload.chunkIndex ?? null,
+      sectionHeading: payload.sectionHeading ?? null,
+      ...(payload.source ? { source: payload.source } : {}),
+    },
+    pageContent: String(payload.pageContent ?? ""),
+    vector: vector.map((value) => Number(value) || 0),
+  };
+};
+
 const readQdrantEntries = async () => {
   const [{ QdrantClient }, config] = await Promise.all([
     import("@qdrant/js-client-rest"),
@@ -194,28 +247,11 @@ const readQdrantEntries = async () => {
     });
 
     for (const point of page?.points ?? []) {
-      const payload = point.payload ?? {};
-      const vector = Array.isArray(point.vector?.dense) ? point.vector.dense : null;
+      const entry = toQdrantChunkEntry(point);
 
-      if (!payload.docId || !vector) {
-        continue;
+      if (entry) {
+        entries.push(entry);
       }
-
-      entries.push({
-        id: String(point.id),
-        metadata: {
-          docId: payload.docId,
-          fileName: payload.fileName,
-          filePath: payload.filePath,
-          publicFilePath: payload.publicFilePath,
-          pageNumber: payload.pageNumber ?? null,
-          chunkIndex: payload.chunkIndex ?? null,
-          sectionHeading: payload.sectionHeading ?? null,
-          ...(payload.source ? { source: payload.source } : {}),
-        },
-        pageContent: String(payload.pageContent ?? ""),
-        vector: vector.map((value) => Number(value) || 0),
-      });
     }
 
     offset = page?.next_page_offset;
@@ -415,24 +451,37 @@ export const planIndexVersionChunkProfileRecords = ({ complete, documentsWritten
   return records.sort((left, right) => left.versionId - right.versionId);
 };
 
+// "PDF" for a PDF (every message's wording before Office formats), "file"
+// for a stored Word, PowerPoint or Excel document.
+const describeStoredFile = (mimeType) => {
+  const format = getDocumentFormatForMimeType(mimeType);
+
+  return format && format !== "pdf" ? "file" : "PDF";
+};
+
 export const prepareFromDocumentBytes = async (document) => {
   const stored = await getDocumentFile(document.docId);
 
   if (!stored?.fileBuffer) {
-    throw new Error(`No PDF bytes are stored for ${document.docId}.`);
+    throw new Error(`No ${describeStoredFile(document.mimeType)} bytes are stored for ${document.docId}.`);
   }
 
   const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "vector-reindex-"));
   const tempPath = path.join(tempDirectory, "document.pdf");
 
   try {
-    // The decrypted bytes (getDocumentFile), parsed from a working file.
+    // The decrypted bytes (getDocumentFile), parsed from a working file as
+    // the format the document was registered as (see the header).
     await writeWorkingFile(tempPath, stored.fileBuffer);
-    const pages = await loadPdfPages(tempPath);
+    const { pages, parse } = await loadDocumentPages(tempPath, {
+      formats: resolveStoredDocumentFormats(stored.mimeType ?? document.mimeType),
+    });
+    const officeParse = readOfficeParse(parse);
     // Re-chunked chunks say which chunk profile cut them, as an ingest's do
-    // (rag/index.js chunkDocumentPages); chunks re-embedded from a local or
-    // Qdrant index keep the metadata they had.
-    const chunkProfile = describeChunkProfile();
+    // (rag/index.js chunkDocumentPages: a Word, PowerPoint or Excel
+    // document's own); chunks re-embedded from a local or Qdrant index keep
+    // the metadata they had.
+    const chunkProfile = officeParse ? describeChunkProfile(officeParse) : describeChunkProfile();
     const chunks = chunkDocumentWithConfig({
       chunkOverlap: chunkProfile.overlap,
       chunkSize: chunkProfile.size,
@@ -461,13 +510,19 @@ export const prepareFromDocumentBytes = async (document) => {
 /**
  * One document of --from documents: { prepared }, or { unreadableCode } when
  * its stored PDF cannot be decrypted or read as a file (any TENANT_* coded
- * error) -- skipped, never the end of the run. Every other error propagates.
+ * error), or the document loader refuses a stored Word, PowerPoint or Excel
+ * file (any DOCUMENT_* coded error) -- skipped, never the end of the run.
+ * Every other error propagates.
  */
 export const prepareDocumentForReindex = async (document, { prepare = prepareFromDocumentBytes } = {}) => {
   try {
     return { prepared: await prepare(document) };
   } catch (error) {
     if (isTenantEncryptionError(error)) {
+      return { unreadableCode: error.code };
+    }
+
+    if (isDocumentFormatError(error) && typeof error.code === "string") {
       return { unreadableCode: error.code };
     }
 
@@ -665,6 +720,8 @@ export const main = async () => {
   let written = 0;
   let skipped = 0;
   let unreadable = 0;
+  // Unreadable documents that are not PDFs: the summary then says "file".
+  let unreadableOther = 0;
   // For the index versions' chunk-profile records (--from documents): the
   // profile every document is cut with, the documents written into each
   // version, and whether every registered document was rewritten.
@@ -725,11 +782,14 @@ export const main = async () => {
       const read = await prepareDocumentForReindex(document);
 
       if (read.unreadableCode) {
+        const storedFile = describeStoredFile(document.mimeType);
+
         complete = false;
         skipped += 1;
         unreadable += 1;
+        unreadableOther += storedFile === "PDF" ? 0 : 1;
         process.stdout.write(
-          `skip   ${item.docId}: its stored PDF cannot be read (${read.unreadableCode}); its chunks stay as they are.\n`
+          `skip   ${item.docId}: its stored ${storedFile} cannot be read (${read.unreadableCode}); its chunks stay as they are.\n`
         );
         continue;
       }
@@ -773,7 +833,7 @@ export const main = async () => {
 
   process.stdout.write(
     `\nDone. ${written} chunk(s) written to pgvector${skipped > 0 ? `; ${skipped} document(s) skipped` : ""}${
-      unreadable > 0 ? ` (${unreadable} with an unreadable stored PDF)` : ""
+      unreadable > 0 ? ` (${unreadable} with an unreadable stored ${unreadableOther > 0 ? "file" : "PDF"})` : ""
     }.\n`
   );
 

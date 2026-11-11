@@ -34,6 +34,7 @@ import { useDocumentSelection } from "./hooks/useDocumentSelection";
 import { useQualityReports } from "./hooks/useQualityReports";
 import { hasActiveTasks, useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
+import { withDocumentMimeType } from "./archiveWorkspace";
 import {
   DEMO_CONVERSATION,
   DEMO_DOCUMENTS,
@@ -190,6 +191,7 @@ const App = () => {
     conversation,
     currentTurn,
     setActiveTurnIndex,
+    t,
   });
   const hasOnlyDemoConversation =
     conversation.length === 0 ||
@@ -651,6 +653,13 @@ const App = () => {
     isDemoWorkbench && !qualityHistory ? DEMO_QUALITY_HISTORY : qualityHistory;
   const visibleSelectedSource =
     selectedSource ?? (isDemoWorkbench ? DEMO_PREVIEW_SOURCE : null);
+  // Citations carry no MIME type; the preview takes the document's, so a
+  // Word, PowerPoint or Excel source offers its download instead of the PDF
+  // viewer (a PDF source is passed on unchanged).
+  const previewSource = useMemo(
+    () => withDocumentMimeType(visibleSelectedSource, visibleDocuments),
+    [visibleDocuments, visibleSelectedSource]
+  );
   const visibleTotalPages = isDemoWorkbench ? 182 : totalPages;
   const visiblePreviewStatus = isDemoWorkbench
     ? `Finance Policy Manual.pdf · ${t("common.page")} 42`
@@ -870,6 +879,7 @@ const App = () => {
         onContinueRun={renderQAContinueRun}
         onFeedback={renderQAFeedback}
         onStepRetry={renderQAStepRetry}
+        t={t}
       />
     );
   };
@@ -1071,7 +1081,7 @@ const App = () => {
             </div>
 
             <div className="archive-card archive-preview-card">
-              <PdfPreview source={visibleSelectedSource} />
+              <PdfPreview source={previewSource} t={t} />
             </div>
           </section>
 

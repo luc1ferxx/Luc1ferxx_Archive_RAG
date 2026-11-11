@@ -28,7 +28,7 @@
 | `POST` | `/artifacts/:artifactId/archive` | 将 artifact 幂等归档；重复归档返回同一个 archived 结果。 |
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
-| `GET` | `/documents/:docId/file` | 以内联 PDF 方式流式返回文档，支持 range request。 |
+| `GET` | `/documents/:docId/file` | 流式返回文档原件，支持 range request：PDF 内联显示，Word、PowerPoint、Excel 按附件下载，Content-Type 是文档自己的类型。 |
 | `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的签名 token，并保存可稍后查看的 recommendation snapshot，同时记录 `external_recommendation` task。 |
 | `GET` | `/documents/arxiv/suggestions` | 列出当前访问范围内保存的 arXiv recommendation snapshots。 |
 | `GET` | `/documents/:docId/arxiv/suggestions/saved` | 读取单份文档当前保存的 arXiv recommendation snapshot；没有保存项时返回空候选和原因。 |
@@ -36,7 +36,7 @@
 | `POST` | `/upload/init` | 初始化分片上传会话。 |
 | `GET` | `/upload/status` | 查询分片上传进度。 |
 | `POST` | `/upload/chunk` | 上传单个文件分片。 |
-| `POST` | `/upload/complete` | 合并分片、解析 PDF、写入索引。 |
+| `POST` | `/upload/complete` | 合并分片、按字节识别格式（PDF、.docx、.pptx、.xlsx，受 `RAG_DOCUMENT_FORMATS` 限制）、解析、写入索引。 |
 | `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
 | `GET` / `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
 | `POST` | `/chat/stream` | 与 `/chat` 同参数的 Server-Sent Events 版本：agent 每记录一步 trace 就推送一个 `trace_step` 事件（只含 id/type/label/status/summary，不含 detail），主文档答案生成时，每写完一句就用 finalizer 同一套 claim 校验检查已生成的部分，通过的句子以 `answer_draft` 事件推送（`{ draft: { index, text } }`），模型调用重试或切换备用模型时推送 `answer_draft_reset`，客户端应清空草稿；原始 token 不会发出。草稿是临时的：最终答案经 finalizer 校验后以 `result` 事件发送，内容与 `/chat` 的 status 和 body 完全一致，客户端用它替换草稿，随后是 `done`；失败时发送 `error`。客户端断开后 run 仍会完成。前端入口是 `src/archiveApi.js` 的 `streamChatAnswer`（聊天界面在用）和底层的 `streamChat`。 |
@@ -111,7 +111,7 @@ cd server
 npm run vector:reindex                       # dry-run：逐文档列出 copy / reembed / skip 计划
 npm run vector:reindex -- --apply            # 复用已有向量（维度一致时）写入 pgvector，每份文档一个事务
 npm run vector:reindex -- --from qdrant --apply
-npm run vector:reindex -- --from documents --apply   # 换 embedding 模型后：用库里的 PDF 重新切块、重新 embedding
+npm run vector:reindex -- --from documents --apply   # 换 embedding 模型后：用库里存的原文件（PDF 或 Office 文件）重新切块、重新 embedding
 ```
 
 真实数据库集成测试只在 `PGVECTOR_TEST_DATABASE_URL` 存在时运行（会清空该库的文档，只指向一次性库）：
@@ -143,7 +143,7 @@ server/evaluation/results/<timestamped-files>
 
 | 层级 | 落点 |
 | --- | --- |
-| 安全 | CORS 白名单（`ALLOWED_ORIGINS`）、helmet、分级限流（全局/chat/upload/destructive）、上传会话按 principal/workspace 分域、文件名 + `%PDF` 魔数双重校验、无静态 `/uploads` 暴露。 |
+| 安全 | CORS 白名单（`ALLOWED_ORIGINS`）、helmet、分级限流（全局/chat/upload/destructive）、上传会话按 principal/workspace 分域、文件名初筛 + 文件字节判定格式（`%PDF` 魔数；Office 文件先过 ZIP 防护：条目数、解压大小、压缩比、单个解析器的 XML 量和抽出文字量都有上限）、无静态 `/uploads` 暴露。 |
 | 性能与可靠性 | 存储层异步原子写 + 写锁 + 增量 BM25 统计；embedding LRU 缓存；外部 fetch 全部带超时；上传 session TTL 清扫；store `list()` 分页；前端 `/chat` AbortController + 组件 memo 化。 |
 | 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |

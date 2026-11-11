@@ -1,10 +1,14 @@
-import { beforeEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import axios from "axios";
-import { render, screen } from "@testing-library/react";
+import { message } from "antd";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createTranslator } from "../archiveI18n";
 import PdfUploader, {
+  getUploadErrorMessage,
   uploadToBackend,
-  validatePdfFile,
+  validateDocumentFile,
   MAX_UPLOAD_SIZE_MB,
+  UPLOAD_ACCEPT,
 } from "./PdfUploader";
 
 vi.mock("axios", () => ({
@@ -15,38 +19,189 @@ vi.mock("axios", () => ({
 }));
 
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+const DOCX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const PPTX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const XLSX_MIME_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
-describe("validatePdfFile", () => {
+describe("validateDocumentFile", () => {
   it("accepts a valid .pdf file", () => {
     const file = { name: "a.pdf", size: 1024, type: "application/pdf" };
-    expect(validatePdfFile(file)).toEqual({ ok: true });
+    expect(validateDocumentFile(file)).toEqual({ ok: true });
   });
 
   it("accepts an uppercase .PDF with empty MIME type", () => {
     const file = { name: "report.PDF", size: 2048, type: "" };
-    expect(validatePdfFile(file)).toEqual({ ok: true });
+    expect(validateDocumentFile(file)).toEqual({ ok: true });
+  });
+
+  it.each([
+    ["notes.docx", DOCX_MIME_TYPE],
+    ["deck.pptx", PPTX_MIME_TYPE],
+    ["budget.xlsx", XLSX_MIME_TYPE],
+    ["NOTES.DOCX", ""],
+    ["Deck.PpTx", ""],
+    ["BUDGET.XLSX", "application/octet-stream"],
+  ])("accepts the Office file %s (type %j)", (name, type) => {
+    expect(validateDocumentFile({ name, size: 1024, type })).toEqual({ ok: true });
+  });
+
+  it("accepts an Office file the browser names only by its MIME type", () => {
+    expect(
+      validateDocumentFile({ name: "download", size: 1024, type: PPTX_MIME_TYPE })
+    ).toEqual({ ok: true });
   });
 
   it("rejects a non-PDF file as invalidType", () => {
     const file = { name: "a.exe", size: 1024, type: "application/octet-stream" };
-    expect(validatePdfFile(file)).toEqual({ ok: false, reason: "invalidType" });
+    expect(validateDocumentFile(file)).toEqual({ ok: false, reason: "invalidType" });
+  });
+
+  it.each([
+    ["legacy.doc", "application/msword"],
+    ["legacy.xls", "application/vnd.ms-excel"],
+    ["legacy.ppt", "application/vnd.ms-powerpoint"],
+    ["macros.docm", "application/vnd.ms-word.document.macroEnabled.12"],
+    ["template.dotx", ""],
+    ["show.ppsx", ""],
+    ["notes.txt", "text/plain"],
+    ["archive.zip", "application/zip"],
+    ["report.pdf.exe", ""],
+  ])("rejects %s as invalidType", (name, type) => {
+    expect(validateDocumentFile({ name, size: 1024, type })).toEqual({
+      ok: false,
+      reason: "invalidType",
+    });
   });
 
   it("rejects a file exceeding the size limit as tooLarge", () => {
     const file = { name: "big.pdf", size: MAX_UPLOAD_SIZE_BYTES + 1, type: "application/pdf" };
-    expect(validatePdfFile(file)).toEqual({ ok: false, reason: "tooLarge" });
+    expect(validateDocumentFile(file)).toEqual({ ok: false, reason: "tooLarge" });
+  });
+
+  it("applies the size limit to Office files too", () => {
+    const file = { name: "big.xlsx", size: MAX_UPLOAD_SIZE_BYTES + 1, type: XLSX_MIME_TYPE };
+    expect(validateDocumentFile(file)).toEqual({ ok: false, reason: "tooLarge" });
   });
 
   it("accepts a file exactly at the size limit", () => {
     const file = { name: "exact.pdf", size: MAX_UPLOAD_SIZE_BYTES, type: "application/pdf" };
-    expect(validatePdfFile(file)).toEqual({ ok: true });
+    expect(validateDocumentFile(file)).toEqual({ ok: true });
+  });
+});
+
+describe("getUploadErrorMessage", () => {
+  it("prefers the server's refusal over the request's own message", () => {
+    expect(
+      getUploadErrorMessage(
+        Object.assign(new Error("Request failed with status code 415"), {
+          response: {
+            status: 415,
+            data: {
+              code: "DOCUMENT_FORMAT_LEGACY_OFFICE",
+              error: "Legacy or password-protected Office files are not supported.",
+            },
+          },
+        })
+      )
+    ).toBe("Legacy or password-protected Office files are not supported.");
+    expect(
+      getUploadErrorMessage({
+        message: "Request failed with status code 413",
+        response: { data: { error: { message: "The workbook has too many cells." } } },
+      })
+    ).toBe("The workbook has too many cells.");
+  });
+
+  it("falls back to the request's message, then a generic one", () => {
+    expect(getUploadErrorMessage(new Error("Network Error"))).toBe("Network Error");
+    expect(getUploadErrorMessage({ response: { data: { error: "  " } } })).toBe(
+      "Upload failed"
+    );
+    expect(getUploadErrorMessage(undefined)).toBe("Upload failed");
   });
 });
 
 describe("PdfUploader", () => {
+  let errorMessage;
+
+  beforeEach(() => {
+    axios.get.mockReset();
+    axios.post.mockReset();
+    errorMessage = vi.spyOn(message, "error").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const getFileInput = (container) => container.querySelector('input[type="file"]');
+
   it("renders the English title when no locale is set", () => {
     render(<PdfUploader />);
-    expect(screen.getByText("Add PDFs")).toBeInTheDocument();
+    expect(screen.getByText("Add documents")).toBeInTheDocument();
+    expect(
+      screen.getByText("Drop PDF, Word, PowerPoint or Excel files here, or click to browse.")
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Chinese copy", () => {
+    render(<PdfUploader t={createTranslator("zh")} />);
+    expect(screen.getByText("添加文档")).toBeInTheDocument();
+  });
+
+  it("offers the four document formats in the file picker", () => {
+    const { container } = render(<PdfUploader />);
+
+    expect(UPLOAD_ACCEPT).toBe(".pdf,.docx,.pptx,.xlsx");
+    expect(getFileInput(container)).toHaveAttribute("accept", ".pdf,.docx,.pptx,.xlsx");
+  });
+
+  it("refuses an unsupported file before sending anything", async () => {
+    const { container } = render(<PdfUploader />);
+
+    fireEvent.change(getFileInput(container), {
+      target: { files: [new File(["text"], "notes.txt", { type: "text/plain" })] },
+    });
+
+    await waitFor(() => {
+      expect(errorMessage).toHaveBeenCalledWith(
+        "notes.txt is not a supported document. Upload PDF, Word (.docx), PowerPoint (.pptx) or Excel (.xlsx) files."
+      );
+    });
+    expect(axios.post).not.toHaveBeenCalled();
+  });
+
+  it("sends a PowerPoint file and shows the server's refusal", async () => {
+    axios.post.mockRejectedValue(
+      Object.assign(new Error("Request failed with status code 415"), {
+        response: {
+          status: 415,
+          data: {
+            code: "DOCUMENT_FORMAT_DISABLED",
+            error: "PowerPoint files are not enabled on this server.",
+          },
+        },
+      })
+    );
+    const onUploadSuccess = vi.fn();
+    const { container } = render(<PdfUploader onUploadSuccess={onUploadSuccess} />);
+
+    fireEvent.change(getFileInput(container), {
+      target: { files: [new File(["PK"], "Deck.PPTX", { type: PPTX_MIME_TYPE })] },
+    });
+
+    await waitFor(() => {
+      expect(errorMessage).toHaveBeenCalledWith(
+        "Deck.PPTX upload failed: PowerPoint files are not enabled on this server."
+      );
+    });
+    expect(axios.post.mock.calls[0][0]).toMatch(/\/upload\/init$/);
+    expect(axios.post.mock.calls[0][1]).toMatchObject({ fileName: "Deck.PPTX" });
+    expect(onUploadSuccess).not.toHaveBeenCalled();
   });
 });
 

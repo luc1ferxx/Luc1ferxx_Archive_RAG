@@ -1,5 +1,7 @@
 import React, { useCallback, useState } from "react";
 import { Spin } from "antd";
+import { createTranslator } from "../archiveI18n";
+import { formatDocumentLocation, getLocationUnit } from "../documentLocation";
 import AgentTraceDetail, {
   formatAgentMode,
   formatTraceStatus,
@@ -7,6 +9,10 @@ import AgentTraceDetail, {
 import AgentTraceOverview from "./AgentTraceOverview";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
+
+// English unless the app hands in its translator: the citation location is
+// the one label here that follows the locale ("Page 4" / "第 4 页").
+const defaultT = createTranslator("en");
 
 const FEEDBACK_ACTIONS = [
   {
@@ -424,7 +430,7 @@ const AgentRunTimeline = ({ steps }) => {
   );
 };
 
-const DemoWorkbenchAnswer = ({ answer, onSelectSource }) => {
+const DemoWorkbenchAnswer = ({ answer, onSelectSource, t }) => {
   const sources = answer.ragSources ?? [];
   const trace = answer.agentTrace ?? [];
   const [showAllSources, setShowAllSources] = useState(false);
@@ -436,7 +442,11 @@ const DemoWorkbenchAnswer = ({ answer, onSelectSource }) => {
       docId: "demo-procurement",
       fileName: "Procurement Guidelines.docx",
       filePath: "",
-      pageNumber: 18,
+      // A Word citation points at a section (its position and heading), not
+      // a page.
+      pageNumber: 4,
+      locationUnit: "section",
+      locationLabel: "Travel purchases",
       chunkIndex: 7,
       rank: 4,
       excerpt: "Vendor travel purchases require manager approval above policy thresholds.",
@@ -518,7 +528,11 @@ const DemoWorkbenchAnswer = ({ answer, onSelectSource }) => {
           >
             <span>{sourceIndex + 1}</span>
             <strong>{source.fileName}</strong>
-            <small>pp. {source.pageNumber}</small>
+            {getLocationUnit(source) ? (
+              <small>{formatDocumentLocation(source, t, { withLabel: false })}</small>
+            ) : (
+              <small>pp. {source.pageNumber}</small>
+            )}
           </button>
         ))}
         <button
@@ -585,6 +599,7 @@ const RenderQA = (props) => {
     onContinueRun,
     onFeedback,
     onStepRetry,
+    t = defaultT,
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
 
@@ -667,6 +682,7 @@ const RenderQA = (props) => {
                 <DemoWorkbenchAnswer
                   answer={each.answer}
                   onSelectSource={onSelectSource}
+                  t={t}
                 />
               ) : (
                 <>
@@ -855,8 +871,16 @@ const RenderQA = (props) => {
                           <span>
                             {sourceIndex + 1}. {source.fileName}
                           </span>
-                          <span>
-                            {source.pageNumber ? `Page ${source.pageNumber}` : ""}
+                          {/* A slide title, sheet name or section heading keeps
+                              its own case (the badge is upper-cased). */}
+                          <span
+                            className={
+                              getLocationUnit(source)
+                                ? "archive-source-location"
+                                : undefined
+                            }
+                          >
+                            {formatDocumentLocation(source, t)}
                           </span>
                         </div>
                         <div className="archive-source-meta-row">

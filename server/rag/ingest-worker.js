@@ -12,6 +12,7 @@ import {
   isRagIngestAsync,
 } from "./config.js";
 import { isDocumentRegistryShared } from "./doc-registry.js";
+import { resolveQueuedDocumentFormats } from "./document-loader.js";
 import { toIngestJobErrorMessage } from "./ingest-job-store.js";
 import {
   instrumentIngestStages,
@@ -348,7 +349,12 @@ export const createIngestWorker = ({
   // The one-step ingest of a ragService that declares no stages. It gets the
   // job's content hash, whether to deduplicate, and whether it replaces a
   // document, so such a service can honour them too; it resolves to
-  // { outcome } for the success record.
+  // { outcome } for the success record. `formats` is every supported format
+  // (rag/index.js ingestDocument): the enqueue checked the bytes against
+  // RAG_DOCUMENT_FORMATS, and a job queued before the setting changed is
+  // still ingested; a PDF-only server reads every file its PDF check passes
+  // as a PDF, as it queued it (rag/document-loader.js
+  // resolveQueuedDocumentFormats).
   const ingestJob = async (job, fence, tempFilePath, holdsLease) => {
     const replacing = job.kind === INGEST_JOB_KINDS.replace;
 
@@ -380,6 +386,7 @@ export const createIngestWorker = ({
         docId: job.docId,
         filePath: tempFilePath,
         fileName: job.fileName,
+        formats: await resolveQueuedDocumentFormats(tempFilePath),
         ownerUserId: job.ownerUserId,
         replace: replacing,
         requestedAt: job.createdAt ?? null,

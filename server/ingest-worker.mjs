@@ -28,7 +28,12 @@ export const runIngestWorkerProcess = async ({
   tempDirectory = null,
 } = {}) => {
   const [
-    { getPostgresTenantContextMode, getVectorStoreProviderConfigStatus, isPostgresDatabaseConfigured },
+    {
+      assertDocumentFormatSettings,
+      getPostgresTenantContextMode,
+      getVectorStoreProviderConfigStatus,
+      isPostgresDatabaseConfigured,
+    },
     { createDefaultIngestJobStore },
     { createIngestWorker },
     { resetPostgresPool },
@@ -63,6 +68,11 @@ export const runIngestWorkerProcess = async ({
 
   // An unknown POSTGRES_TENANT_CONTEXT refuses the start (rag/config.js).
   getPostgresTenantContextMode();
+  // So do the document format settings: the worker reads RAG_DOCUMENT_FORMATS
+  // to read a queued file the way a PDF-only server queued it
+  // (rag/document-loader.js resolveQueuedDocumentFormats), and the Office
+  // limits whenever it parses an Office file.
+  assertDocumentFormatSettings();
 
   const store = (createStore ?? createDefaultIngestJobStore)();
   const resolvedRagService = ragService ?? (await import("./rag/index.js"));

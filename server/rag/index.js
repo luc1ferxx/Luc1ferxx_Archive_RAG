@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { chunkDocumentWithConfig } from "./chunker.js";
-import { describeChunkProfile, stampChunkProfile } from "./chunk-profile.js";
+import { describeChunkProfile, readOfficeParse, stampChunkProfile } from "./chunk-profile.js";
 import {
   isAgentFollowUpOriginalQuestionEnabled,
   isDocumentTrashEnabled,
@@ -67,7 +67,13 @@ import {
 import { runDocumentDeletionCascade } from "./document-deletion-cascade.js";
 import { recordRagTrace } from "./observability.js";
 import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
-import { loadPdfPages } from "./pdf-loader.js";
+import { createNoExtractableTextError } from "./document-format-errors.js";
+import {
+  DOCUMENT_MIME_TYPES,
+  getDocumentFormatForMimeType,
+  resolveStoredDocumentFormats,
+} from "./document-formats.js";
+import { loadDocumentPages } from "./document-loader.js";
 import { readWorkingFile, startsWithReservedFileMagic, writeWorkingFile } from "./working-files.js";
 import { withPostgresTransaction } from "./postgres.js";
 import { STAGED_INGEST } from "./ingest-stages.js";
@@ -130,6 +136,11 @@ const getPageNumber = (metadata = {}, fallbackPageNumber = null) =>
 const createStatusError = (message, status, extra = {}) =>
   Object.assign(new Error(message), { expose: true, status, ...extra });
 
+// What an ingest reads a file as unless its caller says otherwise: PDF alone,
+// what every ingest read before Office formats (rag/document-loader.js then
+// hands the file straight to loadPdfPages).
+const PDF_ONLY_FORMATS = Object.freeze(["pdf"]);
+
 export const hashDocumentBytes = (fileBuffer) =>
   createHash("sha256").update(fileBuffer).digest("hex");
 
@@ -141,14 +152,24 @@ export const hashDocumentBytes = (fileBuffer) =>
  * `parse` names the PDF settings the pages were parsed with when another
  * process parsed them (the staged ingest's pages output); without it the
  * profile names this process's own.
+ *
+ * For a Word, PowerPoint or Excel document `parse` is the loader's parse
+ * metadata ({ format, extractor, extractorVersion }, rag/document-loader.js):
+ * the chunks then carry that document's own profile, the result names the
+ * document's `mimeType` (the registry records it), and pages without text
+ * fail with the 422 worded for a document instead of a PDF. A PDF's result
+ * has exactly the fields it always had.
  */
 export const chunkDocumentPages = ({ docId, fileName, pages, parse = null, source = null }) => {
   const publicFilePath = buildPublicFilePath(docId);
+  const officeParse = readOfficeParse(parse);
   // Read once: the settings the chunks are cut with are the ones recorded.
-  const chunkProfile = describeChunkProfile({
-    paragraphDetection: parse?.paragraphDetection,
-    pdfParser: parse?.pdfParser,
-  });
+  const chunkProfile = officeParse
+    ? describeChunkProfile(officeParse)
+    : describeChunkProfile({
+        paragraphDetection: parse?.paragraphDetection,
+        pdfParser: parse?.pdfParser,
+      });
   const chunks = chunkDocumentWithConfig({
     chunkOverlap: chunkProfile.overlap,
     chunkSize: chunkProfile.size,
@@ -162,9 +183,7 @@ export const chunkDocumentPages = ({ docId, fileName, pages, parse = null, sourc
 
   if (chunks.length === 0) {
     // 422: the upload itself is the problem, and a retry reads the same bytes.
-    const error = new Error("No extractable text was found in the uploaded PDF.");
-    error.status = 422;
-    throw error;
+    throw createNoExtractableTextError(officeParse?.format ?? "pdf");
   }
 
   return {
@@ -180,7 +199,18 @@ export const chunkDocumentPages = ({ docId, fileName, pages, parse = null, sourc
       pages,
       source,
     }),
+    ...(officeParse ? { mimeType: DOCUMENT_MIME_TYPES[officeParse.format] } : {}),
   };
+};
+
+// The MIME type a document is registered with when it is not a PDF (a Word,
+// PowerPoint or Excel document), else null: a PDF's registration carries no
+// MIME type, exactly as before Office formats, and the registry records its
+// default, application/pdf.
+const toRegisteredOfficeMimeType = (mimeType) => {
+  const format = getDocumentFormatForMimeType(mimeType);
+
+  return format && format !== "pdf" ? DOCUMENT_MIME_TYPES[format] : null;
 };
 
 /**
@@ -379,6 +409,12 @@ const withSharedContentLock = async (hash, owner, callback) => {
  *   tenant-and-hash lock, so dedup keeps one document per content. No quota
  *   check and no usage: a trashed document's bytes were never released, so
  *   restoring adds nothing.
+ * - `mimeType`: the content's type when it is a Word, PowerPoint or Excel
+ *   document (chunkDocumentPages names it), which the registry records and
+ *   the download sends. Anything else (a PDF, no type) registers the document
+ *   exactly as before Office formats, with the registry's default
+ *   application/pdf; a replacement or a restore records the type of the
+ *   content it writes.
  *
  * Resolves to { document, docId, duplicate, superseded, documentVersion }.
  */
@@ -399,6 +435,7 @@ export const commitDocument = async ({
   deduplicate = false,
   requestedAt = null,
   onCommit = null,
+  mimeType = null,
 }) => {
   const bytes = await resolveFileBuffer({ fileBuffer, sourceFilePath: filePath });
   const hash = normalizeContentSha256(contentSha256) ?? hashDocumentBytes(bytes);
@@ -417,6 +454,7 @@ export const commitDocument = async ({
   const now = new Date().toISOString();
   const hasRequestTime = toTime(requestedAt) !== null;
   const contentRequestedAt = hasRequestTime ? new Date(requestedAt).toISOString() : now;
+  const officeMimeType = toRegisteredOfficeMimeType(mimeType);
   const registrationFor = (current) => ({
     docId,
     fileName,
@@ -438,6 +476,9 @@ export const commitDocument = async ({
     // are ordered by one clock. The file registry has one writer and keeps
     // this process's time.
     contentUpdatedAtFromDatabase: !hasRequestTime,
+    // Only for a Word, PowerPoint or Excel document: a PDF's registration is
+    // the one it always was.
+    ...(officeMimeType ? { mimeType: officeMimeType } : {}),
   });
 
   // The provider is checked first (database, extension, embedding width) so a
@@ -729,6 +770,10 @@ const toIngestResponse = (outcome) =>
       }
     : outcome.document;
 
+// `parse`: a Word, PowerPoint or Excel document's parse metadata
+// (rag/document-loader.js), which decides its chunk profile and the MIME type
+// it is registered with; pages without it are a PDF's, chunked and registered
+// exactly as before Office formats.
 export const ingestDocumentPages = async ({
   docId,
   filePath,
@@ -742,8 +787,9 @@ export const ingestDocumentPages = async ({
   deduplicate = false,
   replace = false,
   requestedAt = null,
+  parse = null,
 }) => {
-  const chunked = chunkDocumentPages({ docId, fileName, pages, source });
+  const chunked = chunkDocumentPages({ docId, fileName, pages, source, ...(parse ? { parse } : {}) });
 
   return toIngestResponse(
     await commitDocument({
@@ -761,6 +807,7 @@ export const ingestDocumentPages = async ({
       requestedAt,
       source,
       workspaceId,
+      ...(chunked.mimeType ? { mimeType: chunked.mimeType } : {}),
     })
   );
 };
@@ -794,6 +841,14 @@ export const findDuplicateDocument = async ({
  * caller. `deduplicate` answers bytes the tenant already stored with that
  * document (`duplicate: true`) before parsing; `replace` swaps an existing
  * document's content (PUT /documents/:docId).
+ *
+ * `formats`: what the file may be read as (rag/document-loader.js). The
+ * default is PDF alone, so every caller that hands over a PDF (the arXiv
+ * importer among them) parses exactly as before Office formats, whatever
+ * RAG_DOCUMENT_FORMATS says. The upload routes and archive-ingest pass the
+ * format their byte check found for a Word, PowerPoint or Excel file, and the
+ * async worker's one-step path every format (the enqueue already checked the
+ * bytes).
  */
 export const ingestDocument = async ({
   docId,
@@ -806,6 +861,7 @@ export const ingestDocument = async ({
   deduplicate = false,
   replace = false,
   requestedAt = null,
+  formats = PDF_ONLY_FORMATS,
 }) => {
   // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on.
   const fileBuffer = await readWorkingFile(filePath);
@@ -824,7 +880,8 @@ export const ingestDocument = async ({
     }
   }
 
-  const pages = await loadPdfPages(filePath);
+  // With PDF alone this is loadPdfPages(filePath), as it always was.
+  const { format, pages, parse } = await loadDocumentPages(filePath, { formats });
 
   return ingestDocumentPages({
     contentSha256: hash,
@@ -839,6 +896,7 @@ export const ingestDocument = async ({
     requestedAt,
     source,
     workspaceId,
+    ...(format !== "pdf" ? { parse } : {}),
   });
 };
 
@@ -1158,8 +1216,12 @@ const clearDocumentsFromStores = async ({ accessScope = {} } = {}) => {
 export const listTrashedDocuments = (accessScope = {}) => listTrashedRegistryDocuments(accessScope);
 
 // The stored bytes through the ingest parser, as the index-version builder
-// reads them (vector-store-pgvector-version-lifecycle.js loadStoredDocumentPages).
-const loadStoredPdfPages = async (fileBuffer) => {
+// reads them (vector-store-pgvector-version-lifecycle.js loadStoredDocument):
+// { format, mimeType, pages, parse }. A stored document is read as the format
+// it was registered as (resolveStoredDocumentFormats), whatever
+// RAG_DOCUMENT_FORMATS says now: a PDF goes straight to loadPdfPages as it
+// always did, a Word, PowerPoint or Excel document through its own loader.
+const loadStoredDocument = async (fileBuffer, mimeType) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "document-restore-"));
   const filePath = path.join(directory, "document.pdf");
 
@@ -1167,10 +1229,29 @@ const loadStoredPdfPages = async (fileBuffer) => {
     // A working file (rag/working-files.js): encrypted with TENANT_ENCRYPTION=on,
     // like every other temporary copy of tenant bytes.
     await writeWorkingFile(filePath, fileBuffer);
-    return await loadPdfPages(filePath);
+    return await loadDocumentPages(filePath, { formats: resolveStoredDocumentFormats(mimeType) });
   } finally {
     await rm(directory, { force: true, recursive: true });
   }
+};
+
+/**
+ * A stored document's bytes parsed and chunked again, as the trash restore
+ * commits them (chunkDocumentPages' result): read as the format the document
+ * was registered as (`document.mimeType`), so a restored Word, PowerPoint or
+ * Excel document keeps its chunk locations, its own chunk profile and its
+ * MIME type, and a PDF is re-chunked exactly as before Office formats.
+ */
+export const chunkStoredDocument = async ({ document, fileBuffer }) => {
+  const { format, pages, parse } = await loadStoredDocument(fileBuffer, document.mimeType);
+
+  return chunkDocumentPages({
+    docId: document.docId,
+    fileName: document.fileName,
+    pages,
+    source: document.profile?.source ?? null,
+    ...(format !== "pdf" ? { parse } : {}),
+  });
 };
 
 /**
@@ -1208,8 +1289,7 @@ export const restoreDocument = async ({
   }
 
   const source = document.profile?.source ?? null;
-  const pages = await loadStoredPdfPages(fileBuffer);
-  const chunked = chunkDocumentPages({ docId: document.docId, fileName: document.fileName, pages, source });
+  const chunked = await chunkStoredDocument({ document, fileBuffer });
   const outcome = await commitDocument({
     contentSha256: document.contentSha256,
     deduplicate,
@@ -1223,6 +1303,8 @@ export const restoreDocument = async ({
     profile: document.profile,
     source,
     workspaceId: document.workspaceId,
+    // The restored row keeps its Word, PowerPoint or Excel type.
+    ...(chunked.mimeType ? { mimeType: chunked.mimeType } : {}),
   });
 
   return outcome.document;

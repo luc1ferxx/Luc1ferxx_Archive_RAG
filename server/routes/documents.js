@@ -22,6 +22,7 @@ import { describeIndexVersions } from "../rag/vector-store-pgvector-versions.js"
 
 import {
   noStoreTenantData,
+  resolveDocumentFileDisposition,
   sendBufferedFile,
   serializeError,
 } from "./helpers.js";
@@ -73,12 +74,17 @@ export const createDocumentsRouter = (services) => {
       // Only the current content's bytes are kept: a link to a replaced
       // version gets no other version's PDF in its place.
       const currentVersion = Number(storedFile.document?.version ?? 1) || 1;
+      // A PDF is shown inline as it always was; a Word, PowerPoint or Excel
+      // document is sent as a download, with its own Content-Type.
+      const disposition = resolveDocumentFileDisposition(storedFile.mimeType);
 
       if (query.version !== undefined && query.version !== currentVersion) {
         await recordDownload(409);
         return res.status(409).json({
           currentVersion,
-          error: `This link is to version ${query.version} of the document, which has been replaced by version ${currentVersion}; its PDF is no longer stored.`,
+          error: `This link is to version ${query.version} of the document, which has been replaced by version ${currentVersion}; its ${
+            disposition === "inline" ? "PDF" : "file"
+          } is no longer stored.`,
           requestedVersion: query.version,
         });
       }
@@ -92,6 +98,7 @@ export const createDocumentsRouter = (services) => {
         fileBuffer: storedFile.fileBuffer,
         fileName: storedFile.fileName,
         mimeType: storedFile.mimeType,
+        ...(disposition === "inline" ? {} : { disposition }),
       });
       return;
     } catch (error) {
