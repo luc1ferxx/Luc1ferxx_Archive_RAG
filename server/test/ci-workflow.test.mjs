@@ -705,23 +705,36 @@ test("real model eval workflow runs a real local model with no API key and gates
   // Ollama ignores max_completion_tokens, and a pinned version that stopped
   // honouring max_tokens would leave the answer step without a limit. Neither
   // step sets the field, so the probe checks the one the answers use.
+  // Between the probe and the answers, under the same condition, the chat model
+  // is unloaded: the answers start on a freshly loaded model, as they did
+  // before the probe existed, so nothing the probe left in Ollama's prompt
+  // cache reaches them (docs/evaluation.md "之后在 CI 上").
   const probeStepStart = content.indexOf("- name: Check the answer output limit");
+  const unloadStepStart = content.indexOf("- name: Unload the chat model after the probe");
   const retrievalStepStart = content.indexOf("- name: QASPER evidence recall");
 
-  assert.ok(probeStepStart > retrievalStepStart && probeStepStart < answerStepStart, "the probe runs after retrieval, before the answers");
+  assert.ok(
+    retrievalStepStart < probeStepStart && probeStepStart < unloadStepStart && unloadStepStart < answerStepStart,
+    "retrieval, then the probe, the unload and the answers"
+  );
 
-  const probeStep = content.slice(probeStepStart, answerStepStart);
+  const probeStep = content.slice(probeStepStart, unloadStepStart);
+  const unloadStep = content.slice(unloadStepStart, answerStepStart);
 
-  assert.equal(probeStep.match(/- name:/g).length, 1, "no other step between the probe and the answers");
-  assert.match(probeStep, /\n\s*if: env\.QASPER_ANSWER_CASES != '0'\s*\n/);
-  assert.match(answerStep, /\n\s*if: env\.QASPER_ANSWER_CASES != '0'\s*\n/);
+  assert.equal(probeStep.match(/- name:/g).length, 1, "no other step between the probe and the unload");
+  assert.equal(unloadStep.match(/- name:/g).length, 1, "no other step between the unload and the answers");
+  for (const step of [probeStep, unloadStep, answerStep]) {
+    assert.match(step, /\n\s*if: env\.QASPER_ANSWER_CASES != '0'\s*\n/);
+  }
   assert.match(probeStep, /\n\s*run: npm run probe:output-limit\s*$/);
+  assert.match(unloadStep, /\n\s*ollama stop "\$OPENAI_CHAT_MODEL"/);
   assert.equal(serverPackage.scripts["probe:output-limit"], "node evaluation/probe-output-limit.mjs");
   assert.doesNotMatch(content, /RAG_LLM_MAX_TOKENS_FIELD/);
 
   // Every run records the runner's CPU before the model steps: answers at
   // temperature 0 differed between two CI runs (docs/deployment.md), and
-  // other hardware is the first suspect.
+  // other hardware is the likelier cause. nproc counts logical CPUs, so the
+  // physical cores are read as well.
   const cpuStepStart = content.indexOf("- name: Record the runner's CPU");
   const ollamaStepStart = content.indexOf("- name: Install and start Ollama");
   const verifyStepStart = content.indexOf("- name: Real-model quality verification");
@@ -731,7 +744,7 @@ test("real model eval workflow runs a real local model with no API key and gates
   const cpuStep = content.slice(cpuStepStart, verifyStepStart);
 
   assert.equal(cpuStep.match(/- name:/g).length, 1);
-  for (const fact of [/model name' \/proc\/cpuinfo/, /\bnproc\b/, /\bavx512f\b/, /ollama --version/]) {
+  for (const fact of [/model name' \/proc\/cpuinfo/, /Logical CPUs: \$\(nproc\)/, /'cpu cores' \/proc\/cpuinfo/, /\bavx512f\b/, /ollama --version/]) {
     assert.match(cpuStep, fact);
   }
   assert.doesNotMatch(cpuStep, /\n\s*if:/, "recorded on every run");

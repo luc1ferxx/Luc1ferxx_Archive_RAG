@@ -94,12 +94,14 @@ jobs:
           ollama show "$OPENAI_CHAT_MODEL" > /dev/null 2>&1 || for attempt in 1 2 3; do ollama pull "$OPENAI_CHAT_MODEL" && break; [ "$attempt" = 3 ] && exit 1; sleep 30; done
 
       - name: Record the runner's CPU
-        # Answers at temperature 0 were identical in two runs on one machine,
-        # not in two runs here (docs/deployment.md), so each run records the
-        # hardware it ran on.
+        # Answers at temperature 0 were identical in two local runs (Ollama
+        # 0.34.4), not in two runs here (docs/deployment.md), and other
+        # hardware is the likelier cause, so each run records the hardware it
+        # ran on.
         run: |
           echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
-          echo "Cores: $(nproc)"
+          echo "Logical CPUs: $(nproc)"
+          echo "Physical cores per socket: $(grep -m1 'cpu cores' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
           if grep -q -w avx512f /proc/cpuinfo; then echo "AVX-512: yes"; else echo "AVX-512: no"; fi
           ollama --version
 
@@ -128,17 +130,30 @@ jobs:
         # attempt of a runaway answer would wait out the request timeout.
         run: npm run probe:output-limit
 
+      - name: Unload the chat model after the probe
+        if: env.QASPER_ANSWER_CASES != '0'
+        # The answers then start on a freshly loaded model, as they did before
+        # the probe existed. On a fast runner the answer step reaches its first
+        # model call within Ollama's 5-minute keep-alive, so the probe's model
+        # process and prompt cache would otherwise carry over into the answers
+        # (docs/evaluation.md "之后在 CI 上"). A failed unload is reported, not
+        # fatal; "ollama ps" shows what is still loaded.
+        run: |
+          ollama stop "$OPENAI_CHAT_MODEL" || echo "Could not unload $OPENAI_CHAT_MODEL; the answers may reuse the probe's model process."
+          ollama ps
+
       - name: QASPER answers
         if: env.QASPER_ANSWER_CASES != '0'
         env:
           # The answer-side protocol since 2026-11-10 (docs/evaluation.md
           # "答案温度 0 重测：带输出上限"): greedy decoding, and an output
           # limit, without which one question once generated until every retry
-          # timed out. Greedy decoding gave identical answers in two runs on
-          # one machine, but not in two runs here: the CI runs of 2026-11-10
-          # differed on at least 9 of 15 answers (docs/deployment.md), so a
-          # small change in this report is not an effect. Only this step:
-          # verify:quality above keeps the endpoint default.
+          # timed out. Greedy decoding gave identical answers in two local
+          # runs (Ollama 0.34.4) but not in two runs here (0.40.3, CPU only):
+          # the CI runs of 2026-11-10 differed on at least 9 of 15 answers
+          # (docs/deployment.md), so a small change in this report cannot be
+          # read as an effect. Only this step: verify:quality above keeps the
+          # endpoint default.
           RAG_ANSWER_TEMPERATURE: "0"
           RAG_ANSWER_MAX_TOKENS: "1024"
         run: npm run eval:qasper-answers -- --corpus evaluation/generated/qasper-dev.json --cases "$QASPER_ANSWER_CASES"
