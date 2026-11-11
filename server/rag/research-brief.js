@@ -1,5 +1,6 @@
 import { normalizeWhitespace } from "./text-utils.js";
 import { rebaseEvidenceResults } from "./source-labels.js";
+import { pickDocumentLocation } from "./citations.js";
 
 const MAX_QUESTIONS = 3;
 
@@ -64,6 +65,45 @@ export const buildResearchPlan = ({ question, documents = [] }) => {
   };
 };
 
+// Where a document's citations point: "on pages 2, 5" for a PDF, as before.
+// An Office document's citations name the unit their pageNumber counts
+// (rag/citations.js): "on slides 1, 3", "in sections 1, 2", and sheets by
+// name ("on sheets Revenue, Costs"), else by position.
+const LOCATION_LIST_PHRASES = Object.freeze({
+  page: Object.freeze(["on page", "on pages"]),
+  section: Object.freeze(["in section", "in sections"]),
+  sheet: Object.freeze(["on sheet", "on sheets"]),
+  slide: Object.freeze(["on slide", "on slides"]),
+});
+
+const describeCitationLocations = (citations) => {
+  const valuesByUnit = new Map();
+
+  for (const citation of citations) {
+    const { locationUnit = "page", locationLabel = "" } = pickDocumentLocation(citation);
+    const value =
+      locationUnit === "sheet" ? locationLabel || citation.pageNumber : citation.pageNumber;
+
+    if (!value) {
+      continue;
+    }
+
+    if (!valuesByUnit.has(locationUnit)) {
+      valuesByUnit.set(locationUnit, new Set());
+    }
+
+    valuesByUnit.get(locationUnit).add(value);
+  }
+
+  return [...valuesByUnit.entries()]
+    .map(([unit, values]) => {
+      const [one, many] = LOCATION_LIST_PHRASES[unit];
+
+      return ` ${values.size === 1 ? one : many} ${[...values].join(", ")}`;
+    })
+    .join(" and");
+};
+
 const getDocumentEvidenceSummary = ({ documents = [], citations = [] }) => {
   if (citations.length === 0) {
     return "No document citations were returned by the research lookups.";
@@ -85,13 +125,10 @@ const getDocumentEvidenceSummary = ({ documents = [], citations = [] }) => {
           candidate.docId === docKey || candidate.fileName === docCitations[0]?.fileName
       );
       const fileName = document?.fileName ?? docCitations[0]?.fileName ?? docKey;
-      const pages = [
-        ...new Set(docCitations.map((citation) => citation.pageNumber).filter(Boolean)),
-      ];
 
       return `- ${fileName}: ${docCitations.length} citation${
         docCitations.length === 1 ? "" : "s"
-      }${pages.length > 0 ? ` on page${pages.length === 1 ? "" : "s"} ${pages.join(", ")}` : ""}.`;
+      }${describeCitationLocations(docCitations)}.`;
     })
     .join("\n");
 };

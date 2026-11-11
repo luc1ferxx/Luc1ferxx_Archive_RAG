@@ -252,3 +252,83 @@ test("payloads are wrapped in the MCP text-content envelope", () => {
   assert.equal(content.content[0].type, "text");
   assert.deepEqual(JSON.parse(content.content[0].text), { abstained: false });
 });
+
+// A citation of a Word, PowerPoint or Excel file names the unit its
+// pageNumber counts (rag/citations.js); MCP passes it on so the calling model
+// says "slide 3", not "page 3". A PDF citation has neither key.
+const slideCitation = Object.freeze({
+  rank: 1,
+  score: 0.71,
+  docId: "doc-deck",
+  fileName: "deck.pptx",
+  filePath: "/documents/doc-deck/file",
+  pageNumber: 3,
+  locationUnit: "slide",
+  locationLabel: "Q3 Revenue",
+  chunkIndex: 0,
+  excerpt: "Revenue grew 12 percent.",
+  sectionHeading: null,
+});
+
+test("an Office citation keeps its unit and label right after pageNumber", () => {
+  const citation = formatCitation(slideCitation);
+  const { locationLabel: _label, ...unlabelled } = slideCitation;
+
+  assert.deepStrictEqual(citation, { ...slideCitation });
+  assert.equal(JSON.stringify(citation), JSON.stringify(slideCitation));
+  assert.deepStrictEqual(formatCitation({ ...unlabelled, locationUnit: "sheet" }), {
+    ...unlabelled,
+    locationUnit: "sheet",
+  });
+});
+
+test("a PDF citation and evidence entry gain no location keys, and an unknown unit is dropped", () => {
+  const pdf = formatCitation({ rank: 1, docId: "doc-1", fileName: "contract.pdf", pageNumber: 12 });
+  const unknown = formatCitation({ ...slideCitation, locationUnit: "chapter" });
+  const [evidence] = formatEvidence([
+    { rank: 1, docId: "doc-1", fileName: "contract.pdf", pageNumber: 12, text: "x" },
+  ]);
+
+  for (const entry of [pdf, unknown, evidence]) {
+    assert.equal("locationUnit" in entry, false);
+    assert.equal("locationLabel" in entry, false);
+  }
+});
+
+test("an answer's Office citations and evidence carry their location", () => {
+  const result = formatAskResult({
+    abstained: false,
+    text: "Revenue grew 12 percent. [Source 1]",
+    citations: [slideCitation],
+    retrievedContexts: [
+      {
+        rank: 1,
+        score: 0.71,
+        docId: "doc-book",
+        fileName: "book.xlsx",
+        pageNumber: 2,
+        locationUnit: "sheet",
+        locationLabel: "Revenue",
+        chunkIndex: 0,
+        sectionHeading: null,
+        text: "Region: North; Revenue: 120",
+      },
+    ],
+  });
+
+  assert.equal(result.citations[0].locationUnit, "slide");
+  assert.equal(result.citations[0].locationLabel, "Q3 Revenue");
+  assert.deepStrictEqual(Object.keys(result.evidence[0]), [
+    "rank",
+    "docId",
+    "fileName",
+    "pageNumber",
+    "locationUnit",
+    "locationLabel",
+    "chunkIndex",
+    "sectionHeading",
+    "text",
+  ]);
+  assert.equal(result.evidence[0].locationLabel, "Revenue");
+  assert.equal(JSON.parse(toMcpTextContent(result).content[0].text).citations[0].locationUnit, "slide");
+});

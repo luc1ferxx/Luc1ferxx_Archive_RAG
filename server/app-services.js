@@ -91,6 +91,7 @@ import {
 import {
   assertAgentRuntimeSupported,
   assertAnswerGenerationSettings,
+  assertDocumentFormatSettings,
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
@@ -304,6 +305,11 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // a wrong value refuses the start rather than failing every answer call,
   // which /chat would carry on past to the Web stage.
   assertAnswerGenerationSettings();
+  // RAG_DOCUMENT_FORMATS and the Office limits (RAG_OFFICE_*,
+  // RAG_XLSX_MAX_CELLS): a wrong value refuses the start
+  // (RAG_DOCUMENT_FORMATS_INVALID, RAG_OFFICE_LIMIT_INVALID) rather than
+  // failing every upload, or accepting some other set of formats.
+  assertDocumentFormatSettings();
 
   // What a document delete also cleans up in the stores built below
   // (rag/document-deletion-cascade.js); assigned once they exist, read when a

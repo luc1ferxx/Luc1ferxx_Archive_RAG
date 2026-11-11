@@ -249,6 +249,124 @@ export const getPdfAutoGarbledRatio = () =>
     isValid: isUnitRatio,
   });
 
+// RAG_DOCUMENT_FORMATS: what a NEW upload, a PUT replacement, an async enqueue
+// and archive-ingest accept (rag/document-formats.js decides a file's format
+// from its bytes). A comma list of pdf, docx, pptx, xlsx in any case; blank is
+// the default, all four. Duplicates are ignored and the result keeps this
+// canonical order. An unknown entry or a list that names nothing refuses the
+// start (createAppServices) and fails every entry point instead of accepting
+// some other set. Stored documents of every supported format are re-parsed
+// whatever this says: it gates new bytes only. With `pdf` alone every entry
+// point checks exactly what it checked before Office formats existed.
+export const DOCUMENT_FORMATS = Object.freeze(["pdf", "docx", "pptx", "xlsx"]);
+
+export const DOCUMENT_FORMATS_INVALID_CODE = "RAG_DOCUMENT_FORMATS_INVALID";
+
+export const getDocumentFormats = () => {
+  const rawValue = process.env.RAG_DOCUMENT_FORMATS;
+
+  if (!hasEnvValue(rawValue)) {
+    return DOCUMENT_FORMATS;
+  }
+
+  const tokens = rawValue
+    .split(",")
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+  const unknown = tokens.filter((token) => !DOCUMENT_FORMATS.includes(token));
+
+  if (tokens.length === 0 || unknown.length > 0) {
+    throw Object.assign(
+      new Error(
+        `RAG_DOCUMENT_FORMATS must be a comma list of ${DOCUMENT_FORMATS.join(", ")}; got ${JSON.stringify(rawValue)}.`
+      ),
+      { code: DOCUMENT_FORMATS_INVALID_CODE }
+    );
+  }
+
+  return Object.freeze(DOCUMENT_FORMATS.filter((format) => tokens.includes(format)));
+};
+
+// The Office archive guard's limits (rag/office/zip-guard.js), enforced on the
+// bytes a .docx, .pptx or .xlsx actually inflates to as well as on what its ZIP
+// directory declares, before any parser sees the file. Blank is the default; a
+// value that is not a whole number of at least 1 (the ratio: a number of at
+// least 1) refuses the start instead of guarding with some other bound or
+// with none: there is no "0 = no limit" for a zip-bomb guard.
+//   RAG_OFFICE_MAX_UNCOMPRESSED_BYTES  total bytes the entries inflate to (256 MiB)
+//   RAG_OFFICE_MAX_ZIP_ENTRIES         entries in the archive (10000)
+//   RAG_OFFICE_MAX_COMPRESSION_RATIO   inflated / compressed size of one entry,
+//                                      for entries over 1 MiB inflated (200)
+//   RAG_XLSX_MAX_CELLS                 non-empty cells across a workbook's
+//                                      visible sheets (2000000); above it the
+//                                      workbook is refused, never truncated
+//   RAG_OFFICE_MAX_XML_BYTES           the inflated XML one parser holds in
+//                                      memory at once (16 MiB): a Word
+//                                      document's XML parts together (mammoth
+//                                      reads them all before it converts),
+//                                      any one XML part of a deck or of a
+//                                      workbook (a worksheet is bounded by
+//                                      RAG_XLSX_MAX_CELLS instead). mammoth
+//                                      and the PPTX reader build trees about
+//                                      60-115 and 25-50 times the XML they
+//                                      read (measured), so the total cap alone
+//                                      let a few-MB file exhaust the heap.
+//   RAG_OFFICE_MAX_TEXT_CHARS          the text one file may extract to, all
+//                                      its pages together (64 Mi characters):
+//                                      table header labels and shared strings
+//                                      repeat, so a small file can otherwise
+//                                      spell out hundreds of MB of text
+export const OFFICE_LIMIT_INVALID_CODE = "RAG_OFFICE_LIMIT_INVALID";
+
+const readOfficeLimit = (name, fallbackValue, { integer = true } = {}) => {
+  const rawValue = process.env[name];
+
+  if (!hasEnvValue(rawValue)) {
+    return fallbackValue;
+  }
+
+  const value = parseEnvNumber(rawValue);
+  const valid = integer ? Number.isSafeInteger(value) && value >= 1 : Number.isFinite(value) && value >= 1;
+
+  if (!valid) {
+    throw Object.assign(
+      new Error(
+        `${name} must be ${integer ? "a whole number of at least 1" : "a number of at least 1"}; got ${JSON.stringify(rawValue)}.`
+      ),
+      { code: OFFICE_LIMIT_INVALID_CODE }
+    );
+  }
+
+  return value;
+};
+
+export const getOfficeMaxUncompressedBytes = () =>
+  readOfficeLimit("RAG_OFFICE_MAX_UNCOMPRESSED_BYTES", 268_435_456);
+
+export const getOfficeMaxZipEntries = () => readOfficeLimit("RAG_OFFICE_MAX_ZIP_ENTRIES", 10_000);
+
+export const getOfficeMaxCompressionRatio = () =>
+  readOfficeLimit("RAG_OFFICE_MAX_COMPRESSION_RATIO", 200, { integer: false });
+
+export const getXlsxMaxCells = () => readOfficeLimit("RAG_XLSX_MAX_CELLS", 2_000_000);
+
+export const getOfficeMaxXmlBytes = () => readOfficeLimit("RAG_OFFICE_MAX_XML_BYTES", 16_777_216);
+
+export const getOfficeMaxTextChars = () => readOfficeLimit("RAG_OFFICE_MAX_TEXT_CHARS", 67_108_864);
+
+// The seven settings above, checked where an app is built (createAppServices)
+// so a wrong value refuses the start; each getter still refuses a value
+// changed at run time, at the entry point that reads it.
+export const assertDocumentFormatSettings = () => {
+  getDocumentFormats();
+  getOfficeMaxUncompressedBytes();
+  getOfficeMaxZipEntries();
+  getOfficeMaxCompressionRatio();
+  getXlsxMaxCells();
+  getOfficeMaxXmlBytes();
+  getOfficeMaxTextChars();
+};
+
 // Task prefixes some embedding models are trained with and documented as
 // required. They are part of the model's input contract, so they apply to the
 // real embedding client only, never to a configured stand-in provider. On

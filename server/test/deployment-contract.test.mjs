@@ -348,6 +348,38 @@ test("the app image context leaves out secrets, the model cache and the reranker
   }
 });
 
+test("the app image installs the vendored dependency tarballs: copied before npm ci, never ignored", async () => {
+  // SheetJS CE ("xlsx": "file:vendor/xlsx-0.20.3.tgz") is not published on
+  // the npm registry: `npm ci` in the image resolves it from server/vendor,
+  // which must be in the build context and in place before the install.
+  const [dockerfile, dockerignore, packageJson] = await Promise.all([
+    readText(appDockerfilePath),
+    readText(appDockerignorePath),
+    readText(serverPackagePath).then(JSON.parse),
+  ]);
+  const vendored = Object.entries({ ...packageJson.dependencies, ...packageJson.optionalDependencies })
+    .filter(([, spec]) => String(spec).startsWith("file:"))
+    .map(([name, spec]) => [name, String(spec).slice("file:".length)]);
+
+  assert.ok(vendored.some(([name]) => name === "xlsx"), "the vendored SheetJS dependency");
+
+  for (const [name, relativePath] of vendored) {
+    assert.match(relativePath, /^vendor\/[^/]+\.tgz$/, `${name} is vendored under server/vendor`);
+    await access(path.join(serverDirectory, relativePath));
+  }
+
+  const lines = dockerfile.split("\n").map((line) => line.trim());
+  const packageCopy = lines.indexOf("COPY server/package.json server/package-lock.json ./");
+  const vendorCopy = lines.indexOf("COPY server/vendor ./vendor");
+  const install = lines.findIndex((line) => /^RUN npm ci --omit=dev\b/.test(line));
+
+  assert.ok(packageCopy >= 0 && vendorCopy > packageCopy && install > vendorCopy, "server/vendor is copied before npm ci");
+
+  for (const pattern of dockerignore.split("\n").filter(isContentLine).map((line) => line.trim())) {
+    assert.doesNotMatch(pattern, /vendor|\.tgz/, `.dockerignore must not leave out the vendored tarballs (${pattern})`);
+  }
+});
+
 // Service name -> ARCHIVE_RAG_ROLE in compose.services.yml.
 const tierRoles = Object.freeze({
   agent: "agent",

@@ -6,14 +6,31 @@ import {
   ExpandOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { useAuthenticatedDocumentPreview } from "../hooks/useAuthenticatedDocumentPreview";
+import { createTranslator } from "../archiveI18n";
+import { formatDocumentLocation } from "../documentLocation";
+import {
+  useAuthenticatedDocumentDownload,
+  useAuthenticatedDocumentPreview,
+} from "../hooks/useAuthenticatedDocumentPreview";
 import { buildSourceEvidenceObject } from "./evidenceSpine";
+
+// English unless the app hands in its translator, so the preview reads as it
+// always did wherever no locale is wired.
+const defaultT = createTranslator("en");
 
 const formatTabLabel = (singular, plural, count) =>
   count > 1 ? `${plural} ${count}` : singular;
 
-const getPreviewTabs = (evidence) => [
-  { id: "preview", label: "Page" },
+// The cited text itself, never a demo description: the evidence panel of a
+// file without an inline preview shows only what the answer cited.
+const getCitedText = (source = {}) =>
+  String(source.excerpt ?? source.text ?? source.pageContent ?? "").trim();
+
+const getPreviewTabs = (evidence, t) => [
+  {
+    id: "preview",
+    label: evidence.hasInlinePreview ? "Page" : t("preview.fileTab"),
+  },
   {
     id: "chunks",
     label: formatTabLabel("Chunk", "Chunks", evidence.chunks.length),
@@ -50,16 +67,16 @@ const getChunkExcerpt = (chunk) =>
 const getCitationTitle = (citation, index, fallbackFileName) =>
   citation.fileName ?? citation.title ?? fallbackFileName ?? `Citation ${index + 1}`;
 
-const getCitationMeta = (citation) =>
+const getCitationMeta = (citation, t) =>
   [
-    citation.pageNumber ? `Page ${citation.pageNumber}` : null,
+    formatDocumentLocation(citation, t) || null,
     Number.isFinite(citation.rank) ? `Rank #${citation.rank}` : null,
     Number.isFinite(citation.chunkIndex) ? `Chunk ${citation.chunkIndex}` : null,
   ]
     .filter(Boolean)
     .join(" · ");
 
-const PdfPreview = ({ source }) => {
+const PdfPreview = ({ source, t = defaultT }) => {
   const [activeTab, setActiveTab] = useState("preview");
   const [displayPage, setDisplayPage] = useState(source?.pageNumber ?? 1);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -68,19 +85,31 @@ const PdfPreview = ({ source }) => {
   const [zoom, setZoom] = useState(100);
 
   const evidence = useMemo(
-    () => (source ? buildSourceEvidenceObject(source) : null),
-    [source]
+    () => (source ? buildSourceEvidenceObject(source, { t }) : null),
+    [source, t]
   );
   const previewTabs = useMemo(
-    () => (evidence ? getPreviewTabs(evidence) : []),
-    [evidence]
+    () => (evidence ? getPreviewTabs(evidence, t) : []),
+    [evidence, t]
   );
-  const hasProtectedPdf = Boolean(evidence?.filePath && !source?.demoPreview);
+  // Only a PDF (or a source of unknown type, as before the Office formats)
+  // is fetched for the inline viewer. A Word, PowerPoint or Excel file is
+  // fetched only when the user asks to download it.
+  const hasInlinePreview = evidence?.hasInlinePreview ?? true;
+  const hasProtectedFile = Boolean(evidence?.filePath && !source?.demoPreview);
+  const hasProtectedPdf = hasInlinePreview && hasProtectedFile;
   const hasDocumentId = Boolean(String(source?.docId ?? "").trim());
   const canLoadProtectedPdf = Boolean(hasProtectedPdf && hasDocumentId);
+  const canDownloadFile = Boolean(
+    !hasInlinePreview && hasProtectedFile && hasDocumentId
+  );
   const authenticatedPreview = useAuthenticatedDocumentPreview({
     docId: source?.docId,
     enabled: canLoadProtectedPdf,
+  });
+  const documentDownload = useAuthenticatedDocumentDownload({
+    docId: canDownloadFile ? source?.docId : "",
+    fileName: source?.fileName,
   });
 
   useEffect(() => {
@@ -102,9 +131,11 @@ const PdfPreview = ({ source }) => {
   }
 
   const pageNumber = displayPage;
+  const pageLabel = formatDocumentLocation({ pageNumber }, t);
   const previewUrl = authenticatedPreview.objectUrl
     ? `${authenticatedPreview.objectUrl}#page=${pageNumber}&view=FitH`
     : null;
+  const isDownloading = documentDownload.status === "downloading";
 
   const updatePage = (delta) => {
     setDisplayPage((currentPage) => Math.max(1, currentPage + delta));
@@ -205,9 +236,57 @@ const PdfPreview = ({ source }) => {
     </div>
   );
 
+  // A Word, PowerPoint or Excel file: the browser has no viewer for it, so
+  // the panel names the file and where the citation points, offers the
+  // authenticated download, and shows the cited text when there is one.
+  const renderDownloadPanel = () => {
+    const citedText = getCitedText(source);
+
+    return (
+      <div className="archive-preview-summary-page archive-preview-download-page">
+        <div className="archive-preview-summary-mark">{evidence.fileType}</div>
+        <strong>{evidence.fileName}</strong>
+        {evidence.locationText ? (
+          <span className="archive-preview-location">{evidence.locationText}</span>
+        ) : null}
+        <p>{t("preview.noInlinePreview")}</p>
+        {canDownloadFile ? (
+          <Button
+            className="archive-secondary-button archive-preview-download-button"
+            icon={<DownloadOutlined />}
+            loading={isDownloading}
+            onClick={() => void documentDownload.download()}
+          >
+            {isDownloading ? t("preview.downloading") : t("preview.download")}
+          </Button>
+        ) : null}
+        {hasProtectedFile && !hasDocumentId ? (
+          <p className="archive-preview-download-error" role="alert">
+            {t("preview.downloadMissingDocument")}
+          </p>
+        ) : null}
+        {canDownloadFile && documentDownload.status === "error" ? (
+          <p className="archive-preview-download-error" role="alert">
+            {documentDownload.errorMessage || t("preview.downloadFailed")}
+          </p>
+        ) : null}
+        {citedText ? (
+          <figure className="archive-preview-cited-evidence">
+            <figcaption>{t("preview.citedEvidence")}</figcaption>
+            <blockquote>{citedText}</blockquote>
+          </figure>
+        ) : null}
+      </div>
+    );
+  };
+
   const renderPagePanel = () => {
     if (source.demoPreview) {
       return renderDemoPage();
+    }
+
+    if (!hasInlinePreview) {
+      return renderDownloadPanel();
     }
 
     if (hasProtectedPdf && !hasDocumentId) {
@@ -259,7 +338,7 @@ const PdfPreview = ({ source }) => {
       <div className="archive-preview-summary-page">
         <div className="archive-preview-summary-mark">{evidence.fileType}</div>
         <strong>{evidence.fileName}</strong>
-        <span>Page {pageNumber}</span>
+        <span>{pageLabel}</span>
         <p>{evidence.excerpt || evidence.previewDescription}</p>
       </div>
     );
@@ -297,7 +376,7 @@ const PdfPreview = ({ source }) => {
         >
           <span>{index === 0 ? "Selected citation" : `Citation ${index + 1}`}</span>
           <strong>{getCitationTitle(citation, index, evidence.fileName)}</strong>
-          {getCitationMeta(citation) ? <p>{getCitationMeta(citation)}</p> : null}
+          {getCitationMeta(citation, t) ? <p>{getCitationMeta(citation, t)}</p> : null}
           {citation.excerpt || citation.text ? (
             <p>{citation.excerpt ?? citation.text}</p>
           ) : null}
@@ -350,7 +429,11 @@ const PdfPreview = ({ source }) => {
       <div className="archive-preview-document-head">
         <div>
           <div className="archive-preview-file">{evidence.fileName}</div>
-          <div className="archive-preview-page">Source · Page {pageNumber}</div>
+          <div className="archive-preview-page">
+            {hasInlinePreview
+              ? `Source · ${pageLabel}`
+              : ["Source", evidence.locationText].filter(Boolean).join(" · ")}
+          </div>
         </div>
         <span className="archive-status-dot" />
       </div>
@@ -386,15 +469,17 @@ const PdfPreview = ({ source }) => {
             setIsSearchOpen((isOpen) => !isOpen);
           }}
         />
-        <span className="archive-page-stepper">
-          <button type="button" aria-label="Previous page" onClick={() => updatePage(-1)}>
-            ‹
-          </button>
-          Page {pageNumber}
-          <button type="button" aria-label="Next page" onClick={() => updatePage(1)}>
-            ›
-          </button>
-        </span>
+        {hasInlinePreview ? (
+          <span className="archive-page-stepper">
+            <button type="button" aria-label="Previous page" onClick={() => updatePage(-1)}>
+              ‹
+            </button>
+            {pageLabel}
+            <button type="button" aria-label="Next page" onClick={() => updatePage(1)}>
+              ›
+            </button>
+          </span>
+        ) : null}
         {source.demoPreview ? (
           <span className="archive-zoom-stepper">
             <button type="button" aria-label="Zoom out" onClick={() => updateZoom(-10)}>

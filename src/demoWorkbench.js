@@ -1,3 +1,5 @@
+import { DOCX_MIME_TYPE, PDF_MIME_TYPE } from "./documentLocation";
+
 export const DEMO_PREVIEW_SOURCE = {
   docId: "demo-finance-policy",
   fileName: "Finance Policy Manual.pdf",
@@ -15,10 +17,13 @@ export const DEMO_PREVIEW_SOURCE = {
   },
 };
 
+// Each carries the MIME type GET /documents reports, which picks the count's
+// unit (pages, or a Word file's sections) and the icon.
 export const DEMO_DOCUMENTS = [
   {
     docId: "demo-finance-policy",
     fileName: "Finance Policy Manual.pdf",
+    mimeType: PDF_MIME_TYPE,
     pageCount: 182,
     previewSource: DEMO_PREVIEW_SOURCE,
     profile: {
@@ -33,6 +38,7 @@ export const DEMO_DOCUMENTS = [
   {
     docId: "demo-expense-policy",
     fileName: "Expense Reimbursement Policy.pdf",
+    mimeType: PDF_MIME_TYPE,
     pageCount: 24,
     profile: {
       tags: ["expense", "reimbursement"],
@@ -46,6 +52,7 @@ export const DEMO_DOCUMENTS = [
   {
     docId: "demo-travel-policy",
     fileName: "Travel & Entertainment Policy.pdf",
+    mimeType: PDF_MIME_TYPE,
     pageCount: 18,
     profile: {
       tags: ["travel", "entertainment"],
@@ -59,7 +66,9 @@ export const DEMO_DOCUMENTS = [
   {
     docId: "demo-procurement",
     fileName: "Procurement Guidelines.docx",
-    pageCount: 45,
+    mimeType: DOCX_MIME_TYPE,
+    // A Word document counts sections (one per top-level heading), not pages.
+    pageCount: 12,
     profile: {
       tags: ["procurement", "vendor"],
       summary: "Vendor onboarding, approval thresholds, and purchase controls.",
@@ -72,6 +81,7 @@ export const DEMO_DOCUMENTS = [
   {
     docId: "demo-vendor-management",
     fileName: "Vendor Management Policy.pdf",
+    mimeType: PDF_MIME_TYPE,
     pageCount: 31,
     profile: {
       tags: ["vendor", "risk"],

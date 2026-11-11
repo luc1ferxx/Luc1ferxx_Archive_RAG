@@ -505,7 +505,7 @@ const ChatComponent = (props) => {
                   onClick={() => onAttach?.()}
                 >
                   <PaperClipOutlined aria-hidden="true" />
-                  {t("chat.attachPdfs")}
+                  {t("chat.attachDocuments")}
                 </button>
               ) : null}
 
@@ -639,7 +639,7 @@ const ChatComponent = (props) => {
             <div className="archive-composer-menu">
               <button type="button" onClick={() => onAttach?.()}>
                 <PaperClipOutlined />
-                {t("chat.attachPdfs")}
+                {t("chat.attachDocuments")}
               </button>
               <button type="button" onClick={cycleRetrievalMode}>
                 <AppstoreOutlined />

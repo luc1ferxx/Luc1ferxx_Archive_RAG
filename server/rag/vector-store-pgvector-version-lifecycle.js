@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { chunkDocumentWithConfig } from "./chunker.js";
-import { describeChunkProfile, stampChunkProfile } from "./chunk-profile.js";
+import { describeChunkProfile, readOfficeParse, stampChunkProfile } from "./chunk-profile.js";
 import {
   getDocumentsPostgresTable,
   getEmbeddingTaskPrefixesForModel,
@@ -27,9 +27,11 @@ import {
   renderIndexVersionDropDdl,
   renderSystemAccessInstallStatement,
 } from "./db-migrations.js";
+import { isDocumentFormatError } from "./document-format-errors.js";
+import { getDocumentFormatForMimeType, resolveStoredDocumentFormats } from "./document-formats.js";
+import { loadDocumentPages } from "./document-loader.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
-import { loadPdfPages } from "./pdf-loader.js";
 import { runAsDatabaseSystem } from "./postgres-tenant.js";
 import {
   PGVECTOR_ERROR_CODES,
@@ -109,14 +111,18 @@ import {
 // A document whose stored PDF cannot be decrypted or read as a file
 // (TENANT_ENCRYPTION's coded errors, rag/kms/errors.js: a key destroyed by a
 // standalone `tenant:keys destroy`, a changed byte, bytes that only look like
-// an envelope) is recorded as failed with an `unreadable_source <code>:`
-// error and the build goes on. It keeps its chunks in the active version but
-// gets none in the new one, so the gate's chunk-count comparison holds it
-// back; `allowUnreadableSources` (--allow-unreadable-sources) lets the gate
-// pass over exactly those documents, which then are not searchable in the new
-// version. That is an operator's call, never a default: the same codes also
-// come from a builder that cannot see the keystore or the master key, and a
-// silent pass would then activate a version without any encrypted document.
+// an envelope), or a stored Word, PowerPoint or Excel document the document
+// loader refuses (its DOCUMENT_* code, rag/document-format-errors.js: an
+// archive over RAG_OFFICE_* limits lowered since the upload, a workbook over
+// RAG_XLSX_MAX_CELLS), is recorded as failed with an `unreadable_source
+// <code>:` error and the build goes on. It keeps its chunks in the active
+// version but gets none in the new one, so the gate's chunk-count comparison
+// holds it back; `allowUnreadableSources` (--allow-unreadable-sources) lets
+// the gate pass over exactly those documents, which then are not searchable
+// in the new version. That is an operator's call, never a default: the same
+// codes also come from a builder that cannot see the keystore or the master
+// key, and a silent pass would then activate a version without any encrypted
+// document.
 
 const DDL_LOCK_TIMEOUT = "10s";
 const PROBE_TEXT_LIMIT = 1000;
@@ -144,7 +150,20 @@ class DocumentSourceError extends Error {
   }
 }
 
-const toUnreadableCode = (error) => (isTenantEncryptionError(error) ? error.code : null);
+// A stored document's bytes this build cannot read: TENANT_ENCRYPTION's coded
+// errors, and the document loader's coded refusals of a stored Office file.
+const toUnreadableCode = (error) =>
+  isTenantEncryptionError(error) || (isDocumentFormatError(error) && typeof error.code === "string")
+    ? error.code
+    : null;
+
+// How the build's messages name a stored document's file: "PDF" for a PDF
+// (the wording they always had), "file" for a Word, PowerPoint or Excel one.
+const describeStoredFile = (mimeType) => {
+  const format = getDocumentFormatForMimeType(mimeType);
+
+  return format && format !== "pdf" ? "file" : "PDF";
+};
 
 const getDocumentsTableName = () => {
   const tableName = getDocumentsPostgresTable();
@@ -582,7 +601,7 @@ const readDocumentSource = async (docId) =>
     await runAsDatabaseSystem(() =>
       getPgvectorRuntime().query(
         `/* index_versions:document_source */
-          SELECT doc_id, file_name, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version,
+          SELECT doc_id, file_name, mime_type, file_bytes, profile, uploaded_at::text AS uploaded_at, content_version,
                  owner_user_id, workspace_id
           FROM ${getDocumentsTableName()}
           WHERE doc_id = $1
@@ -597,25 +616,36 @@ const readDocumentSource = async (docId) =>
 // and bumps content_version (migration 018).
 const toContentToken = (row) => `${String(row?.uploaded_at)}#${Number(row?.content_version ?? 1) || 1}`;
 
-/** The default page loader: the stored PDF bytes through the ingest parser. */
-export const loadStoredDocumentPages = async ({ fileBuffer }) => {
+/**
+ * The default document loader: the stored bytes through the ingest parser,
+ * read as the format the document was registered as (`mimeType`, the row's
+ * mime_type; rag/document-formats.js resolveStoredDocumentFormats), whatever
+ * RAG_DOCUMENT_FORMATS says now. A PDF goes straight to loadPdfPages, as it
+ * always did; a Word, PowerPoint or Excel document through its own loader.
+ * Resolves to { format, mimeType, pages, parse } (rag/document-loader.js).
+ */
+export const loadStoredDocument = async ({ fileBuffer, mimeType = null }) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "index-version-build-"));
   const filePath = path.join(directory, "document.pdf");
 
   try {
     await writeWorkingFile(filePath, fileBuffer);
-    return await loadPdfPages(filePath);
+    return await loadDocumentPages(filePath, { formats: resolveStoredDocumentFormats(mimeType) });
   } finally {
     await rm(directory, { force: true, recursive: true });
   }
 };
 
+/** The stored document's pages alone (loadStoredDocument). */
+export const loadStoredDocumentPages = async (input) => (await loadStoredDocument(input)).pages;
+
 const buildDocumentChunks = async ({ loadPages, source }) => {
   const docId = String(source.doc_id);
   const storedBytes = Buffer.from(source.file_bytes ?? []);
+  const storedFile = describeStoredFile(source.mime_type);
 
   if (storedBytes.byteLength === 0) {
-    throw new DocumentSourceError(`No PDF bytes are stored for ${docId}.`);
+    throw new DocumentSourceError(`No ${storedFile} bytes are stored for ${docId}.`);
   }
 
   // TENANT_ENCRYPTION: an envelope is decrypted with the row's own owner
@@ -634,25 +664,39 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
     );
   } catch (error) {
     throw new DocumentSourceError(
-      `Decrypting the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
+      `Decrypting the stored ${storedFile} of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
       { unreadableCode: toUnreadableCode(error) }
     );
   }
 
   let pages;
+  let officeParse = null;
 
   try {
-    pages = await loadPages({ docId, fileBuffer, fileName: String(source.file_name ?? "") });
+    // A loader resolves to the pages (a test's) or to the document loader's
+    // { pages, parse } (loadStoredDocument).
+    const loaded = await loadPages({
+      docId,
+      fileBuffer,
+      fileName: String(source.file_name ?? ""),
+      mimeType: source.mime_type ?? null,
+    });
+
+    pages = Array.isArray(loaded) ? loaded : loaded?.pages ?? [];
+    officeParse = Array.isArray(loaded) ? null : readOfficeParse(loaded?.parse);
   } catch (error) {
-    // A coded error here is the working copy's (rag/working-files.js), not
-    // the PDF parser's: stored bytes that begin like a working file.
+    // A TENANT_* code here is the working copy's (rag/working-files.js), not
+    // the PDF parser's: stored bytes that begin like a working file. A
+    // DOCUMENT_* code is the document loader refusing a stored Office file.
     throw new DocumentSourceError(
-      `Parsing the stored PDF of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
+      `Parsing the stored ${storedFile} of ${docId} failed: ${error instanceof Error ? error.message : String(error)}`,
       { unreadableCode: toUnreadableCode(error) }
     );
   }
 
-  const chunkProfile = describeChunkProfile();
+  // A Word, PowerPoint or Excel document's chunks carry its own profile, as
+  // an ingest's do (rag/index.js chunkDocumentPages); a PDF's the build's.
+  const chunkProfile = officeParse ? describeChunkProfile(officeParse) : describeChunkProfile();
   const chunks = chunkDocumentWithConfig({
     chunkOverlap: chunkProfile.overlap,
     chunkSize: chunkProfile.size,
@@ -665,7 +709,7 @@ const buildDocumentChunks = async ({ loadPages, source }) => {
   });
 
   if (chunks.length === 0) {
-    throw new DocumentSourceError(`No extractable text was found in the stored PDF of ${docId}.`);
+    throw new DocumentSourceError(`No extractable text was found in the stored ${storedFile} of ${docId}.`);
   }
 
   // Stamped like an ingest stamps them (rag/index.js chunkDocumentPages and
@@ -1044,7 +1088,7 @@ export const runIndexVersionBuild = async ({
   concurrency = getIndexVersionBuildConcurrency(),
   hooks = {},
   leaseMs = getIndexVersionBuildLeaseMs(),
-  loadPages = loadStoredDocumentPages,
+  loadPages = loadStoredDocument,
   logger = null,
   maxAttemptsPerDocument = 3,
   versionId,
@@ -1529,12 +1573,20 @@ export const validateIndexVersion = async ({
 
     if (unreadable.length > 0 && !allowUnreadableSources) {
       const codes = [...new Set(unreadable.map((entry) => entry.code))].sort();
+      // DOCUMENT_* codes: the document loader refused a stored Word,
+      // PowerPoint or Excel file (buildDocumentChunks). Said only then, so
+      // the reason for encrypted PDFs reads as it always did.
+      const refusedByLoader = codes.some((code) => code.startsWith("DOCUMENT_"));
 
       report.reasons.push(
         `${unreadable.length} document(s) have no chunks in version ${safeVersionId} because the build could not read their stored PDF (${codes.join(", ")}; first: ${unreadable
           .slice(0, 3)
           .map((entry) => entry.docId)
-          .join(", ")}). Fix the keystore if a key file or the master key was missing for the builder and resume; otherwise pass --allow-unreadable-sources to activate without them (they are not searchable in version ${safeVersionId}).`
+          .join(", ")}). Fix the keystore if a key file or the master key was missing for the builder and resume; otherwise pass --allow-unreadable-sources to activate without them (they are not searchable in version ${safeVersionId}).${
+          refusedByLoader
+            ? " A DOCUMENT_* code is the document loader refusing a stored Word, PowerPoint or Excel file (an RAG_OFFICE_* or RAG_XLSX_MAX_CELLS limit lower than when it was uploaded): raise the limit and resume, or pass --allow-unreadable-sources."
+            : ""
+        }`
       );
     }
 

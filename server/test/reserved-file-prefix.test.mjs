@@ -4,6 +4,9 @@
 // its first 1024 bytes, but every later reader would take it for a damaged
 // envelope, so the shared PDF check refuses it like any other non-PDF -- with
 // TENANT_ENCRYPTION off (where a "\0ARTWRK" upload used to be a 500) and on.
+// The upload routes run the document check (routes/helpers.js
+// checkUploadedDocument): with Office formats enabled (the default) such
+// bytes are no supported document, with RAG_DOCUMENT_FORMATS=pdf no PDF.
 // The trash restore's refusal of such stored bytes is in
 // document-trash-postgres.integration.test.mjs.
 import test, { afterEach } from "node:test";
@@ -28,6 +31,7 @@ const okHealthService = {
 };
 
 const previousEncryption = process.env.TENANT_ENCRYPTION;
+const previousFormats = process.env.RAG_DOCUMENT_FORMATS;
 
 const setEncryption = (value) => {
   if (value === undefined) {
@@ -37,7 +41,18 @@ const setEncryption = (value) => {
   }
 };
 
-afterEach(() => setEncryption(previousEncryption));
+const setFormats = (value) => {
+  if (value === undefined) {
+    delete process.env.RAG_DOCUMENT_FORMATS;
+  } else {
+    process.env.RAG_DOCUMENT_FORMATS = value;
+  }
+};
+
+afterEach(() => {
+  setEncryption(previousEncryption);
+  setFormats(previousFormats);
+});
 
 const withTempDirectory = async (callback) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "reserved-prefix-"));
@@ -135,34 +150,52 @@ const sendFile = (port, method, requestPath, bytes) => {
   return fetch(`http://127.0.0.1:${port}${requestPath}`, { body: form, method });
 };
 
+// Deliberately changed with Office formats: by default (RAG_DOCUMENT_FORMATS
+// names all four) a reserved prefix is refused as no supported document, with
+// its code; with RAG_DOCUMENT_FORMATS=pdf the answer is the old "not a valid
+// PDF" without one.
+const REFUSALS = [
+  {
+    expected: {
+      code: "DOCUMENT_FORMAT_UNSUPPORTED",
+      error: "The uploaded file is not a supported document (PDF, Word .docx, PowerPoint .pptx or Excel .xlsx).",
+    },
+    formats: undefined,
+  },
+  { expected: { error: "The uploaded file is not a valid PDF." }, formats: "pdf" },
+];
+
 for (const encryption of ["off", "on"]) {
-  test(`POST /upload and PUT /documents/:docId refuse a reserved prefix as no PDF (TENANT_ENCRYPTION=${encryption})`, async () => {
-    setEncryption(encryption);
+  for (const { expected, formats } of REFUSALS) {
+    test(`POST /upload and PUT /documents/:docId refuse a reserved prefix as no document (TENANT_ENCRYPTION=${encryption}, RAG_DOCUMENT_FORMATS=${formats ?? "default"})`, async () => {
+      setEncryption(encryption);
+      setFormats(formats);
 
-    const server = await startApp();
+      const server = await startApp();
 
-    try {
-      for (const bytes of [ENVELOPE_PREFIXED, WORKING_PREFIXED]) {
-        for (const [method, requestPath] of [
-          ["POST", "/upload"],
-          ["PUT", "/documents/doc-1"],
-        ]) {
-          const response = await sendFile(server.port, method, requestPath, bytes);
+      try {
+        for (const bytes of [ENVELOPE_PREFIXED, WORKING_PREFIXED]) {
+          for (const [method, requestPath] of [
+            ["POST", "/upload"],
+            ["PUT", "/documents/doc-1"],
+          ]) {
+            const response = await sendFile(server.port, method, requestPath, bytes);
 
-          assert.equal(response.status, 400, `${method} ${requestPath}`);
-          assert.match((await response.json()).error, /not a valid PDF/);
+            assert.equal(response.status, 400, `${method} ${requestPath}`);
+            assert.deepEqual(await response.json(), expected);
+          }
         }
+
+        assert.deepEqual(server.ingested, [], "nothing reached the ingest");
+        assert.deepEqual(await readdir(server.uploadsDirectory), [], "the refused uploads are removed");
+
+        const accepted = await sendFile(server.port, "POST", "/upload", PDF);
+
+        assert.equal(accepted.status, 201);
+        assert.equal(server.ingested.length, 1);
+      } finally {
+        await server.close();
       }
-
-      assert.deepEqual(server.ingested, [], "nothing reached the ingest");
-      assert.deepEqual(await readdir(server.uploadsDirectory), [], "the refused uploads are removed");
-
-      const accepted = await sendFile(server.port, "POST", "/upload", PDF);
-
-      assert.equal(accepted.status, 201);
-      assert.equal(server.ingested.length, 1);
-    } finally {
-      await server.close();
-    }
-  });
+    });
+  }
 }

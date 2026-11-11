@@ -161,7 +161,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 ## 切块配置变了
 
 - **`checks.chunking` 报错**：`RAG_CHUNK_STRATEGY` 不是 `structured`、`sentence`、`simple` 之一，入库会失败。改成合法值即可；空值等于默认的 `structured`。
-- **`vectorStore.indexVersions.warnings` 里有 `chunk_profile_differs_from_active`**：活动索引版本是用另一套切块配置（策略、块大小、重叠、切块器版本、PDF 解析设置）建的。警告里的 `settings` 列出能恢复到那套配置的环境变量。要么把这些变量改回去，要么用当前配置重建：`npm run vector:index -- build` 建新版本，验证后 `activate`；或者原地重切：`npm run vector:reindex -- --from documents --apply`。`chunk_profile_differs_from_version` 说的是正在构建或还在双写窗口里的版本。这两个警告只在 api 和 agent 层出现，从不让 `/ready` 失败。
+- **`vectorStore.indexVersions.warnings` 里有 `chunk_profile_differs_from_active`**：活动索引版本是用另一套切块配置（策略、块大小、重叠、切块器版本、PDF 解析设置）建的。警告里的 `settings` 列出能恢复到那套配置的环境变量。要么把这些变量改回去，要么用当前配置重建：`npm run vector:index -- build` 建新版本，验证后 `activate`；或者原地重切：`npm run vector:reindex -- --from documents --apply`。`chunk_profile_differs_from_version` 说的是正在构建或还在双写窗口里的版本。这两个警告只在 api 和 agent 层出现，从不让 `/ready` 失败。版本只记录构建进程的 PDF 切块配置，所以 Word、PowerPoint、Excel 解析器（mammoth、SheetJS、PPTX 读取器）升级不会触发这个警告；Office 文件的 chunk 各自带自己的 `chunkProfileId`，要看可以按它查。
 - **版本记录是 `unknown` 或 `mixed`**：版本 1 和这个改动之前建的版本没有记录；`mixed` 表示一次只覆盖部分文档的 `vector:reindex` 之后，版本里混着不同配置切出的块。每个块自己的 `metadata.chunkProfileId` 仍然准确。
 - **异步入库**：同一个队列上的 worker 要用同一套切块设置。一个任务在 embed 或 index 阶段重试时如果发现已存的块是另一套设置切的，会退回 chunk 阶段重切一次。
 

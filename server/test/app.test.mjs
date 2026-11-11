@@ -4895,27 +4895,59 @@ test("upload routes report missing and invalid request boundaries", async () => 
     });
     assert.equal(response.status, 404);
 
-    response = await fetch(`${server.baseUrl}/upload`, {
-      method: "POST",
-    });
-    assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /PDF file is required/);
+    // Deliberately changed with Office formats: by default (RAG_DOCUMENT_FORMATS
+    // names PDF, .docx, .pptx and .xlsx) a missing file is no document and a
+    // file of no supported name or type is refused with its code; with
+    // RAG_DOCUMENT_FORMATS=pdf both answer exactly as before.
+    const postTextFile = () => {
+      const directUploadForm = new FormData();
+      directUploadForm.append(
+        "file",
+        new Blob(["not a pdf"], {
+          type: "text/plain",
+        }),
+        "notes.txt"
+      );
 
-    const directUploadForm = new FormData();
-    directUploadForm.append(
-      "file",
-      new Blob(["not a pdf"], {
-        type: "text/plain",
-      }),
-      "notes.txt"
-    );
+      return fetch(`${server.baseUrl}/upload`, {
+        method: "POST",
+        body: directUploadForm,
+      });
+    };
+    const previousFormats = process.env.RAG_DOCUMENT_FORMATS;
 
-    response = await fetch(`${server.baseUrl}/upload`, {
-      method: "POST",
-      body: directUploadForm,
-    });
-    assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /PDF file is required/);
+    try {
+      delete process.env.RAG_DOCUMENT_FORMATS;
+      response = await fetch(`${server.baseUrl}/upload`, {
+        method: "POST",
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "A document file is required." });
+
+      response = await postTextFile();
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        code: "DOCUMENT_FORMAT_UNSUPPORTED",
+        error: "The uploaded file is not a supported document (PDF, Word .docx, PowerPoint .pptx or Excel .xlsx).",
+      });
+
+      process.env.RAG_DOCUMENT_FORMATS = "pdf";
+      response = await fetch(`${server.baseUrl}/upload`, {
+        method: "POST",
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "A PDF file is required." });
+
+      response = await postTextFile();
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "A PDF file is required." });
+    } finally {
+      if (previousFormats === undefined) {
+        delete process.env.RAG_DOCUMENT_FORMATS;
+      } else {
+        process.env.RAG_DOCUMENT_FORMATS = previousFormats;
+      }
+    }
   } finally {
     await server.close();
     await rm(tempRoot, { recursive: true, force: true });
@@ -5199,68 +5231,97 @@ test("chunked upload rejects non-PDF file names and disguised non-PDF content", 
     },
   });
   const server = await startServer(app);
+  const previousFormats = process.env.RAG_DOCUMENT_FORMATS;
+  const unsupported = {
+    code: "DOCUMENT_FORMAT_UNSUPPORTED",
+    error: "The uploaded file is not a supported document (PDF, Word .docx, PowerPoint .pptx or Excel .xlsx).",
+  };
 
   try {
-    let response = await fetch(`${server.baseUrl}/upload/init`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    // Deliberately changed with Office formats: by default a name or content
+    // of no supported format is refused with that code; with
+    // RAG_DOCUMENT_FORMATS=pdf both answers are the ones they always were.
+    for (const { formats, refusedContent, refusedName } of [
+      { formats: undefined, refusedContent: unsupported, refusedName: unsupported },
+      {
+        formats: "pdf",
+        refusedContent: { error: "The uploaded file is not a valid PDF." },
+        refusedName: { error: "Only PDF files are supported." },
       },
-      body: JSON.stringify({
-        fileId: "html-file",
-        fileName: "malicious.html",
-        fileSize: 16,
-        totalChunks: 1,
-        chunkSize: 16,
-      }),
-    });
-    assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /Only PDF files/);
+    ]) {
+      if (formats === undefined) {
+        delete process.env.RAG_DOCUMENT_FORMATS;
+      } else {
+        process.env.RAG_DOCUMENT_FORMATS = formats;
+      }
 
-    const fileId = "disguised-content";
-    const content = "<html>bad</html>";
+      let response = await fetch(`${server.baseUrl}/upload/init`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileId: `html-file-${formats ?? "default"}`,
+          fileName: "malicious.html",
+          fileSize: 16,
+          totalChunks: 1,
+          chunkSize: 16,
+        }),
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), refusedName);
 
-    response = await fetch(`${server.baseUrl}/upload/init`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        fileId,
-        fileName: "disguised.pdf",
-        fileSize: content.length,
-        lastModified: 0,
-        totalChunks: 1,
-        chunkSize: 16,
-      }),
-    });
-    assert.equal(response.status, 201);
+      const fileId = `disguised-content-${formats ?? "default"}`;
+      const content = "<html>bad</html>";
 
-    const chunkForm = new FormData();
-    chunkForm.append("fileId", fileId);
-    chunkForm.append("chunkIndex", "0");
-    chunkForm.append("totalChunks", "1");
-    chunkForm.append("chunk", new Blob([content]), "disguised.pdf.part-0");
+      response = await fetch(`${server.baseUrl}/upload/init`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileId,
+          fileName: "disguised.pdf",
+          fileSize: content.length,
+          lastModified: 0,
+          totalChunks: 1,
+          chunkSize: 16,
+        }),
+      });
+      assert.equal(response.status, 201);
 
-    response = await fetch(`${server.baseUrl}/upload/chunk`, {
-      method: "POST",
-      body: chunkForm,
-    });
-    assert.equal(response.status, 201);
+      const chunkForm = new FormData();
+      chunkForm.append("fileId", fileId);
+      chunkForm.append("chunkIndex", "0");
+      chunkForm.append("totalChunks", "1");
+      chunkForm.append("chunk", new Blob([content]), "disguised.pdf.part-0");
 
-    response = await fetch(`${server.baseUrl}/upload/complete`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        fileId,
-      }),
-    });
-    assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /not a valid PDF/);
-    assert.equal(ingested, false);
+      response = await fetch(`${server.baseUrl}/upload/chunk`, {
+        method: "POST",
+        body: chunkForm,
+      });
+      assert.equal(response.status, 201);
+
+      response = await fetch(`${server.baseUrl}/upload/complete`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileId,
+        }),
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), refusedContent);
+      assert.equal(ingested, false);
+    }
   } finally {
+    if (previousFormats === undefined) {
+      delete process.env.RAG_DOCUMENT_FORMATS;
+    } else {
+      process.env.RAG_DOCUMENT_FORMATS = previousFormats;
+    }
+
     await server.close();
     await rm(tempRoot, { recursive: true, force: true });
   }

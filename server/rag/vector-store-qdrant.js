@@ -9,6 +9,7 @@ import {
   getVectorWeight,
   isEmbeddingIdentityCurrent,
 } from "./config.js";
+import { copyDocumentLocationFields } from "./citations.js";
 import { embedTexts } from "./openai.js";
 import {
   buildTermFrequencyMap,
@@ -113,12 +114,17 @@ const buildDenseResultScore = ({ vectorScore, keywordScore, scoringMode }) =>
 
 const buildPointId = (document) => String(document.id);
 
+// The payload names its fields one by one. An Office chunk's slide, sheet or
+// section (locationUnit, locationLabel; rag/citations.js) is written and read
+// back as it was, and only when the chunk has it: a PDF chunk's payload and
+// the metadata a search returns for it are what they were.
 const buildPointPayload = (document) => ({
   docId: document.metadata?.docId ?? "",
   fileName: document.metadata?.fileName ?? "Unknown document",
   filePath: document.metadata?.filePath ?? "",
   publicFilePath: document.metadata?.publicFilePath ?? "",
   pageNumber: document.metadata?.pageNumber ?? null,
+  ...copyDocumentLocationFields(document.metadata),
   chunkIndex: document.metadata?.chunkIndex ?? null,
   sectionHeading: document.metadata?.sectionHeading ?? null,
   source: document.metadata?.source ?? null,
@@ -132,6 +138,7 @@ const buildMetadataFromPayload = (payload = {}) => ({
   filePath: payload.filePath ?? "",
   publicFilePath: payload.publicFilePath ?? "",
   pageNumber: payload.pageNumber ?? null,
+  ...copyDocumentLocationFields(payload),
   chunkIndex: payload.chunkIndex ?? null,
   sectionHeading: payload.sectionHeading ?? null,
   source: payload.source ?? null,

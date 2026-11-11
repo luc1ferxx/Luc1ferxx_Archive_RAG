@@ -5,14 +5,29 @@ import {
   BranchesOutlined,
   EllipsisOutlined,
   FileDoneOutlined,
+  FileExcelOutlined,
   FilePdfOutlined,
+  FilePptOutlined,
   FileSearchOutlined,
+  FileWordOutlined,
   FolderOpenOutlined,
   HomeOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
+import { formatDocumentUnitCount, getDocumentFormat } from "../documentLocation";
+
+// By the stored MIME type; a PDF and a document whose type is not known keep
+// the PDF icon they always had.
+const DOCUMENT_ICONS = {
+  docx: FileWordOutlined,
+  pptx: FilePptOutlined,
+  xlsx: FileExcelOutlined,
+};
+
+const getDocumentIcon = (document) =>
+  DOCUMENT_ICONS[getDocumentFormat(document?.mimeType)?.id] ?? FilePdfOutlined;
 
 const HOME_SECTION_IDS = ["home", "skills", "workflows", "drive", "runs", "more"];
 
@@ -196,7 +211,10 @@ const getDocumentPageLabel = (document, t) => {
     return t("common.indexed");
   }
 
-  return `${pageCount} ${t(pageCount === 1 ? "common.page" : "common.pages")}`;
+  return (
+    formatDocumentUnitCount(document, pageCount, t) ??
+    `${pageCount} ${t(pageCount === 1 ? "common.page" : "common.pages")}`
+  );
 };
 
 const getSkillById = (skillId) =>
@@ -406,6 +424,7 @@ const WorkspaceEntryPanel = ({
       <div className="archive-home-document-list">
         {documents.map((document) => {
           const isChecked = compareDocIds.includes(document.docId);
+          const DocumentIcon = getDocumentIcon(document);
 
           return (
             <label key={document.docId} className="archive-home-document-row">
@@ -417,7 +436,7 @@ const WorkspaceEntryPanel = ({
                 />
               ) : null}
               <span className="archive-home-document-icon">
-                <FilePdfOutlined aria-hidden="true" />
+                <DocumentIcon aria-hidden="true" />
               </span>
               <span className="archive-home-document-copy">
                 <strong>{getDocumentLabel(document) ?? t("common.untitledDocument")}</strong>

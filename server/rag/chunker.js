@@ -1,3 +1,4 @@
+import { normalizeDocumentLocationLabel } from "./citations.js";
 import { CHUNK_STRATEGIES, getChunkOverlap, getChunkSize, getChunkStrategy } from "./config.js";
 import { buildPublicFilePath } from "./document-utils.js";
 import { splitLongSentence, splitSentenceSegments } from "./sentence-splitter.js";
@@ -825,6 +826,30 @@ const CHUNK_PAGE_BY_STRATEGY = new Map([
   ["sentence", chunkPageWithSentences],
 ]);
 
+// Where a page of a Word, PowerPoint or Excel document sits in its file
+// (rag/document-loader.js: locationUnit "section", "slide" or "sheet", and a
+// locationLabel such as the slide title or the sheet name): only the fields
+// the page has, as non-empty strings, or null. A PDF page has neither, so its
+// chunks keep exactly the metadata they always had. The label is cut here, to
+// the one line of at most MAX_DOCUMENT_LOCATION_LABEL_LENGTH characters every
+// citation carries: every chunk of the page repeats it, so a 100,000-
+// character heading over 3,000 chunks stored 300 MB of metadata (measured).
+const describePageLocation = (page) => {
+  const location = {};
+
+  if (typeof page?.locationUnit === "string" && page.locationUnit) {
+    location.locationUnit = page.locationUnit;
+  }
+
+  const locationLabel = normalizeDocumentLocationLabel(page?.locationLabel);
+
+  if (locationLabel) {
+    location.locationLabel = locationLabel;
+  }
+
+  return Object.keys(location).length > 0 ? location : null;
+};
+
 export const chunkDocumentWithConfig = ({
   docId,
   fileName,
@@ -861,8 +886,19 @@ export const chunkDocumentWithConfig = ({
       chunkOverlap,
       startingChunkIndex: chunkIndex,
     });
+    // Added once the strategy has cut the page (and appended any trailing
+    // heading to its last chunk), so the text and the boundaries of the
+    // chunks are the strategy's alone; citations read the fields back from
+    // the chunk metadata.
+    const location = describePageLocation(page);
 
-    chunks.push(...pageChunks.chunks);
+    // One push per chunk, never push(...chunks): a spread passes every chunk
+    // as an argument, and a page cut into more than about 125,000 chunks
+    // would overflow the stack.
+    for (const chunk of pageChunks.chunks) {
+      chunks.push(location ? { ...chunk, metadata: { ...chunk.metadata, ...location } } : chunk);
+    }
+
     chunkIndex = pageChunks.nextChunkIndex;
   }
 

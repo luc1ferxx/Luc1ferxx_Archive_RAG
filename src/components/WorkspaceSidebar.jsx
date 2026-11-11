@@ -16,6 +16,7 @@ import {
   getDocumentSource,
   isArxivDocument,
 } from "../archiveWorkspace";
+import { formatDocumentUnitCount } from "../documentLocation";
 import DocumentProfileSnippet from "./DocumentProfileSnippet";
 import ArxivSuggestionPanel from "./ArxivSuggestionPanel";
 import PdfUploader from "./PdfUploader";
@@ -403,7 +404,17 @@ const WorkspaceSidebar = ({
                 >
                   <div className="document-item-title">{document.fileName}</div>
                   <div className="document-item-meta">
-                    {formatPageCount(document.pageCount)} {t("common.pages")}
+                    {/* A deck counts slides, a workbook sheets, a Word file
+                        sections; a PDF (or an unknown type) keeps its pages. */}
+                    {formatDocumentUnitCount(
+                      document,
+                      formatPageCount(document.pageCount),
+                      t
+                    ) ?? (
+                      <>
+                        {formatPageCount(document.pageCount)} {t("common.pages")}
+                      </>
+                    )}
                     {document.version ? ` · ${document.version}` : ""}
                     {document.age ? ` · ${document.age}` : ` · ID ${document.docId.slice(0, 8)}`}
                   </div>

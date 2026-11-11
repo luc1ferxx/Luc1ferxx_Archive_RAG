@@ -3,9 +3,10 @@ import {
   describeChunkProfile,
   describePdfParseSettings,
   readStoredChunkProfile,
-  readStoredPdfParseSettings,
+  readStoredDocumentParse,
 } from "./chunk-profile.js";
 import { getRagIngestStageOutputMaxBytes, isRagIngestEmbedBatchingEnabled } from "./config.js";
+import { loadDocumentPages, resolveQueuedDocumentFormats } from "./document-loader.js";
 import { getDefaultEmbeddingBatcher } from "./ingest-embedding-batcher.js";
 import { INGEST_JOB_KINDS, INGEST_STAGE_OUTPUTS, INGEST_STAGES } from "./ingest-stages.js";
 import {
@@ -14,15 +15,17 @@ import {
   embedDocumentChunks,
   findDuplicateDocument,
 } from "./index.js";
-import { loadPdfPages } from "./pdf-loader.js";
 import { embedDocumentTextsForIndex } from "./vector-store.js";
 
 // The staged form of an ingest, run by rag/ingest-worker.js for an async job:
 //
-//   parse  the job's PDF -> `pages` (the PDF itself becomes `document_file`;
-//                           the PDF settings it parsed with ride along)
+//   parse  the job's file -> `pages` (the file itself becomes `document_file`;
+//                           what parsed it rides along: a PDF's settings, or
+//                           a Word, PowerPoint or Excel document's parse
+//                           metadata, rag/document-loader.js)
 //   chunk  `pages`       -> `chunks` (chunk documents, page count, profile,
-//                           and the chunk profile they were cut with)
+//                           and the chunk profile they were cut with; an
+//                           Office document's MIME type too)
 //   embed  `chunks`      -> `embeddings` (per embedding space, through the
 //                           process's cross-document batcher, or one request
 //                           per job and space with RAG_INGEST_EMBED_BATCHING=false)
@@ -240,6 +243,14 @@ export const decodeEmbeddingsOutput = (buffer) => {
   return { spaces, vectorsBySpace };
 };
 
+// A queued job's file, read as any supported format (rag/document-loader.js:
+// a PDF goes to loadPdfPages exactly as before). RAG_DOCUMENT_FORMATS gates
+// what an enqueue accepts, never a job already queued, except that a PDF-only
+// server reads every file its PDF check passes as a PDF
+// (resolveQueuedDocumentFormats).
+export const loadQueuedDocument = async (filePath) =>
+  loadDocumentPages(filePath, { formats: await resolveQueuedDocumentFormats(filePath) });
+
 /**
  * The stages, over injectable parts (tests swap the parser, the batcher or
  * the commit). Every stage takes the job and the inputs STAGE_INPUTS names as
@@ -250,6 +261,16 @@ export const decodeEmbeddingsOutput = (buffer) => {
  * the process's default batcher while `batchingEnabled()` holds
  * (RAG_INGEST_EMBED_BATCHING), else straight through `embedUnbatched`, one
  * request per job and embedding space.
+ *
+ * The parse stage reads the job's file with `loadDocument` (rag/
+ * document-loader.js: { pages, parse }). A job is parsed whatever format it
+ * is and whatever RAG_DOCUMENT_FORMATS says now: its enqueue checked the
+ * bytes against the setting of its time, and a job queued before the setting
+ * changed is still the tenant's upload. The one exception: a PDF-only server
+ * reads every file its PDF check passes as a PDF, a ZIP or OLE2 file with
+ * '%PDF' in its first kilobyte included, as it queued it
+ * (resolveQueuedDocumentFormats). `loadPages` (filePath -> pages) is the
+ * older seam, a PDF parser whose settings `describeParse` names.
  */
 export const createIngestPipeline = ({
   batcher = null,
@@ -261,9 +282,30 @@ export const createIngestPipeline = ({
   embedChunks = embedDocumentChunks,
   embedUnbatched = embedDocumentTextsForIndex,
   findDuplicate = findDuplicateDocument,
-  loadPages = loadPdfPages,
+  loadDocument = loadQueuedDocument,
+  loadPages = null,
   maxOutputBytes = getRagIngestStageOutputMaxBytes,
 } = {}) => {
+  // The pages and what parsed them.
+  const readJobFile = async (filePath) => {
+    if (!loadPages) {
+      const { pages, parse } = await loadDocument(filePath);
+
+      return { pages, parse };
+    }
+
+    // The settings loadPages parses with, read before it parses.
+    let parse = null;
+
+    try {
+      parse = describeParse();
+    } catch {
+      // An invalid PDF_PARSER fails loadPages below.
+    }
+
+    return { pages: await loadPages(filePath), parse };
+  };
+
   const resolveEmbedInSpace = () => {
     if (batcher) {
       return (texts, space) => batcher.embed(texts, space);
@@ -339,17 +381,10 @@ export const createIngestPipeline = ({
     },
 
     async parse({ filePath }) {
-      // The settings loadPages parses with, stored beside the pages so the
-      // chunk stage, in whichever process, records the parse that made them.
-      let parse = null;
-
-      try {
-        parse = describeParse();
-      } catch {
-        // An invalid PDF_PARSER fails loadPages below.
-      }
-
-      const pages = await loadPages(filePath);
+      // What parsed the pages (a PDF's settings, an Office document's parse
+      // metadata), stored beside them so the chunk stage, in whichever
+      // process, records the parse that made them.
+      const { pages, parse } = await readJobFile(filePath);
 
       return {
         output: encodeJsonOutput(
@@ -371,7 +406,9 @@ export const createIngestPipeline = ({
         docId: job.docId,
         fileName: job.fileName,
         pages,
-        parse: readStoredPdfParseSettings(meta?.parse),
+        // A PDF's settings exactly as before Office formats, or an Office
+        // document's parse metadata (its chunk profile and MIME type).
+        parse: readStoredDocumentParse(meta?.parse),
         source: null,
       });
 
@@ -394,11 +431,13 @@ export const createIngestPipeline = ({
 
     /**
      * Commits the document (rag/index.js commitDocument) from the stored
-     * outputs; `documentFilePath` holds the job's PDF. `onCommit` runs inside
-     * the write transaction where there is one.
+     * outputs; `documentFilePath` holds the job's file. `onCommit` runs inside
+     * the write transaction where there is one. A Word, PowerPoint or Excel
+     * document is registered with the MIME type its chunk output names; a
+     * PDF's commit is the one it always was.
      */
     async index({ documentFilePath, inputs, job, onCommit = null }) {
-      const { documents, pageCount, profile } = decodeJsonOutput(
+      const { documents, mimeType, pageCount, profile } = decodeJsonOutput(
         INGEST_STAGE_OUTPUTS.chunks,
         inputs[INGEST_STAGE_OUTPUTS.chunks]
       );
@@ -421,6 +460,7 @@ export const createIngestPipeline = ({
         requestedAt: job.createdAt,
         vectorsBySpace,
         workspaceId: job.workspaceId,
+        ...(typeof mimeType === "string" && mimeType ? { mimeType } : {}),
       });
     },
   };

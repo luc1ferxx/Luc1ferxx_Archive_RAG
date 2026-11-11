@@ -10,10 +10,13 @@ import {
   planIndexVersionChunkProfileRecords,
   prepareDocumentForReindex,
   prepareFromStoredVectors,
+  toQdrantChunkEntry,
   writeReindexedDocument,
 } from "../vector-reindex.mjs";
 import { buildTextPdf } from "../evaluation/load-bench-pdf.mjs";
 import { MIXED_CHUNK_PROFILE, describeChunkProfile } from "../rag/chunk-profile.js";
+import { DOCUMENT_MIME_TYPES } from "../rag/document-formats.js";
+import { PPTX_EXTRACTOR_VERSION } from "../rag/office/pptx-loader.js";
 import { recordIndexVersionChunkProfile } from "../rag/vector-store-pgvector-version-lifecycle.js";
 import { describeIndexVersions, invalidateIndexVersionSnapshot } from "../rag/vector-store-pgvector-versions.js";
 import { TENANT_ENCRYPTION_ERROR_CODES, createTenantEncryptionError } from "../rag/kms/errors.js";
@@ -30,6 +33,7 @@ import {
   resetPgvectorVectorStore,
 } from "../rag/vector-store-pgvector.js";
 import { getConfiguredEmbeddingSpace } from "../rag/vector-store-pgvector-versions.js";
+import { buildPptx, buildXlsx } from "./office-fixture-builder.mjs";
 import { createFakeVersionDatabase } from "./pgvector-version-fake-database.mjs";
 import {
   configureRagDataDirectory,
@@ -210,6 +214,52 @@ test("parseArgs reads --trust-source-embeddings alongside the other flags", () =
 test("parseArgs rejects an unknown option and an invalid source", () => {
   assert.throws(() => parseArgs(["--nope"]), /Unknown option/);
   assert.throws(() => parseArgs(["--from", "elastic"]), /--from must be/);
+});
+
+test("--from qdrant keeps an Office chunk's location and leaves a PDF chunk's metadata as it was", () => {
+  const point = (payload) => ({ id: 7, payload, vector: { dense: [0.5, "x"] } });
+  const base = {
+    chunkIndex: 2,
+    docId: "doc-a",
+    fileName: "deck.pptx",
+    filePath: "/files/doc-a",
+    pageContent: "Revenue grew.",
+    pageNumber: 3,
+    publicFilePath: "/documents/doc-a/file",
+    sectionHeading: null,
+  };
+  const slide = toQdrantChunkEntry(point({ ...base, locationLabel: "Q3 results", locationUnit: "slide" }));
+
+  assert.deepEqual(slide, {
+    id: "7",
+    metadata: {
+      docId: "doc-a",
+      fileName: "deck.pptx",
+      filePath: "/files/doc-a",
+      publicFilePath: "/documents/doc-a/file",
+      pageNumber: 3,
+      locationUnit: "slide",
+      locationLabel: "Q3 results",
+      chunkIndex: 2,
+      sectionHeading: null,
+    },
+    pageContent: "Revenue grew.",
+    vector: [0.5, 0],
+  });
+
+  const pdf = toQdrantChunkEntry(point({ ...base, fileName: "report.pdf" }));
+
+  assert.deepEqual(Object.keys(pdf.metadata), [
+    "docId",
+    "fileName",
+    "filePath",
+    "publicFilePath",
+    "pageNumber",
+    "chunkIndex",
+    "sectionHeading",
+  ]);
+  assert.equal(toQdrantChunkEntry(point({ ...base, docId: "" })), null);
+  assert.equal(toQdrantChunkEntry({ id: 1, payload: base }), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -656,6 +706,134 @@ test("--from documents --apply re-chunks every document and records that profile
     output = await runWith(["--from", "documents", "--apply"]);
     assert.doesNotMatch(output, /now records/);
   } finally {
+    invalidateIndexVersionSnapshot();
+    resetOpenAIProvider();
+    resetPgvectorVectorStore();
+    delete process.env.OPENAI_EMBEDDING_MODEL;
+  }
+});
+
+test("--from documents re-parses a stored Word, PowerPoint or Excel document as its own format, and skips one the loader refuses", async () => {
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+  process.env.OPENAI_EMBEDDING_MODEL = "reindex-embed";
+  configureEmbeddingDimensions(DIMENSIONS);
+  configureOpenAIProvider({
+    embedQuery: async () => [1, 0, 0, 0],
+    embedTexts: async (texts) => texts.map(() => [1, 0, 0, 0]),
+  });
+
+  const previous = {
+    RAG_DOCUMENT_FORMATS: process.env.RAG_DOCUMENT_FORMATS,
+    RAG_XLSX_MAX_CELLS: process.env.RAG_XLSX_MAX_CELLS,
+  };
+  const database = createFakeVersionDatabase({ baseDimensions: DIMENSIONS });
+  const stored = {
+    "doc-deck": {
+      bytes: buildPptx({
+        slides: [
+          { shapes: [{ paragraphs: ["Budget approved for the pilot."], x: 1, y: 2 }], title: "Kickoff" },
+          { hidden: true, title: "Backup" },
+          { shapes: [{ paragraphs: ["The timeline is agreed."], x: 1, y: 2 }], title: "Plan" },
+        ],
+      }),
+      document: registeredDoc({ docId: "doc-deck", fileName: "deck.pptx", mimeType: DOCUMENT_MIME_TYPES.pptx }),
+    },
+    "doc-pdf": {
+      bytes: buildTextPdf({ pages: [["Signed contracts are kept for seven years after they end."]] }),
+      document: registeredDoc({ docId: "doc-pdf", fileName: "policy.pdf" }),
+    },
+    "doc-sheet": {
+      bytes: buildXlsx({ sheets: [{ name: "Budget", rows: [["Item", "Amount"], ["Travel", 1200], ["Hotels", 800]] }] }),
+      document: registeredDoc({ docId: "doc-sheet", fileName: "budget.xlsx", mimeType: DOCUMENT_MIME_TYPES.xlsx }),
+    },
+  };
+  const documents = Object.values(stored).map(({ document }) => ({
+    ...document,
+    contentSha256: null,
+    ownerUserId: "alice",
+    version: 1,
+    workspaceId: "ws",
+  }));
+
+  for (const document of documents) {
+    database.addDocument({ docId: document.docId, owner: "alice", pages: ["x"], workspace: "ws" });
+  }
+
+  configurePgvectorRuntime(database.runtime);
+  configureDocumentRegistryStore({
+    async getFile(docId) {
+      const document = documents.find((entry) => entry.docId === docId);
+
+      return { document, fileBuffer: stored[docId].bytes, mimeType: document.mimeType };
+    },
+    async initialize() {
+      return true;
+    },
+    async list() {
+      return documents;
+    },
+    async lockForContentReplace(docId) {
+      return documents.find((document) => document.docId === docId) ?? null;
+    },
+  });
+  invalidateIndexVersionSnapshot();
+
+  try {
+    // What new uploads accept does not decide what is re-read; the workbook
+    // is over the cell limit now, so the loader refuses it.
+    process.env.RAG_DOCUMENT_FORMATS = "pdf";
+    process.env.RAG_XLSX_MAX_CELLS = "2";
+    // runMain swallows stdout: let node --test's earlier reports out first.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const output = await runMain(["--from", "documents", "--apply"]);
+    const rows = [...database.state.tables.get("rag_document_chunks").rows.values()];
+    const rowsOf = (docId) => rows.filter((row) => row.doc_id === docId);
+    const deckProfile = describeChunkProfile({
+      extractor: "ooxml-pptx",
+      extractorVersion: PPTX_EXTRACTOR_VERSION,
+      format: "pptx",
+    });
+
+    assert.deepEqual(
+      [
+        ...new Map(
+          rowsOf("doc-deck").map(({ metadata }) => [
+            metadata.pageNumber,
+            [metadata.pageNumber, metadata.locationUnit, metadata.locationLabel],
+          ])
+        ).values(),
+      ],
+      [
+        [1, "slide", "Kickoff"],
+        [3, "slide", "Plan"],
+      ]
+    );
+    assert.ok(rowsOf("doc-deck").every((row) => row.metadata.chunkProfileId === deckProfile.id));
+    assert.ok(rowsOf("doc-pdf").length > 0);
+    assert.ok(rowsOf("doc-pdf").every((row) => row.metadata.chunkProfileId === describeChunkProfile().id));
+    assert.ok(rowsOf("doc-pdf").every((row) => !("locationUnit" in row.metadata)));
+
+    // The refused workbook keeps the chunks it had (none here), and the run goes on.
+    assert.equal(rowsOf("doc-sheet").length, 0);
+    assert.match(
+      output,
+      /skip {3}doc-sheet: its stored file cannot be read \(DOCUMENT_SPREADSHEET_TOO_LARGE\); its chunks stay as they are\./
+    );
+    assert.match(output, /wrote {2}doc-deck: \d+ chunk\(s\)/);
+    assert.match(output, /\(1 with an unreadable stored file\)/);
+    assert.deepEqual(await prepareDocumentForReindex(documents.find((entry) => entry.docId === "doc-sheet")), {
+      unreadableCode: "DOCUMENT_SPREADSHEET_TOO_LARGE",
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+
     invalidateIndexVersionSnapshot();
     resetOpenAIProvider();
     resetPgvectorVectorStore();

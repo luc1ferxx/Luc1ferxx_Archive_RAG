@@ -1,0 +1,47 @@
+/* Word, PowerPoint and Excel documents next to PDFs. A slide title, sheet
+   name or section heading keeps its own case in the upper-cased location
+   badges, and the preview of a format the browser cannot show inline offers
+   the download and the cited evidence instead of a viewer. */
+
+.archive-source-head span.archive-source-location,
+.archive-preview-summary-page span.archive-preview-location {
+  text-transform: none;
+}
+
+.archive-preview-download-page .archive-preview-download-button.ant-btn {
+  justify-self: start;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--archive-radius-md);
+  font-size: 0.76rem;
+}
+
+.archive-preview-summary-page .archive-preview-download-error {
+  color: #b42318;
+}
+
+.archive-preview-cited-evidence {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--archive-accent);
+  border-radius: 6px;
+  background: #f8fbff;
+}
+
+.archive-preview-cited-evidence figcaption {
+  color: #66758c;
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.archive-preview-cited-evidence blockquote {
+  margin: 0;
+  color: #1f2937;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

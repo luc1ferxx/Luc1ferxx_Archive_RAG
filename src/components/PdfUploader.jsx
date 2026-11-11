@@ -4,13 +4,19 @@ import { InboxOutlined } from "@ant-design/icons";
 import { message, Upload } from "antd";
 import { API_DOMAIN, buildApiRequestConfig } from "../config";
 import { createTranslator, getInitialLocale } from "../archiveI18n";
+import {
+  DOCX_MIME_TYPE,
+  PDF_MIME_TYPE,
+  PPTX_MIME_TYPE,
+  XLSX_MIME_TYPE,
+} from "../documentLocation";
 
 const defaultT = createTranslator(getInitialLocale());
 
 const { Dragger } = Upload;
 const CHUNK_SIZE_BYTES = 2 * 1024 * 1024;
 // With RAG_INGEST_MODE=async the server answers 202 with an ingest job and a
-// worker indexes the PDF; the uploader polls the job until it settles. The
+// worker indexes the document; the uploader polls the job until it settles. The
 // interval grows from 1 s to 5 s, so several files dropped at once stay well
 // under the API's per-IP rate limit while their jobs wait in the queue.
 export const INGEST_POLL_INTERVAL_MS = 1000;
@@ -21,9 +27,31 @@ const INGEST_POLL_BACKOFF = 1.5;
 export const MAX_UPLOAD_SIZE_MB = 100;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
-export const validatePdfFile = (file) => {
-  const hasValidExtension = /\.pdf$/i.test(file.name);
-  const hasValidMime = file.type === "application/pdf";
+// Every format the server can ingest. RAG_DOCUMENT_FORMATS may switch some
+// off, which the browser cannot know: the server then refuses the upload with
+// its own message (415 DOCUMENT_FORMAT_DISABLED), and onChange shows it. As for
+// PDFs before, either the extension or the browser's MIME type is enough here;
+// the server decides by the bytes.
+export const SUPPORTED_UPLOAD_EXTENSIONS = Object.freeze([
+  ".pdf",
+  ".docx",
+  ".pptx",
+  ".xlsx",
+]);
+const SUPPORTED_UPLOAD_MIME_TYPES = new Set([
+  PDF_MIME_TYPE,
+  DOCX_MIME_TYPE,
+  PPTX_MIME_TYPE,
+  XLSX_MIME_TYPE,
+]);
+export const UPLOAD_ACCEPT = SUPPORTED_UPLOAD_EXTENSIONS.join(",");
+
+export const validateDocumentFile = (file) => {
+  const fileName = String(file.name ?? "").toLowerCase();
+  const hasValidExtension = SUPPORTED_UPLOAD_EXTENSIONS.some((extension) =>
+    fileName.endsWith(extension)
+  );
+  const hasValidMime = SUPPORTED_UPLOAD_MIME_TYPES.has(file.type);
   if (!hasValidExtension && !hasValidMime) {
     return { ok: false, reason: "invalidType" };
   }
@@ -31,6 +59,24 @@ export const validatePdfFile = (file) => {
     return { ok: false, reason: "tooLarge" };
   }
   return { ok: true };
+};
+
+// The server's refusal ({ error: "..." }, or { error: { message } } where a
+// route nests it) is what the user needs to read: a format the server
+// switched off, a legacy or macro-enabled Office file, a workbook over the
+// cell limit. Without one, the request's own message, as before.
+export const getUploadErrorMessage = (error) => {
+  const serverError = error?.response?.data?.error;
+
+  if (typeof serverError === "string" && serverError.trim()) {
+    return serverError;
+  }
+
+  if (typeof serverError?.message === "string" && serverError.message.trim()) {
+    return serverError.message;
+  }
+
+  return error?.message || "Upload failed";
 };
 
 const buildFileId = (file) =>
@@ -243,11 +289,11 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
   const attributes = {
     name: "file",
     multiple: true,
-    accept: ".pdf",
+    accept: UPLOAD_ACCEPT,
     showUploadList: false,
     className: "archive-uploader",
     beforeUpload(file) {
-      const result = validatePdfFile(file);
+      const result = validateDocumentFile(file);
       if (!result.ok) {
         if (result.reason === "invalidType") {
           message.error(t("uploader.invalidType", { fileName: file.name }));
@@ -274,12 +320,12 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
       if (status === "done") {
         message.success(t("uploader.uploadSuccess", { fileName: info.file.name }));
       } else if (status === "error") {
-        const errorMessage =
-          info.file.error?.response?.data?.error ??
-          info.file.error?.message ??
-          "Upload failed";
-
-        message.error(t("uploader.uploadFailed", { fileName: info.file.name, message: errorMessage }));
+        message.error(
+          t("uploader.uploadFailed", {
+            fileName: info.file.name,
+            message: getUploadErrorMessage(info.file.error),
+          })
+        );
       }
     },
   };

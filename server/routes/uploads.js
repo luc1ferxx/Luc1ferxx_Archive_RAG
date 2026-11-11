@@ -37,12 +37,18 @@ import { readWorkingFile } from "../rag/working-files.js";
 import { createWorkingFileDiskStorage } from "./working-file-storage.js";
 
 import {
+  checkUploadedDocument,
   cleanupUploadedFile,
   createStoredFileName,
   DEFAULT_UPLOAD_CHUNK_SIZE,
-  hasPdfMagicBytes,
-  isPdfFile,
-  isPdfFileName,
+  describeDocumentFormatErrorCode,
+  describeDocumentRefusal,
+  describeMissingUploadFile,
+  describeRefusedUploadFileName,
+  filterUploadFile,
+  getUploadDocumentFormats,
+  isAcceptedUploadFileName,
+  isDocumentFormatSettingError,
   MAX_CHUNK_UPLOAD_SIZE,
   MAX_DIRECT_UPLOAD_SIZE,
   serializeError,
@@ -107,7 +113,20 @@ export const createUploadsRouter = (services) => {
   // staged pipeline (rag/ingest-worker.js). The content hash rides along so
   // either mode can resolve a duplicate (RAG_INGEST_DEDUP) and every document
   // records it.
-  const ingestUpload = async ({ accessScope, docId, fileName, filePath, kind = INGEST_JOB_KINDS.create }) => {
+  //
+  // `format` is what the byte check found. A synchronous ingest of a Word,
+  // PowerPoint or Excel file is told to read it as that format (rag/index.js
+  // ingestDocument `formats`); a PDF's ingest is handed exactly what it always
+  // was. A queued job needs nothing: its parse stage reads any format.
+  const ingestUpload = async ({
+    accessScope,
+    docId,
+    fileName,
+    filePath,
+    format = "pdf",
+    kind = INGEST_JOB_KINDS.create,
+  }) => {
+    const readAs = format && format !== "pdf" ? { formats: [format] } : {};
     // The upload is a working file (encrypted with TENANT_ENCRYPTION=on); the
     // hash, the quota and the queued job all see its plaintext.
     const fileBytes = await readWorkingFile(filePath);
@@ -139,6 +158,7 @@ export const createUploadsRouter = (services) => {
           fileName,
           ownerUserId: accessScope.userId,
           workspaceId: accessScope.workspaceId,
+          ...readAs,
         });
 
         // A replacement requested before the document's current content was
@@ -154,6 +174,7 @@ export const createUploadsRouter = (services) => {
         fileName,
         ownerUserId: accessScope.userId,
         workspaceId: accessScope.workspaceId,
+        ...readAs,
       });
 
       return {
@@ -193,9 +214,34 @@ export const createUploadsRouter = (services) => {
       cb(null, uploadsDirectory);
     },
     filename: (req, file, cb) => {
-      cb(null, createStoredFileName());
+      // "<uuid>.pdf" with PDF alone; otherwise the original name's extension.
+      let storedFileName;
+
+      try {
+        storedFileName = createStoredFileName({ fileName: file.originalname, mimeType: file.mimetype });
+      } catch (error) {
+        cb(error);
+        return;
+      }
+
+      cb(null, storedFileName);
     },
   });
+
+  // RAG_DOCUMENT_FORMATS for one request, or null once the route answered
+  // 500 with its coded error (a value changed to an invalid one after the
+  // start, which createAppServices would have refused).
+  const readFormatsOrRespond = (res) => {
+    try {
+      return getUploadDocumentFormats();
+    } catch (error) {
+      res.status(500).json({
+        ...describeDocumentFormatErrorCode(error),
+        error: serializeError(error, "The accepted document formats are misconfigured."),
+      });
+      return null;
+    }
+  };
 
   const upload = multer({
     storage,
@@ -208,9 +254,9 @@ export const createUploadsRouter = (services) => {
       parts: 2,
       fieldSize: MAX_UPLOAD_MULTIPART_FIELD_BYTES,
     },
-    fileFilter: (req, file, cb) => {
-      cb(null, isPdfFile(file));
-    },
+    // A name or client MIME type of a format this server reads gets through
+    // (helpers.js isAcceptedUploadFile); the byte check decides.
+    fileFilter: filterUploadFile,
   });
   const chunkUpload = multer({
     storage: multer.memoryStorage(),
@@ -227,10 +273,11 @@ export const createUploadsRouter = (services) => {
   });
 
   router.post("/upload/init", async (req, res) => {
-    if (req.body?.fileName != null && !isPdfFileName(req.body.fileName)) {
-      return res.status(400).json({
-        error: "Only PDF files are supported.",
-      });
+    const formats = readFormatsOrRespond(res);
+    if (!formats) return;
+
+    if (req.body?.fileName != null && !isAcceptedUploadFileName(req.body.fileName, formats)) {
+      return res.status(400).json(describeRefusedUploadFileName(formats));
     }
 
     try {
@@ -336,6 +383,8 @@ export const createUploadsRouter = (services) => {
     const parsed = parseOrRespond(fileIdBodySchema, req.body ?? {}, res);
     if (!parsed) return;
     const { fileId } = parsed;
+    const formats = readFormatsOrRespond(res);
+    if (!formats) return;
 
     let mergedFilePath = null;
     let accessScope = null;
@@ -358,18 +407,16 @@ export const createUploadsRouter = (services) => {
         throw missingSessionError;
       }
 
-      if (!isPdfFileName(session.fileName)) {
+      if (!isAcceptedUploadFileName(session.fileName, formats)) {
         await uploadStore.clearUploadSession({
           accessScope,
           fileId,
         });
 
-        return res.status(400).json({
-          error: "Only PDF files are supported.",
-        });
+        return res.status(400).json(describeRefusedUploadFileName(formats));
       }
 
-      const storedFileName = createStoredFileName();
+      const storedFileName = createStoredFileName({ fileName: session.fileName, formats });
       mergedFilePath = path.join(uploadsDirectory, storedFileName);
 
       await uploadStore.finalizeUploadSession({
@@ -379,7 +426,10 @@ export const createUploadsRouter = (services) => {
         destinationPath: mergedFilePath,
       });
 
-      if (!(await hasPdfMagicBytes(mergedFilePath))) {
+      // The bytes decide (with PDF alone: the %PDF check and its 400).
+      const checked = await checkUploadedDocument(mergedFilePath, formats);
+
+      if (checked.refusal) {
         await uploadStore.removeMergedUpload(mergedFilePath);
         mergedFilePath = null;
         await uploadStore.clearUploadSession({
@@ -387,9 +437,7 @@ export const createUploadsRouter = (services) => {
           fileId,
         });
 
-        return res.status(400).json({
-          error: "The uploaded file is not a valid PDF.",
-        });
+        return res.status(checked.refusal.status).json(describeDocumentRefusal(checked.refusal));
       }
 
       // Once ingested (or queued) the session has served its purpose; a
@@ -399,6 +447,7 @@ export const createUploadsRouter = (services) => {
         docId: session.sessionId,
         fileName: session.fileName,
         filePath: mergedFilePath,
+        format: checked.format,
       });
       ingestionSucceeded = true;
 
@@ -429,16 +478,22 @@ export const createUploadsRouter = (services) => {
 
       return res.status(error.status ?? 500).json({
         ...describeTenantStorageQuotaError(error),
+        ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to finalize the uploaded PDF."),
       });
     }
   });
 
   router.post("/upload", upload.single("file"), bindDatabaseTenant, async (req, res) => {
+    const formats = readFormatsOrRespond(res);
+
+    if (!formats) {
+      await cleanupUploadedFile(req.file?.path);
+      return;
+    }
+
     if (!req.file) {
-      return res.status(400).json({
-        error: "A PDF file is required.",
-      });
+      return res.status(400).json(describeMissingUploadFile(req, formats));
     }
 
     try {
@@ -458,12 +513,13 @@ export const createUploadsRouter = (services) => {
         });
       }
 
-      if (!(await hasPdfMagicBytes(req.file.path))) {
+      // The bytes decide (with PDF alone: the %PDF check and its 400).
+      const checked = await checkUploadedDocument(req.file.path, formats);
+
+      if (checked.refusal) {
         await cleanupUploadedFile(req.file.path);
 
-        return res.status(400).json({
-          error: "The uploaded file is not a valid PDF.",
-        });
+        return res.status(checked.refusal.status).json(describeDocumentRefusal(checked.refusal));
       }
 
       const ingestion = await ingestUpload({
@@ -471,6 +527,7 @@ export const createUploadsRouter = (services) => {
         docId: randomUUID(),
         fileName: req.file.originalname,
         filePath: req.file.path,
+        format: checked.format,
       });
 
       await cleanupUploadedFile(req.file.path);
@@ -480,6 +537,7 @@ export const createUploadsRouter = (services) => {
 
       return res.status(error.status ?? 500).json({
         ...describeTenantStorageQuotaError(error),
+        ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to ingest uploaded PDF."),
       });
     }
@@ -501,10 +559,15 @@ export const createUploadsRouter = (services) => {
       return;
     }
 
+    const formats = readFormatsOrRespond(res);
+
+    if (!formats) {
+      await cleanupUploadedFile(req.file?.path);
+      return;
+    }
+
     if (!req.file) {
-      return res.status(400).json({
-        error: "A PDF file is required.",
-      });
+      return res.status(400).json(describeMissingUploadFile(req, formats));
     }
 
     try {
@@ -524,12 +587,13 @@ export const createUploadsRouter = (services) => {
         });
       }
 
-      if (!(await hasPdfMagicBytes(req.file.path))) {
+      // The bytes decide (with PDF alone: the %PDF check and its 400).
+      const checked = await checkUploadedDocument(req.file.path, formats);
+
+      if (checked.refusal) {
         await cleanupUploadedFile(req.file.path);
 
-        return res.status(400).json({
-          error: "The uploaded file is not a valid PDF.",
-        });
+        return res.status(checked.refusal.status).json(describeDocumentRefusal(checked.refusal));
       }
 
       if (!supportsDocumentReplacement()) {
@@ -569,6 +633,7 @@ export const createUploadsRouter = (services) => {
           docId: parsed.docId,
           fileName: req.file.originalname,
           filePath: req.file.path,
+          format: checked.format,
           kind: INGEST_JOB_KINDS.replace,
         });
       } catch (error) {
@@ -584,6 +649,7 @@ export const createUploadsRouter = (services) => {
 
       return res.status(error.status ?? 500).json({
         ...describeTenantStorageQuotaError(error),
+        ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to replace the document."),
       });
     }
@@ -691,6 +757,16 @@ export const createUploadsRouter = (services) => {
   });
 
   router.use((error, req, res, next) => {
+    // The upload filter or the stored file's name read an invalid
+    // RAG_DOCUMENT_FORMATS (helpers.js filterUploadFile): its coded 500.
+    if (isDocumentFormatSettingError(error)) {
+      res.status(500).json({
+        ...describeDocumentFormatErrorCode(error),
+        error: serializeError(error, "The accepted document formats are misconfigured."),
+      });
+      return;
+    }
+
     if (!(error instanceof multer.MulterError)) {
       next(error);
       return;

@@ -83,7 +83,7 @@ npm run vector:index -- build [--model M] [--dimensions N] [--document-prefix P]
 ```
 
 - 创建版本时，在任何 DDL 之前先用新空间嵌入一条探测文本并校验宽度。模型不可用、密钥被拒、`--dimensions` 与模型实际输出不符时直接报错，不登记任何版本。
-- 构建从文档注册表保存的 PDF 字节重新解析、分块（加密存储的字节先按该行的属主解密），再用新版本自己的模型嵌入。chunk 带上文档当前的 `documentVersion`。
+- 构建从文档注册表保存的原文件字节重新解析、分块（加密存储的字节先按该行的属主解密），再用新版本自己的模型嵌入。chunk 带上文档当前的 `documentVersion`。文件按登记的 `mime_type` 读：PDF 照旧直接交给 `loadPdfPages`，Word、PowerPoint、Excel 用各自的解析器，与 `RAG_DOCUMENT_FORMATS` 当前的值无关。
 - 同时处理的文档数：`RAG_INDEX_VERSION_BUILD_CONCURRENCY`（默认 4）。CLI 用 `--concurrency`，build 和 resume 都能用。
 - 待处理文档按 `RAG_INDEX_VERSION_BUILD_BATCH_SIZE`（默认 16）一页一页列出：
   - 游标只往前走，每个文档只取一次；
@@ -105,7 +105,7 @@ npm run vector:index -- build [--model M] [--dimensions N] [--document-prefix P]
   - 回收站里的文档（迁移 042）不列入待处理。恢复时由恢复本身写入正在构建的版本，因为它也是写目标。
   - 文档在读取后被重新上传或替换：重新读取，最多 3 次。
   - 解析失败、没有可提取的文本：只把该文档记为 failed，构建继续。
-  - 保存的 PDF 解不开或读不出（`TENANT_*` 错误码：密钥被单独的 `tenant:keys destroy` 销毁、字节被改、字节只是看起来像信封）：该文档记为 failed，进度错误以 `unreadable_source <CODE>:` 开头，构建继续，摘要里计入 `unreadable`。
+  - 保存的文件解不开或读不出（`TENANT_*` 错误码：密钥被单独的 `tenant:keys destroy` 销毁、字节被改、字节只是看起来像信封；或 `DOCUMENT_*` 错误码：保存的 Office 文件超过了上传之后调低的 `RAG_OFFICE_*` / `RAG_XLSX_MAX_CELLS` 上限）：该文档记为 failed，进度错误以 `unreadable_source <CODE>:` 开头，构建继续，摘要里计入 `unreadable`。
   - 嵌入宽度和声明不符：版本标记为 failed。
   - 租约丢失：构建停止，不改版本状态。
   - 其他错误（嵌入服务不可用、数据库断开）：释放租约，版本保持 building。
@@ -221,7 +221,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - `npm run vector:reindex` 原地重写活动版本（以及它双写的版本）。活动版本是固定模型时，它会提示：`--apply` 按该模型重写；要换到配置模型，用 `vector:index build` 再激活。
   - `--apply` 每个文档一个事务：先取索引写锁，再对文档行加 `FOR UPDATE`，只有 `content_version` 和 `content_sha256` 仍与读取字节时一致才写入，否则报告跳过（期间被替换或被删除）。
   - 从 local/Qdrant 复制时，源 chunk 的内容版本和注册表不一致也跳过。
-  - 保存的 PDF 读不出（`TENANT_*` 错误码）的文档跳过，chunk 保持原样，其他文档继续。
+  - 保存的文件读不出（`TENANT_*` 错误码，或 Office 文件被调低的上限拒绝的 `DOCUMENT_*` 错误码）的文档跳过，chunk 保持原样，其他文档继续。
 
 ### 配置
 
@@ -278,9 +278,9 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 
 ## 异步入库流水线（分阶段）
 
-`RAG_INGEST_MODE=async`（默认 `sync`）时，上传请求只做校验，然后把 PDF 写成一个 ingest job，返回 202。worker 按 parse → chunk → embed → index 四个阶段执行这个 job：
+`RAG_INGEST_MODE=async`（默认 `sync`）时，上传请求只做校验，然后把文件（PDF 或 Word、PowerPoint、Excel 文件）写成一个 ingest job，返回 202。worker 按 parse → chunk → embed → index 四个阶段执行这个 job：
 
-- **parse**：解析 PDF，得到页面文本（输出 `pages`）。解析成功后，PDF 字节离开 job 行，转为 `document_file` 输出，只留给 index 阶段写进文档行；`GET /documents/:docId/file` 和索引版本构建都要用到它。
+- **parse**：解析文件，得到页面文本（输出 `pages`；Office 文件一页对应一节、一张幻灯片或一个工作表，解析元数据随页面存下）。解析成功后，文件字节离开 job 行，转为 `document_file` 输出，只留给 index 阶段写进文档行；`GET /documents/:docId/file` 和索引版本构建都要用到它。job 不记录格式：`RAG_DOCUMENT_FORMATS=pdf` 时，凡是能通过 PDF 检查的文件都按 PDF 读，和入队时一样；否则按文件实际的格式读。
 - **chunk**：切块，得到 chunk、页数和 profile（输出 `chunks`）。
 - **embed**：计算向量（输出 `embeddings`，以 float32 存储）。写目标版本（active、正在构建、已构建未激活、宽限期内）的每个嵌入空间各算一次。
 - **index**：通过和同步上传同一个 `commitDocument`，在一个事务里写文档行和所有写目标版本的 chunk（双写）。pgvector 上同一事务还把 job 记为 succeeded（`store.completeInTransaction`），所以文档提交和 job 成功是同一次 COMMIT。

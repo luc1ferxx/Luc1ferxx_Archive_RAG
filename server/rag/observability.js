@@ -5,6 +5,7 @@ import {
   isRagObservabilityEnabled,
   shouldIncludeRagObservabilityContext,
 } from "./config.js";
+import { pickDocumentLocation } from "./citations.js";
 import { getRagDataDirectory } from "./storage.js";
 
 const EXCERPT_PREVIEW_LENGTH = 120;
@@ -110,6 +111,9 @@ export const buildResultTrace = (result = {}) => {
     docId: metadata.docId ?? null,
     fileName: metadata.fileName ?? "Unknown document",
     pageNumber: getPageNumber(metadata),
+    // An Office chunk's slide, sheet or section, which pageNumber counts
+    // (rag/citations.js); absent for a PDF chunk.
+    ...pickDocumentLocation(metadata),
     chunkIndex: metadata.chunkIndex ?? null,
     sectionHeading: metadata.sectionHeading ?? null,
     score: toTraceNumber(result.score),
@@ -152,6 +156,7 @@ export const buildBundleTrace = (bundle = {}) => {
       docId: citation.docId ?? null,
       fileName: citation.fileName ?? "Unknown document",
       pageNumber: citation.pageNumber ?? null,
+      ...pickDocumentLocation(citation),
       chunkIndex: citation.chunkIndex ?? null,
       sectionHeading: citation.sectionHeading ?? null,
       score: toTraceNumber(citation.score),

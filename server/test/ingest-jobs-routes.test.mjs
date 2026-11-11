@@ -626,6 +626,50 @@ test("the dedicated worker process refuses the per-process local vector index", 
   }
 });
 
+test("the dedicated worker process refuses an invalid document format setting before it creates its store", async () => {
+  const previous = {
+    POSTGRES_DATABASE_URL: process.env.POSTGRES_DATABASE_URL,
+    RAG_DOCUMENT_FORMATS: process.env.RAG_DOCUMENT_FORMATS,
+    RAG_OFFICE_MAX_XML_BYTES: process.env.RAG_OFFICE_MAX_XML_BYTES,
+    VECTOR_STORE_PROVIDER: process.env.VECTOR_STORE_PROVIDER,
+  };
+
+  process.env.POSTGRES_DATABASE_URL = "postgresql://unused@127.0.0.1:1/unused";
+  process.env.VECTOR_STORE_PROVIDER = "pgvector";
+
+  try {
+    // It reads RAG_DOCUMENT_FORMATS to read a queued file the way a PDF-only
+    // server queued it, and the Office limits for every Office file.
+    for (const [name, value, code] of [
+      ["RAG_DOCUMENT_FORMATS", "pdf,odt", "RAG_DOCUMENT_FORMATS_INVALID"],
+      ["RAG_OFFICE_MAX_XML_BYTES", "0", "RAG_OFFICE_LIMIT_INVALID"],
+    ]) {
+      process.env[name] = value;
+
+      await assert.rejects(
+        runIngestWorkerProcess({
+          createStore: () => {
+            throw new Error("the store must not be created");
+          },
+          environment: {},
+          logger: { error() {}, log() {} },
+        }),
+        { code }
+      );
+
+      delete process.env[name];
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("the dedicated worker process drains the queue and stops on SIGTERM", async () => {
   const previous = process.env.POSTGRES_DATABASE_URL;
   const previousProvider = process.env.VECTOR_STORE_PROVIDER;

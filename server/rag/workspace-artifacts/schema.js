@@ -1,4 +1,5 @@
 import { normalizeClampedText } from "../../lib/normalize-text.js";
+import { pickDocumentLocation } from "../citations.js";
 
 export const WORKSPACE_ARTIFACT_VERSION = "1.0.0";
 
@@ -129,6 +130,11 @@ const normalizeFileName = (value) =>
     .replace(/[\\/]+/g, "-")
     .replace(/[\u0000-\u001f\u007f]/g, "");
 
+// A citation of a Word, PowerPoint or Excel file keeps the unit its
+// pageNumber counts ("slide", "sheet" or "section") and that unit's title
+// (rag/citations.js pickDocumentLocation: an unknown unit is dropped, a label
+// is kept only with a unit and is bounded). A PDF citation has neither, so its
+// manifest entry is what it was.
 const normalizeCitationManifest = (value) => {
   const citations = (Array.isArray(value) ? value : [])
     .map((citation) => {
@@ -136,12 +142,15 @@ const normalizeCitationManifest = (value) => {
         citation && typeof citation === "object" && !Array.isArray(citation)
           ? citation
           : {};
+      const location = pickDocumentLocation(source);
       const compactCitation = {
         arxivId: normalizeText(source.arxivId, MAX_ID_LENGTH),
         chunkId: normalizeText(source.chunkId, MAX_ID_LENGTH),
         docId: normalizeText(source.docId, MAX_ID_LENGTH),
         excerpt: normalizeText(source.excerpt, 1200),
         fileName: normalizeText(source.fileName, MAX_TITLE_LENGTH),
+        locationLabel: location.locationLabel,
+        locationUnit: location.locationUnit,
         pageNumber:
           Number.isInteger(Number(source.pageNumber)) && Number(source.pageNumber) > 0
             ? Number(source.pageNumber)

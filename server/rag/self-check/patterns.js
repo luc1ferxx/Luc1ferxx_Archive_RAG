@@ -293,13 +293,22 @@ export const CHINESE_DOCUMENT_IDENTITY_PATTERN =
 export const CHINESE_ATTRIBUTION_PREFIX_PATTERN = /(?:根据|按照|依照|在|从)$/;
 export const CHINESE_ATTRIBUTION_VERB_PATTERN =
   /^(?:允许|要求|需要|必须|应当|规定|限制|禁止|不得|包含|包括|提供|说明|指出|采用|使用|为|有|无)/;
+// A file name's extension is never a document's short alias: every sibling
+// of the same format shares it ("contract-2024.pptx" and "budget-2024.pptx"
+// would both answer to "pptx"). Covers every format the archive ingests (PDF,
+// Word .docx, PowerPoint .pptx, Excel .xlsx) and their legacy and plain-text
+// neighbours.
 export const FILE_EXTENSION_TERMS = new Set([
   "doc",
   "docx",
   "md",
   "pdf",
+  "ppt",
+  "pptx",
   "rtf",
   "txt",
+  "xls",
+  "xlsx",
 ]);
 export const CHINESE_MODALITY_SURFACE_PATTERN =
   /允许|可以|禁止|不得|不能|不可|要求|需要|必须|应当|无需|不需要|非必须|可选|自愿|豁免/g;

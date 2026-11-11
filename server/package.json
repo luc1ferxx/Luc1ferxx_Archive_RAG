@@ -121,14 +121,17 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-rate-limit": "^8.6.1",
-    "fast-xml-parser": "^5.8.0",
+    "fast-xml-parser": "^5.12.0",
     "helmet": "^8.3.0",
     "ioredis": "^5.11.1",
     "langchain": "1.5.16",
+    "mammoth": "1.13.0",
     "multer": "^2.4.0",
     "pdfjs-dist": "6.4.299",
     "pg": "^8.20.0",
     "serpapi": "^2.2.1",
+    "xlsx": "file:vendor/xlsx-0.20.3.tgz",
+    "yauzl": "3.4.0",
     "zod": "^4.2.0"
   },
   "type": "module"

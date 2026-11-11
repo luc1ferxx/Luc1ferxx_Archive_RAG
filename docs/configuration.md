@@ -253,11 +253,49 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 - 不检查副本是否真的跟随这个主库（`system_identifier`）。误配成别的集群的备库时，带 guard 的读会因为找不到文档而回退，不会读错数据，但会被计为 `version_behind`。
 - 延迟计算假设 `synchronous_commit` 是 `on`。
 
+## 文档格式
+
+默认接收 PDF、Word（.docx）、PowerPoint（.pptx）和 Excel（.xlsx）。文件是什么格式只看它的字节；文件名和浏览器给的 MIME 类型只用来先筛一遍。
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `RAG_DOCUMENT_FORMATS` | `pdf,docx,pptx,xlsx` | 新上传（`POST /upload`、分片上传）、`PUT /documents/:docId` 替换、它们背后的异步入队和 `archive-ingest` 接受哪些格式。逗号分隔的 `pdf`、`docx`、`pptx`、`xlsx`，不区分大小写，去掉首尾空白，重复的忽略；留空或只写空白等于未设置。有未知取值、或一个格式都没写（例如只写 `,`）时应用拒绝启动（`RAG_DOCUMENT_FORMATS_INVALID`）；运行中被改成这样的值时上传接口返回 500 和这个 `code`，不会改按别的格式集合收文件。它只管新的字节：已经存下的文档不管是什么格式，都按登记时的格式重新解析（索引版本构建、`vector:reindex --from documents`、回收站恢复、已经排队的入库任务）。设成 `pdf` 时，每个入口的检查、报错信息和保存的文件名都和加入 Office 格式之前完全一样。 |
+| `RAG_OFFICE_MAX_UNCOMPRESSED_BYTES` | `268435456`（256 MiB） | 一个 Office 文件里所有 ZIP 条目解压后的总字节数上限。先查 ZIP 目录里声明的大小，压缩炸弹在解压前就被拒；解压时再按实际字节数查一次，因为目录可以谎报。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。 |
+| `RAG_OFFICE_MAX_ZIP_ENTRIES` | `10000` | ZIP 条目数上限，超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。 |
+| `RAG_OFFICE_MAX_COMPRESSION_RATIO` | `200` | 单个条目解压后与压缩后大小之比的上限，只查解压后超过 1 MiB 的条目（很小的部件，比如一串空格，压缩比本来就很高）。可以是小数。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。 |
+| `RAG_XLSX_MAX_CELLS` | `2000000` | 一个工作簿所有可见工作表里非空单元格的总数上限。超出时整个工作簿被拒（413 `DOCUMENT_SPREADSHEET_TOO_LARGE`），不会截断后入库。SheetJS 解析之前还有一道预检：可见工作表里的单元格元素（按 SheetJS 自己的匹配方式数，带命名空间前缀的、空的带样式单元格和合并区域都算）超过这个上限的两倍时直接拒绝。SheetJS 把解析出的每个单元格都放在内存里（实测数值单元格约 130 字节），内存小的容器可以调低它。 |
+| `RAG_OFFICE_MAX_XML_BYTES` | `16777216`（16 MiB） | 一个解析器同时放进内存的 XML 上限：Word 文档所有 XML 部件加起来（mammoth 先读完全部部件再转换），演示文稿和工作簿则是每个 XML 部件单独算（工作表另由 `RAG_XLSX_MAX_CELLS` 约束）。mammoth 和 PowerPoint 读取器建出的树分别约是所读 XML 的 60–115 倍和 25–50 倍（实测），只靠总大小上限时几 MB 的文件就能把堆耗尽。Word 和 PowerPoint 在上传检查时就按它拒绝，工作簿在解析时。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。默认值下 mammoth 最多可能要约 2 GB 堆，适合 64 位主机的默认 V8 堆；内存小的容器应调低。 |
+| `RAG_OFFICE_MAX_TEXT_CHARS` | `67108864` | 一个 Office 文件所有页加起来最多提取的字符数。表格的表头标签每行都重复，共享字符串和数字格式也会让同一段文字出现很多次，没有这个上限时几 KB 的文件能展开成几百 MB 的文字（每段都要向量化）。表格行在写出时就计数，Excel 单元格的原始文字在复制前计数，超过即停。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。 |
+
+- 后六个变量必须是不小于 1 的整数（压缩比可以是不小于 1 的小数）。它们是防压缩炸弹的上限，没有"`0` 表示不限"。值不合法时应用拒绝启动（`RAG_OFFICE_LIMIT_INVALID`）。
+- 启动时检查这七个变量的是 `createAppServices`：单体、api 层、agent 层，以及会建 app 的评测脚本；单独运行的 `npm run worker:ingest` 启动时也全部检查，因为它要按 `RAG_DOCUMENT_FORMATS` 判断排队文件该怎么读（见下面"已经排队的入库任务"），所以 worker 要和 API 用同一个值。`archive-ingest` 在读任何文件之前检查 `RAG_DOCUMENT_FORMATS`。`vector:index` 和 `vector:reindex` 不读 `RAG_DOCUMENT_FORMATS`，几个上限也要等读到 Office 文件时才读，值不合法时那份文件失败。
+- 格式判断：PDF 是前 1024 字节里出现 `%PDF`，和以前一样；启用了任何 Office 格式时，以 ZIP 头或 OLE2 头开头的文件一律不算 PDF。Office 文件是一个 ZIP，按 `_rels/.rels` 指向的主部件在 `[Content_Types].xml` 里登记的类型区分 Word、PowerPoint 和 Excel；没有 `[Content_Types].xml` 的 ZIP 不算支持的格式。文档登记的 MIME 类型是 `application/pdf` 和三种 OOXML 文档类型。
+- 压缩包检查（`server/rag/office/zip-guard.js`）：Office 文件在任何解析器读它之前先过这一关，上传检查时一次、解析时再一次，所以同步上传的 Office 文件会解压两次，两次都受上面几个上限约束。`[Content_Types].xml` 和 `_rels/.rels` 每次上传检查都要解析，各自固定不超过 4 MiB（真实文件在 10000 个条目时也不到 1.5 MB），超出返回 413。除了下表列出的情况，它还拒绝 ZIP64、结尾记录有歧义、本地文件头和中央目录不一致、只差大小写的同名条目、含反斜杠的条目名，以及 store 和 deflate 以外的压缩方式（都是 400 `DOCUMENT_ARCHIVE_INVALID`）：mammoth（内部用 JSZip）和 yauzl 读中央目录，而解析器之间对这些情况可能读出不同的内容。
+- Excel 工作簿：SheetJS 不直接读上传的 ZIP，读的是用校验过的部件重建的工作簿（可见工作表、共享字符串、样式，以及服务端自己写的 `[Content_Types].xml`、工作簿部件和关系），所以它不会去读批注、绘图、图表和外部链接，也不会自己挑另一个工作簿部件。超链接标签在交给 SheetJS 之前改名（覆盖整张表的超链接会让它给每个单元格建对象）。长度超过 255 个字符（Excel 本身的上限）或同一节里出现多个 `@` 的数字格式直接拒绝（400 `DOCUMENT_ARCHIVE_INVALID`）：SheetJS 对每个单元格都要按格式重新分析一遍，一个 9 KB 的工作簿配上 10 万字符的格式就耗尽了堆。SheetJS 解析时不再给单元格生成显示文本，而是由服务端逐个单元格调用 SheetJS 自己的格式化函数，得到的文字和以前一样，但不会同时保留所有单元格的格式化结果（一个 310 KB、190 万个单元格、套用 254 字符日期格式的工作簿以前要约 5 GB 堆）。
+- 已经排队的入库任务不记录格式：按当前设置读取，只有一个例外。以 ZIP 或 OLE2 头开头、前 1024 字节里又有 `%PDF` 的文件，在只启用 `pdf` 时算 PDF，启用 Office 格式时不算。只启用 `pdf` 的服务器读取排队任务时，凡是能通过它的 PDF 检查的文件都按 PDF 读，和加入 Office 格式之前一样，Office 解析器碰不到它收下的字节。
+- 拒绝时返回 `{ code, error }`，信息里不引用文件内容：
+
+| 情况 | 状态码 | `code` |
+| --- | --- | --- |
+| 字节不属于任何启用的格式；直接上传时文件名和 MIME 类型都不是支持的格式；分片上传的文件名不是支持的格式 | 400 | `DOCUMENT_FORMAT_UNSUPPORTED`。只启用 `pdf` 时这三种情况仍分别是原来的 "The uploaded file is not a valid PDF."、"A PDF file is required." 和 "Only PDF files are supported."，没有 `code` |
+| 认得出格式，但 `RAG_DOCUMENT_FORMATS` 没有启用它 | 415 | `DOCUMENT_FORMAT_DISABLED` |
+| OLE2 文件：旧版 .doc / .ppt / .xls，或任何设了打开密码的 Office 文件（加密会把整个包装进 OLE2） | 415 | `DOCUMENT_FORMAT_LEGACY_OFFICE` |
+| 启用宏的文件、模板（.dotx / .potx / .xltx）、幻灯片放映（.ppsx）和其他 Office 文件类型 | 415 | `DOCUMENT_FORMAT_OFFICE_VARIANT` |
+| 条目太多、解压后太大（声明的或实际的）、压缩比太高、`[Content_Types].xml` 或 `_rels/.rels` 超过 4 MiB、XML 超过 `RAG_OFFICE_MAX_XML_BYTES`、提取的文字超过 `RAG_OFFICE_MAX_TEXT_CHARS` | 413 | `DOCUMENT_ARCHIVE_TOO_LARGE` |
+| 读不了的 ZIP、不安全的条目名（`..`、绝对路径）、加密的条目、`.xml` 或 `.rels` 部件里有 DTD（`<!DOCTYPE` / `<!ENTITY`）、缺主部件、超长或重复 `@` 的数字格式、mammoth / SheetJS / PowerPoint 读取器读不了 | 400 | `DOCUMENT_ARCHIVE_INVALID` |
+| 工作簿的非空单元格超过 `RAG_XLSX_MAX_CELLS`，或解析前的单元格元素超过它的两倍 | 413 | `DOCUMENT_SPREADSHEET_TOO_LARGE` |
+| 没有可提取的文字 | 422 | 无。PDF 的信息不变，其他格式把 "PDF" 换成 "document" |
+
+- 文件名检查在字节检查之前：用 .doc、.docm、.ppsx 这类扩展名上传的文件在文件名这一步就返回 400 `DOCUMENT_FORMAT_UNSUPPORTED`。415 的 `DOCUMENT_FORMAT_LEGACY_OFFICE` 和 `DOCUMENT_FORMAT_OFFICE_VARIANT` 针对的是名字是 .docx / .pptx / .xlsx（或浏览器报的是这三种 MIME 类型）、字节却是旧格式或变体的文件，最常见的是设了打开密码的 .docx / .pptx / .xlsx。请求里没有文件时，启用了 Office 格式返回 400 "A document file is required."，只启用 `pdf` 时仍是 "A PDF file is required."。
+- 引用位置：PowerPoint 的每张幻灯片、Excel 的每个可见工作表、Word 的每个章节（按文档用到的最高一级标题切分，第一个标题之前的文字算第 1 节）各算一"页"。这时引用的 `pageNumber` 数的是幻灯片在演示文稿里的位置（隐藏的幻灯片不入库，但占着序号）、工作表在工作簿里的位置（隐藏的工作表同样占序号）或章节的序号，并另带 `locationUnit`（`slide`、`sheet`、`section`）和 `locationLabel`（幻灯片标题、工作表名、章节标题）；PDF 的引用没有这两个字段。`GET /documents/:docId/file` 按登记的 MIME 类型返回，Office 文件作为附件下载，PDF 仍内联显示。
+- 表格：三种格式的表格都是每行一行，第一行作表头，后面的单元格写成 "表头: 值"。超过 200 个字符的表头单元格不当标签用（改用列字母），它的全文只在表头那一行出现一次。PowerPoint 的项目符号按 PowerPoint 的继承规则判断（段落自己的属性、形状的列表样式、版式和母版里对应的占位符、母版的文本样式），普通内容页里从母版继承项目符号的正文也会写成 "- " 开头的列表行。
+- 不提取的内容：Word 的页眉页脚和批注；PowerPoint 的图表、SmartArt、图片和公式；Excel 的图表（包括图表工作表）和单元格批注，公式只取文件里缓存的结果，不重新计算；任何格式里的图片都不做 OCR。Office 文件在调用线程里解析（`PDF_PARSE_WORKERS` 只管 pdf.js），大工作簿或大文档解析期间会占住事件循环；防止恶意文件耗尽堆靠的是上面的 XML 和文字上限，不是 worker 的资源限制。
+
 ## 上传入库
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `RAG_INGEST_MODE` | `sync` | `sync`：上传请求里完成解析、向量化和写索引，返回 201 和文档（原有行为）。`async`：只做原有校验（PDF 魔数、大小、分片会话），把文件字节存进入库任务，返回 202 `{jobId, docId, fileName, status: "queued"}`，由 worker 执行同一个 `ingestDocument`。无法识别的值按 `sync` 处理。 |
+| `RAG_INGEST_MODE` | `sync` | `sync`：上传请求里完成解析、向量化和写索引，返回 201 和文档（原有行为）。`async`：只做原有校验（按 `RAG_DOCUMENT_FORMATS` 检查文件格式、大小、分片会话），把文件字节存进入库任务，返回 202 `{jobId, docId, fileName, status: "queued"}`，由 worker 执行同一个 `ingestDocument`。无法识别的值按 `sync` 处理。 |
 | `RAG_INGEST_WORKER_ENABLED` | `true` | `async` 下 API 进程是否同时运行 worker。设为 `false` 时入库交给 `npm run worker:ingest` 进程。没有 PostgreSQL（队列在内存里）或向量库是 `local` 时忽略 `false`，并打印错误。 |
 | `RAG_INGEST_WORKER_CONCURRENCY` | `2` | 每个进程同时处理的任务数。 |
 | `RAG_INGEST_WORKER_POLL_MS` | `1000` | 空闲 worker 两次查看队列的最长间隔。任务入队或被归还时会立即唤醒：同一进程内直接唤醒，其他进程通过 PostgreSQL `LISTEN/NOTIFY`。这个间隔只是兜底，唤醒丢失时（LISTEN 连接断开、重试退避到期、租约过期）最多晚一个间隔领取。 |
@@ -267,7 +305,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `RAG_INGEST_JOB_RETENTION_MS` | 7 天 | 已完成任务的保留时长，由 worker 空闲时清理；0 永久保留。 |
 | `INGEST_JOBS_POSTGRES_TABLE` | `rag_ingest_jobs` | 任务表名（迁移 015）。 |
 
-- 任务状态：`GET /ingest-jobs/:jobId` 返回 `{jobId, docId, fileName, status, attemptCount, error, createdAt, startedAt, finishedAt}`，成功时带上与 201 相同的 `document`。`status` 为 `queued`、`running`、`succeeded` 或 `failed`。`error` 只给入库对上传本身的错误（413/415/422），其他错误统一为 "Indexing failed on the server."，完整错误只写 worker 日志。按 access scope 过滤，查别的租户的任务返回 404。
+- 任务状态：`GET /ingest-jobs/:jobId` 返回 `{jobId, docId, fileName, status, attemptCount, error, createdAt, startedAt, finishedAt}`，成功时带上与 201 相同的 `document`。`status` 为 `queued`、`running`、`succeeded` 或 `failed`。`error` 只给入库对上传本身的错误（413/415/422，以及标明可以给客户端看的错误，例如 Office 文件解析时的 400 `DOCUMENT_ARCHIVE_INVALID`），其他错误统一为 "Indexing failed on the server."，完整错误只写 worker 日志。按 access scope 过滤，查别的租户的任务返回 404。
 - 任务表启用行级安全，策略与 `rag_documents` 相同，计入 `/health` 的 `checks.rowLevelSecurity`。
 - worker 以数据库 owner 身份领取任务：一条 `UPDATE ... FOR UPDATE SKIP LOCKED`，先选当前运行任务最少的租户，再按创建时间；领取后以任务所属租户的身份入库。之后的续约、成功、失败和归还都以 `job_id + claimed_by + attempt_count` 为条件，失去租约的 worker 覆盖不了新一次尝试。
 - 重试前由数据库判定文档是否已提交（不信任本进程的注册表缓存）：上一次尝试已写入文档行和分块、但没来得及标记成功时，重试直接记为成功，不会重复入库。前一次尝试持有租约时进程死掉的任务会单独运行，避免一个让进程崩溃的 PDF 耗掉同批其他任务的尝试次数。
