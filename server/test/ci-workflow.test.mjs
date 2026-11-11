@@ -718,4 +718,21 @@ test("real model eval workflow runs a real local model with no API key and gates
   assert.match(probeStep, /\n\s*run: npm run probe:output-limit\s*$/);
   assert.equal(serverPackage.scripts["probe:output-limit"], "node evaluation/probe-output-limit.mjs");
   assert.doesNotMatch(content, /RAG_LLM_MAX_TOKENS_FIELD/);
+
+  // Every run records the runner's CPU before the model steps: answers at
+  // temperature 0 differed between two CI runs (docs/deployment.md), and
+  // other hardware is the first suspect.
+  const cpuStepStart = content.indexOf("- name: Record the runner's CPU");
+  const ollamaStepStart = content.indexOf("- name: Install and start Ollama");
+  const verifyStepStart = content.indexOf("- name: Real-model quality verification");
+
+  assert.ok(cpuStepStart > ollamaStepStart && cpuStepStart < verifyStepStart, "the CPU is recorded after Ollama starts, before the first model step");
+
+  const cpuStep = content.slice(cpuStepStart, verifyStepStart);
+
+  assert.equal(cpuStep.match(/- name:/g).length, 1);
+  for (const fact of [/model name' \/proc\/cpuinfo/, /\bnproc\b/, /\bavx512f\b/, /ollama --version/]) {
+    assert.match(cpuStep, fact);
+  }
+  assert.doesNotMatch(cpuStep, /\n\s*if:/, "recorded on every run");
 });
