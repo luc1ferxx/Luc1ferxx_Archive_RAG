@@ -138,14 +138,20 @@ export const buildDenseRescueGrid = (signals) =>
 
 const MODE_ORDER = new Map(DENSE_RESCUE_MODES.map((mode, index) => [mode, index]));
 
+// The rules compare whole questions (`counts` from summarizeGateSetting), not
+// the reported rates: those are rounded to 4 decimals, and the difference of
+// two rounded rates can miss a gain of exactly the minimum by 0.0001.
+const catchShortfall = (row, baseline) =>
+  (baseline.counts.unanswerableCaught - row.counts.unanswerableCaught) / baseline.counts.unanswerable;
+
 /** The qualifying rescue that passes the most answerable questions (see DENSE_RESCUE_CATCH_TOLERANCE), or null. */
 export const pickDenseRescue = (rows, baseline) =>
   [...rows]
-    .filter((row) => row.unanswerableCatch >= baseline.unanswerableCatch - DENSE_RESCUE_CATCH_TOLERANCE - 1e-9)
+    .filter((row) => catchShortfall(row, baseline) <= DENSE_RESCUE_CATCH_TOLERANCE + 1e-9)
     .sort(
       (left, right) =>
-        right.answerablePass - left.answerablePass ||
-        right.unanswerableCatch - left.unanswerableCatch ||
+        right.counts.answerablePassed - left.counts.answerablePassed ||
+        right.counts.unanswerableCaught - left.counts.unanswerableCaught ||
         MODE_ORDER.get(left.mode) - MODE_ORDER.get(right.mode) ||
         right.floor - left.floor ||
         right.threshold - left.threshold
@@ -153,7 +159,9 @@ export const pickDenseRescue = (rows, baseline) =>
 
 /** Whether the pick passes enough more answerable questions than the default gate to go on to dev. */
 export const denseRescueGainsEnough = (pick, baseline) =>
-  pick !== null && pick.answerablePass - baseline.answerablePass >= DENSE_RESCUE_MIN_GAIN - 1e-9;
+  pick !== null &&
+  (pick.counts.answerablePassed - baseline.counts.answerablePassed) / baseline.counts.answerable >=
+    DENSE_RESCUE_MIN_GAIN - 1e-9;
 
 /**
  * One gate setting against another on the same questions: per class, the
@@ -245,8 +253,10 @@ export const computeAuc = (positives, negatives) => {
 export const summarizeGateSetting = (decisions) => {
   const answerable = decisions.filter((decision) => !decision.shouldAbstain);
   const unanswerable = decisions.filter((decision) => decision.shouldAbstain);
-  const answerablePass = rate(answerable.filter((decision) => decision.confident).length, answerable.length);
-  const unanswerableCatch = rate(unanswerable.filter((decision) => !decision.confident).length, unanswerable.length);
+  const answerablePassed = answerable.filter((decision) => decision.confident).length;
+  const unanswerableCaught = unanswerable.filter((decision) => !decision.confident).length;
+  const answerablePass = rate(answerablePassed, answerable.length);
+  const unanswerableCatch = rate(unanswerableCaught, unanswerable.length);
 
   return {
     answerableEvidencePass: rate(
@@ -254,6 +264,12 @@ export const summarizeGateSetting = (decisions) => {
       answerable.length
     ),
     answerablePass,
+    counts: {
+      answerable: answerable.length,
+      answerablePassed,
+      unanswerable: unanswerable.length,
+      unanswerableCaught,
+    },
     unanswerableCatch,
     youdenJ:
       answerablePass === null || unanswerableCatch === null ? null : round(answerablePass + unanswerableCatch - 1),

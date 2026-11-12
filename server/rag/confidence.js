@@ -602,9 +602,11 @@ export const assessQaConfidence = ({
   const coverageBasis = coverageOf
     ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: gateInflection } }
     : {};
-  // Read on every call, so a bad setting fails the question instead of
-  // waiting for a question the rescue would apply to.
-  const denseRescueSetting = rerankGate ? null : getQaDenseRescue();
+  // Read on every call, under the reranker gate too, so a bad setting fails
+  // the question instead of waiting for a question the rescue would apply to.
+  const configuredDenseRescue = getQaDenseRescue();
+  // The reranker's probability replaces coverage, so the rescue never applies there.
+  const denseRescueSetting = rerankGate ? null : configuredDenseRescue;
   // Like the partial band, a single-part question only: in a multi-part one,
   // low coverage means an unanswered part and drives the gap planner.
   const denseRescue = denseRescueSetting && evidenceRequirementCount <= 1 ? denseRescueSetting : null;
