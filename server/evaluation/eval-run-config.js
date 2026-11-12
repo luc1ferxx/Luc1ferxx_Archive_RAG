@@ -70,8 +70,18 @@ const describeEmbeddingEndpointHost = (env = process.env) => {
  */
 export const describeRetrievalConfig = async () => {
   const [config, topology] = await Promise.all([import("../rag/config.js"), import("../rag/service-topology.js")]);
+  const denseRescue = config.getQaDenseRescue();
 
   return {
+    // Only with RAG_QA_DENSE_RESCUE on, so a default report keeps its shape
+    // and compares equal with reports from before the setting.
+    ...(denseRescue
+      ? {
+          qaDenseRescue: denseRescue.mode,
+          qaDenseRescueFloor: denseRescue.floor,
+          qaDenseRescueThreshold: denseRescue.threshold,
+        }
+      : {}),
     bm25B: config.getBm25B(),
     bm25K1: config.getBm25K1(),
     denseWeight: config.getHybridDenseWeight(),
@@ -136,6 +146,9 @@ const RETRIEVAL_FIELDS = Object.freeze([
   "qaGateInflection",
   "qaAnswerVerdict",
   "qaMinRerankProbability",
+  "qaDenseRescue",
+  "qaDenseRescueThreshold",
+  "qaDenseRescueFloor",
   "remoteRetrieval",
   "modelGateway",
   "embeddingEndpointHost",

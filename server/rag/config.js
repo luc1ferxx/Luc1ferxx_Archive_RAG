@@ -1387,6 +1387,62 @@ export const getQaPartialCoverageFloor = () =>
     toPositiveNumber(process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR, DEFAULT_QA_PARTIAL_COVERAGE_FLOOR)
   );
 
+// Dense rescue on the single-document QA gate (RAG_QA_DENSE_RESCUE, default
+// off): a chunk below the query-term coverage floor is admitted when its dense
+// similarity is high enough, it still shares at least RAG_QA_DENSE_RESCUE_FLOOR
+// of the query's terms, and it does not swap a query word for a rival
+// (findQueryTermSubstitution). `absolute` reads the chunk's cosine, `margin`
+// its cosine above the mean of the question's dense candidates. Anchors still
+// have to appear. The threshold is a cosine of one embedding model, so it has
+// to be measured for the model in use (eval:abstention-gate). Off, the gate is
+// what it was; an unknown mode or a missing or invalid number refuses, so a
+// typo never runs the gate on a setting nobody chose.
+export const QA_DENSE_RESCUE_MODES = Object.freeze(["off", "absolute", "margin"]);
+
+export const getQaDenseRescue = () => {
+  const rawMode = process.env.RAG_QA_DENSE_RESCUE;
+  const mode =
+    typeof rawMode === "string" && rawMode.trim() !== "" ? rawMode.trim().toLowerCase() : "off";
+
+  if (!QA_DENSE_RESCUE_MODES.includes(mode)) {
+    throw new Error(
+      `RAG_QA_DENSE_RESCUE must be one of ${QA_DENSE_RESCUE_MODES.join(", ")}. Received "${rawMode}".`
+    );
+  }
+
+  if (mode === "off") {
+    return null;
+  }
+
+  const readNumber = (name, { allowZero, fallback }) => {
+    const rawValue = process.env[name];
+
+    if (rawValue === undefined || String(rawValue).trim() === "") {
+      if (fallback !== undefined) {
+        return fallback;
+      }
+
+      throw new Error(`${name} must be set when RAG_QA_DENSE_RESCUE is ${mode}.`);
+    }
+
+    const value = Number(rawValue);
+
+    if (!Number.isFinite(value) || value > 1 || value < 0 || (!allowZero && value === 0)) {
+      throw new Error(
+        `${name} must be a number ${allowZero ? "from 0" : "above 0"} up to 1. Received "${rawValue}".`
+      );
+    }
+
+    return value;
+  };
+
+  return {
+    floor: readNumber("RAG_QA_DENSE_RESCUE_FLOOR", { allowZero: true, fallback: 0 }),
+    mode,
+    threshold: readNumber("RAG_QA_DENSE_RESCUE_THRESHOLD", { allowZero: false }),
+  };
+};
+
 export const isQueryDecompositionEnabled = () =>
   toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);
 
