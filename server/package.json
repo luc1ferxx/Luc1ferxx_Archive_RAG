@@ -52,6 +52,8 @@
     "eval:abstention-gate": "node evaluation/run-abstention-gate-analysis.mjs",
     "eval:qasper-retrieval": "node evaluation/run-qasper-retrieval-eval.mjs",
     "eval:layout-parsing": "node evaluation/run-layout-parsing-eval.mjs",
+    "corpus:office-formats": "node evaluation/build-office-format-corpus.mjs",
+    "eval:office-formats": "node evaluation/run-office-format-eval.mjs",
     "eval:docling-routing": "node evaluation/run-docling-routing-check.mjs",
     "eval:judge": "node evaluation/run-llm-judge.mjs",
     "rerank:cross-encoder:setup": "python3 -m venv --clear evaluation/.venv-neural-reranker && PYTHONNOUSERSITE=1 evaluation/.venv-neural-reranker/bin/python -m pip install -r evaluation/neural-reranker-requirements.txt",
