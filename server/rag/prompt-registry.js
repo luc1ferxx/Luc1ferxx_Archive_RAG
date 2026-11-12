@@ -28,6 +28,8 @@ export const PROMPT_IDS = Object.freeze({
   memoryQueryRewrite: "memory_query_rewrite",
   qaAnswer: "qa_answer",
   qaAnswerExtractive: "qa_answer_extractive",
+  qaQueryHyde: "qa_query_hyde",
+  qaQueryMultiQuery: "qa_query_multi_query",
   replanner: "replanner",
   unifiedGraphPlanner: "unified_graph_planner",
   webAnswer: "web_answer",

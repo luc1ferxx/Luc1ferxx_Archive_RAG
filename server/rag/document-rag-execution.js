@@ -20,6 +20,7 @@ import {
 import {
   assessComparisonConfidence,
   assessQaConfidence,
+  computeResultQueryTermCoverage,
   selectQaContext,
 } from "./confidence.js";
 import {
@@ -33,7 +34,13 @@ import {
   buildConfidenceTrace,
   buildResultTrace,
 } from "./observability.js";
-import { embedQueryCached } from "./embedding-cache.js";
+import { embedHydeQueryVector, embedQueryCached } from "./embedding-cache.js";
+import {
+  describeQueryExpansionErrorCode,
+  expandQaQuestion,
+  resolveQaQueryExpansion,
+} from "./query-expansion.js";
+import { isRequestCancelledError } from "./request-deadline.js";
 import {
   buildEvidenceRequirements,
   buildRetrievalQueries,
@@ -55,7 +62,7 @@ import {
   writeComparisonAnswer,
   writeQaAnswer,
 } from "./answer-writer.js";
-import { getAdmissionScore, getResultKey } from "./citations.js";
+import { computeAdmissionScore, getAdmissionScore, getResultKey } from "./citations.js";
 import { lookupSemanticCache, storeSemanticCacheAnswer } from "./semantic-cache.js";
 
 const getResultMergeScore = (result = {}) =>
@@ -451,6 +458,228 @@ const searchGlobalContext = ({ accessScope = null, ...args }) =>
     ? searchGlobalContextRemotely({ accessScope, ...args })
     : searchGlobalContextInProcess(args);
 
+// Query expansion on the single-document QA route's own retrieval
+// (RAG_QA_QUERY_EXPANSION, rag/query-expansion.js). Off, prepareQaQueryExpansion
+// returns null and retrieveQaResults makes exactly the call the route always
+// made.
+
+// A copy only a rewrite returned: its keywordScore (and the admission score
+// read from it) measured against the question, as the gate, the context
+// selection and every other candidate's copy are.
+const remeasureAgainstQuestion = (result, queryText) => {
+  if (typeof result?.keywordScore !== "number") {
+    return result;
+  }
+
+  const remeasured = { ...result, keywordScore: computeResultQueryTermCoverage(result, queryText) };
+
+  return { ...remeasured, admissionScore: computeAdmissionScore(remeasured) };
+};
+
+/**
+ * RAG_QA_QUERY_EXPANSION=multi_query: the question's own candidates (the
+ * first list) and each rewrite's, fused by reciprocal rank (each list adds
+ * 1 / (rrfK + rank) to a chunk, rank from 1) and cut to `topK`, so the route
+ * keeps the candidate count it has without expansion. A chunk several lists
+ * returned keeps the question's own copy when there is one, else the copy that
+ * came with its best rank (the earlier list on a tie), with every list's query
+ * in its provenance. A copy only a rewrite returned is measured against the
+ * question again (remeasureAgainstQuestion); its vectorScore stays its cosine
+ * to that rewrite's vector. `score` becomes the fused score the list is
+ * ordered by (ties: the question's list first, then the better rank, then the
+ * result key).
+ */
+export const fuseExpandedQueryResults = ({ lists, queryText, rrfK = getRrfK(), topK }) => {
+  const entries = new Map();
+
+  (Array.isArray(lists) ? lists : []).forEach((results, listIndex) => {
+    (Array.isArray(results) ? results : []).forEach((result, rankIndex) => {
+      const key = getResultKey(result);
+      const contribution = 1 / (rrfK + rankIndex + 1);
+      const entry = entries.get(key);
+
+      if (!entry) {
+        entries.set(key, { key, listIndex, rank: rankIndex, result, score: contribution });
+        return;
+      }
+
+      entry.score += contribution;
+
+      const incomingWins = entry.listIndex !== 0 && (listIndex === 0 || rankIndex < entry.rank);
+      const kept = incomingWins ? result : entry.result;
+
+      entry.result = {
+        ...kept,
+        provenance: mergeProvenance(kept, incomingWins ? entry.result : result),
+      };
+
+      if (incomingWins) {
+        entry.listIndex = listIndex;
+        entry.rank = rankIndex;
+      }
+    });
+  });
+
+  const limit = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : Number.POSITIVE_INFINITY;
+
+  return [...entries.values()]
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.listIndex - right.listIndex ||
+        left.rank - right.rank ||
+        left.key.localeCompare(right.key)
+    )
+    .slice(0, limit)
+    .map(({ listIndex, result, score }) => ({
+      ...(listIndex === 0 ? result : remeasureAgainstQuestion(result, queryText)),
+      score,
+    }));
+};
+
+// The expansion for one QA retrieval: null with the setting off; otherwise
+// `{ diagnostics }` (what the trace and the evaluation reports record: mode,
+// whether it applied, the milliseconds it took before retrieval, why not),
+// plus `rewrites` (multi_query) or `hydeVector` (hyde) when it applies. A
+// retrieval the agent planned and a question the decomposer split into parts
+// are never expanded. A cancelled request throws; any other failure falls
+// back to the question alone.
+const prepareQaQueryExpansion = async ({ agentRetrievalPlan, plannedRetrievalQueries }) => {
+  const setting = resolveQaQueryExpansion();
+
+  if (!setting) {
+    return null;
+  }
+
+  const skipped = (reason) => ({
+    diagnostics: { applied: false, durationMs: 0, generated: 0, mode: setting.mode, skipped: reason },
+  });
+
+  if (agentRetrievalPlan) {
+    return skipped("agent_plan");
+  }
+
+  if (plannedRetrievalQueries.length !== 1) {
+    return skipped("multi_part");
+  }
+
+  const [primary] = plannedRetrievalQueries;
+  const startedAt = performance.now();
+  const expansion = await expandQaQuestion({ question: primary.query, setting });
+
+  if (!expansion.passage) {
+    return expansion;
+  }
+
+  try {
+    const hydeVector = await embedHydeQueryVector({ passage: expansion.passage, queryText: primary.query });
+
+    return {
+      diagnostics: { ...expansion.diagnostics, durationMs: Math.round(performance.now() - startedAt) },
+      hydeVector,
+    };
+  } catch (error) {
+    if (isRequestCancelledError(error)) {
+      throw error;
+    }
+
+    const errorCode = describeQueryExpansionErrorCode(error);
+
+    console.warn(
+      `RAG_QA_QUERY_EXPANSION=hyde: embedding the passage failed (${errorCode}); retrieving with the question alone.`
+    );
+
+    return {
+      diagnostics: {
+        ...expansion.diagnostics,
+        applied: false,
+        durationMs: Math.round(performance.now() - startedAt),
+        errorCode,
+        fallback: "embedding_error",
+      },
+    };
+  }
+};
+
+// The QA route's retrieval, with the expansion applied when it holds one.
+// hyde: the planned (single) query searches with the HyDE vector; its text,
+// which the sparse route and the reranker read, stays the question.
+// multi_query: the question and each rewrite as their own retrieval, fused.
+const retrieveQaResults = async ({
+  accessScope = null,
+  docIds,
+  expansion = null,
+  plannedRetrievalQueries,
+  queryAdapterScope = null,
+  queryVector,
+  resolvedQuery,
+  retrievalOptions,
+}) => {
+  if (expansion?.hydeVector) {
+    const [primary] = plannedRetrievalQueries;
+
+    return retrieveGlobalContextForQueries({
+      accessScope,
+      docIds,
+      primaryQueryText: primary.query,
+      primaryQueryVector: expansion.hydeVector,
+      queryAdapterScope,
+      retrievalOptions,
+      retrievalQueries: plannedRetrievalQueries,
+    });
+  }
+
+  if (expansion?.rewrites?.length > 0) {
+    const [primary] = plannedRetrievalQueries;
+    const retrievalQueries = [
+      primary,
+      ...expansion.rewrites.map((query, index) => ({
+        id: `rewrite-${index + 1}`,
+        label: `Rewrite ${index + 1}`,
+        primary: false,
+        query,
+      })),
+    ];
+    const searches = await Promise.all(
+      retrievalQueries.map((retrievalQuery) =>
+        retrieveGlobalContextForQueries({
+          accessScope,
+          docIds,
+          primaryQueryText: resolvedQuery,
+          primaryQueryVector: queryVector,
+          queryAdapterScope,
+          retrievalOptions,
+          retrievalQueries: [retrievalQuery],
+        })
+      )
+    );
+
+    return {
+      results: fuseExpandedQueryResults({
+        lists: searches.map((search) => search.results),
+        queryText: resolvedQuery,
+        rrfK: getRrfK(),
+        topK: retrievalOptions.topK ?? getRetrievalTopK(),
+      }),
+      retrieval: {
+        ...searches[0].retrieval,
+        queryCount: retrievalQueries.length,
+        routes: mergeRouteSummaries(...searches.map((search) => search.retrieval.routes)),
+      },
+    };
+  }
+
+  return retrieveGlobalContextForQueries({
+    accessScope,
+    primaryQueryVector: queryVector,
+    primaryQueryText: resolvedQuery,
+    retrievalQueries: plannedRetrievalQueries,
+    retrievalOptions,
+    docIds,
+    queryAdapterScope,
+  });
+};
+
 const buildQaGapPlan = async ({
   accessScope = null,
   query,
@@ -731,18 +960,29 @@ export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolve
     docIds,
     resolvedQuery,
   });
-  const { results } = await retrieveGlobalContextForQueries({
+  // As executeDocumentRag: the QA route expands its retrieval, the comparison
+  // route never does.
+  const expansion =
+    inputs.route.mode === "compare"
+      ? null
+      : await prepareQaQueryExpansion({
+          agentRetrievalPlan: null,
+          plannedRetrievalQueries: inputs.plannedRetrievalQueries,
+        });
+  const { results } = await retrieveQaResults({
     accessScope,
-    primaryQueryVector: inputs.queryVector,
-    primaryQueryText: resolvedQuery,
-    retrievalQueries: inputs.plannedRetrievalQueries,
-    retrievalOptions: inputs.retrievalOptions,
     docIds,
+    expansion,
+    plannedRetrievalQueries: inputs.plannedRetrievalQueries,
     queryAdapterScope: QUERY_ADAPTER_SCOPE_QA,
+    queryVector: inputs.queryVector,
+    resolvedQuery,
+    retrievalOptions: inputs.retrievalOptions,
   });
 
   return {
     evidenceRequirementCount: inputs.evidenceRequirements?.length ?? 1,
+    ...(expansion ? { queryExpansion: expansion.diagnostics } : {}),
     results,
     routeMode: inputs.route.mode,
   };
@@ -767,16 +1007,17 @@ const executeQaRag = async ({
   // claims; its gate judges every candidate against the question.
   const coverageFromQueryText =
     agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled();
-  const { results: retrievalResults, retrieval } =
-    await retrieveGlobalContextForQueries({
-      accessScope,
-      primaryQueryVector: queryVector,
-      primaryQueryText: resolvedQuery,
-      retrievalQueries: plannedRetrievalQueries,
-      retrievalOptions,
-      docIds,
-      queryAdapterScope,
-    });
+  const expansion = await prepareQaQueryExpansion({ agentRetrievalPlan, plannedRetrievalQueries });
+  const { results: retrievalResults, retrieval } = await retrieveQaResults({
+    accessScope,
+    docIds,
+    expansion,
+    plannedRetrievalQueries,
+    queryAdapterScope,
+    queryVector,
+    resolvedQuery,
+    retrievalOptions,
+  });
   const confidence = assessQaConfidence({
     coverageFromQueryText,
     evidenceRequirementCount: evidenceRequirements?.length ?? 1,
@@ -812,6 +1053,8 @@ const executeQaRag = async ({
       route,
     }),
     retrieval,
+    // Only with RAG_QA_QUERY_EXPANSION on, so a default trace keeps its shape.
+    ...(expansion ? { queryExpansion: expansion.diagnostics } : {}),
     retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
     contextExtraCount: contextResults.length - confidence.usableResults.length,
     confidence: buildConfidenceTrace(confidence),
@@ -861,6 +1104,7 @@ const executeQaRag = async ({
           coverageFromQueryText,
           docIds,
           evidenceRequirementCount: evidenceRequirements?.length ?? 1,
+          expansion,
           plannedRetrievalQueries,
           preferenceBlock,
           query,
@@ -918,6 +1162,8 @@ const retryQaWithDeeperRetrieval = async ({
   coverageFromQueryText = false,
   docIds,
   evidenceRequirementCount,
+  // The first retrieval's expansion, reused: the retry asks no new model call.
+  expansion = null,
   plannedRetrievalQueries,
   preferenceBlock,
   query,
@@ -935,14 +1181,15 @@ const retryQaWithDeeperRetrieval = async ({
   }
 
   const shownKeys = new Set(shownResults.map((result) => getResultKey(result)));
-  const { results } = await retrieveGlobalContextForQueries({
+  const { results } = await retrieveQaResults({
     accessScope,
-    primaryQueryVector: queryVector,
-    primaryQueryText: resolvedQuery,
-    retrievalQueries: plannedRetrievalQueries,
-    retrievalOptions: { ...retrievalOptions, topK },
     docIds,
+    expansion,
+    plannedRetrievalQueries,
     queryAdapterScope,
+    queryVector,
+    resolvedQuery,
+    retrievalOptions: { ...retrievalOptions, topK },
   });
   const unseen = results.filter((result) => !shownKeys.has(getResultKey(result)));
   const confidence = assessQaConfidence({

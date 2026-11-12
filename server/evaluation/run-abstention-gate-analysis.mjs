@@ -402,8 +402,69 @@ const formatMarkdown = (report) => {
           ...(report.rerankGate ? formatRerankGateMarkdown(report.rerankGate) : []),
         ]),
     ...(report.denseRescue ? formatDenseRescueMarkdown(report.denseRescue) : []),
+    ...(report.queryExpansion ? formatQueryExpansionMarkdown(report.queryExpansion) : []),
   ].join("\n");
 };
+
+const percentile = (sortedValues, share) =>
+  sortedValues.length === 0
+    ? null
+    : sortedValues[Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(share * sortedValues.length) - 1))];
+
+/**
+ * What RAG_QA_QUERY_EXPANSION did over a run (the cases' `queryExpansion`,
+ * retrieveQaCandidates): how many questions it applied to, why the others got
+ * none (skipped: never asked; fallback: asked, nothing usable), how many
+ * replies the output limit cut, and the milliseconds the expansion step took
+ * before retrieval (nearest-rank percentiles over the questions it ran on).
+ * Null when no case carries it (the setting was off).
+ */
+export const summarizeQueryExpansion = (cases = []) => {
+  const entries = cases.map((entry) => entry?.queryExpansion).filter(Boolean);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const countBy = (read) =>
+    entries.reduce((counts, entry) => {
+      const key = read(entry);
+
+      return key ? { ...counts, [key]: (counts[key] ?? 0) + 1 } : counts;
+    }, {});
+  const durations = entries
+    .filter((entry) => !entry.skipped)
+    .map((entry) => Number(entry.durationMs))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+
+  return {
+    applied: entries.filter((entry) => entry.applied === true).length,
+    durationMs:
+      durations.length === 0
+        ? null
+        : {
+            max: durations.at(-1),
+            mean: Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length),
+            p50: percentile(durations, 0.5),
+            p95: percentile(durations, 0.95),
+          },
+    errorCodes: countBy((entry) => entry.errorCode),
+    fallbacks: countBy((entry) => entry.fallback),
+    mode: entries[0].mode,
+    questions: entries.length,
+    skipped: countBy((entry) => entry.skipped),
+    truncated: entries.filter((entry) => entry.truncated === true).length,
+  };
+};
+
+const formatQueryExpansionMarkdown = (section) => [
+  "",
+  `Query expansion (RAG_QA_QUERY_EXPANSION=${section.mode}): applied to ${section.applied} of ${section.questions} questions; skipped ${JSON.stringify(section.skipped)}, fell back ${JSON.stringify(section.fallbacks)}, cut by the output limit ${section.truncated}.`,
+  section.durationMs
+    ? `Expansion before retrieval: mean ${section.durationMs.mean} ms, p50 ${section.durationMs.p50}, p95 ${section.durationMs.p95}, max ${section.durationMs.max}.`
+    : "Expansion before retrieval: no timed question.",
+];
 
 /** `--dense-rescue margin:0.05:0.3` (mode, threshold, coverage floor) as a rescue configuration. */
 export const parseDenseRescueOption = (value) => {
@@ -586,14 +647,19 @@ const main = async () => {
       }
 
       for (const [index, testCase] of cases.entries()) {
-        const { evidenceRequirementCount, results } = await retrieveQaCandidates({
+        const startedAt = performance.now();
+        const { evidenceRequirementCount, queryExpansion, results } = await retrieveQaCandidates({
           docIds: [testCase.docKeys[0]],
           resolvedQuery: testCase.question,
         });
 
         candidatesByCase.push({
           evidenceRequirementCount,
+          // Only with RAG_QA_QUERY_EXPANSION on (summarizeQueryExpansion).
+          ...(queryExpansion ? { queryExpansion } : {}),
           results,
+          // The whole retrieval of this question, expansion included.
+          retrievalMs: Math.round(performance.now() - startedAt),
           testCase: {
             docKeys: testCase.docKeys,
             expectedEvidence: testCase.expectedEvidence,
@@ -761,6 +827,7 @@ const main = async () => {
       })),
       pick: pick ? stripDecisions(pick) : null,
     },
+    queryExpansion: summarizeQueryExpansion(candidatesByCase),
     rerankGate,
     rerankGrid,
     rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,

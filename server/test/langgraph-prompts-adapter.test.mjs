@@ -70,6 +70,8 @@ const PINNED_TEMPLATE_PROMPTS = Object.freeze({
   "qa_answer@v2.3": "f13805dcc49f",
   "qa_answer_extractive@v1": "cfd276c7467d",
   "qa_answer_extractive@v2": "701e1a252ded",
+  "qa_query_hyde@v1": "db479ed2b55e",
+  "qa_query_multi_query@v1": "9f04172e48e2",
   "web_answer@v1.1": "26e8ffa6c6c4",
   "web_answer@v2.1": "9fb8253dfa4f",
 });
@@ -89,6 +91,8 @@ const TEMPLATE_VARIABLES = Object.freeze({
   memory_query_rewrite: ["documents", "longTermMemory", "question", "recentConversation"],
   qa_answer: ["context", "preferenceBlock", "questionBlock"],
   qa_answer_extractive: ["context", "preferenceBlock", "questionBlock"],
+  qa_query_hyde: ["question"],
+  qa_query_multi_query: ["count", "question"],
   web_answer: ["question", "searchResults"],
 });
 

@@ -69,8 +69,13 @@ const describeEmbeddingEndpointHost = (env = process.env) => {
  * embedded.
  */
 export const describeRetrievalConfig = async () => {
-  const [config, topology] = await Promise.all([import("../rag/config.js"), import("../rag/service-topology.js")]);
+  const [config, topology, queryExpansionModule] = await Promise.all([
+    import("../rag/config.js"),
+    import("../rag/service-topology.js"),
+    import("../rag/query-expansion.js"),
+  ]);
   const denseRescue = config.getQaDenseRescue();
+  const queryExpansion = config.getQaQueryExpansion();
 
   return {
     // Only with RAG_QA_DENSE_RESCUE on, so a default report keeps its shape
@@ -80,6 +85,16 @@ export const describeRetrievalConfig = async () => {
           qaDenseRescue: denseRescue.mode,
           qaDenseRescueFloor: denseRescue.floor,
           qaDenseRescueThreshold: denseRescue.threshold,
+        }
+      : {}),
+    // Only with RAG_QA_QUERY_EXPANSION on, likewise; the prompt as
+    // id@version#fingerprint, since the expansion's text comes from it.
+    ...(queryExpansion
+      ? {
+          qaQueryExpansion: queryExpansion.mode,
+          qaQueryExpansionCount: queryExpansion.count,
+          qaQueryExpansionPrompt: queryExpansionModule.describeQueryExpansionPrompt(queryExpansion.mode),
+          qaQueryExpansionTemperature: queryExpansion.temperature,
         }
       : {}),
     bm25B: config.getBm25B(),
@@ -149,6 +164,10 @@ const RETRIEVAL_FIELDS = Object.freeze([
   "qaDenseRescue",
   "qaDenseRescueThreshold",
   "qaDenseRescueFloor",
+  "qaQueryExpansion",
+  "qaQueryExpansionCount",
+  "qaQueryExpansionPrompt",
+  "qaQueryExpansionTemperature",
   "remoteRetrieval",
   "modelGateway",
   "embeddingEndpointHost",
