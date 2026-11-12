@@ -88,6 +88,7 @@ import {
   createDefaultWorkspaceArtifactStore,
   createWorkspaceArtifactService,
 } from "./rag/workspace-artifacts/index.js";
+import { assertQaQueryExpansionSettings } from "./rag/query-expansion.js";
 import {
   assertAgentRuntimeSupported,
   assertAnswerGenerationSettings,
@@ -310,6 +311,11 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // (RAG_DOCUMENT_FORMATS_INVALID, RAG_OFFICE_LIMIT_INVALID) rather than
   // failing every upload, or accepting some other set of formats.
   assertDocumentFormatSettings();
+  // RAG_QA_QUERY_EXPANSION and its count and temperature, and the settings it
+  // cannot run with (rag/query-expansion.js): refused at the start
+  // (RAG_QA_QUERY_EXPANSION_INVALID, _COUNT_INVALID, _TEMPERATURE_INVALID,
+  // _CONFLICT) rather than failing every QA retrieval.
+  assertQaQueryExpansionSettings();
 
   // What a document delete also cleans up in the stores built below
   // (rag/document-deletion-cascade.js); assigned once they exist, read when a

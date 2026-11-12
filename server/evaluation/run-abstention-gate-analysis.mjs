@@ -402,8 +402,77 @@ const formatMarkdown = (report) => {
           ...(report.rerankGate ? formatRerankGateMarkdown(report.rerankGate) : []),
         ]),
     ...(report.denseRescue ? formatDenseRescueMarkdown(report.denseRescue) : []),
+    ...(report.queryExpansion ? formatQueryExpansionMarkdown(report.queryExpansion) : []),
   ].join("\n");
 };
+
+const percentile = (sortedValues, share) =>
+  sortedValues.length === 0
+    ? null
+    : sortedValues[Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(share * sortedValues.length) - 1))];
+
+/**
+ * What RAG_QA_QUERY_EXPANSION did over a run (the cases' `queryExpansion`,
+ * retrieveQaCandidates): how many questions it applied to, why the others got
+ * none (skipped: never asked; fallback: asked, nothing usable), how many
+ * replies the output limit cut, and the milliseconds the expansion step took
+ * before retrieval (nearest-rank percentiles over the questions it ran on).
+ * Null when no case carries it (the setting was off).
+ */
+export const summarizeQueryExpansion = (cases = []) => {
+  const entries = cases.map((entry) => entry?.queryExpansion).filter(Boolean);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const countBy = (read) =>
+    entries.reduce((counts, entry) => {
+      const key = read(entry);
+
+      return key ? { ...counts, [key]: (counts[key] ?? 0) + 1 } : counts;
+    }, {});
+  const durations = entries
+    .filter((entry) => !entry.skipped)
+    .map((entry) => Number(entry.durationMs))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right);
+
+  return {
+    applied: entries.filter((entry) => entry.applied === true).length,
+    durationMs:
+      durations.length === 0
+        ? null
+        : {
+            max: durations.at(-1),
+            mean: Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length),
+            p50: percentile(durations, 0.5),
+            p95: percentile(durations, 0.95),
+          },
+    errorCodes: countBy((entry) => entry.errorCode),
+    fallbacks: countBy((entry) => entry.fallback),
+    mode: entries[0].mode,
+    questions: entries.length,
+    // multi_query: questions where at least one rewrite's retrieval failed
+    // and was left out of the fusion.
+    rewriteRetrievalFailures: entries.filter((entry) => Number(entry.failedRewrites) > 0).length,
+    skipped: countBy((entry) => entry.skipped),
+    truncated: entries.filter((entry) => entry.truncated === true).length,
+  };
+};
+
+const formatQueryExpansionMarkdown = (section) => [
+  "",
+  `Query expansion (RAG_QA_QUERY_EXPANSION=${section.mode}): applied to ${section.applied} of ${section.questions} questions; skipped ${JSON.stringify(section.skipped)}, fell back ${JSON.stringify(section.fallbacks)}, cut by the output limit ${section.truncated}.`,
+  section.durationMs
+    ? `Expansion before retrieval: mean ${section.durationMs.mean} ms, p50 ${section.durationMs.p50}, p95 ${section.durationMs.p95}, max ${section.durationMs.max}.`
+    : "Expansion before retrieval: no timed question.",
+  ...(section.applied > 0
+    ? [
+        "No dense rescue section: the expanded candidates' cosines are to a rewrite or to the HyDE vector, not to the question, and the expansion refuses to run with the rescue. The dense similarity AUC above reads those cosines too.",
+      ]
+    : []),
+];
 
 /** `--dense-rescue margin:0.05:0.3` (mode, threshold, coverage floor) as a rescue configuration. */
 export const parseDenseRescueOption = (value) => {
@@ -586,14 +655,19 @@ const main = async () => {
       }
 
       for (const [index, testCase] of cases.entries()) {
-        const { evidenceRequirementCount, results } = await retrieveQaCandidates({
+        const startedAt = performance.now();
+        const { evidenceRequirementCount, queryExpansion, results } = await retrieveQaCandidates({
           docIds: [testCase.docKeys[0]],
           resolvedQuery: testCase.question,
         });
 
         candidatesByCase.push({
           evidenceRequirementCount,
+          // Only with RAG_QA_QUERY_EXPANSION on (summarizeQueryExpansion).
+          ...(queryExpansion ? { queryExpansion } : {}),
           results,
+          // The whole retrieval of this question, expansion included.
+          retrievalMs: Math.round(performance.now() - startedAt),
           testCase: {
             docKeys: testCase.docKeys,
             expectedEvidence: testCase.expectedEvidence,
@@ -721,15 +795,23 @@ const main = async () => {
     : null;
   // The dense rescue section. The reranker gate replaces the lexical one, and
   // the rescue never applies there, so it is measured on the lexical gate.
+  // Not on expanded candidates (RAG_QA_QUERY_EXPANSION applied to any
+  // question): their cosines are to a rewrite or to the HyDE vector, not to
+  // the question, and the expansion refuses to run with the rescue.
+  const expanded = candidatesByCase.some((entry) => entry.queryExpansion?.applied === true);
   const denseSignals = signals.map((signal) => ({ absolute: signal.dense_absolute, margin: signal.dense_margin }));
-  const rescueConfigs = explicitRescues.length > 0 ? explicitRescues : buildDenseRescueGrid(denseSignals);
+  const rescueConfigs = expanded
+    ? []
+    : explicitRescues.length > 0
+      ? explicitRescues
+      : buildDenseRescueGrid(denseSignals);
   const rescueRows = rescueConfigs.map((denseRescue) => {
     const decisions = decide({ ...DEFAULT_GATE, denseRescue });
 
     return { ...denseRescue, ...withCost(summarizeGateSetting(decisions)), decisions };
   });
   const stripDecisions = ({ decisions: _decisions, ...row }) => row;
-  const pick = explicitRescues.length > 0 ? null : pickDenseRescue(rescueRows, defaultSummary);
+  const pick = expanded || explicitRescues.length > 0 ? null : pickDenseRescue(rescueRows, defaultSummary);
   const pairedRows = explicitRescues.length > 0 ? rescueRows : pick ? [pick] : [];
   const answerableCases = candidatesByCase.filter(({ testCase }) => !testCase.shouldAbstain);
   const report = {
@@ -745,22 +827,26 @@ const main = async () => {
       unanswerable: candidatesByCase.length - answerableCases.length,
     },
     default: defaultSummary,
-    denseRescue: {
-      auc: { absolute: auc("dense_absolute"), margin: auc("dense_margin") },
-      baseline: { answerablePass: defaultSummary.answerablePass, unanswerableCatch: defaultSummary.unanswerableCatch },
-      catchTolerance: DENSE_RESCUE_CATCH_TOLERANCE,
-      explicit: explicitRescues.length > 0 ? explicitRescues : null,
-      gainsEnough: explicitRescues.length > 0 ? null : denseRescueGainsEnough(pick, defaultSummary),
-      grid: rescueRows.map(stripDecisions),
-      minGain: DENSE_RESCUE_MIN_GAIN,
-      paired: pairedRows.map((row) => ({
-        floor: row.floor,
-        mode: row.mode,
-        threshold: row.threshold,
-        ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
-      })),
-      pick: pick ? stripDecisions(pick) : null,
-    },
+    // Null when the candidates were expanded (see above).
+    denseRescue: expanded
+      ? null
+      : {
+          auc: { absolute: auc("dense_absolute"), margin: auc("dense_margin") },
+          baseline: { answerablePass: defaultSummary.answerablePass, unanswerableCatch: defaultSummary.unanswerableCatch },
+          catchTolerance: DENSE_RESCUE_CATCH_TOLERANCE,
+          explicit: explicitRescues.length > 0 ? explicitRescues : null,
+          gainsEnough: explicitRescues.length > 0 ? null : denseRescueGainsEnough(pick, defaultSummary),
+          grid: rescueRows.map(stripDecisions),
+          minGain: DENSE_RESCUE_MIN_GAIN,
+          paired: pairedRows.map((row) => ({
+            floor: row.floor,
+            mode: row.mode,
+            threshold: row.threshold,
+            ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
+          })),
+          pick: pick ? stripDecisions(pick) : null,
+        },
+    queryExpansion: summarizeQueryExpansion(candidatesByCase),
     rerankGate,
     rerankGrid,
     rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,

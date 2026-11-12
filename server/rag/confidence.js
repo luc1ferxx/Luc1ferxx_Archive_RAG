@@ -279,6 +279,16 @@ export const computeQueryTermCoverage = ({ queryText = "", resultText = "", infl
   return overlap / queryTerms.size;
 };
 
+/**
+ * A candidate's query-term coverage of `queryText`, read from the text the
+ * stores score (file name, section heading, chunk): what a store's
+ * keywordScore would be had it searched with `queryText`. Query expansion
+ * (query-expansion.js) measures a chunk only a rewrite returned against the
+ * question with it.
+ */
+export const computeResultQueryTermCoverage = (result, queryText) =>
+  computeQueryTermCoverage({ queryText, resultText: buildSearchableResultText(result) });
+
 // How the QA gate reads a candidate's query-term coverage. By default it is the
 // stored keywordScore, measured against whichever retrieval query's copy of
 // the candidate won the merge. `fromQueryText` (the agent's follow-up with

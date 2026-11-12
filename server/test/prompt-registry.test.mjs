@@ -54,6 +54,9 @@ const PINNED_PROMPT_TEMPLATES = Object.freeze({
   // v1.3 / v2.3: the not-in-evidence verdict (RAG_QA_ANSWER_VERDICT on).
   "qa_answer@v1.3": "c57f90a838c7",
   "qa_answer@v2.3": "f13805dcc49f",
+  // The QA retrieval's query expansion (RAG_QA_QUERY_EXPANSION).
+  "qa_query_hyde@v1": "db479ed2b55e",
+  "qa_query_multi_query@v1": "9f04172e48e2",
   "replanner@v1": "16e4034680c7",
   // The heterogeneous v3 (unified) graph planner.
   "unified_graph_planner@v1": "037c0f5c79da",
@@ -78,15 +81,29 @@ test("every prompt template matches its pinned fingerprint", () => {
 });
 
 test("every prompt id has templates and the active set picks exactly one per id", () => {
-  const listedIds = new Set(listPromptTemplates().map((template) => template.id));
-  const active = getActivePromptTemplates();
-  const activeIds = active.map((template) => template.id);
+  const previousExpansion = process.env.RAG_QA_QUERY_EXPANSION;
 
-  assert.deepEqual([...listedIds].sort(), Object.values(PROMPT_IDS).sort());
-  assert.equal(new Set(activeIds).size, activeIds.length, "one active template per id");
-  // Exactly one of the three comparison prompts and one of the two QA prompts
-  // is active, by configuration.
-  assert.equal(activeIds.length, Object.values(PROMPT_IDS).length - 3);
+  delete process.env.RAG_QA_QUERY_EXPANSION;
+
+  try {
+    const listedIds = new Set(listPromptTemplates().map((template) => template.id));
+    const active = getActivePromptTemplates();
+    const activeIds = active.map((template) => template.id);
+
+    assert.deepEqual([...listedIds].sort(), Object.values(PROMPT_IDS).sort());
+    assert.equal(new Set(activeIds).size, activeIds.length, "one active template per id");
+    // Exactly one of the three comparison prompts and one of the two QA prompts
+    // is active, by configuration, and neither query-expansion prompt while
+    // RAG_QA_QUERY_EXPANSION is off (the default).
+    assert.equal(activeIds.length, Object.values(PROMPT_IDS).length - 5);
+    assert.equal(activeIds.some((id) => id.startsWith("qa_query_")), false);
+  } finally {
+    if (previousExpansion === undefined) {
+      delete process.env.RAG_QA_QUERY_EXPANSION;
+    } else {
+      process.env.RAG_QA_QUERY_EXPANSION = previousExpansion;
+    }
+  }
 });
 
 test("the active set follows RAG_PROMPT_VERSION and hashes independently of order", () => {

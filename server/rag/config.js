@@ -1443,6 +1443,77 @@ export const getQaDenseRescue = () => {
   };
 };
 
+// Query expansion on the single-document QA route's own retrieval
+// (RAG_QA_QUERY_EXPANSION, default off; rag/query-expansion.js). Before it
+// retrieves, the chat model either rewrites the question as
+// RAG_QA_QUERY_EXPANSION_COUNT other search queries (`multi_query`: each one
+// runs the hybrid route and the lists, the question's own first, are fused by
+// reciprocal rank) or writes a short passage that would answer it (`hyde`:
+// the dense route searches with the normalized mean of the question's query
+// embedding and the passage's document embedding; the sparse route keeps the
+// question). RAG_QA_QUERY_EXPANSION_TEMPERATURE is sent with that call only
+// when set, as the answer calls' temperature is. Off, nothing is called and
+// retrieval is what it was. An unknown mode or an invalid number refuses (the
+// start, through assertQaQueryExpansionSettings, and every retrieval), so a
+// typo never retrieves with a setting nobody chose.
+export const QA_QUERY_EXPANSION_MODES = Object.freeze(["off", "multi_query", "hyde"]);
+export const DEFAULT_QA_QUERY_EXPANSION_COUNT = 3;
+export const MAX_QA_QUERY_EXPANSION_COUNT = 5;
+
+const invalidQueryExpansionSetting = (code, message) => Object.assign(new Error(message), { code });
+
+export const getQaQueryExpansion = () => {
+  const rawMode = process.env.RAG_QA_QUERY_EXPANSION;
+  const mode = hasEnvValue(rawMode) ? rawMode.trim().toLowerCase() : "off";
+
+  if (!QA_QUERY_EXPANSION_MODES.includes(mode)) {
+    throw invalidQueryExpansionSetting(
+      "RAG_QA_QUERY_EXPANSION_INVALID",
+      `RAG_QA_QUERY_EXPANSION must be one of ${QA_QUERY_EXPANSION_MODES.join(", ")}; got ${JSON.stringify(rawMode)}.`
+    );
+  }
+
+  if (mode === "off") {
+    return null;
+  }
+
+  // Read whenever the setting is on, also for hyde (which writes one
+  // passage), so a typo in it never waits for a switch of mode to surface.
+  const rawCount = process.env.RAG_QA_QUERY_EXPANSION_COUNT;
+  let count = DEFAULT_QA_QUERY_EXPANSION_COUNT;
+
+  if (hasEnvValue(rawCount)) {
+    const parsedCount = Number(rawCount.trim());
+
+    if (!Number.isSafeInteger(parsedCount) || parsedCount < 1 || parsedCount > MAX_QA_QUERY_EXPANSION_COUNT) {
+      throw invalidQueryExpansionSetting(
+        "RAG_QA_QUERY_EXPANSION_COUNT_INVALID",
+        `RAG_QA_QUERY_EXPANSION_COUNT must be a whole number from 1 to ${MAX_QA_QUERY_EXPANSION_COUNT}; got ${JSON.stringify(rawCount)}.`
+      );
+    }
+
+    count = parsedCount;
+  }
+
+  const rawTemperature = process.env.RAG_QA_QUERY_EXPANSION_TEMPERATURE;
+  let temperature = null;
+
+  if (hasEnvValue(rawTemperature)) {
+    const parsedTemperature = Number(rawTemperature.trim());
+
+    if (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
+      throw invalidQueryExpansionSetting(
+        "RAG_QA_QUERY_EXPANSION_TEMPERATURE_INVALID",
+        `RAG_QA_QUERY_EXPANSION_TEMPERATURE must be a number from 0 to 2; got ${JSON.stringify(rawTemperature)}.`
+      );
+    }
+
+    temperature = parsedTemperature;
+  }
+
+  return { count: mode === "multi_query" ? count : 1, mode, temperature };
+};
+
 export const isQueryDecompositionEnabled = () =>
   toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);
 
