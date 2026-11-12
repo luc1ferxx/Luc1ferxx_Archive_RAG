@@ -229,6 +229,37 @@ export const pickRerankThreshold = (rows) => {
     .sort((left, right) => right.minRerankProbability - left.minRerankProbability)[0];
 };
 
+// The reranker re-measure at top-K 10 (docs/evaluation.md "重排在 top-K 10
+// 下重测"): the lexical gate on the same reranked candidates competes with
+// every probability threshold under the same cost; within RERANK_COST_TOLERANCE
+// of the lowest cost the setting that catches the most unanswerable questions
+// wins, then the lower cost. Costs come from whole counts, not rounded rates.
+export const RERANK_COST_TOLERANCE = 0.01;
+
+export const exactGateCost = ({ answerable, answerablePassed, unanswerable, unanswerableCaught }) =>
+  (1 - UNANSWERABLE_PRIOR) * (1 - answerablePassed / answerable) +
+  WRONG_ANSWER_COST * UNANSWERABLE_PRIOR * (1 - unanswerableCaught / unanswerable);
+
+/** The pick among the probability thresholds and the lexical gate (`gate: "lexical"`, no threshold). */
+export const pickRerankGate = (rerankRows, lexicalRow) => {
+  const candidates = [
+    ...rerankRows.map((row) => ({ ...row, gate: "rerank" })),
+    { ...lexicalRow, gate: "lexical", minRerankProbability: null },
+  ].map((candidate) => ({ ...candidate, exactCost: exactGateCost(candidate.counts) }));
+  const lowest = Math.min(...candidates.map((candidate) => candidate.exactCost));
+  const { exactCost: _exactCost, ...pick } = candidates
+    .filter((candidate) => candidate.exactCost <= lowest + RERANK_COST_TOLERANCE + 1e-9)
+    .sort(
+      (left, right) =>
+        right.counts.unanswerableCaught - left.counts.unanswerableCaught ||
+        left.exactCost - right.exactCost ||
+        // An exact tie goes to the higher threshold, as in pickRerankThreshold.
+        (right.minRerankProbability ?? -1) - (left.minRerankProbability ?? -1)
+    )[0];
+
+  return pick;
+};
+
 const round = (value) => (value === null ? null : Number(value.toFixed(4)));
 const rate = (count, total) => (total > 0 ? round(count / total) : null);
 
@@ -353,6 +384,7 @@ const formatMarkdown = (report) => {
               `| ${entry.minRerankProbability}${entry === report.rerankPick ? " (picked)" : ""} | ${entry.answerablePass} | ${entry.answerableEvidencePass} | ${entry.unanswerableCatch} | ${entry.youdenJ} | ${entry.cost} |`
           ),
           "",
+          ...(report.rerankGate ? formatRerankGateMarkdown(report.rerankGate) : []),
         ]),
     ...(report.denseRescue ? formatDenseRescueMarkdown(report.denseRescue) : []),
   ].join("\n");
@@ -377,6 +409,23 @@ const describeRescue = ({ floor, mode, threshold }) => `${mode}:${threshold}:${f
 
 const formatPairedDelta = (label, delta) =>
   `| ${label} | ${delta.delta} | [${delta.ci95ByPaper?.join(", ") ?? "n/a"}] | +${delta.flips.won} / -${delta.flips.lost} | ${delta.questions} | ${delta.papers} |`;
+
+const formatPairedCell = ({ ci95ByPaper, delta, flips }) =>
+  `${delta} [${ci95ByPaper?.[0] ?? "n/a"}, ${ci95ByPaper?.[1] ?? "n/a"}] (+${flips.won} / -${flips.lost})`;
+
+export const formatRerankGateMarkdown = ({ costTolerance, paired, pick }) => [
+  `Pick (the lexical gate on these candidates competes; within ${costTolerance} of the lowest cost, the most unanswerable questions caught, then the lower cost, then the higher threshold):${pick.gate === "lexical" ? "the lexical gate" : `min probability ${pick.minRerankProbability}`}; answerable pass ${pick.answerablePass}, unanswerable caught ${pick.unanswerableCatch}, cost ${pick.cost}.`,
+  "",
+  "Each threshold against the lexical gate on the same candidates, question by question (95% interval resampling papers):",
+  "",
+  "| min probability | answerable pass | ... with evidence admitted | unanswerable caught |",
+  "|---|---|---|---|",
+  ...paired.map(
+    (row) =>
+      `| ${row.minRerankProbability} | ${formatPairedCell(row.answerablePass)} | ${formatPairedCell(row.answerableEvidencePass)} | ${formatPairedCell(row.unanswerableCatch)} |`
+  ),
+  "",
+];
 
 const formatDenseRescueMarkdown = (section) => [
   "## Dense rescue (RAG_QA_DENSE_RESCUE)",
@@ -614,13 +663,27 @@ const main = async () => {
     results.some((result) => typeof result.crossEncoderScore === "number")
   );
   const withCost = (entry) => ({ ...entry, cost: gateCost(entry) });
-  const rerankGrid = reranked
-    ? RERANK_PROBABILITY_GRID.map((minRerankProbability) =>
-        withCost({ minRerankProbability, ...evaluateSetting({ ...DEFAULT_GATE, minRerankProbability }) })
-      )
+  const rerankRows = reranked
+    ? RERANK_PROBABILITY_GRID.map((minRerankProbability) => {
+        const decisions = decide({ ...DEFAULT_GATE, minRerankProbability });
+
+        return { minRerankProbability, ...withCost(summarizeGateSetting(decisions)), decisions };
+      })
     : [];
+  const rerankGrid = rerankRows.map(({ decisions: _decisions, ...row }) => row);
   const defaultDecisions = decide(DEFAULT_GATE);
   const defaultSummary = withCost({ ...DEFAULT_GATE, ...summarizeGateSetting(defaultDecisions) });
+  // Every threshold paired with the lexical gate on the same reranked candidates.
+  const rerankGate = reranked
+    ? {
+        costTolerance: RERANK_COST_TOLERANCE,
+        paired: rerankRows.map((row) => ({
+          minRerankProbability: row.minRerankProbability,
+          ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
+        })),
+        pick: pickRerankGate(rerankGrid, defaultSummary),
+      }
+    : null;
   // The dense rescue section. The reranker gate replaces the lexical one, and
   // the rescue never applies there, so it is measured on the lexical gate.
   const denseSignals = signals.map((signal) => ({ absolute: signal.dense_absolute, margin: signal.dense_margin }));
@@ -663,6 +726,7 @@ const main = async () => {
       })),
       pick: pick ? stripDecisions(pick) : null,
     },
+    rerankGate,
     rerankGrid,
     rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,
     partialBand: { ...PARTIAL_BAND_GATE, ...evaluateSetting(PARTIAL_BAND_GATE) },

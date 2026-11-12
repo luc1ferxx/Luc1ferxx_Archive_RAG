@@ -10,12 +10,16 @@ import {
   DENSE_RESCUE_MIN_GAIN,
   denseRescueGainsEnough,
   describeDenseSignals,
+  exactGateCost,
+  formatRerankGateMarkdown,
   gateCost,
   pairGateDecisions,
   parseDenseRescueOption,
   PARTIAL_BAND_GATE,
   pickDenseRescue,
+  pickRerankGate,
   pickRerankThreshold,
+  RERANK_COST_TOLERANCE,
   quantileOf,
   RELEVANCE_GRID,
   summarizeGateSetting,
@@ -237,4 +241,53 @@ test("--dense-rescue names one configuration, and the gate environment never lea
       process.env.RAG_QA_DENSE_RESCUE = previous;
     }
   }
+});
+
+test("the reranker re-measure picks among the probability thresholds and the lexical gate on whole counts", () => {
+  const counts = (answerablePassed, unanswerableCaught) => ({
+    answerable: 800,
+    answerablePassed,
+    unanswerable: 272,
+    unanswerableCaught,
+  });
+  const entry = (minRerankProbability, answerablePassed, unanswerableCaught) => {
+    const rowCounts = counts(answerablePassed, unanswerableCaught);
+
+    return { cost: Number(exactGateCost(rowCounts).toFixed(4)), counts: rowCounts, minRerankProbability };
+  };
+  const { minRerankProbability: _none, ...lexical } = entry(undefined, 480, 130);
+
+  // 0.885 x refused answerable + 0.345 x answered unanswerable, from counts.
+  assert.ok(Math.abs(exactGateCost(counts(400, 136)) - (0.885 * 0.5 + 0.345 * 0.5)) < 1e-12);
+  assert.equal(RERANK_COST_TOLERANCE, 0.01);
+
+  // Costs: 0.01 -> 0.3463, 0.02 -> 0.3605, 0.05 -> 0.3794, 0.2 -> 0.4329,
+  // lexical -> 0.5341. Within 0.01 of the lowest only 0.01 qualifies.
+  const rows = [entry(0.01, 730, 60), entry(0.02, 700, 75), entry(0.05, 660, 95), entry(0.2, 560, 140)];
+
+  assert.equal(pickRerankGate(rows, lexical).minRerankProbability, 0.01);
+  assert.equal(pickRerankGate(rows, lexical).gate, "rerank");
+
+  // 0.01 -> 0.3463 and 0.02 -> 0.3498 are within 0.01: the one catching more wins.
+  assert.equal(pickRerankGate([entry(0.01, 730, 60), entry(0.02, 720, 66)], lexical).minRerankProbability, 0.02);
+  // An exact tie goes to the higher threshold.
+  assert.equal(pickRerankGate([entry(0.01, 730, 60), entry(0.02, 730, 60)], lexical).minRerankProbability, 0.02);
+
+  // The lexical gate competes, and wins when no threshold comes within 0.01 of it.
+  const pick = pickRerankGate([entry(0.01, 500, 100), entry(0.5, 420, 140)], lexical);
+
+  assert.equal(pick.gate, "lexical");
+  assert.equal(pick.minRerankProbability, null);
+});
+
+test("the reranker re-measure prints its pick and every threshold against the lexical gate", () => {
+  const cell = { ci95ByPaper: [0.01, 0.03], delta: 0.02, flips: { lost: 1, won: 9 } };
+  const lines = formatRerankGateMarkdown({
+    costTolerance: 0.01,
+    paired: [{ answerableEvidencePass: cell, answerablePass: cell, minRerankProbability: 0.02, unanswerableCatch: cell }],
+    pick: { answerablePass: 0.8, cost: 0.3, gate: "rerank", minRerankProbability: 0.02, unanswerableCatch: 0.4 },
+  }).join("\n");
+
+  assert.match(lines, /min probability 0\.02; answerable pass 0\.8, unanswerable caught 0\.4, cost 0\.3\./);
+  assert.match(lines, /\| 0\.02 \| 0\.02 \[0\.01, 0\.03\] \(\+9 \/ -1\) \|/);
 });
