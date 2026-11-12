@@ -465,12 +465,12 @@ const searchGlobalContext = ({ accessScope = null, ...args }) =>
 
 // A copy only a rewrite returned: its keywordScore (and the admission score
 // read from it) measured against the question, as the gate, the context
-// selection and every other candidate's copy are.
+// selection and every other candidate's copy are, whatever the store stored.
+// A store stores null for a query with no term; the gate reads a coverage
+// that is not a number as enough, so a null from a rewrite must never reach
+// it. The result is null only when the question itself has no term, as it is
+// then for the question's own copies.
 const remeasureAgainstQuestion = (result, queryText) => {
-  if (typeof result?.keywordScore !== "number") {
-    return result;
-  }
-
   const remeasured = { ...result, keywordScore: computeResultQueryTermCoverage(result, queryText) };
 
   return { ...remeasured, admissionScore: computeAdmissionScore(remeasured) };
@@ -486,8 +486,9 @@ const remeasureAgainstQuestion = (result, queryText) => {
  * in its provenance. A copy only a rewrite returned is measured against the
  * question again (remeasureAgainstQuestion); its vectorScore stays its cosine
  * to that rewrite's vector. `score` becomes the fused score the list is
- * ordered by (ties: the question's list first, then the better rank, then the
- * result key).
+ * ordered by, scaled by (rrfK + 1) / the number of lists into (0, 1] as the
+ * hybrid fusion scales its own (ties: the question's list first, then the
+ * better rank, then the result key).
  */
 export const fuseExpandedQueryResults = ({ lists, queryText, rrfK = getRrfK(), topK }) => {
   const entries = new Map();
@@ -521,6 +522,7 @@ export const fuseExpandedQueryResults = ({ lists, queryText, rrfK = getRrfK(), t
   });
 
   const limit = Number.isFinite(topK) && topK > 0 ? Math.floor(topK) : Number.POSITIVE_INFINITY;
+  const scale = (rrfK + 1) / Math.max(1, Array.isArray(lists) ? lists.length : 1);
 
   return [...entries.values()]
     .sort(
@@ -533,7 +535,7 @@ export const fuseExpandedQueryResults = ({ lists, queryText, rrfK = getRrfK(), t
     .slice(0, limit)
     .map(({ listIndex, result, score }) => ({
       ...(listIndex === 0 ? result : remeasureAgainstQuestion(result, queryText)),
-      score,
+      score: score * scale,
     }));
 };
 
@@ -601,10 +603,32 @@ const prepareQaQueryExpansion = async ({ agentRetrievalPlan, plannedRetrievalQue
   }
 };
 
+// The expansion's diagnostics with what its retrieval reported: rewrites
+// whose retrieval failed, and, when every one failed, the fallback to the
+// question alone.
+const describeAppliedExpansion = (expansion, expansionFailures) => {
+  if (!expansionFailures) {
+    return expansion.diagnostics;
+  }
+
+  const allFailed = expansionFailures.failedRewrites >= (expansion.rewrites?.length ?? 0);
+
+  return {
+    ...expansion.diagnostics,
+    errorCode: expansionFailures.errorCode,
+    failedRewrites: expansionFailures.failedRewrites,
+    ...(allFailed ? { applied: false, fallback: "retrieval_error" } : {}),
+  };
+};
+
 // The QA route's retrieval, with the expansion applied when it holds one.
 // hyde: the planned (single) query searches with the HyDE vector; its text,
 // which the sparse route and the reranker read, stays the question.
 // multi_query: the question and each rewrite as their own retrieval, fused.
+// The question's own retrieval fails the call as it always did; a rewrite's
+// that fails is left out (a cancelled request still throws), and
+// `expansionFailures` ({ failedRewrites, errorCode }) says so; with none left,
+// the result is the question's own retrieval, as without expansion.
 const retrieveQaResults = async ({
   accessScope = null,
   docIds,
@@ -640,21 +664,54 @@ const retrieveQaResults = async ({
         query,
       })),
     ];
-    const searches = await Promise.all(
-      retrievalQueries.map((retrievalQuery) =>
-        retrieveGlobalContextForQueries({
-          accessScope,
-          docIds,
-          primaryQueryText: resolvedQuery,
-          primaryQueryVector: queryVector,
-          queryAdapterScope,
-          retrievalOptions,
-          retrievalQueries: [retrievalQuery],
-        })
-      )
-    );
+    const retrieveOne = (retrievalQuery) =>
+      retrieveGlobalContextForQueries({
+        accessScope,
+        docIds,
+        primaryQueryText: resolvedQuery,
+        primaryQueryVector: queryVector,
+        queryAdapterScope,
+        retrievalOptions,
+        retrievalQueries: [retrievalQuery],
+      });
+    const [questionSearch, ...rewriteOutcomes] = await Promise.all([
+      retrieveOne(primary),
+      ...retrievalQueries.slice(1).map((retrievalQuery) =>
+        retrieveOne(retrievalQuery).then(
+          (search) => ({ search }),
+          (error) => ({ error })
+        )
+      ),
+    ]);
+    const failures = rewriteOutcomes.filter((outcome) => outcome.error);
+    const cancellation = failures.find((outcome) => isRequestCancelledError(outcome.error));
+
+    if (cancellation) {
+      throw cancellation.error;
+    }
+
+    const expansionFailures =
+      failures.length > 0
+        ? { errorCode: describeQueryExpansionErrorCode(failures[0].error), failedRewrites: failures.length }
+        : null;
+
+    if (expansionFailures) {
+      console.warn(
+        `RAG_QA_QUERY_EXPANSION=multi_query: ${failures.length} of ${rewriteOutcomes.length} rewrite retrievals failed (${expansionFailures.errorCode}); fusing the rest.`
+      );
+    }
+
+    const searches = [
+      questionSearch,
+      ...rewriteOutcomes.filter((outcome) => outcome.search).map((outcome) => outcome.search),
+    ];
+
+    if (searches.length === 1) {
+      return { ...questionSearch, expansionFailures };
+    }
 
     return {
+      expansionFailures,
       results: fuseExpandedQueryResults({
         lists: searches.map((search) => search.results),
         queryText: resolvedQuery,
@@ -662,8 +719,8 @@ const retrieveQaResults = async ({
         topK: retrievalOptions.topK ?? getRetrievalTopK(),
       }),
       retrieval: {
-        ...searches[0].retrieval,
-        queryCount: retrievalQueries.length,
+        ...questionSearch.retrieval,
+        queryCount: searches.length,
         routes: mergeRouteSummaries(...searches.map((search) => search.retrieval.routes)),
       },
     };
@@ -969,7 +1026,7 @@ export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolve
           agentRetrievalPlan: null,
           plannedRetrievalQueries: inputs.plannedRetrievalQueries,
         });
-  const { results } = await retrieveQaResults({
+  const { expansionFailures, results } = await retrieveQaResults({
     accessScope,
     docIds,
     expansion,
@@ -982,7 +1039,7 @@ export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolve
 
   return {
     evidenceRequirementCount: inputs.evidenceRequirements?.length ?? 1,
-    ...(expansion ? { queryExpansion: expansion.diagnostics } : {}),
+    ...(expansion ? { queryExpansion: describeAppliedExpansion(expansion, expansionFailures) } : {}),
     results,
     routeMode: inputs.route.mode,
   };
@@ -1008,7 +1065,11 @@ const executeQaRag = async ({
   const coverageFromQueryText =
     agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled();
   const expansion = await prepareQaQueryExpansion({ agentRetrievalPlan, plannedRetrievalQueries });
-  const { results: retrievalResults, retrieval } = await retrieveQaResults({
+  const {
+    expansionFailures,
+    results: retrievalResults,
+    retrieval,
+  } = await retrieveQaResults({
     accessScope,
     docIds,
     expansion,
@@ -1054,7 +1115,7 @@ const executeQaRag = async ({
     }),
     retrieval,
     // Only with RAG_QA_QUERY_EXPANSION on, so a default trace keeps its shape.
-    ...(expansion ? { queryExpansion: expansion.diagnostics } : {}),
+    ...(expansion ? { queryExpansion: describeAppliedExpansion(expansion, expansionFailures) } : {}),
     retrievalResults: retrievalResults.map((result) => buildResultTrace(result)),
     contextExtraCount: contextResults.length - confidence.usableResults.length,
     confidence: buildConfidenceTrace(confidence),

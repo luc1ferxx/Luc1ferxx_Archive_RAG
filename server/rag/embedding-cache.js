@@ -2,7 +2,7 @@ import {
   getActiveDatabaseTenant,
   getDatabaseTenantContext,
 } from "./postgres-tenant.js";
-import { embedQuery, embedTexts } from "./openai.js";
+import { embedQuery } from "./openai.js";
 import { meanOfUnitVectors } from "./query-expansion.js";
 import {
   getQueryEmbeddingCacheMaxEntries,
@@ -340,19 +340,22 @@ export const embedQueryCached = async (query, { space = null } = {}) => {
  * HyDE's dense query vector (RAG_QA_QUERY_EXPANSION=hyde, rag/query-expansion.js):
  * the normalized mean of `queryText`'s query embedding (this cache's, so the
  * question is embedded once) and `passage`'s document embedding, both in the
- * space the index serves. The passage goes through embedTexts with that
- * space's document prefix, as a chunk does, and is not cached: it was written
- * for this one question. The result is tagged with the space like every vector
- * returned here, so a pgvector search uses it as is; were the pointer to move
- * between this call and the search, the search would embed the question's text
- * in the new space and run without the passage.
+ * space the index serves. The passage is embedded with that space's document
+ * prefix, as a chunk is, but on the query path (embedQuery with the document
+ * prefix in place of the query prefix): it is part of a request, so it takes
+ * the query lane and is metered as a query embedding, not as ingest
+ * (embedTexts). It is not cached: it was written for this one question. The
+ * result is tagged with the space like every vector returned here, so a
+ * pgvector search uses it as is; were the pointer to move between this call
+ * and the search, the search would embed the question's text in the new space
+ * and run without the passage.
  */
 export const embedHydeQueryVector = async ({ passage, queryText }) => {
   const space = peekServingQueryEmbeddingSpace() ?? (await resolveServingQueryEmbeddingSpace());
   const questionVector = await embedQueryCached(queryText, { space });
-  const [passageVector] = isSameQuerySpace(space, getConfiguredEmbeddingSpace())
-    ? await embedTexts([passage])
-    : await embedTexts([passage], { embeddingSpace: toEmbeddingSpaceRequest(space) });
+  const passageVector = await embedQuery(passage, {
+    embeddingSpace: { ...toEmbeddingSpaceRequest(space), queryPrefix: space.documentPrefix },
+  });
   const vector = meanOfUnitVectors(questionVector, passageVector);
 
   vectorSpaces.set(vector, space);

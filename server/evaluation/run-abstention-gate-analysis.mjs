@@ -453,6 +453,9 @@ export const summarizeQueryExpansion = (cases = []) => {
     fallbacks: countBy((entry) => entry.fallback),
     mode: entries[0].mode,
     questions: entries.length,
+    // multi_query: questions where at least one rewrite's retrieval failed
+    // and was left out of the fusion.
+    rewriteRetrievalFailures: entries.filter((entry) => Number(entry.failedRewrites) > 0).length,
     skipped: countBy((entry) => entry.skipped),
     truncated: entries.filter((entry) => entry.truncated === true).length,
   };
@@ -464,6 +467,11 @@ const formatQueryExpansionMarkdown = (section) => [
   section.durationMs
     ? `Expansion before retrieval: mean ${section.durationMs.mean} ms, p50 ${section.durationMs.p50}, p95 ${section.durationMs.p95}, max ${section.durationMs.max}.`
     : "Expansion before retrieval: no timed question.",
+  ...(section.applied > 0
+    ? [
+        "No dense rescue section: the expanded candidates' cosines are to a rewrite or to the HyDE vector, not to the question, and the expansion refuses to run with the rescue. The dense similarity AUC above reads those cosines too.",
+      ]
+    : []),
 ];
 
 /** `--dense-rescue margin:0.05:0.3` (mode, threshold, coverage floor) as a rescue configuration. */
@@ -787,15 +795,23 @@ const main = async () => {
     : null;
   // The dense rescue section. The reranker gate replaces the lexical one, and
   // the rescue never applies there, so it is measured on the lexical gate.
+  // Not on expanded candidates (RAG_QA_QUERY_EXPANSION applied to any
+  // question): their cosines are to a rewrite or to the HyDE vector, not to
+  // the question, and the expansion refuses to run with the rescue.
+  const expanded = candidatesByCase.some((entry) => entry.queryExpansion?.applied === true);
   const denseSignals = signals.map((signal) => ({ absolute: signal.dense_absolute, margin: signal.dense_margin }));
-  const rescueConfigs = explicitRescues.length > 0 ? explicitRescues : buildDenseRescueGrid(denseSignals);
+  const rescueConfigs = expanded
+    ? []
+    : explicitRescues.length > 0
+      ? explicitRescues
+      : buildDenseRescueGrid(denseSignals);
   const rescueRows = rescueConfigs.map((denseRescue) => {
     const decisions = decide({ ...DEFAULT_GATE, denseRescue });
 
     return { ...denseRescue, ...withCost(summarizeGateSetting(decisions)), decisions };
   });
   const stripDecisions = ({ decisions: _decisions, ...row }) => row;
-  const pick = explicitRescues.length > 0 ? null : pickDenseRescue(rescueRows, defaultSummary);
+  const pick = expanded || explicitRescues.length > 0 ? null : pickDenseRescue(rescueRows, defaultSummary);
   const pairedRows = explicitRescues.length > 0 ? rescueRows : pick ? [pick] : [];
   const answerableCases = candidatesByCase.filter(({ testCase }) => !testCase.shouldAbstain);
   const report = {
@@ -811,22 +827,25 @@ const main = async () => {
       unanswerable: candidatesByCase.length - answerableCases.length,
     },
     default: defaultSummary,
-    denseRescue: {
-      auc: { absolute: auc("dense_absolute"), margin: auc("dense_margin") },
-      baseline: { answerablePass: defaultSummary.answerablePass, unanswerableCatch: defaultSummary.unanswerableCatch },
-      catchTolerance: DENSE_RESCUE_CATCH_TOLERANCE,
-      explicit: explicitRescues.length > 0 ? explicitRescues : null,
-      gainsEnough: explicitRescues.length > 0 ? null : denseRescueGainsEnough(pick, defaultSummary),
-      grid: rescueRows.map(stripDecisions),
-      minGain: DENSE_RESCUE_MIN_GAIN,
-      paired: pairedRows.map((row) => ({
-        floor: row.floor,
-        mode: row.mode,
-        threshold: row.threshold,
-        ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
-      })),
-      pick: pick ? stripDecisions(pick) : null,
-    },
+    // Null when the candidates were expanded (see above).
+    denseRescue: expanded
+      ? null
+      : {
+          auc: { absolute: auc("dense_absolute"), margin: auc("dense_margin") },
+          baseline: { answerablePass: defaultSummary.answerablePass, unanswerableCatch: defaultSummary.unanswerableCatch },
+          catchTolerance: DENSE_RESCUE_CATCH_TOLERANCE,
+          explicit: explicitRescues.length > 0 ? explicitRescues : null,
+          gainsEnough: explicitRescues.length > 0 ? null : denseRescueGainsEnough(pick, defaultSummary),
+          grid: rescueRows.map(stripDecisions),
+          minGain: DENSE_RESCUE_MIN_GAIN,
+          paired: pairedRows.map((row) => ({
+            floor: row.floor,
+            mode: row.mode,
+            threshold: row.threshold,
+            ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
+          })),
+          pick: pick ? stripDecisions(pick) : null,
+        },
     queryExpansion: summarizeQueryExpansion(candidatesByCase),
     rerankGate,
     rerankGrid,

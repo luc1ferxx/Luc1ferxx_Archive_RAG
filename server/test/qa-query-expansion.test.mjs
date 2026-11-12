@@ -120,9 +120,9 @@ const useIndex = async () => {
   withEnv({
     OPENAI_EMBEDDING_MODEL: "expansion-test-model",
     RAG_EMBEDDING_DIMENSIONS: "3",
-    RAG_EMBEDDING_DOCUMENT_PREFIX: "",
+    RAG_EMBEDDING_DOCUMENT_PREFIX: "d: ",
     RAG_EMBEDDING_QUERY_ADAPTER: undefined,
-    RAG_EMBEDDING_QUERY_PREFIX: "",
+    RAG_EMBEDDING_QUERY_PREFIX: "q: ",
     RAG_HYBRID_ENABLED: "true",
     RAG_HYBRID_FUSION: undefined,
     RAG_RERANK_ENABLED: "false",
@@ -141,8 +141,19 @@ const useIndex = async () => {
 
 // A stand-in model: the expansion prompts get `rewrites` / `passage` (or the
 // error a test wants), anything else (an answer prompt) a short answer.
-const useModels = ({ answer = "Geneva [Source 1].", embedError = null, passage = PASSAGE, replyError = null, rewrites = `1. ${REWRITE}` } = {}) => {
+// `embedError` fails the passage's embedding, `failingQueries` the query
+// embeddings of the texts it names. The stand-in sees raw texts; the prefix
+// a real client would add travels in `embeddingSpace` (embeddedQueries).
+const useModels = ({
+  answer = "Geneva [Source 1].",
+  embedError = null,
+  failingQueries = {},
+  passage = PASSAGE,
+  replyError = null,
+  rewrites = `1. ${REWRITE}`,
+} = {}) => {
   const completions = [];
+  const embeddedQueries = [];
   const embeddedTexts = [];
 
   configureOpenAIProvider({
@@ -157,19 +168,26 @@ const useModels = ({ answer = "Geneva [Source 1].", embedError = null, passage =
 
       return kind === "multi_query" ? rewrites : kind === "hyde" ? passage : answer;
     },
-    embedQuery: async (query) => vectorOf(query),
-    embedTexts: async (texts) => {
-      embeddedTexts.push(texts);
+    embedQuery: async (query, options) => {
+      embeddedQueries.push({ options, query });
 
-      if (embedError && texts.includes(passage)) {
+      if (embedError && query === passage) {
         throw embedError;
       }
 
+      if (failingQueries[query]) {
+        throw failingQueries[query];
+      }
+
+      return vectorOf(query);
+    },
+    embedTexts: async (texts) => {
+      embeddedTexts.push(texts);
       return texts.map(vectorOf);
     },
   });
 
-  return { completions, embeddedTexts };
+  return { completions, embeddedQueries, embeddedTexts };
 };
 
 const summarize = (candidates) =>
@@ -288,6 +306,22 @@ test("a multi_query reply is read one query per line, without markers, prefaces,
     }),
     ["alpha", "beta", "gamma", "2.5 million parameter models?"]
   );
+  // A label needs a space after ".", ")" or "-": a quarter that starts the query stays.
+  assert.deepEqual(
+    parseRewrittenQueries("Q3-2024 revenue growth\nQ4.2024 revenue\nQ2) delta epsilon\nQuery 3 - zeta eta", {
+      count: 5,
+      question: "x",
+    }),
+    ["Q3-2024 revenue growth", "Q4.2024 revenue", "delta epsilon", "zeta eta"]
+  );
+  // A line with no term a store would score is no query and takes no slot.
+  assert.deepEqual(
+    parseRewrittenQueries("1.\nWhich corpora are used?\n2.\n```\n---\n...\nN/A\nWhat is it?\nWhat training data does the paper use?", {
+      count: 2,
+      question: "What datasets do they train on?",
+    }),
+    ["Which corpora are used?", "What training data does the paper use?"]
+  );
   // The question itself, a preface in Chinese, an empty line and an overlong line never count.
   assert.deepEqual(
     parseRewrittenQueries(`以下是改写：\n\n条约在哪里签署？\n${"long ".repeat(100)}\n签约地点`, {
@@ -326,7 +360,11 @@ test("the fused list: reciprocal rank over the lists, the question's copy kept, 
   });
   const question = [result("a", { keywordScore: 0.2 }), result("x", { keywordScore: 0.1 })];
   const rewriteOne = [result("b", { queryId: "rewrite-1" }), result("a", { keywordScore: 0.95, queryId: "rewrite-1" })];
-  const rewriteTwo = [result("c", { queryId: "rewrite-2" }), result("b", { queryId: "rewrite-2", vectorScore: 0.3 })];
+  // A store stores null coverage for a query with no term; the gate would read it as enough.
+  const rewriteTwo = [
+    result("c", { keywordScore: null, queryId: "rewrite-2" }),
+    result("b", { queryId: "rewrite-2", vectorScore: 0.3 }),
+  ];
   const fused = fuseExpandedQueryResults({
     lists: [question, rewriteOne, rewriteTwo],
     queryText: "where is the venue",
@@ -334,14 +372,21 @@ test("the fused list: reciprocal rank over the lists, the question's copy kept, 
     topK: 3,
   });
 
-  // a: 1/61 + 1/62; b: 1/61 + 1/62 (tie: a came from the question's list); c: 1/61; x: 1/62.
+  // a: 1/61 + 1/62; b: 1/61 + 1/62 (tie: a came from the question's list); c: 1/61; x: 1/62;
+  // scaled by 61 / 3 lists into (0, 1].
+  const scaled = (sum) => Number(((sum * 61) / 3).toFixed(6));
   assert.deepEqual(
     fused.map((entry) => [entry.document.metadata.chunkIndex, Number(entry.score.toFixed(6))]),
     [
-      ["a", Number((1 / 61 + 1 / 62).toFixed(6))],
-      ["b", Number((1 / 61 + 1 / 62).toFixed(6))],
-      ["c", Number((1 / 61).toFixed(6))],
+      ["a", scaled(1 / 61 + 1 / 62)],
+      ["b", scaled(1 / 61 + 1 / 62)],
+      ["c", scaled(1 / 61)],
     ]
+  );
+  // Ranked first by every list: 1.
+  assert.equal(
+    fuseExpandedQueryResults({ lists: [question.slice(0, 1), question.slice(0, 1)], queryText: "q", rrfK: 60, topK: 1 })[0].score,
+    1
   );
   // The question's own copy, untouched apart from the fused score, with both queries.
   assert.equal(fused[0].keywordScore, 0.2);
@@ -353,6 +398,10 @@ test("the fused list: reciprocal rank over the lists, the question's copy kept, 
   assert.notEqual(coverage, 0.9);
   assert.equal(fused[1].admissionScore, Math.max(0.4, coverage));
   assert.deepEqual(fused[1].provenance.queries.map((query) => query.queryId), ["rewrite-1", "rewrite-2"]);
+  // c: only the term-less rewrite found it; its null coverage is measured against the question.
+  assert.equal(typeof fused[2].keywordScore, "number");
+  assert.equal(fused[2].keywordScore, computeResultQueryTermCoverage(fused[2], "where is the venue"));
+  assert.equal(fused[2].admissionScore, Math.max(0.4, fused[2].keywordScore));
   // No cut without a top-K.
   assert.equal(fuseExpandedQueryResults({ lists: [question, rewriteOne, rewriteTwo], queryText: "q", rrfK: 60 }).length, 4);
 });
@@ -402,7 +451,7 @@ test("multi_query: one call, the rewrite's list fused with the question's, the r
 
 test("hyde: the dense route searches with the mean of the question's and the passage's vectors", async () => {
   await useIndex();
-  const { completions, embeddedTexts } = useModels();
+  const { completions, embeddedQueries, embeddedTexts } = useModels();
 
   withEnv({ RAG_QA_QUERY_EXPANSION: "hyde" });
   const candidates = await retrieve();
@@ -411,8 +460,13 @@ test("hyde: the dense route searches with the mean of the question's and the pas
   assert.equal(completions[0].kind, "hyde");
   // No temperature unless set.
   assert.equal("temperature" in completions[0].options, false);
-  // The passage went through the document embedding path (embedTexts).
-  assert.deepEqual(embeddedTexts.at(-1), [PASSAGE]);
+  // The passage was embedded on the query path (the request's lane, not
+  // ingest's embedTexts) with the document prefix in place of the query prefix.
+  const passageEmbeddings = embeddedQueries.filter((call) => call.query === PASSAGE);
+  assert.equal(passageEmbeddings.length, 1);
+  assert.equal(passageEmbeddings[0].options.embeddingSpace.queryPrefix, "d: ");
+  assert.equal(passageEmbeddings[0].options.embeddingSpace.model, "expansion-test-model");
+  assert.equal(embeddedTexts.length, 0);
   // Mean of [1, 0, 0] and [0, 1, 0]: A (0.78) then B (0.71); the question alone ranks A, X.
   assert.deepEqual(summarize(candidates).map((row) => row.text), [TEXTS.A, TEXTS.B]);
   assert.ok(Math.abs(candidates.results[1].vectorScore - Math.SQRT1_2) < 1e-9);
@@ -454,6 +508,27 @@ test("a failed or empty expansion retrieves with the question alone and says why
   useModels({ replyError: Object.assign(new Error("upstream down"), { code: "MODEL_UPSTREAM_UNAVAILABLE" }) });
   withEnv({ RAG_QA_QUERY_EXPANSION: "multi_query" });
   assert.equal((await retrieve()).queryExpansion.errorCode, "MODEL_UPSTREAM_UNAVAILABLE");
+
+  // A rewrite whose retrieval fails is left out; every one failing is the question alone.
+  const down = Object.assign(new Error("embed down"), { code: "EMBED_DOWN" });
+
+  resetOpenAIProvider();
+  resetEmbeddingCache();
+  useModels({ failingQueries: { [REWRITE]: down }, rewrites: `1. ${REWRITE}\n2. other venue question` });
+  const partial = await retrieve();
+  assert.equal(partial.queryExpansion.applied, true);
+  assert.equal(partial.queryExpansion.failedRewrites, 1);
+  assert.equal(partial.queryExpansion.errorCode, "EMBED_DOWN");
+  assert.notDeepEqual(partial.results, baseline);
+
+  resetOpenAIProvider();
+  resetEmbeddingCache();
+  useModels({ failingQueries: { [REWRITE]: down } });
+  const none = await retrieve();
+  assert.deepEqual(none.results, baseline);
+  assert.equal(none.queryExpansion.applied, false);
+  assert.equal(none.queryExpansion.fallback, "retrieval_error");
+  assert.equal(none.queryExpansion.failedRewrites, 1);
 });
 
 test("a cancelled request is not swallowed by the fallback", async () => {
@@ -559,6 +634,7 @@ test("the gate analysis summarizes what the expansion did", () => {
     fallbacks: { model_error: 1 },
     mode: "multi_query",
     questions: 4,
+    rewriteRetrievalFailures: 0,
     skipped: { multi_part: 1 },
     truncated: 1,
   });

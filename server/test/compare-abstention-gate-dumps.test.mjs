@@ -11,7 +11,9 @@ import {
   GATE_SETTING_FIELDS,
   assertComparableGateDumps,
   compareGateDumps,
+  describeGateDumpConfigDifferences,
   describeGateDumpRows,
+  formatGateDumpComparison,
   pairGateDumpRows,
   summarizeRetrievalMs,
 } from "../evaluation/compare-abstention-gate-dumps.mjs";
@@ -44,9 +46,10 @@ const testCase = (id, paper, { pages = [], shouldAbstain = false } = {}) => ({
   question: "Which datasets do they evaluate on?",
   shouldAbstain,
 });
-const dumpOf = (cases, retrieval) => ({
+const GIT = Object.freeze({ changedPaths: [], dirty: false, sha: "abc123" });
+const dumpOf = (cases, retrieval, config = {}) => ({
   cases,
-  config: { retrieval },
+  config: { corpus: "qasper-train.json", embeddingModel: "nomic-embed-text", git: GIT, retrieval, seed: 1, ...config },
   generatedAt: "2026-11-12T00:00:00.000Z",
   reportType: "abstention-gate-candidates",
 });
@@ -133,6 +136,31 @@ test("two files are compared only over the same questions and the gate settings 
       field
     );
   }
+
+  // Anything but the expansion differing: another commit, a dirty tree, another
+  // top-K or embedding model, a base from another run's settings.
+  for (const [label, arm] of [
+    ["git.sha", dumpOf(cases, retrieval, { git: { ...GIT, sha: "def456" } })],
+    ["git.changedPaths", dumpOf(cases, retrieval, { git: { changedPaths: ["server/rag/x.js"], dirty: true, sha: GIT.sha } })],
+    ["retrieval.topK", dumpOf(cases, { ...retrieval, topK: 6 })],
+    ["embeddingModel", dumpOf(cases, retrieval, { embeddingModel: "other-model" })],
+    ["seed", dumpOf(cases, retrieval, { seed: 2 })],
+  ]) {
+    assert.throws(() => assertComparableGateDumps(same, arm, retrieval), new RegExp(`differ in more than the query expansion: .*${label.replace(".", "\\.")}`), label);
+    assert.ok(
+      assertComparableGateDumps(same, arm, retrieval, { allowDifferences: true }).some(({ field }) => field === label),
+      label
+    );
+  }
+
+  // The expansion fields alone are expected to differ.
+  assert.deepEqual(
+    describeGateDumpConfigDifferences(same.config, {
+      ...same.config,
+      retrieval: { ...retrieval, qaQueryExpansion: "multi_query", qaQueryExpansionCount: 3, qaQueryExpansionPrompt: "p", qaQueryExpansionTemperature: 0 },
+    }),
+    []
+  );
 });
 
 test("the comparison: every metric, the retrieval time of each file", () => {
@@ -164,6 +192,16 @@ test("the comparison: every metric, the retrieval time of each file", () => {
   assert.equal(comparison.metrics.gateUnanswerableCatch.base, 1);
   assert.deepEqual(comparison.retrievalMs.arm, { max: 1200, mean: 1000, p50: 800, p95: 1200, questions: 2 });
   assert.equal(summarizeRetrievalMs(dumpOf([{ results: [] }], {})), null);
+  assert.deepEqual(comparison.provenance.base, {
+    dirty: false,
+    generatedAt: "2026-11-12T00:00:00.000Z",
+    queryExpansion: "off",
+    sha: "abc123",
+  });
+  assert.match(
+    formatGateDumpComparison(comparison, { armLabel: "arm.json", baseLabel: "base.json" }),
+    /base: commit abc123, expansion off; arm: commit abc123, expansion off\./
+  );
 });
 
 test("the command reads two files and prints the comparison without reading server/.env", async () => {
@@ -195,6 +233,8 @@ test("the command reads two files and prints the comparison without reading serv
     assert.equal(printed.base, "base.json");
     assert.equal(printed.metrics.evidenceInContext.delta, 0);
     assert.equal(printed.metrics.evidenceInContext.arm, 1);
+    assert.equal(printed.provenance.arm.sha, "abc123");
+    assert.deepEqual(printed.configDifferences, []);
   } finally {
     rmSync(tempRoot, { force: true, recursive: true });
   }

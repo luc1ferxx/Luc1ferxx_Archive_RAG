@@ -9,6 +9,7 @@ import { completeTextWithMetadata } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 import { isRequestCancelledError } from "./request-deadline.js";
 import { isRemoteRetrievalEnabled } from "./service-topology.js";
+import { buildTermSet } from "./text-utils.js";
 
 // Query expansion on the single-document QA route's own retrieval
 // (RAG_QA_QUERY_EXPANSION, default off; settings in config.js). Before the
@@ -110,7 +111,7 @@ const describeConflict = ({ mode }) => {
   }
 
   if (mode === "multi_query" && isRerankEnabled()) {
-    return "cannot run with RAG_RERANK_ENABLED: each rewrite's candidates would be reranked against the rewrite, and the rerank gate reads those scores as relevance to the question.";
+    return "cannot run with RAG_RERANK_ENABLED (any RAG_RERANK_PROVIDER): each rewrite's candidates would be reranked against the rewrite, and with the cross-encoder the rerank gate would read those scores as relevance to the question.";
   }
 
   return null;
@@ -151,16 +152,21 @@ const normalizeForComparison = (text) =>
     .trim();
 
 // A leading list marker followed by a space: "- ", "* ", "• ", "1. ", "2) ",
-// "(3) ", or a label "Q1:", "Query 2 -", "Query:". A number or a word that
-// starts the query itself ("2.5 million ...", "Q-learning ...") is not one.
+// "(3) ", or a label "Q1:", "Q1) ", "Query 2 - ", "Query:". A number or a
+// word that starts the query itself ("2.5 million ...", "Q-learning ...",
+// "Q3-2024 revenue", "Q4.2024") is not one: after a label's ".", ")" or "-"
+// a space must follow.
 const LIST_MARKER_PATTERN =
-  /^(?:[-*•]+\s+|\(?\d{1,2}[.)]\s+|(?:q|query)\s*\d{1,2}\s*[:.)-]\s*|(?:q|query)\s*[:：]\s*)/iu;
+  /^(?:[-*•]+\s+|\(?\d{1,2}[.)]\s+|(?:q|query)\s*\d{1,2}\s*(?:[:：]\s*|[.)-]\s+)|(?:q|query)\s*[:：]\s*)/iu;
 const SURROUNDING_QUOTES_PATTERN = /^["'“”‘’「『]+|["'“”‘’」』]+$/gu;
 
 /**
  * The rewrites a multi_query reply holds: one per line, list markers and
  * surrounding quotes removed, a preface line ending in ":" dropped, never the
- * question itself or a repeat, at most `count`.
+ * question itself or a repeat, at most `count`. A line with no term a store
+ * would score ("1.", "```", "---", "N/A", "What is it?": buildTermSet, the
+ * stores' and the gate's own term set) is no query and takes no slot: its
+ * search would return candidates with no coverage to read.
  */
 export const parseRewrittenQueries = (text, { count, question }) => {
   const seen = new Set([normalizeForComparison(question)]);
@@ -175,7 +181,13 @@ export const parseRewrittenQueries = (text, { count, question }) => {
       .trim();
     const key = normalizeForComparison(rewrite);
 
-    if (!rewrite || /[:：]$/u.test(rewrite) || rewrite.length > MAX_REWRITE_CHARS || seen.has(key)) {
+    if (
+      !rewrite ||
+      /[:：]$/u.test(rewrite) ||
+      rewrite.length > MAX_REWRITE_CHARS ||
+      seen.has(key) ||
+      buildTermSet(rewrite).size === 0
+    ) {
       continue;
     }
 

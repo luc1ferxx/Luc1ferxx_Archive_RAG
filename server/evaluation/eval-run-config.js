@@ -97,6 +97,9 @@ export const describeRetrievalConfig = async () => {
           qaQueryExpansionTemperature: queryExpansion.temperature,
         }
       : {}),
+    // Only with reranking on (RAG_CROSS_ENCODER_SCORES): how the rerank gate
+    // reads a stored crossEncoderScore, so a replay can be held to it.
+    ...(config.isRerankEnabled() ? { crossEncoderScores: config.getCrossEncoderScoreScale() } : {}),
     bm25B: config.getBm25B(),
     bm25K1: config.getBm25K1(),
     denseWeight: config.getHybridDenseWeight(),
@@ -155,6 +158,7 @@ const RETRIEVAL_FIELDS = Object.freeze([
   "maxQueryRequirements",
   "bm25K1",
   "bm25B",
+  "crossEncoderScores",
   "minRelevanceScore",
   "minQaQueryTermCoverage",
   "qaPartialCoverageFloor",

@@ -14,15 +14,24 @@
 // allowlisted environment (env -i) for the defaults. The context holds at most
 // the run's own top-K (config.retrieval.topK) chunks. It never reads
 // server/.env.
+//
+// The two runs must differ in nothing but the query expansion
+// (retrieval.qaQueryExpansion*): same checkout (git sha, a clean tree),
+// chunking, retrieval settings, embedding model, query adapter, corpus and
+// sample. Otherwise it refuses and names the differences; --allow-differences
+// compares anyway and prints them. The output names each run's commit and
+// expansion mode.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { describeRunConfigDifferences } from "./eval-run-config.js";
 import { bootstrapClusterMeanInterval, createSeededRandom } from "./paired-bootstrap.js";
 
 export const GATE_DUMP_REPORT_TYPE = "abstention-gate-candidates";
 
 // The settings the replayed gate and context read (eval-run-config.js names).
 export const GATE_SETTING_FIELDS = Object.freeze([
+  "crossEncoderScores",
   "minQaQueryTermCoverage",
   "minRelevanceScore",
   "qaAnswerVerdict",
@@ -49,11 +58,41 @@ const assertGateDump = (dump, label) => {
   }
 };
 
+// Run settings outside config.retrieval and config.chunking that change the
+// candidates.
+const RUN_FIELDS = Object.freeze(["answerable", "corpus", "embeddingModel", "queryAdapter", "seed"]);
+
 /**
- * Throws unless both dumps hold the same questions in the same order and
- * recorded the gate settings `currentRetrieval` (describeRetrievalConfig) has.
+ * Where the two runs differ apart from the query expansion: the fields
+ * describeRunConfigDifferences lists (chunking, retrieval settings, the
+ * checkout) without retrieval.qaQueryExpansion*, plus RUN_FIELDS.
  */
-export const assertComparableGateDumps = (base, arm, currentRetrieval) => {
+export const describeGateDumpConfigDifferences = (baseConfig = {}, armConfig = {}) => [
+  ...describeRunConfigDifferences(baseConfig, armConfig).filter(
+    ({ field }) => !field.startsWith("retrieval.qaQueryExpansion")
+  ),
+  ...RUN_FIELDS.filter((field) => !Object.is(baseConfig?.[field] ?? null, armConfig?.[field] ?? null)).map((field) => ({
+    current: baseConfig?.[field] ?? null,
+    field,
+    other: armConfig?.[field] ?? null,
+  })),
+];
+
+/** A run's commit, whether its tree was clean, and its expansion mode, for the output. */
+export const describeGateDumpProvenance = (dump) => ({
+  dirty: dump.config?.git?.dirty ?? null,
+  generatedAt: dump.generatedAt ?? null,
+  queryExpansion: dump.config?.retrieval?.qaQueryExpansion ?? "off",
+  sha: dump.config?.git?.sha ?? null,
+});
+
+/**
+ * Throws unless both dumps hold the same questions in the same order,
+ * recorded the gate settings `currentRetrieval` (describeRetrievalConfig) has,
+ * and differ in nothing but the query expansion (describeGateDumpConfigDifferences;
+ * `allowDifferences` lets them through). Returns those differences.
+ */
+export const assertComparableGateDumps = (base, arm, currentRetrieval, { allowDifferences = false } = {}) => {
   assertGateDump(base, "the base");
   assertGateDump(arm, "the arm");
 
@@ -82,6 +121,18 @@ export const assertComparableGateDumps = (base, arm, currentRetrieval) => {
       }
     }
   }
+
+  const differences = describeGateDumpConfigDifferences(base.config, arm.config);
+
+  if (differences.length > 0 && !allowDifferences) {
+    throw new Error(
+      `The two runs differ in more than the query expansion: ${differences
+        .map(({ current, field, other }) => `${field} ${JSON.stringify(current)} / ${JSON.stringify(other)}`)
+        .join("; ")}. Run both arms on one clean commit with one environment, or pass --allow-differences.`
+    );
+  }
+
+  return differences;
 };
 
 /**
@@ -202,19 +253,21 @@ const METRICS = Object.freeze([
  * functions (assessQaConfidence, selectQaContext, minContextCoverage, and the
  * fallback topK for a dump that recorded none).
  */
-export const compareGateDumps = (base, arm, { gate, iterations = 10000, seed = 12345 }) => {
+export const compareGateDumps = (base, arm, { configDifferences = [], gate, iterations = 10000, seed = 12345 }) => {
   const rowsOf = (dump) =>
     describeGateDumpRows(dump, { ...gate, topK: Number(dump.config?.retrieval?.topK) || gate.topK });
   const baseRows = rowsOf(base);
   const armRows = rowsOf(arm);
 
   return {
+    configDifferences,
     metrics: Object.fromEntries(
       METRICS.map(([name, keep, outcome], index) => [
         name,
         pairGateDumpRows(baseRows, armRows, { iterations, keep, outcome, seed: seed + index }),
       ])
     ),
+    provenance: { arm: describeGateDumpProvenance(arm), base: describeGateDumpProvenance(base) },
     questions: {
       answerable: baseRows.filter((row) => !row.shouldAbstain).length,
       unanswerable: baseRows.filter((row) => row.shouldAbstain).length,
@@ -228,9 +281,22 @@ const formatMetric = (name, metric) =>
     ? `${name}: ${metric.base} -> ${metric.arm}, ${metric.delta >= 0 ? "+" : ""}${metric.delta} [${metric.ci95ByPaper[0]}, ${metric.ci95ByPaper[1]}] (+${metric.flips.won} / -${metric.flips.lost}; ${metric.questions} questions, ${metric.papers} papers)`
     : `${name}: no question`;
 
+const describeRun = (provenance) =>
+  provenance
+    ? `commit ${provenance.sha ?? "unknown"}${provenance.dirty ? " (uncommitted changes)" : ""}, expansion ${provenance.queryExpansion}`
+    : "unknown";
+
 export const formatGateDumpComparison = (comparison, { armLabel, baseLabel }) =>
   [
     `Arm ${armLabel} minus base ${baseLabel}: ${comparison.questions.answerable} answerable and ${comparison.questions.unanswerable} unanswerable questions; 95% intervals resample papers.`,
+    `base: ${describeRun(comparison.provenance?.base)}; arm: ${describeRun(comparison.provenance?.arm)}.`,
+    ...(comparison.configDifferences?.length
+      ? [
+          `The runs also differ in: ${comparison.configDifferences
+            .map(({ current, field, other }) => `${field} ${JSON.stringify(current)} / ${JSON.stringify(other)}`)
+            .join("; ")}.`,
+        ]
+      : []),
     ...Object.entries(comparison.metrics).map(([name, metric]) => formatMetric(name, metric)),
     `retrieval ms, base: ${JSON.stringify(comparison.retrievalMs.base)}`,
     `retrieval ms, arm: ${JSON.stringify(comparison.retrievalMs.arm)}`,
@@ -248,7 +314,9 @@ const main = async () => {
   const positional = args.filter((value, index) => !value.startsWith("--") && !VALUE_OPTIONS.includes(args[index - 1]));
 
   if (positional.length !== 2) {
-    process.stderr.write("Usage: compare:gate-dumps -- <base dump> <arm dump> [--iterations 10000] [--seed 12345] [--json]\n");
+    process.stderr.write(
+      "Usage: compare:gate-dumps -- <base dump> <arm dump> [--iterations 10000] [--seed 12345] [--json] [--allow-differences]\n"
+    );
     process.exit(2);
   }
 
@@ -264,9 +332,12 @@ const main = async () => {
       import("./eval-run-config.js"),
     ]);
 
-  assertComparableGateDumps(base, arm, await describeRetrievalConfig());
+  const configDifferences = assertComparableGateDumps(base, arm, await describeRetrievalConfig(), {
+    allowDifferences: args.includes("--allow-differences"),
+  });
 
   const comparison = compareGateDumps(base, arm, {
+    configDifferences,
     gate: {
       assessQaConfidence,
       minContextCoverage: QA_CONTEXT_MIN_COVERAGE,
