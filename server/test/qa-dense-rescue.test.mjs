@@ -204,12 +204,19 @@ test("the rescue leaves multi-part questions and the reranker gate alone", async
 });
 
 test("a bad rescue setting fails the gate, not only the getter", async () => {
-  await withEnv(rescue("absolute"), () =>
+  await withEnv(rescue("absolute"), () => {
     assert.throws(
       () => assessQaConfidence({ queryText: question, results: reworded() }),
       /RAG_QA_DENSE_RESCUE_THRESHOLD must be set/
-    )
-  );
+    );
+    // Also when the reranker's probability decides and the rescue would not apply.
+    const reranked = reworded().map((result) => ({ ...result, crossEncoderScore: 4 }));
+
+    assert.throws(
+      () => assessQaConfidence({ queryText: question, results: reranked }),
+      /RAG_QA_DENSE_RESCUE_THRESHOLD must be set/
+    );
+  });
 });
 
 test("reports record the rescue only when it is on, so default reports compare equal with older ones", async () => {

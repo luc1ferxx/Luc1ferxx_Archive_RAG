@@ -46,6 +46,7 @@ test("a gate setting is summarized per class, so sampling one class does not bia
   assert.deepEqual(summary, {
     answerableEvidencePass: 0.3333,
     answerablePass: 0.6667,
+    counts: { answerable: 3, answerablePassed: 2, unanswerable: 1, unanswerableCaught: 1 },
     unanswerableCatch: 1,
     youdenJ: 0.6667,
   });
@@ -115,30 +116,58 @@ test("the rescue grid is the deciles of each signal over the run's questions, wi
 });
 
 test("the rescue pick passes the most answerable questions among those catching nearly as many unanswerable ones", () => {
-  const baseline = { answerablePass: 0.5, unanswerableCatch: 0.5 };
-  const row = (mode, threshold, floor, answerablePass, unanswerableCatch) => ({
-    answerablePass,
+  const counts = (answerablePassed, unanswerableCaught) => ({
+    answerable: 100,
+    answerablePassed,
+    unanswerable: 100,
+    unanswerableCaught,
+  });
+  const baseline = { counts: counts(50, 50) };
+  const row = (mode, threshold, floor, answerablePassed, unanswerableCaught) => ({
+    counts: counts(answerablePassed, unanswerableCaught),
     floor,
     mode,
     threshold,
-    unanswerableCatch,
   });
   const rows = [
-    row("absolute", 0.7, 0, 0.62, 0.47), // catches too few
-    row("margin", 0.05, 0, 0.58, 0.49),
-    row("absolute", 0.75, 0.3, 0.58, 0.49),
-    row("absolute", 0.75, 0, 0.58, 0.49),
-    row("absolute", 0.8, 0, 0.58, 0.48),
+    row("absolute", 0.7, 0, 62, 47), // catches too few
+    row("margin", 0.05, 0, 58, 49),
+    row("absolute", 0.75, 0.3, 58, 49),
+    row("absolute", 0.75, 0, 58, 49),
+    row("absolute", 0.8, 0, 58, 48), // exactly at the tolerance: qualifies
   ];
 
   assert.equal(DENSE_RESCUE_CATCH_TOLERANCE, 0.02);
   // Ties on pass go to the higher catch, then absolute, then the higher floor.
   assert.deepEqual(pickDenseRescue(rows, baseline), rows[2]);
+  assert.deepEqual(pickDenseRescue([rows[0], rows[4]], baseline), rows[4]);
   assert.equal(pickDenseRescue([rows[0]], baseline), null);
   assert.equal(DENSE_RESCUE_MIN_GAIN, 0.03);
   assert.equal(denseRescueGainsEnough(rows[2], baseline), true);
-  assert.equal(denseRescueGainsEnough({ ...rows[2], answerablePass: 0.52 }, baseline), false);
+  assert.equal(denseRescueGainsEnough(row("absolute", 0.75, 0.3, 53, 49), baseline), true);
+  assert.equal(denseRescueGainsEnough(row("absolute", 0.75, 0.3, 52, 49), baseline), false);
   assert.equal(denseRescueGainsEnough(null, baseline), false);
+});
+
+test("the rescue rules count questions, so rates rounded to 4 decimals cannot misjudge the minimum gain", () => {
+  // 5 and 29 of 800 report as 0.0063 and 0.0362: the rounded rates differ by
+  // 0.0299, while 24 more questions of 800 is exactly the required 0.03.
+  const baseline = summarizeGateSetting(
+    Array.from({ length: 800 }, (_, index) => ({ confident: index < 5, evidenceAdmitted: false, shouldAbstain: false }))
+  );
+  const pick = {
+    ...summarizeGateSetting(
+      Array.from({ length: 800 }, (_, index) => ({ confident: index < 29, evidenceAdmitted: false, shouldAbstain: false }))
+    ),
+    floor: 0,
+    mode: "absolute",
+    threshold: 0.8,
+  };
+
+  assert.equal(baseline.answerablePass, 0.0063);
+  assert.equal(pick.answerablePass, 0.0362);
+  assert.ok(pick.answerablePass - baseline.answerablePass < DENSE_RESCUE_MIN_GAIN - 1e-9);
+  assert.equal(denseRescueGainsEnough(pick, baseline), true);
 });
 
 test("a rescue is paired with the default gate question by question, with intervals by paper", () => {
