@@ -347,6 +347,8 @@ test("AppleScript strings are quoted, and the scripts name both outputs", () => 
 test("numbers and dates are read out of answers", () => {
   assert.deepEqual(extractNumbers("Spent was 47,250.00, a deficit of -2,250."), [47250, -2250]);
   assert.deepEqual(extractNumbers("12.5% growth"), [12.5]);
+  // Digits glued to a letter name something ("Q3"); they are not a value.
+  assert.deepEqual(extractNumbers("The Q3 revenue is 1,234.50"), [1234.5]);
   assert.deepEqual(extractIsoDates("on 2026-09-14"), ["2026-09-14"]);
   assert.deepEqual(extractIsoDates("on September 14, 2026"), ["2026-09-14"]);
   assert.deepEqual(extractIsoDates("on 4th March 2027"), ["2027-03-04"]);
@@ -371,6 +373,20 @@ test("an answer gives the gold value by number, by date or by whole words, never
   assert.equal(answerMatchesGold({ text: "Priya leads it." }, { kind: "text", value: "Priya Rossi" }), false);
   assert.equal(answerMatchesGold({ text: "The office is in Lyons." }, { kind: "text", value: "Lyon" }), false);
   assert.equal(answerMatchesGold({ text: "It moves to Station Road in May." }, { kind: "text", value: "Station Road" }), true);
+
+  // A citation label, a header's digit or a date's parts are not the number
+  // an answer gives: a small gold such as 1 or 2 would otherwise match the
+  // "[Source N]" label the answer writer puts on almost every answer.
+  const years = (value) => ({ kind: "number", value });
+
+  assert.equal(answerMatchesGold({ text: "The Contract years for Kestrel Logistics is 5. [Source 1]" }, years("1")), false);
+  assert.equal(
+    answerMatchesGold({ text: "The Contract years for Kestrel Logistics is not listed. [Source 1] [Source 2]" }, years("2")),
+    false
+  );
+  assert.equal(answerMatchesGold({ text: "The Contract years for Kestrel Logistics is 1. [Source 1]" }, years("1")), true);
+  assert.equal(answerMatchesGold({ text: "The Q3 revenue for Nordic is 1,234,567.89. [Source 1]" }, years("3.0%")), false);
+  assert.equal(answerMatchesGold({ text: "The Review date for Training is 2026-10-25. [Source 1]" }, years("-10.0%")), false);
 });
 
 test("evidence is in the context when one chunk holds the row's key and value, or the fact", () => {
@@ -396,6 +412,14 @@ test("evidence is in the context when one chunk holds the row's key and value, o
   assert.equal(evidenceInContexts(["The encoder has six layers."], wordQuestion), true);
   assert.equal(evidenceInContexts(["The encoder has six-layer blocks."], wordQuestion), false);
   assert.equal(evidenceInContexts(["anything"], { corpus: "word", gold: { spans: [] } }), null);
+
+  // A span is folded like the chunks: typographic quotes and dashes match
+  // their own text and the plain ASCII forms.
+  const quotedSpan = "define “cluster strength” as the “intra–group” distance";
+  const quotedQuestion = { corpus: "word", gold: { spans: [quotedSpan] } };
+
+  assert.equal(evidenceInContexts([quotedSpan], quotedQuestion), true);
+  assert.equal(evidenceInContexts(['We define "cluster strength" as the "intra-group" distance.'], quotedQuestion), true);
 });
 
 test("each arm is scored as the corpus asks: F1 for papers, the gold value otherwise", () => {
@@ -418,6 +442,17 @@ test("each arm is scored as the corpus asks: F1 for papers, the gold value other
     }),
     { abstained: true, correct: false, evidence: false }
   );
+
+  // An abstention scores 0, even where one annotator marked the question
+  // unanswerable (the official evaluator would give "Unanswerable" 1 there);
+  // an answer is still scored with the official F1.
+  const mixed = { corpus: "word", gold: { references: ["No", "Unanswerable"], spans: [] } };
+
+  assert.equal(
+    scoreArmAnswer({ abstained: true, contexts: [], question: mixed, text: "I still cannot confirm it reliably." }).f1,
+    0
+  );
+  assert.equal(scoreArmAnswer({ abstained: false, contexts: [], question: mixed, text: "No. [Source 1]" }).f1, 1);
 });
 
 const row = (docId, group, native, pdf) => ({ corpus: "sheet", docId, group, id: `${docId}-${group}`, native, pdf });

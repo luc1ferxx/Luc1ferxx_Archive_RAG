@@ -189,7 +189,8 @@ const describePromptTemplates = async () => {
 };
 
 // The rag surface's answer as this eval scores it. contextPages are the pages
-// the model was shown (a gate abstention still carries them); citedPages are
+// the model was shown (none for a gate abstention, which shows the model
+// nothing); citedPages are
 // the pages its [Source N] labels name, empty for an abstention; contextChars
 // is the chunk text of those contexts, in characters.
 export const describeRagSurfaceAnswer = (result) => {
@@ -267,7 +268,7 @@ const formatMarkdown = (report) => {
     `- Cited evidence recall (an evidence paragraph among the pages the answer's [Source N] labels cite; answerable, an abstention cites none): ${summary.citedEvidenceRecall}; among answers actually given: ${summary.citedEvidenceRecallWhenAnswered}`,
     `- Citation precision (share of cited pages holding annotated evidence; answered answerable questions citing a page, n=${summary.citationPrecisionCases}): ${summary.citationPrecision}`,
     `- Answers citing no page (all answered questions): ${summary.noCitationRateWhenAnswered}`,
-    `- Context evidence recall (${report.config.surface === "agent" ? "an evidence paragraph among the response's ragSources, cited or not, none for an abstention" : "an evidence paragraph among the pages the model was shown, cited or not; a gate abstention keeps them"}; earlier reports' evidenceRecall): ${summary.contextEvidenceRecall}; among answers actually given: ${summary.contextEvidenceRecallWhenAnswered}`,
+    `- Context evidence recall (${report.config.surface === "agent" ? "an evidence paragraph among the response's ragSources, cited or not, none for an abstention" : "an evidence paragraph among the pages the model was shown, cited or not; a gate abstention shows none, so it counts as a miss"}; earlier reports' evidenceRecall): ${summary.contextEvidenceRecall}; among answers actually given: ${summary.contextEvidenceRecallWhenAnswered}`,
     `- Answer F1 on answerable questions it did answer: ${summary.f1WhenAnswered}`,
     `- Abstained on answerable questions: ${summary.answerableAbstainRate}`,
     `- Unanswerable questions caught (abstain recall): ${summary.abstainRecall}; abstentions that were right (precision): ${summary.abstainPrecision}`,

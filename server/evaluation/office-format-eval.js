@@ -872,11 +872,22 @@ export const normalizeAnswerText = (text) =>
     .replace(/\s+/g, " ")
     .trim();
 
-/** Every number written in `text`, thousands separators dropped ("-2,250.00" is -2250). */
+/**
+ * Every number written in `text`, thousands separators dropped ("-2,250.00"
+ * is -2250). Digits glued to a letter are part of a name, not a number: the
+ * 3 of "Q3 revenue" is not a value.
+ */
 export const extractNumbers = (text) =>
-  [...normalizeAnswerText(text).matchAll(/-?\d[\d,]*(?:\.\d+)?/g)]
+  [...normalizeAnswerText(text).matchAll(/(?<!\p{L})-?\d[\d,]*(?:\.\d+)?/gu)]
     .map((match) => Number(match[0].replace(/,/g, "")))
     .filter(Number.isFinite);
+
+// The answer writer labels nearly every sentence "[Source N]", and an ISO date
+// splits into numbers (2026, -10, -25); neither is the number an answer gives.
+const withoutSourceLabelsAndDates = (text) =>
+  String(text ?? "")
+    .replace(/\[\s*source[^\]]*\]/gi, " ")
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
 
 const MONTH_NUMBERS = new Map(MONTHS.map((month, index) => [month.toLowerCase(), index + 1]));
 
@@ -918,7 +929,7 @@ export const answerMatchesGold = ({ abstained, text }, gold) => {
   if (gold.kind === "number") {
     const [expected] = extractNumbers(gold.value);
 
-    return extractNumbers(text).some((value) => Math.abs(value - expected) < 1e-9);
+    return extractNumbers(withoutSourceLabelsAndDates(text)).some((value) => Math.abs(value - expected) < 1e-9);
   }
 
   if (gold.kind === "date") {
@@ -956,7 +967,9 @@ export const evidenceInContexts = (contexts, question) => {
   const haystack = ` ${normalizeQasperAnswer(chunks.join("\n"))} `;
 
   return spans.some((span) => {
-    const needle = normalizeQasperAnswer(span);
+    // Folded like the chunks (NFKC, typographic quotes and dashes), or a span
+    // with curly quotes would not even match its own paragraph.
+    const needle = normalizeQasperAnswer(evidenceText(span));
 
     return needle.length > 0 && haystack.includes(` ${needle} `);
   });
@@ -970,9 +983,14 @@ export const scoreArmAnswer = ({ abstained, contexts, question, text }) => {
   };
 
   if (question.corpus === "word") {
+    // An abstention scores 0, as the rules declare. The official evaluator
+    // would score it as the answer "Unanswerable", which earns 1 whenever one
+    // annotator marked the question unanswerable.
     return {
       ...base,
-      f1: Number(qasperAnswerF1(toQasperPrediction({ abstained, text }), question.gold.references).toFixed(4)),
+      f1: abstained
+        ? 0
+        : Number(qasperAnswerF1(toQasperPrediction({ abstained: false, text }), question.gold.references).toFixed(4)),
     };
   }
 
@@ -1110,7 +1128,7 @@ const METRIC_LABELS = Object.freeze({
   answered: "answered (not abstained)",
   correct: "answer gives the gold value",
   evidence: "evidence in the model's context",
-  f1: "official QASPER answer F1",
+  f1: "QASPER answer F1 (abstention = 0)",
 });
 
 export const formatOfficeFormatMarkdown = (report) => {

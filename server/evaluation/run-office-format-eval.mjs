@@ -11,8 +11,10 @@
 //
 // Per question and arm the report keeps whether the system abstained, whether
 // the evidence (the sheet row, the slide fact, a gold extractive span) was in
-// the chunks retrieved for the model, the answer text, and the score: the
-// gold value given (sheet, deck) or the official QASPER answer F1 (word).
+// the chunks the model was shown (none when the QA gate refuses, so it is
+// false on every gate refusal), the answer text, and the score: the gold value
+// given (sheet, deck) or the QASPER answer F1 with an abstention scored 0
+// (word).
 // Summaries are native minus PDF with bootstrap 95% intervals by question
 // and by document. The manifest's file digests are checked before anything
 // is ingested.

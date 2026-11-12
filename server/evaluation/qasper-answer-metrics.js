@@ -8,7 +8,9 @@
 //   context  the pages the model was shown (the rag surface's
 //            retrievedContexts). The QA path returns every context chunk as a
 //            citation, so this measures retrieval plus context size, not what
-//            the answer cites, and a gate abstention still carries its context.
+//            the answer cites. A gate abstention shows the model nothing (its
+//            retrievedContexts is empty), so it always counts as a miss; an
+//            answer-model abstention keeps the context it was shown.
 //   cited    the pages of the sources the answer's [Source N] labels name,
 //            resolved with the product's filterCitationsToSourceRanks; an
 //            abstention cites nothing.
@@ -228,8 +230,9 @@ export const summarizeQasperRuns = (rows) => {
       citedRows.filter((row) => !row.abstained).map((row) => (row.citedEvidenceHit ? 1 : 0))
     ),
     // The figure earlier reports called evidenceRecall: an evidence page among
-    // the context pages (rag surface) whether or not the answer cites it, and
-    // a gate abstention keeps its context. Not a citation metric.
+    // the context pages (rag surface) whether or not the answer cites it; a
+    // gate abstention shows the model nothing and counts as a miss. Not a
+    // citation metric.
     contextEvidenceRecall: mean(contextRows.map((row) => (readContextEvidenceHit(row) ? 1 : 0))),
     contextEvidenceRecallWhenAnswered: mean(
       contextRows.filter((row) => !row.abstained).map((row) => (readContextEvidenceHit(row) ? 1 : 0))
