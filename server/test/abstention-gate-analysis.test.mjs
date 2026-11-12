@@ -280,14 +280,49 @@ test("the reranker re-measure picks among the probability thresholds and the lex
   assert.equal(pick.minRerankProbability, null);
 });
 
-test("the reranker re-measure prints its pick and every threshold against the lexical gate", () => {
+test("the reranker re-measure's rule: each key in order, the tolerance inclusive, whole counts only", () => {
+  // With 885 answerable and 345 unanswerable questions the cost is exactly
+  // 1.23 - (passed + caught) / 1000, so differences are whole thousandths.
+  const row = (minRerankProbability, answerablePassed, unanswerableCaught, cost = 0) => ({
+    cost, // a rounded rate's cost the pick must not read
+    counts: { answerable: 885, answerablePassed, unanswerable: 345, unanswerableCaught },
+    minRerankProbability,
+  });
+  const lexical = { cost: 0, counts: { answerable: 885, answerablePassed: 400, unanswerable: 345, unanswerableCaught: 300 } };
+  const threshold = (rows) => pickRerankGate(rows, lexical)?.minRerankProbability;
+
+  // Exactly 0.01 above the lowest (0.230 against 0.240) still qualifies, and catches more.
+  assert.equal(threshold([row(0.01, 800, 200), row(0.02, 780, 210)]), 0.02);
+  // 0.011 above does not.
+  assert.equal(threshold([row(0.01, 800, 200), row(0.02, 779, 210)]), 0.01);
+  // Equal catch: the lower cost wins before the higher threshold.
+  assert.equal(threshold([row(0.01, 800, 200), row(0.02, 795, 200)]), 0.01);
+  // The `cost` field is ignored: a row that only looks cheap is not picked.
+  assert.equal(threshold([row(0.01, 800, 200), row(0.5, 500, 210, -1)]), 0.01);
+  // A run without one of the classes has no pick instead of a crash.
+  const empty = { counts: { answerable: 10, answerablePassed: 5, unanswerable: 0, unanswerableCaught: 0 } };
+
+  assert.equal(exactGateCost(empty.counts), null);
+  assert.equal(pickRerankGate([{ ...empty, minRerankProbability: 0.02 }], empty), null);
+});
+
+test("the reranker re-measure prints its pick, its costs and every threshold against the lexical gate", () => {
   const cell = { ci95ByPaper: [0.01, 0.03], delta: 0.02, flips: { lost: 1, won: 9 } };
   const lines = formatRerankGateMarkdown({
+    candidates: [
+      { exactCost: 0.31, gate: "rerank", minRerankProbability: 0.02 },
+      { exactCost: 0.45, gate: "lexical", minRerankProbability: null },
+    ],
     costTolerance: 0.01,
     paired: [{ answerableEvidencePass: cell, answerablePass: cell, minRerankProbability: 0.02, unanswerableCatch: cell }],
-    pick: { answerablePass: 0.8, cost: 0.3, gate: "rerank", minRerankProbability: 0.02, unanswerableCatch: 0.4 },
+    pick: { answerablePass: 0.8, exactCost: 0.3100004, gate: "rerank", minRerankProbability: 0.02, unanswerableCatch: 0.4 },
   }).join("\n");
 
-  assert.match(lines, /min probability 0\.02; answerable pass 0\.8, unanswerable caught 0\.4, cost 0\.3\./);
+  assert.match(lines, /threshold\): min probability 0\.02; answerable pass 0\.8, unanswerable caught 0\.4, cost from counts 0\.31\./);
+  assert.match(lines, /Costs from counts, which the pick compares: 0\.02 0\.31, lexical 0\.45\./);
   assert.match(lines, /\| 0\.02 \| 0\.02 \[0\.01, 0\.03\] \(\+9 \/ -1\) \|/);
+  assert.match(
+    formatRerankGateMarkdown({ costTolerance: 0.01, paired: [], pick: null }).join("\n"),
+    /No pick: the run has no answerable or no unanswerable questions\./
+  );
 });

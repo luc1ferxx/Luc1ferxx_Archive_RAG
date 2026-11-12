@@ -236,28 +236,43 @@ export const pickRerankThreshold = (rows) => {
 // wins, then the lower cost. Costs come from whole counts, not rounded rates.
 export const RERANK_COST_TOLERANCE = 0.01;
 
+/** The cost from whole counts, or null when a class has no questions. */
 export const exactGateCost = ({ answerable, answerablePassed, unanswerable, unanswerableCaught }) =>
-  (1 - UNANSWERABLE_PRIOR) * (1 - answerablePassed / answerable) +
-  WRONG_ANSWER_COST * UNANSWERABLE_PRIOR * (1 - unanswerableCaught / unanswerable);
+  answerable > 0 && unanswerable > 0
+    ? (1 - UNANSWERABLE_PRIOR) * (1 - answerablePassed / answerable) +
+      WRONG_ANSWER_COST * UNANSWERABLE_PRIOR * (1 - unanswerableCaught / unanswerable)
+    : null;
 
-/** The pick among the probability thresholds and the lexical gate (`gate: "lexical"`, no threshold). */
+/**
+ * Every candidate of the reranker re-measure with its exact cost: the
+ * probability thresholds, then the lexical gate (`gate: "lexical"`, no threshold).
+ */
+export const describeRerankGateCandidates = (rerankRows, lexicalRow) =>
+  [...rerankRows.map((row) => ({ ...row, gate: "rerank" })), { ...lexicalRow, gate: "lexical", minRerankProbability: null }].map(
+    (candidate) => ({ ...candidate, exactCost: exactGateCost(candidate.counts) })
+  );
+
+/** The pick among the probability thresholds and the lexical gate, or null when a class has no questions. */
 export const pickRerankGate = (rerankRows, lexicalRow) => {
-  const candidates = [
-    ...rerankRows.map((row) => ({ ...row, gate: "rerank" })),
-    { ...lexicalRow, gate: "lexical", minRerankProbability: null },
-  ].map((candidate) => ({ ...candidate, exactCost: exactGateCost(candidate.counts) }));
-  const lowest = Math.min(...candidates.map((candidate) => candidate.exactCost));
-  const { exactCost: _exactCost, ...pick } = candidates
-    .filter((candidate) => candidate.exactCost <= lowest + RERANK_COST_TOLERANCE + 1e-9)
-    .sort(
-      (left, right) =>
-        right.counts.unanswerableCaught - left.counts.unanswerableCaught ||
-        left.exactCost - right.exactCost ||
-        // An exact tie goes to the higher threshold, as in pickRerankThreshold.
-        (right.minRerankProbability ?? -1) - (left.minRerankProbability ?? -1)
-    )[0];
+  const candidates = describeRerankGateCandidates(rerankRows, lexicalRow);
 
-  return pick;
+  if (candidates.some((candidate) => candidate.exactCost === null)) {
+    return null;
+  }
+
+  const lowest = Math.min(...candidates.map((candidate) => candidate.exactCost));
+
+  return (
+    candidates
+      .filter((candidate) => candidate.exactCost <= lowest + RERANK_COST_TOLERANCE + 1e-9)
+      .sort(
+        (left, right) =>
+          right.counts.unanswerableCaught - left.counts.unanswerableCaught ||
+          left.exactCost - right.exactCost ||
+          // An exact tie goes to the higher threshold, as in pickRerankThreshold.
+          (right.minRerankProbability ?? -1) - (left.minRerankProbability ?? -1)
+      )[0] ?? null
+  );
 };
 
 const round = (value) => (value === null ? null : Number(value.toFixed(4)));
@@ -381,7 +396,7 @@ const formatMarkdown = (report) => {
           "|---|---|---|---|---|---|",
           ...report.rerankGrid.map(
             (entry) =>
-              `| ${entry.minRerankProbability}${entry === report.rerankPick ? " (picked)" : ""} | ${entry.answerablePass} | ${entry.answerableEvidencePass} | ${entry.unanswerableCatch} | ${entry.youdenJ} | ${entry.cost} |`
+              `| ${entry.minRerankProbability}${entry === report.rerankPick ? " (earlier rule's pick)" : ""} | ${entry.answerablePass} | ${entry.answerableEvidencePass} | ${entry.unanswerableCatch} | ${entry.youdenJ} | ${entry.cost} |`
           ),
           "",
           ...(report.rerankGate ? formatRerankGateMarkdown(report.rerankGate) : []),
@@ -413,8 +428,23 @@ const formatPairedDelta = (label, delta) =>
 const formatPairedCell = ({ ci95ByPaper, delta, flips }) =>
   `${delta} [${ci95ByPaper?.[0] ?? "n/a"}, ${ci95ByPaper?.[1] ?? "n/a"}] (+${flips.won} / -${flips.lost})`;
 
-export const formatRerankGateMarkdown = ({ costTolerance, paired, pick }) => [
-  `Pick (the lexical gate on these candidates competes; within ${costTolerance} of the lowest cost, the most unanswerable questions caught, then the lower cost, then the higher threshold):${pick.gate === "lexical" ? "the lexical gate" : `min probability ${pick.minRerankProbability}`}; answerable pass ${pick.answerablePass}, unanswerable caught ${pick.unanswerableCatch}, cost ${pick.cost}.`,
+const roundCost = (value) => (value === null ? null : Number(value.toFixed(6)));
+
+export const formatRerankGateMarkdown = ({ candidates = [], costTolerance, paired, pick }) => [
+  pick
+    ? `Pick (the lexical gate on these candidates competes; within ${costTolerance} of the lowest cost, the most unanswerable questions caught, then the lower cost, then the higher threshold): ${pick.gate === "lexical" ? "the lexical gate" : `min probability ${pick.minRerankProbability}`}; answerable pass ${pick.answerablePass}, unanswerable caught ${pick.unanswerableCatch}, cost from counts ${roundCost(pick.exactCost)}.`
+    : "No pick: the run has no answerable or no unanswerable questions.",
+  ...(candidates.length > 0
+    ? [
+        "",
+        `Costs from counts, which the pick compares: ${candidates
+          .map(
+            (candidate) =>
+              `${candidate.gate === "lexical" ? "lexical" : candidate.minRerankProbability} ${roundCost(candidate.exactCost)}`
+          )
+          .join(", ")}.`,
+      ]
+    : []),
   "",
   "Each threshold against the lexical gate on the same candidates, question by question (95% interval resampling papers):",
   "",
@@ -676,6 +706,11 @@ const main = async () => {
   // Every threshold paired with the lexical gate on the same reranked candidates.
   const rerankGate = reranked
     ? {
+        candidates: describeRerankGateCandidates(rerankGrid, defaultSummary).map((candidate) => ({
+          exactCost: candidate.exactCost === null ? null : Number(candidate.exactCost.toFixed(6)),
+          gate: candidate.gate,
+          minRerankProbability: candidate.minRerankProbability,
+        })),
         costTolerance: RERANK_COST_TOLERANCE,
         paired: rerankRows.map((row) => ({
           minRerankProbability: row.minRerankProbability,
