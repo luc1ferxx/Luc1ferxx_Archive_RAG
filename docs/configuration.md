@@ -449,10 +449,10 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `RAG_RRF_K` | `60` | RRF 平滑常数。 |
 | `RAG_RERANK_ENABLED` | `false` | 是否启用 rerank。 |
 | `RAG_RERANK_PROVIDER` | `heuristic` | `heuristic`、`cross-encoder` 或代码内注入的 `custom`。启发式重排在 QASPER 上没有收益。有重排服务时推荐 `cross-encoder` 加 BAAI/bge-reranker-v2-m3：dev 上证据进入模型上下文 +0.063（topK 6 时测得），可回答题的拒答率下降 4.4 个百分点，不可回答题识别率不变（见 evaluation.md 的“交叉编码器重排”）。重排服务不可用时，该次查询退回融合排序并打印警告，不会失败。 |
-| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数：重排 `RAG_RETRIEVAL_TOP_K` × 这个数个融合候选，留下 topK 个。交叉编码器的权重 0.6 和概率门槛是在 topK 6（18 选 6）上调的，默认 topK 改为 10（30 选 10）后没有重测。 |
+| `RAG_RERANK_CANDIDATE_MULTIPLIER` | `3` | Rerank 候选放大倍数：重排 `RAG_RETRIEVAL_TOP_K` × 这个数个融合候选，留下 topK 个。交叉编码器的权重 0.6 和概率门槛是在 topK 6（18 选 6）上调的。默认 topK 改为 10（30 选 10）后，概率门槛在 2026-11-12 重测过，仍选 0.02；权重没有重调。 |
 | `RAG_RERANK_WEIGHT` | `0.6` | Rerank 分数与粗排分数混合权重。 |
 | `RAG_CROSS_ENCODER_ENDPOINT` | 空 | Cross-encoder HTTP endpoint，请求 `{query, texts}`、返回 `{scores}`，和 Hugging Face TEI 的 `/rerank` 格式相同。本地用 `npm run rerank:cross-encoder` 启动，地址是 `http://127.0.0.1:8081/rerank`。 |
-| `RAG_QA_MIN_RERANK_PROBABILITY` | `0.02` | 开启交叉编码器重排后，单文档问答是否作答，由重排模型给出的相关概率决定，不再看问题词覆盖率。只对带重排分数的结果生效：没开重排或重排失败时，仍用词面门控。设为 `off` 可关闭。0.02 是在 QASPER train 上按事先定的代价规则选出的。dev 上可回答题被拒答从 37.8% 降到 13.9%，F1 不变；但不可回答题的识别率从 80% 降到 45%（见 evaluation.md 的"重排概率做拒答门控"）。2026-11-12 在 top-K 10 下按同一条规则重测，仍选 0.02；更看重不乱答时可以设 0.2，那一档拦下不可回答题的比例和不开重排时相当（见"重排在 top-K 10 下重测"）。 |
+| `RAG_QA_MIN_RERANK_PROBABILITY` | `0.02` | 开启交叉编码器重排后，单文档问答是否作答，由重排模型给出的相关概率决定，不再看问题词覆盖率。只对带重排分数的结果生效：没开重排或重排失败时，仍用词面门控。设为 `off` 可关闭。0.02 是在 QASPER train 上按事先定的代价规则选出的。top-K 6 时测的 dev 结果：可回答题被拒答从 37.8% 降到 13.9%，F1 不变；但不可回答题的识别率从 80% 降到 45%（见 evaluation.md 的"重排概率做拒答门控"）。2026-11-12 在 top-K 10 下重测：代价公式不变，这次让词面门控也一起参选，仍选 0.02。dev 上和不开重排比，可回答题放行 0.600 → 0.893，不可回答题拦截 0.589 → 0.337。阈值 0.2 时拦截率和不开重排时没检出差异，放行更多；但这是事后看到的，没做过答题确认（见"重排在 top-K 10 下重测"）。 |
 | `RAG_CROSS_ENCODER_SCORES` | `logits` | 重排服务返回的分数格式：`logits`（本仓库的端点）或 `probabilities`（Hugging Face TEI 的默认）。拒答门控会把它换算成概率。 |
 | `RAG_CROSS_ENCODER_MODEL` | 空 | 传给 cross-encoder endpoint 的可选模型名。 |
 
