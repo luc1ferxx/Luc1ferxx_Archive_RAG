@@ -1,0 +1,437 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "document_rag:primary",
+        "label": "Document RAG",
+        "status": "completed",
+        "summary": "Document RAG returned 1 citation.",
+        "type": "document_rag"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-self_check",
+        "label": "Self Check",
+        "status": "failed",
+        "summary": "Evidence check needs attention: Citations cover 0 of 1 required documents. 2 answer claims lacks citation support.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "5-gap_analysis",
+        "label": "Gap Analysis",
+        "status": "completed",
+        "summary": "Identified 2 evidence gaps for follow-up: unsupported_claim.",
+        "type": "gap_analysis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "follow_up_retrieval:1",
+        "label": "Follow-up Retrieval",
+        "status": "completed",
+        "summary": "Focused follow-up returned 1 citation.",
+        "type": "follow_up_retrieval"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "7-self_check",
+        "label": "Follow-up Self Check",
+        "status": "completed",
+        "summary": "Evidence check passed with 1 citation across 1 cited document.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "8-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "9-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Final answer passed claim-level citation finalization with 1 supported claim.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "follow_up",
+        "detail": [
+          "failed",
+          "completed"
+        ],
+        "id": "self_check_failed_then_passed",
+        "label": "Self-check failed before follow-up and passed after follow-up",
+        "passed": true
+      },
+      {
+        "category": "follow_up",
+        "detail": [
+          {
+            "claim": "Remote work requires manager approval",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 1,
+            "type": "unsupported_claim"
+          },
+          {
+            "claim": "The satellite stipend is 500 dollars",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [
+              "500",
+              "subject:satellite",
+              "subject:stipend",
+              "term:satellite",
+              "term:stipend",
+              "term:dollars"
+            ],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          }
+        ],
+        "id": "gap_analysis_recorded",
+        "label": "Gap analysis recorded unsupported claim",
+        "passed": true
+      },
+      {
+        "category": "follow_up",
+        "detail": [
+          "primary",
+          "follow_up"
+        ],
+        "id": "follow_up_retrieval_ran",
+        "label": "Focused follow-up retrieval ran",
+        "passed": true
+      },
+      {
+        "category": "follow_up",
+        "detail": {
+          "checkedQueries": [
+            {
+              "label": "Original request",
+              "phase": "primary",
+              "primary": true,
+              "query": "What does remote work require?",
+              "queryId": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Exact citation evidence",
+              "phase": "primary",
+              "primary": false,
+              "query": "Find exact cited evidence for: What does remote work require?",
+              "queryId": "fact-citation",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Original request",
+              "phase": "follow_up",
+              "primary": true,
+              "query": "Re-check the uploaded documents for cited support before answering. Original question: What does remote work require? Evidence issue: Citations cover 0 of 1 required documents. 2 answer claims lacks citation support. Unsupported claims: Remote work requires manager approval | The satellite stipend is 500 dollars Return the best answer only if it is backed by page-level citations.",
+              "queryId": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Follow-up evidence repair",
+              "phase": "follow_up",
+              "primary": false,
+              "query": "Find citation-backed evidence that fixes this issue: Citations cover 0 of 1 required documents. 2 answer claims lacks citation support. Unsupported claim: Remote work requires manager approval Unsupported claim: The satellite stipend is 500 dollars",
+              "queryId": "follow-up-evidence",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Follow-up source support",
+              "phase": "follow_up",
+              "primary": false,
+              "query": "Find source excerpts that directly support the final answer for: What does remote work require?",
+              "queryId": "follow-up-source-check",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "docIds": [
+            "policy-1"
+          ],
+          "goal": "What does remote work require?",
+          "resolvedGaps": [
+            {
+              "claim": "Remote work requires manager approval",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "phase": "gap_analysis",
+              "resolvedPhase": "follow_up",
+              "severity": "repairable",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 1,
+              "type": "unsupported_claim"
+            },
+            {
+              "claim": "The satellite stipend is 500 dollars",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [
+                "500",
+                "subject:satellite",
+                "subject:stipend",
+                "term:satellite",
+                "term:stipend",
+                "term:dollars"
+              ],
+              "phase": "gap_analysis",
+              "resolvedPhase": "follow_up",
+              "severity": "repairable",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0,
+              "type": "unsupported_claim"
+            }
+          ],
+          "supportedClaims": [
+            {
+              "anchors": [
+                "require"
+              ],
+              "missingAnchors": [],
+              "phase": "follow_up",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "Remote work requires manager approval before the first remote day",
+              "tokenOverlap": 1
+            }
+          ],
+          "unresolvedGaps": [],
+          "unsupportedClaims": [
+            {
+              "anchors": [
+                "require"
+              ],
+              "missingAnchors": [],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "Remote work requires manager approval",
+              "tokenOverlap": 1
+            },
+            {
+              "anchors": [
+                "500"
+              ],
+              "missingAnchors": [
+                "500",
+                "subject:satellite",
+                "subject:stipend",
+                "term:satellite",
+                "term:stipend",
+                "term:dollars"
+              ],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "The satellite stipend is 500 dollars",
+              "tokenOverlap": 0
+            }
+          ],
+          "version": "1.0"
+        },
+        "id": "working_memory_resolved_gap",
+        "label": "Working memory resolved the evidence gap",
+        "passed": true
+      },
+      {
+        "category": "budget",
+        "detail": {
+          "attempts": 2,
+          "budgetUsed": 2,
+          "followUpsRun": 1
+        },
+        "id": "document_budget_bounded",
+        "label": "Document RAG stayed within retry budget",
+        "passed": true
+      }
+    ],
+    "description": "Unsupported document claims should trigger gap_analysis and a focused follow-up retrieval.",
+    "failedCheckCount": 0,
+    "id": "document_follow_up_retrieval",
+    "label": "Document evidence follow-up",
+    "passed": true,
+    "response": {
+      "agentMode": "document",
+      "agentSkills": [
+        {
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 2,
+          "researchQuestions": 0,
+          "traceSteps": 9,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": null,
+      "executionLoop": {
+        "followUpsRun": 1,
+        "gaps": [
+          {
+            "claim": "Remote work requires manager approval",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 1,
+            "type": "unsupported_claim"
+          },
+          {
+            "claim": "The satellite stipend is 500 dollars",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [
+              "500",
+              "subject:satellite",
+              "subject:stipend",
+              "term:satellite",
+              "term:stipend",
+              "term:dollars"
+            ],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 0,
+            "type": "unsupported_claim"
+          }
+        ],
+        "gapsIdentified": 2,
+        "maxFollowUps": 1,
+        "stoppedReason": "follow_up_resolved",
+        "version": "1.0"
+      },
+      "observed": {
+        "documentAttempts": 2,
+        "documentBudgetUsed": 2,
+        "documentRunPhases": [
+          "primary",
+          "follow_up"
+        ],
+        "gapTypes": [
+          "unsupported_claim",
+          "unsupported_claim"
+        ],
+        "selfCheckStatuses": [
+          "failed",
+          "completed"
+        ]
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "documentRagCalls",
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 2,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "document_rag",
+        "self_check",
+        "gap_analysis",
+        "follow_up_retrieval",
+        "self_check",
+        "synthesis",
+        "answer_finalizer"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 5,
+        "resolvedGapCount": 2,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 2
+      }
+    }
+  },
+  "runs": []
+}

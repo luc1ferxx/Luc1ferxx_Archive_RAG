@@ -7,37 +7,31 @@ import { createServer } from "node:http";
 import { register } from "node:module";
 import test from "node:test";
 
-// Phase-3 acceptance evidence for the public surface on the LangGraph runtime
+// Acceptance evidence for the public surface on the LangGraph runtime
 // (docs/adr/0001-langgraph-runtime.md): the real app (createApp over the local
 // vector store, an in-memory run store, in-memory task and artifact stores and
-// a stand-in model) answers these requests in the production setting, which
-// keeps the V1 outer plan (and the /chat/stream route) on the native loop and
-// puts the custom-Skill DAG and the v3 graph on LangGraph. Until ADR 0001
-// phase 6 removed the native graph scheduler, every request also ran under
-// AGENT_RUNTIME=native and was compared with it after masking. Before the
-// deletion, the native side of every request that runs a graph (the v3
-// approve and deny, the v3 stream up to its pause, the background task's
-// approval re-entry, and startup recovery) was frozen, masked exactly as
-// below, under test/fixtures/graph-goldens/langgraph-routes/ from HEAD
-// e1385c1c with AGENT_RUNTIME=native, and the production setting is now held
-// to those goldens with the same deepStrictEqual (assertMatchesGraphGolden;
-// rewriting one is a decision, see test/langgraph-support/graph-goldens.mjs).
-// The requests that build no graph (document QA, its stream, the V1
-// Capability approval) never depended on AGENT_RUNTIME and have no golden.
-// The requests the outer plan answers
-// also run a second pass, `outerPlan`, with the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph that schedules the outer plan on
-// LangGraph and streams through the LangGraph relay (config.js says why it is
-// opt-in), and everything a client or a later process can see must be
-// identical between the two passes after masking what two runs never share:
+// a stand-in model) answers these requests with everything the agent
+// schedules on LangGraph: the V1 outer plan and the /chat/stream relay (the
+// only path since phase 7 removed the native loop and the route's native
+// branch), the custom-Skill DAG and the v3 graph (since phase 6). What the
+// removed native schedulers did on each request is frozen, masked exactly as
+// below, under test/fixtures/graph-goldens/langgraph-routes/, and the app is
+// held to those goldens with deepStrictEqual (assertMatchesGraphGolden;
+// rewriting one is a decision, see test/langgraph-support/graph-goldens.mjs):
+// the requests that run a graph (the v3 approve and deny, the v3 stream up to
+// its pause, the background task's approval re-entry, startup recovery) from
+// HEAD e1385c1c with AGENT_RUNTIME=native, before phase 6; the requests the
+// outer plan answers (document QA, its stream with GET and POST /chat, the V1
+// Capability approval) from commit 3313b40b with the outer plan on the native
+// loop, before phase 7.
 //
-//   - POST /chat on the V1 outer plan (on LangGraph only in the outerPlan
-//     pass);
-//   - GET and POST /chat/stream (the bytes on the wire, with answer drafts);
+//   - POST /chat on the V1 outer plan;
+//   - GET and POST /chat, POST /chat/stream (the bytes on the wire, with
+//     answer drafts);
 //   - a guarded v3 unified graph parked at its approval gate through POST
 //     /chat and decided through POST /agent-runs/:runId/actions/approve|deny
-//     (on LangGraph the pause is the thread's pending interrupt, the decision
-//     continues the same thread, and a finished run carries no thread);
+//     (the pause is the thread's pending interrupt, the decision continues
+//     the same thread, and a finished run carries no thread);
 //   - the V1 Capability approval on the same endpoint;
 //   - a background task (POST /agent-tasks, the task runner app-services
 //     wires) whose v3 graph pauses for approval and whose task action
@@ -46,10 +40,10 @@ import test from "node:test";
 //     app instance left at a node boundary.
 //
 // The on-demand imports of both LangGraph schedulers are redirected to the
-// phase-2/3 counting taps, so each pass also proves what LangGraph really
-// scheduled (the v3 graph on every pass, the outer plan only with the outer
-// dial); the route's import of the stream relay is tapped too, so a stream
-// pass also shows which branch of routes/chat.js answered.
+// phase-2/3 counting taps, so each request also proves what LangGraph really
+// scheduled (the v3 graph or the outer plan); the route's import of the
+// stream relay is tapped too, so a stream is seen to have gone through
+// streamAgentRun.
 
 const RAG_PREFIX = new URL("../rag/", import.meta.url).href;
 const EXECUTOR_TAP_URL = new URL(
@@ -132,23 +126,16 @@ const {
   createTaskCapabilityRegistry,
 } = await import("./fixtures/unified-graph-run-fixtures.mjs");
 
-// `langgraph` is the production setting (every graph on LangGraph, the outer
-// plan on the native loop); `outerPlan` adds the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph.
-const OUTER_PLAN_PASSES = Object.freeze(["langgraph", "outerPlan"]);
-const PASS_ENV = Object.freeze({
-  langgraph: Object.freeze({}),
-  outerPlan: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
-});
-
-// Every pass runs with the answer-rate flags off and nothing in the ambient
-// environment pointing at another tier, a gateway, a timeout or a rollout.
+// Every request runs with the answer-rate flags off and nothing in the
+// ambient environment pointing at another tier, a gateway, a timeout or a
+// rollout (the two removed runtime dials unset).
 const BASE_ENV = Object.freeze({
   ...ANSWER_RATE_FLAGS_OFF,
   AGENT_CANCEL_ON_DISCONNECT: undefined,
   AGENT_OUTER_PLAN_RUNTIME: undefined,
   AGENT_PLANNER_ROLLOUT: "deterministic",
   AGENT_REQUEST_TIMEOUT_MS: undefined,
+  AGENT_RUNTIME: undefined,
   AGENT_RUN_RECOVERY_MODE: undefined,
   AGENT_SERVICE_URL: undefined,
   AGENT_UNIFIED_GRAPH_CAPABILITIES: undefined,
@@ -181,8 +168,7 @@ const noRecovery = {
   recoverOnStartup: async () => ({ mode: "manual", recoveredCount: 0, runs: [] }),
 };
 
-const onRuntime = (pass, work, env = {}) =>
-  withEnv({ ...BASE_ENV, ...env, ...PASS_ENV[pass] }, work);
+const onLangGraph = (work, env = {}) => withEnv({ ...BASE_ENV, ...env }, work);
 
 // ---------------------------------------------------------------------------
 // Masking: what two runs never share, and nothing else (the unified-graph
@@ -463,23 +449,18 @@ const installStreamingModel = (t) => {
 const qaRequest = { docId: QA_CITATION.docId, question: QA_QUESTION, sessionId: "routes-session" };
 const qaScope = Object.freeze({ userId: "routes-user", workspaceId: "" });
 
-test("POST /chat answers a document question identically on every pass, and only the outer-plan dial schedules the outer plan on LangGraph", async (t) => {
+test("POST /chat answers a document question as the native loop's golden records, with the outer plan scheduled on LangGraph", async (t) => {
   installStreamingModel(t);
-  const passes = {};
 
-  for (const runtime of OUTER_PLAN_PASSES) {
-    passes[runtime] = await onRuntime(runtime, () =>
-      withApp({ agentRunService: newService(newStore()), ragService: createQaRagService() }, async (app) => {
-        const answer = await postJson(`${app.baseUrl}/chat`, qaRequest, scopeHeaders(qaScope));
-        const invocations = takeInvocations();
-        const run = await loadRun(app.agentRunService, qaScope, answer.body.agentRunId);
+  const langgraph = await onLangGraph(() =>
+    withApp({ agentRunService: newService(newStore()), ragService: createQaRagService() }, async (app) => {
+      const answer = await postJson(`${app.baseUrl}/chat`, qaRequest, scopeHeaders(qaScope));
+      const invocations = takeInvocations();
+      const run = await loadRun(app.agentRunService, qaScope, answer.body.agentRunId);
 
-        return { answer, invocations, run };
-      })
-    );
-  }
-
-  const { langgraph, outerPlan } = passes;
+      return { answer, invocations, run };
+    })
+  );
 
   assert.equal(langgraph.answer.status, 200);
   assert.equal(langgraph.answer.body.agentMode, "document");
@@ -487,98 +468,96 @@ test("POST /chat answers a document question identically on every pass, and only
     assert.ok(langgraph.answer.body.agentAnswer.includes(sentence), sentence);
   }
   assert.equal(langgraph.run.run.status, "completed");
-  assert.deepStrictEqual(mask(outerPlan.answer), mask(langgraph.answer));
-  assert.deepStrictEqual(mask(outerPlan.run), mask(langgraph.run));
-  // The production setting kept the outer plan on the native loop. With the
-  // outer dial the plan was scheduled on LangGraph once, bound to the run; no
+  // The answer and the run are what the native outer loop left (the golden).
+  assertMatchesGraphGolden("langgraph-routes", "v1-chat-document-question", {
+    answer: mask(langgraph.answer),
+    run: mask(langgraph.run),
+  });
+  // The plan was scheduled on LangGraph once, bound to the run; no
   // custom-Skill or unified graph exists on this request.
-  assert.deepStrictEqual(langgraph.invocations, { graph: [], plan: [] });
-  assert.deepStrictEqual(outerPlan.invocations.graph, []);
-  assert.equal(outerPlan.invocations.plan.length, 1);
-  assert.equal(outerPlan.invocations.plan[0].boundToRun, true);
-  assert.ok(outerPlan.invocations.plan[0].stepIds.includes("document_rag"));
+  assert.deepStrictEqual(langgraph.invocations.graph, []);
+  assert.equal(langgraph.invocations.plan.length, 1);
+  assert.equal(langgraph.invocations.plan[0].boundToRun, true);
+  assert.ok(langgraph.invocations.plan[0].stepIds.includes("document_rag"));
 });
 
-test("POST /chat/stream relays identical SSE bytes on every pass, drafts included; its result equals GET /chat and POST /chat; GET /chat/stream is no route", async (t) => {
+test("POST /chat/stream relays the SSE bytes the native branch's golden records, drafts included; its result equals GET /chat and POST /chat; GET /chat/stream is no route", async (t) => {
   installStreamingModel(t);
-  const passes = {};
 
-  for (const runtime of OUTER_PLAN_PASSES) {
-    passes[runtime] = await onRuntime(runtime, () =>
-      withApp({ agentRunService: newService(newStore()), ragService: createQaRagService() }, async (app) => {
-        const headers = scopeHeaders(qaScope);
+  const langgraph = await onLangGraph(() =>
+    withApp({ agentRunService: newService(newStore()), ragService: createQaRagService() }, async (app) => {
+      const headers = scopeHeaders(qaScope);
 
-        takeAgentStreamRelayCalls();
+      takeAgentStreamRelayCalls();
 
-        const streamed = await fetch(`${app.baseUrl}/chat/stream`, {
-          body: JSON.stringify(qaRequest),
-          headers: { "content-type": "application/json", ...headers },
-          method: "POST",
-        });
-        const text = await streamed.text();
-        const relayCalls = takeAgentStreamRelayCalls();
-        const query = new URLSearchParams(qaRequest).toString();
-        // The router mounts GET /chat and POST /chat/stream (routes/chat.js);
-        // a GET of the stream path is a 404 on every pass.
-        const getStream = await fetch(`${app.baseUrl}/chat/stream?${query}`, { headers });
-        await getStream.text();
-        const got = await getJson(`${app.baseUrl}/chat?${query}`, headers);
-        const invocations = takeInvocations();
-        const posted = await postJson(`${app.baseUrl}/chat`, qaRequest, headers);
-        const runs = [];
+      const streamed = await fetch(`${app.baseUrl}/chat/stream`, {
+        body: JSON.stringify(qaRequest),
+        headers: { "content-type": "application/json", ...headers },
+        method: "POST",
+      });
+      const text = await streamed.text();
+      const relayCalls = takeAgentStreamRelayCalls();
+      const query = new URLSearchParams(qaRequest).toString();
+      // The router mounts GET /chat and POST /chat/stream (routes/chat.js);
+      // a GET of the stream path is a 404.
+      const getStream = await fetch(`${app.baseUrl}/chat/stream?${query}`, { headers });
+      await getStream.text();
+      const got = await getJson(`${app.baseUrl}/chat?${query}`, headers);
+      const invocations = takeInvocations();
+      const posted = await postJson(`${app.baseUrl}/chat`, qaRequest, headers);
+      const runs = [];
 
-        for (const listed of (await app.agentRunService.listRuns({ accessScope: qaScope })).runs) {
-          runs.push((await loadRun(app.agentRunService, qaScope, listed.runId)).run);
-        }
+      for (const listed of (await app.agentRunService.listRuns({ accessScope: qaScope })).runs) {
+        runs.push((await loadRun(app.agentRunService, qaScope, listed.runId)).run);
+      }
 
-        return {
-          get: got,
-          getStreamStatus: getStream.status,
-          invocations,
-          post: posted,
-          relayCalls,
-          runs,
-          stream: { frames: parseFrames(text), status: streamed.status, text },
-        };
-      })
-    );
-  }
+      return {
+        get: got,
+        getStreamStatus: getStream.status,
+        invocations,
+        post: posted,
+        relayCalls,
+        runs,
+        stream: { frames: parseFrames(text), status: streamed.status, text },
+      };
+    })
+  );
 
-  const { langgraph, outerPlan } = passes;
-
-  for (const [runtime, pass] of Object.entries(passes)) {
-    assert.equal(pass.stream.status, 200, runtime);
-    assert.equal(pass.getStreamStatus, 404, runtime);
-    assert.equal(pass.get.status, 200, runtime);
-    assert.equal(pass.post.status, 200, runtime);
-    const events = pass.stream.frames.map((frame) => frame.event);
-    assert.ok(events.includes("trace_step"), runtime);
-    assert.deepStrictEqual(events.slice(-2), ["result", "done"], runtime);
-    assert.deepStrictEqual(
-      pass.stream.frames.filter((frame) => frame.event === "answer_draft").map((frame) => frame.data.draft.text),
-      QA_SENTENCES,
-      runtime
-    );
-    // The result frame is the /chat answer, whichever method asked.
-    assert.deepStrictEqual(mask(pass.stream.frames.at(-2).data), mask(pass.post), runtime);
-    assert.deepStrictEqual(mask(pass.get), mask(pass.post), runtime);
-  }
-
-  assert.equal(maskVolatileText(outerPlan.stream.text), maskVolatileText(langgraph.stream.text));
-  assert.deepStrictEqual(mask(outerPlan.get), mask(langgraph.get));
-  assert.deepStrictEqual(mask(outerPlan.post), mask(langgraph.post));
-  assert.deepStrictEqual(mask(outerPlan.runs), mask(langgraph.runs));
+  assert.equal(langgraph.stream.status, 200);
+  assert.equal(langgraph.getStreamStatus, 404);
+  assert.equal(langgraph.get.status, 200);
+  assert.equal(langgraph.post.status, 200);
+  const events = langgraph.stream.frames.map((frame) => frame.event);
+  assert.ok(events.includes("trace_step"));
+  assert.deepStrictEqual(events.slice(-2), ["result", "done"]);
+  assert.deepStrictEqual(
+    langgraph.stream.frames
+      .filter((frame) => frame.event === "answer_draft")
+      .map((frame) => frame.data.draft.text),
+    QA_SENTENCES
+  );
+  // The result frame is the /chat answer, whichever method asked.
+  assert.deepStrictEqual(mask(langgraph.stream.frames.at(-2).data), mask(langgraph.post));
+  assert.deepStrictEqual(mask(langgraph.get), mask(langgraph.post));
   assert.equal(langgraph.runs.length, 3);
-  // The production setting: the native route branch and the native outer
-  // loop for the stream and both /chat methods.
-  assert.deepStrictEqual(langgraph.invocations, { graph: [], plan: [] });
-  assert.equal(langgraph.relayCalls, 0);
-  // With the outer dial the stream went through the LangGraph relay, and the
-  // stream and GET /chat each scheduled the outer plan on LangGraph (the
-  // POST /chat after them is not in the count).
-  assert.equal(outerPlan.relayCalls, 1);
-  assert.equal(outerPlan.invocations.plan.length, 2);
-  assert.deepStrictEqual(outerPlan.invocations.graph, []);
+  // The bytes, both /chat answers and the three runs are what the native
+  // route branch and loop left (the golden).
+  assertMatchesGraphGolden("langgraph-routes", "v1-chat-stream-document-question", {
+    get: mask(langgraph.get),
+    post: mask(langgraph.post),
+    runs: mask(langgraph.runs),
+    stream: {
+      frames: mask(langgraph.stream.frames),
+      status: langgraph.stream.status,
+      text: maskVolatileText(langgraph.stream.text),
+    },
+  });
+  // The stream went through the relay generator, and the stream and GET
+  // /chat each scheduled the outer plan on LangGraph (the POST /chat after
+  // them is not in the count).
+  assert.equal(langgraph.relayCalls, 1);
+  assert.equal(langgraph.invocations.plan.length, 2);
+  assert.deepStrictEqual(langgraph.invocations.graph, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -626,8 +605,7 @@ const decideGate = (app, { action, gate, hash = gate.approvalObjectHash, runId }
 test("a v3 graph parked at its approval gate through POST /chat is approved or denied through POST /agent-runs/:runId/actions/:action, continuing the parked thread", async () => {
   for (const action of ["approve", "deny"]) {
     const label = `action=${action}`;
-    const langgraph = await onRuntime(
-      "langgraph",
+    const langgraph = await onLangGraph(
       () =>
         withUnifiedApp({}, async (app) => {
           const paused = await postJson(
@@ -769,8 +747,7 @@ test("on LangGraph the approval continues the parked thread itself: the Capabili
   let seen = null;
   const observe = { app: null, runId: null };
 
-  await onRuntime(
-    "langgraph",
+  await onLangGraph(
     () =>
       withUnifiedApp(
         {
@@ -815,59 +792,47 @@ test("on LangGraph the approval continues the parked thread itself: the Capabili
   );
 });
 
-// In the production setting the route streams on its native branch (no
-// relay), and the v3 graph LangGraph schedules is invoked without the relay,
-// so its nodes emit to the sink the native branch bound around the run: the
-// graph's steps must reach the client in order. With the outer dial as well,
-// the route streams through the LangGraph relay, and the same bytes come out.
-test("POST /chat/stream over the v3 graph relays identical SSE bytes on every pass up to the approval pause, and the graph's events reach the client in order", async () => {
-  const passes = {};
+// The v3 graph answers the request without the outer plan, and LangGraph
+// schedules it without the stream relay, so its nodes emit to the sink the
+// route's generator bound around the run: the graph's steps must reach the
+// client in order, as the bytes the native scheduler's golden records.
+test("POST /chat/stream over the v3 graph relays the golden's SSE bytes up to the approval pause, and the graph's events reach the client in order", async () => {
+  const langgraph = await onLangGraph(
+    () =>
+      withUnifiedApp({}, async (app) => {
+        takeAgentStreamRelayCalls();
 
-  for (const runtime of OUTER_PLAN_PASSES) {
-    passes[runtime] = await onRuntime(
-      runtime,
-      () =>
-        withUnifiedApp({}, async (app) => {
-          takeAgentStreamRelayCalls();
+        const streamed = await fetch(`${app.baseUrl}/chat/stream`, {
+          body: JSON.stringify(unifiedRequest(APPROVAL_TASK_QUESTION)),
+          headers: { "content-type": "application/json", ...unifiedHeaders },
+          method: "POST",
+        });
+        const text = await streamed.text();
+        const frames = parseFrames(text);
+        const invocations = takeInvocations();
+        const result = frames.at(-2)?.data;
+        const runId = result?.body?.agentRunId;
 
-          const streamed = await fetch(`${app.baseUrl}/chat/stream`, {
-            body: JSON.stringify(unifiedRequest(APPROVAL_TASK_QUESTION)),
-            headers: { "content-type": "application/json", ...unifiedHeaders },
-            method: "POST",
-          });
-          const text = await streamed.text();
-          const frames = parseFrames(text);
-          const invocations = takeInvocations();
-          const result = frames.at(-2)?.data;
-          const runId = result?.body?.agentRunId;
-
-          return {
-            frames,
-            invocations,
-            relayCalls: takeAgentStreamRelayCalls(),
-            run: runId ? await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId) : null,
-            status: streamed.status,
-            text,
-          };
-        }),
-      UNIFIED_ENV
-    );
-  }
-
-  const { langgraph, outerPlan } = passes;
+        return {
+          frames,
+          invocations,
+          relayCalls: takeAgentStreamRelayCalls(),
+          run: runId ? await loadRun(app.agentRunService, UNIFIED_ACCESS_SCOPE, runId) : null,
+          status: streamed.status,
+          text,
+        };
+      }),
+    UNIFIED_ENV
+  );
 
   assert.equal(langgraph.status, 200);
-  assert.equal(outerPlan.status, 200);
-  // The production setting streams exactly the bytes, frames and run the
-  // native scheduler did (the golden); the outer dial changes none of them.
+  // Exactly the bytes, frames and run the native scheduler left (the golden,
+  // frozen while the route still streamed on its native branch).
   assertMatchesGraphGolden("langgraph-routes", "v3-stream-approval-pause", {
     frames: mask(langgraph.frames),
     run: mask(langgraph.run),
     text: maskText(langgraph.text),
   });
-  assert.equal(maskText(outerPlan.text), maskText(langgraph.text));
-  assert.deepStrictEqual(mask(outerPlan.frames), mask(langgraph.frames));
-  assert.deepStrictEqual(mask(outerPlan.run), mask(langgraph.run));
   const events = langgraph.frames.map((frame) => frame.event);
   assert.deepStrictEqual(events.slice(-2), ["result", "done"]);
   assert.equal(langgraph.frames.at(-2).data.status, 200);
@@ -885,16 +850,12 @@ test("POST /chat/stream over the v3 graph relays identical SSE bytes on every pa
   // plan and the approval gate.
   assert.deepStrictEqual(stepTypes, ["plan", "graph_node", "graph_node", "capability_approval_gate"]);
   assert.deepStrictEqual(langgraph.run.run.steps.map((step) => step.type), ["graph_node", "graph_node"]);
-  // Both passes scheduled the v3 graph on LangGraph and never the outer plan
-  // (the graph answers the request); only the outer dial moved the stream
-  // onto the relay.
-  for (const [pass, other] of [["langgraph", langgraph], ["outerPlan", outerPlan]]) {
-    assert.equal(other.invocations.graph.length, 1, pass);
-    assert.equal(other.invocations.graph[0].boundToRun, true, pass);
-    assert.deepStrictEqual(other.invocations.plan, [], pass);
-  }
-  assert.equal(langgraph.relayCalls, 0);
-  assert.equal(outerPlan.relayCalls, 1);
+  // The v3 graph was scheduled on LangGraph and the outer plan never was (the
+  // graph answers the request); the stream went through the relay generator.
+  assert.equal(langgraph.invocations.graph.length, 1);
+  assert.equal(langgraph.invocations.graph[0].boundToRun, true);
+  assert.deepStrictEqual(langgraph.invocations.plan, []);
+  assert.equal(langgraph.relayCalls, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -935,68 +896,66 @@ const createWebSearchRegistry = () => {
 
 const webScope = Object.freeze({ userId: "web-user", workspaceId: "" });
 
-test("the V1 Capability approval pauses the run and resumes it through POST /agent-runs/:runId/actions/approve identically on every pass", async () => {
-  const passes = {};
+test("the V1 Capability approval pauses the run and resumes it through POST /agent-runs/:runId/actions/approve as the native loop's golden records", async () => {
+  const langgraph = await onLangGraph(async () => {
+    const { calls, registry } = createWebSearchRegistry();
 
-  for (const runtime of OUTER_PLAN_PASSES) {
-    passes[runtime] = await onRuntime(runtime, async () => {
-      const { calls, registry } = createWebSearchRegistry();
+    return withApp(
+      {
+        agentRunService: newService(newStore()),
+        capabilityRegistry: registry,
+        ragService: appRagService({
+          chat: async () => {
+            throw new Error("Document RAG should not run for direct web prompts.");
+          },
+          getDocument: () => null,
+          listDocuments: () => [],
+        }),
+      },
+      async (app) => {
+        const headers = scopeHeaders(webScope);
+        const paused = await postJson(`${app.baseUrl}/chat`, { question: WEB_QUESTION }, headers);
+        const pauseInvocations = takeInvocations();
+        const runId = paused.body.agentRunId;
+        const gate = paused.body.approvalGates?.[0];
 
-      return withApp(
-        {
-          agentRunService: newService(newStore()),
-          capabilityRegistry: registry,
-          ragService: appRagService({
-            chat: async () => {
-              throw new Error("Document RAG should not run for direct web prompts.");
-            },
-            getDocument: () => null,
-            listDocuments: () => [],
-          }),
-        },
-        async (app) => {
-          const headers = scopeHeaders(webScope);
-          const paused = await postJson(`${app.baseUrl}/chat`, { question: WEB_QUESTION }, headers);
-          const pauseInvocations = takeInvocations();
-          const runId = paused.body.agentRunId;
-          const gate = paused.body.approvalGates?.[0];
+        assert.equal(paused.status, 200);
+        assert.equal(paused.body.clarification?.reason, "capability_approval_required");
+        assert.equal(gate?.capabilityId, CAPABILITY_IDS.webSearch);
+        assert.deepStrictEqual(calls, []);
 
-          assert.equal(paused.status, 200, runtime);
-          assert.equal(paused.body.clarification?.reason, "capability_approval_required", runtime);
-          assert.equal(gate?.capabilityId, CAPABILITY_IDS.webSearch, runtime);
-          assert.deepStrictEqual(calls, [], runtime);
+        const refused = await postJson(
+          `${app.baseUrl}/agent-runs/${runId}/actions/approve`,
+          { approvalObjectHash: `sha256:${"0".repeat(64)}`, gateId: gate.id },
+          headers
+        );
+        assert.equal(refused.status, 409);
+        assert.deepStrictEqual(calls, []);
 
-          const refused = await postJson(
-            `${app.baseUrl}/agent-runs/${runId}/actions/approve`,
-            { approvalObjectHash: `sha256:${"0".repeat(64)}`, gateId: gate.id },
-            headers
-          );
-          assert.equal(refused.status, 409, runtime);
-          assert.deepStrictEqual(calls, [], runtime);
+        const pausedRun = await loadRun(app.agentRunService, webScope, runId);
+        const approved = await postJson(
+          `${app.baseUrl}/agent-runs/${runId}/actions/approve`,
+          { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
+          headers
+        );
+        const decisionInvocations = takeInvocations();
+        const finished = await loadRun(app.agentRunService, webScope, runId);
 
-          const pausedRun = await loadRun(app.agentRunService, webScope, runId);
-          const approved = await postJson(
-            `${app.baseUrl}/agent-runs/${runId}/actions/approve`,
-            { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
-            headers
-          );
-          const decisionInvocations = takeInvocations();
-          const finished = await loadRun(app.agentRunService, webScope, runId);
+        return { approved, calls, decisionInvocations, finished, pauseInvocations, paused, pausedRun };
+      }
+    );
+  });
 
-          return { approved, calls, decisionInvocations, finished, pauseInvocations, paused, pausedRun };
-        }
-      );
-    });
-  }
-
-  const { langgraph, outerPlan } = passes;
-
-  assert.deepStrictEqual(mask(outerPlan.paused), mask(langgraph.paused));
-  assert.deepStrictEqual(mask(outerPlan.pausedRun), mask(langgraph.pausedRun));
-  assert.deepStrictEqual(mask(outerPlan.approved), mask(langgraph.approved));
-  assert.deepStrictEqual(mask(outerPlan.finished), mask(langgraph.finished));
-  assert.deepStrictEqual(outerPlan.calls, langgraph.calls);
   assert.deepStrictEqual(langgraph.calls, [WEB_QUESTION]);
+  // The pause, the paused run, the approval answer and the finished run are
+  // what the native outer loop left (the golden).
+  assertMatchesGraphGolden("langgraph-routes", "v1-capability-approval", {
+    approved: mask(langgraph.approved),
+    calls: langgraph.calls,
+    finished: mask(langgraph.finished),
+    paused: mask(langgraph.paused),
+    pausedRun: mask(langgraph.pausedRun),
+  });
   assert.equal(langgraph.approved.status, 200);
   assert.equal(langgraph.approved.body.response.agentMode, "web");
   assert.equal(langgraph.approved.body.run.status, "completed");
@@ -1016,16 +975,16 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
       "run_completed",
     ]
   );
-  // With the outer dial the V1 plan was scheduled on LangGraph for the
-  // request that parked the Capability; the production setting kept it on the
-  // native loop. The approval action resumes the paused step itself (the step
-  // executor, no outer plan) on every pass.
-  assert.deepStrictEqual(langgraph.pauseInvocations, { graph: [], plan: [] });
+  // The V1 plan was scheduled on LangGraph for the request that parked the
+  // Capability. The approval action resumes the paused step itself (the step
+  // executor, no outer plan).
+  assert.equal(langgraph.pauseInvocations.plan.length, 1);
+  assert.ok(
+    langgraph.pauseInvocations.plan[0].stepIds.includes("web_search"),
+    JSON.stringify(langgraph.pauseInvocations)
+  );
+  assert.deepStrictEqual(langgraph.pauseInvocations.graph, []);
   assert.deepStrictEqual(langgraph.decisionInvocations, { graph: [], plan: [] });
-  assert.equal(outerPlan.pauseInvocations.plan.length, 1);
-  assert.ok(outerPlan.pauseInvocations.plan[0].stepIds.includes("web_search"), JSON.stringify(outerPlan.pauseInvocations));
-  assert.deepStrictEqual(outerPlan.pauseInvocations.graph, []);
-  assert.deepStrictEqual(outerPlan.decisionInvocations, { graph: [], plan: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -1033,8 +992,7 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
 // ---------------------------------------------------------------------------
 
 test("a background task runs the v3 graph, parks at the gate, and its approve action re-enters the SAME graph", async () => {
-  const langgraph = await onRuntime(
-    "langgraph",
+  const langgraph = await onLangGraph(
     async () => {
       const scheduled = [];
       const drain = async () => {
@@ -1176,8 +1134,7 @@ test("a background task runs the v3 graph, parks at the gate, and its approve ac
 // ---------------------------------------------------------------------------
 
 test("startup recovery of a v3 run another app instance left at a node boundary resumes it from the thread and the checkpoint", async () => {
-  const langgraph = await onRuntime(
-    "langgraph",
+  const langgraph = await onLangGraph(
     async () => {
       const store = newStore();
       const planner = createProposalAdapter(createDocumentLoopProposal);

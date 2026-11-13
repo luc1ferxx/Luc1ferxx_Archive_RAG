@@ -18,7 +18,7 @@
 
 ### 4. 运行到一半崩了怎么办？怎么保证不重复执行有副作用的步骤？
 
-运行状态、步骤、事件和 guarded 图的 checkpoint 都存在 PostgreSQL。启动时只在能证明安全时自动续跑，都要求没有待审批项，只有三种情形：外层计划恰好只有 `custom_skills` 一个阶段的 guarded custom-Skill 图，和走 guarded 路径的 v3 统一图（rollout 仍是 `guarded`，认领前还要核对 LangGraph 线程），这两种只在节点边界续跑，还要求 checkpoint 与已持久化的步骤对账一致，在途节点转人工；再就是没有图 checkpoint 的 run 里中断的 `custom_skill` 步骤，整步重放，矩阵里只有它标成可自动重放。普通文档问答 run 不自动续跑：`document_rag` 会写会话记忆，在途的一律转人工；这类步骤和 Capability 调用都标记为不可自动重放，只能人工显式重试。认领、节点开始、完成都带运行版本号做 CAS，挡住的是旧 worker 的状态写，不是它已经发出的副作用。custom-Skill DAG 和 v3 图现在由 LangGraph.js 调度：checkpointer 是写现有 run 行的自定义 `RunStoreCheckpointSaver`，v3 审批用 `interrupt()` + `Command({resume})` 在同一线程续跑；权威仍是自己的图 checkpoint，线程只存回执，两者对不上就转人工。能否自动重放由运行时按步骤类型登记的矩阵决定，Skill 契约的声明只能收窄、不能放宽。要主动说的缺口：run 没有租约，多实例部署时一个实例重启会把别的实例正在跑的 run 也当成中断（读代码推断，没测过）。
+运行状态、步骤、事件和 guarded 图的 checkpoint 都存在 PostgreSQL。启动时只在能证明安全时自动续跑，都要求没有待审批项，只有三种情形：外层计划恰好只有 `custom_skills` 一个阶段的 guarded custom-Skill 图，和走 guarded 路径的 v3 统一图（rollout 仍是 `guarded`，认领前还要核对 LangGraph 线程），这两种只在节点边界续跑，还要求 checkpoint 与已持久化的步骤对账一致，在途节点转人工；再就是没有图 checkpoint 的 run 里中断的 `custom_skill` 步骤，整步重放，矩阵里只有它标成可自动重放。普通文档问答 run 不自动续跑：`document_rag` 会写会话记忆，在途的一律转人工；这类步骤和 Capability 调用都标记为不可自动重放，只能人工显式重试。认领、节点开始、完成都带运行版本号做 CAS，挡住的是旧 worker 的状态写，不是它已经发出的副作用。custom-Skill DAG 和 v3 图现在由 LangGraph.js 调度：checkpointer 是写现有 run 行的自定义 `RunStoreCheckpointSaver`，v3 审批用 `interrupt()` + `Command({resume})` 在同一线程续跑；权威仍是自己的图 checkpoint，线程只存回执，两者对不上就转人工。外层计划 2026-11-13 起也由 LangGraph 调度，但那张图不带 checkpointer，持久化仍是 run 的步骤，上面的续跑范围没有变。能否自动重放由运行时按步骤类型登记的矩阵决定，Skill 契约的声明只能收窄、不能放宽。要主动说的缺口：run 没有租约，多实例部署时一个实例重启会把别的实例正在跑的 run 也当成中断（读代码推断，没测过）。
 
 ### 5. 记忆怎么设计的？
 
@@ -76,9 +76,9 @@ finalizer 会在生成之后删掉没有证据的 claim，边生成边推 token�
 
 日志回答"发生了什么"，trace 回答"这次请求的时间花在哪一步、哪次模型调用、用了多少 token"。我用 OpenTelemetry 按 GenAI 语义约定打 span：一次运行一个 `invoke_agent`，下面是规划器、每个 Skill 的 `execute_tool`，Skill 里的每次模型调用是 `chat` span，带 token 和估算成本，重试是事件。用 OTLP 导出，所以 Phoenix、Langfuse、Jaeger 都能接，不绑定厂商。三个细节：一是 span 靠 AsyncLocalStorage 嵌套，检索服务深处的模型调用自动挂在发起它的 Skill 下面，不用一层层传参；拆分部署时服务客户端注入 W3C `traceparent`、接收端恢复，跨层仍是一条 trace；二是不记录问题、prompt、输出和文档内容，因为 trace 后端是一个新的泄露面，测试会检查；三是 Phoenix 的 OTLP/HTTP 只收 protobuf，最初我装的导出器发 JSON，会被静默拒绝，查文档后改成默认 protobuf、按标准变量可切 JSON。
 
-### 18. 为什么只把两张图交给 LangGraph，外层计划不迁？
+### 18. 外层计划压测没过门，为什么最后还是放到了 LangGraph 上？
 
-因为只有这两张图需要框架提供的东西：持久状态和中断。custom-Skill DAG 和 v3 统一图要在节点边界续跑，v3 还要在审批节点暂停、批准后同一线程续跑，所以交给 LangGraph.js；外层计划的持久性本来就是 run 的步骤，不需要 checkpoint 和中断，交过去只有开销。迁移前定了硬门：压测每请求 CPU 和 p95 退化都不超过 10%。第一次把外层计划也编成 StateGraph，并发 32 时每请求 CPU +29–35%；剖析下来是 LangChain core 每个节点调用都新建一个 `RunTree`，空的 3–5 节点图底价 0.38–0.59 ms，而 10% 的预算只有 0.4 ms，属于结构性开销。改用底层 Pregel 后进程内只多 0.28 ms，但压测并发 1 时每请求 CPU 仍 +17.6%，所以不放宽门，外层计划长期留在原生循环。两张图的原生调度器已删除：删除前把它在固定场景上的输出冻结成 golden（8 个套件、102 个文件），之后只在 LangGraph 上跑、对照 golden。取消走 drain，不把请求 signal 交给 LangGraph，因为直接交会让在途节点被重跑。
+先说结论：现在整个 Agent 只有 LangGraph.js 一种运行时，但外层计划是 2026-11-13 才迁过去的，而且是明知压测门没过、接受代价迁的，不是因为它更快。真正需要框架的只有两张图：custom-Skill DAG 和 v3 统一图要在节点边界续跑，v3 还要在审批节点暂停、批准后同一线程续跑；外层计划的持久性本来就是 run 的步骤，不需要 checkpoint 和中断，交过去在性能上只有开销。迁移前定了硬门：压测每请求 CPU 和 p95 退化都不超过 10%。第一次把外层计划也编成 StateGraph，并发 32 时每请求 CPU +29–35%；剖析下来是 LangChain core 每个节点调用都新建一个 `RunTree`，空的 3–5 节点图底价 0.38–0.59 ms，而 10% 的预算只有 0.4 ms，属于结构性开销。改用底层 Pregel 后进程内只多 0.28 ms，但压测（模型 0 ms）并发 1 时每请求 CPU 仍 +17.6%，所以当时不放宽门，外层计划留在原生循环，LangGraph 实现只作实验开关。后来我不想让 Agent 有两种运作模式，决定只用已经迁好的 LangGraph：原生循环和开关一起删了。门没有重测，也没有通过，接受的代价是进程内每次运行多约 0.3 ms CPU（0.605 → 0.894 ms），相对真实模型约 2.4 秒的一次回答看不出来。外层计划图不带 checkpointer，持久化还是 run 的步骤。两次删除用的是同一个办法：删除前把原生实现在固定场景上的输出冻结成 golden（图调度器 8 个套件、102 个文件，外层循环又加 32 个文件），之后只在 LangGraph 上跑、对照 golden；没有运行时回退开关，只能 `git revert`。取消走 drain，不把请求 signal 交给 LangGraph，因为直接交会让在途节点被重跑。
 
 ### 19. 多租户怎么隔离？哪些默认没开？
 
@@ -92,7 +92,7 @@ finalizer 会在生成之后删掉没有证据的 claim，边生成边推 token�
 
 ### 21. 如果重来，你会怎么做？
 
-更早接外部标注的评测集：之前花了很多时间做报告谱系、门禁这些"证据流程"，QASPER 接得太晚，流程比数据先进。也会更早收敛架构：V1 顺序链、V2 typed DAG、v3 统一图三代并存，又做了 LangGraph 迁移，维护面大。现在 V2 是自定义 Skill 阶段的默认执行器，V1 留作整图被拒时的兜底和运维回退；v3 有 `guarded` 档（含图内审批），但默认关；两张图由 LangGraph.js 调度，原生图调度器已删除。
+更早接外部标注的评测集：之前花了很多时间做报告谱系、门禁这些"证据流程"，QASPER 接得太晚，流程比数据先进。也会更早收敛架构：V1 顺序链、V2 typed DAG、v3 统一图三代并存，又做了 LangGraph 迁移，维护面大。现在 V2 是自定义 Skill 阶段的默认执行器，V1 留作整图被拒时的兜底和运维回退；v3 有 `guarded` 档（含图内审批），但默认关；两张图由 LangGraph.js 调度，原生图调度器已删除；外层计划的原生循环 2026-11-13 也删了，运行时只剩 LangGraph 一种。
 
 ### 22. 项目里哪部分是你自己设计的？用了 AI 编码工具吗？
 

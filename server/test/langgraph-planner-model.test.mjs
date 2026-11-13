@@ -945,9 +945,8 @@ test("an option the planner call cannot carry is refused before the model is cal
 });
 
 // Inside a LangGraph node (the DAG planner and the replanner run inside the
-// outer plan graph's custom_skills node under AGENT_OUTER_PLAN_RUNTIME=
-// langgraph) the call is still a root LangChain run: the node's config and its
-// run signal do not reach the model.
+// outer plan graph's custom_skills node) the call is still a root LangChain
+// run: the node's config and its run signal do not reach the model.
 test("inside a LangGraph node the planner call stays a root run and decides as natively", async () => {
   const { Annotation, END, START, StateGraph } = await import("@langchain/langgraph");
   const dag = PLANNERS.find(({ name }) => name === "dag");

@@ -1,0 +1,354 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "document_rag:primary",
+        "label": "Document RAG",
+        "status": "completed",
+        "summary": "Document RAG returned 1 citation.",
+        "type": "document_rag"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-self_check",
+        "label": "Self Check",
+        "status": "failed",
+        "summary": "Evidence check needs attention: Citations cover 0 of 1 required documents. 2 answer claims lacks citation support.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "5-gap_analysis",
+        "label": "Gap Analysis",
+        "status": "completed",
+        "summary": "Identified 2 evidence gaps for follow-up: unsupported_claim.",
+        "type": "gap_analysis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-budget_limit",
+        "label": "Budget Limit",
+        "status": "skipped",
+        "summary": "Skipped Document follow-up: document RAG budget exhausted (1/1).",
+        "type": "budget_limit"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "7-clarification_gate",
+        "label": "Clarification Gate",
+        "status": "needs_input",
+        "summary": "The agent could not verify the answer from the selected document evidence.",
+        "type": "clarification_gate"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "memory",
+        "detail": {
+          "ragAbstained": true,
+          "ragMemoryApplied": false,
+          "sourceCount": 0
+        },
+        "id": "memory_not_promoted_to_evidence",
+        "label": "Clarification did not promote memory-only text to evidence",
+        "passed": true
+      },
+      {
+        "category": "memory",
+        "detail": {
+          "selfCheckStatus": "failed",
+          "unsupportedClaims": [
+            {
+              "anchors": [
+                "require"
+              ],
+              "missingAnchors": [],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "Remote work requires manager approval",
+              "tokenOverlap": 1
+            },
+            {
+              "anchors": [
+                "20"
+              ],
+              "missingAnchors": [
+                "20",
+                "term:alice",
+                "term:prefers",
+                "term:days"
+              ],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "Alice prefers 20 remote days",
+              "tokenOverlap": 0.25
+            }
+          ]
+        },
+        "id": "memory_claim_failed_support",
+        "label": "Memory-derived claim failed claim support",
+        "passed": true
+      },
+      {
+        "category": "memory",
+        "detail": {
+          "clarification": {
+            "detail": {
+              "gaps": [
+                {
+                  "claim": "Remote work requires manager approval",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "document_rag",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 1,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Alice prefers 20 remote days",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [
+                    "20",
+                    "term:alice",
+                    "term:prefers",
+                    "term:days"
+                  ],
+                  "severity": "repairable",
+                  "skillId": "document_rag",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0.25,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "reasons": [
+                "Citations cover 0 of 1 required documents.",
+                "2 answer claims lacks citation support."
+              ]
+            },
+            "needed": true,
+            "question": "I could not verify the answer from the selected documents. Which specific section, term, date, or document should I focus on?",
+            "reason": "document_follow_up_budget_exhausted"
+          },
+          "traceTypes": [
+            "plan",
+            "query_planner",
+            "document_rag",
+            "self_check",
+            "gap_analysis",
+            "budget_limit",
+            "clarification_gate"
+          ]
+        },
+        "id": "memory_gap_not_evidence",
+        "label": "Unsupported memory claim became a gap instead of evidence",
+        "passed": true
+      }
+    ],
+    "description": "Long-memory hints may affect context, but unsupported memory-derived claims must not count as document evidence.",
+    "failedCheckCount": 0,
+    "id": "memory_not_evidence",
+    "label": "Memory is not evidence",
+    "passed": true,
+    "response": {
+      "agentMode": "clarification",
+      "agentSkills": [
+        {
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 1,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 1,
+          "researchQuestions": 0,
+          "traceSteps": 7,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": {
+        "detail": {
+          "gaps": [
+            {
+              "claim": "Remote work requires manager approval",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "severity": "repairable",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 1,
+              "type": "unsupported_claim"
+            },
+            {
+              "claim": "Alice prefers 20 remote days",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [
+                "20",
+                "term:alice",
+                "term:prefers",
+                "term:days"
+              ],
+              "severity": "repairable",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0.25,
+              "type": "unsupported_claim"
+            }
+          ],
+          "reasons": [
+            "Citations cover 0 of 1 required documents.",
+            "2 answer claims lacks citation support."
+          ]
+        },
+        "needed": true,
+        "question": "I could not verify the answer from the selected documents. Which specific section, term, date, or document should I focus on?",
+        "reason": "document_follow_up_budget_exhausted"
+      },
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [
+          {
+            "claim": "Remote work requires manager approval",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 1,
+            "type": "unsupported_claim"
+          },
+          {
+            "claim": "Alice prefers 20 remote days",
+            "message": "Answer claim lacks citation support.",
+            "missingAnchors": [
+              "20",
+              "term:alice",
+              "term:prefers",
+              "term:days"
+            ],
+            "severity": "repairable",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "tokenOverlap": 0.25,
+            "type": "unsupported_claim"
+          }
+        ],
+        "gapsIdentified": 2,
+        "maxFollowUps": 1,
+        "stoppedReason": "budget_exhausted",
+        "version": "1.0"
+      },
+      "observed": {
+        "clarificationReason": "document_follow_up_budget_exhausted",
+        "ragAbstained": true,
+        "ragMemoryApplied": false,
+        "selfCheckStatus": "failed",
+        "sourceDocIds": [],
+        "traceTypes": [
+          "plan",
+          "query_planner",
+          "document_rag",
+          "self_check",
+          "gap_analysis",
+          "budget_limit",
+          "clarification_gate"
+        ],
+        "unsupportedClaimTexts": [
+          "Remote work requires manager approval",
+          "Alice prefers 20 remote days"
+        ]
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "documentRagCalls",
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 1,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "document_rag",
+        "self_check",
+        "gap_analysis",
+        "budget_limit",
+        "clarification_gate"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 2,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 2,
+        "unsupportedClaimCount": 2
+      }
+    }
+  },
+  "runs": []
+}

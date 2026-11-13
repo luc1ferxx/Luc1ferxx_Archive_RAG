@@ -1,0 +1,2957 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "document_rag:primary",
+        "label": "Document RAG",
+        "status": "completed",
+        "summary": "Document RAG ran but reported insufficient evidence.",
+        "type": "document_rag"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-self_check",
+        "label": "Self Check",
+        "status": "failed",
+        "summary": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "web_search:primary",
+        "label": "Web Search",
+        "status": "completed",
+        "summary": "Web search returned supplemental context.",
+        "type": "web_search"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "7-self_check",
+        "label": "Final Self Check",
+        "status": "failed",
+        "summary": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "8-gap_analysis",
+        "label": "Final Gap Analysis",
+        "status": "completed",
+        "summary": "Identified 5 evidence gaps for follow-up: missing_citations, unsupported_claim.",
+        "type": "gap_analysis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "9-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Finalizer removed 4 unsupported claims and returned an evidence-limited answer.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "error": null,
+    "errorIsCancellation": false,
+    "errorIsOutage": false,
+    "response": {
+      "body": {
+        "agentAnswer": "I do not have enough citation-backed evidence to answer reliably.",
+        "agentMode": "document_web",
+        "agentObservability": {
+          "agentMode": "document_web",
+          "budget": {
+            "limits": {
+              "maxArxivPaperFetches": 1,
+              "maxCustomSkillCalls": 2,
+              "maxDocumentRagCalls": 2,
+              "maxResearchQuestions": 3,
+              "maxTraceSteps": 16,
+              "maxWebSearchCalls": 1
+            },
+            "run": {
+              "exhausted": null,
+              "limits": {
+                "maxCostUsd": 0.5,
+                "maxDurationMs": 300000,
+                "maxTokens": 100000
+              },
+              "used": {
+                "costUsd": 0,
+                "durationMs": "<elapsed>",
+                "modelCalls": 0,
+                "tokens": 0,
+                "unpricedModelCalls": 0
+              }
+            },
+            "traceTruncated": false,
+            "used": {
+              "arxivPaperFetches": 0,
+              "customSkillCalls": 0,
+              "documentRagCalls": 1,
+              "researchQuestions": 0,
+              "traceSteps": 9,
+              "webSearchCalls": 1
+            }
+          },
+          "executionLoop": {
+            "followUpsRun": 0,
+            "gaps": [],
+            "gapsIdentified": 0,
+            "maxFollowUps": 1,
+            "stoppedReason": "not_needed",
+            "version": "1.0"
+          },
+          "executionPlanner": {
+            "fallback": false,
+            "fallbackReason": null,
+            "requestedPlannerId": "deterministic",
+            "selectedPlannerId": "deterministic",
+            "status": "selected",
+            "stepIds": [
+              "arxiv_import",
+              "workspace_action",
+              "research_brief",
+              "inventory",
+              "document_discovery",
+              "document_rag",
+              "web_search"
+            ]
+          },
+          "experienceMemory": {
+            "applied": false,
+            "enabled": false,
+            "error": null,
+            "hintCount": 0,
+            "hints": [],
+            "hitCount": 0,
+            "planningHints": [],
+            "reason": "env_disabled",
+            "status": "disabled",
+            "storedCount": 0,
+            "write": {
+              "enabled": false,
+              "error": null,
+              "prunedCount": 0,
+              "recordCount": 0,
+              "recordTypes": [],
+              "skippedReason": "env_disabled",
+              "status": "skipped",
+              "storedCount": 0,
+              "storedRecords": [],
+              "writeAttempted": false
+            },
+            "writeAttempted": false,
+            "writeSkippedReason": "env_disabled"
+          },
+          "intentPlanner": {
+            "candidateIntentIds": [
+              "document"
+            ],
+            "experienceMemory": {
+              "applied": false,
+              "hintCount": 0
+            },
+            "fallback": false,
+            "fallbackReason": null,
+            "requestedPlannerId": "deterministic",
+            "selectedIntentId": "document",
+            "selectedMode": "document",
+            "selectedPlannerId": "deterministic",
+            "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+            "status": "selected"
+          },
+          "longMemory": {
+            "enabled": false,
+            "postgresConfigured": false,
+            "reason": "env_disabled",
+            "status": "disabled"
+          },
+          "planMode": "document",
+          "promptTemplates": [],
+          "runs": [
+            {
+              "abstained": true,
+              "budget": {
+                "key": "documentRagCalls",
+                "label": "document RAG",
+                "limit": 2,
+                "ok": true,
+                "reason": null,
+                "remaining": 1,
+                "used": 1
+              },
+              "budgetDelta": {},
+              "citationCount": 0,
+              "durationMs": "<elapsed>",
+              "error": null,
+              "label": "Document RAG",
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "status": "completed"
+            },
+            {
+              "abstained": false,
+              "budget": {
+                "key": "webSearchCalls",
+                "label": "web search",
+                "limit": 1,
+                "ok": true,
+                "reason": null,
+                "remaining": 0,
+                "used": 1
+              },
+              "budgetDelta": {},
+              "citationCount": 0,
+              "durationMs": "<elapsed>",
+              "error": null,
+              "label": "Web Search",
+              "phase": "fallback",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "status": "completed"
+            }
+          ],
+          "selectedSkills": [
+            {
+              "budgetKey": "documentRagCalls",
+              "label": "Document RAG",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "skillChain": [],
+          "skills": [
+            {
+              "abstained": true,
+              "attempts": 1,
+              "budgetDelta": {},
+              "budgetKey": "documentRagCalls",
+              "budgetLimit": 2,
+              "budgetRemaining": 1,
+              "budgetUsed": 1,
+              "citationCount": 0,
+              "errorCount": 0,
+              "errors": [],
+              "followUpCount": 0,
+              "label": "Document RAG",
+              "lastCitationCount": 0,
+              "retryCount": 0,
+              "selected": true,
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "skippedCount": 0,
+              "status": "completed",
+              "totalDurationMs": "<elapsed>"
+            },
+            {
+              "abstained": false,
+              "attempts": 1,
+              "budgetDelta": {},
+              "budgetKey": "webSearchCalls",
+              "budgetLimit": 1,
+              "budgetRemaining": 0,
+              "budgetUsed": 1,
+              "citationCount": 0,
+              "errorCount": 0,
+              "errors": [],
+              "followUpCount": 0,
+              "label": "Web Search",
+              "lastCitationCount": 0,
+              "retryCount": 0,
+              "selected": false,
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "skippedCount": 0,
+              "status": "completed",
+              "totalDurationMs": "<elapsed>"
+            }
+          ],
+          "taskMemory": null,
+          "workingMemory": {
+            "checkedQueries": [
+              {
+                "label": "Original request",
+                "phase": "primary",
+                "primary": true,
+                "query": "What does remote work require?",
+                "queryId": "primary",
+                "skillId": "document_rag",
+                "skillVersion": "1.0.0"
+              },
+              {
+                "label": "Exact citation evidence",
+                "phase": "primary",
+                "primary": false,
+                "query": "Find exact cited evidence for: What does remote work require?",
+                "queryId": "fact-citation",
+                "skillId": "document_rag",
+                "skillVersion": "1.0.0"
+              }
+            ],
+            "docIds": [
+              "doc-1"
+            ],
+            "goal": "What does remote work require?",
+            "resolvedGaps": [],
+            "supportedClaims": [],
+            "unresolvedGaps": [
+              {
+                "message": "Final answer has no citations.",
+                "phase": "final",
+                "severity": "blocking",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "type": "missing_citations"
+              },
+              {
+                "claim": "Document evidence:",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [],
+                "phase": "final",
+                "severity": "repairable",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "The documents do not say",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [],
+                "phase": "final",
+                "severity": "repairable",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Web context:",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [],
+                "phase": "final",
+                "severity": "repairable",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              },
+              {
+                "claim": "Remote work requires manager approval, says the web",
+                "message": "Answer claim lacks citation support.",
+                "missingAnchors": [],
+                "phase": "final",
+                "severity": "repairable",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "tokenOverlap": 0,
+                "type": "unsupported_claim"
+              }
+            ],
+            "unsupportedClaims": [
+              {
+                "anchors": [],
+                "missingAnchors": [],
+                "phase": "primary",
+                "skillId": "document_rag",
+                "skillVersion": "1.0.0",
+                "text": "The documents do not say",
+                "tokenOverlap": 0
+              },
+              {
+                "anchors": [],
+                "missingAnchors": [],
+                "phase": "final",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "text": "Document evidence:",
+                "tokenOverlap": 0
+              },
+              {
+                "anchors": [],
+                "missingAnchors": [],
+                "phase": "final",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "text": "Web context:",
+                "tokenOverlap": 0
+              },
+              {
+                "anchors": [
+                  "require"
+                ],
+                "missingAnchors": [],
+                "phase": "final",
+                "skillId": "web_search",
+                "skillVersion": "1.0.0",
+                "text": "Remote work requires manager approval, says the web",
+                "tokenOverlap": 0
+              }
+            ],
+            "version": "1.0"
+          }
+        },
+        "agentRunId": "<id>",
+        "agentRunStatus": "completed",
+        "agentRunSteps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Use selected documents and synthesize a grounded answer."
+                },
+                {
+                  "id": "document_rag",
+                  "label": "Run document RAG",
+                  "summary": "Search 1 selected document."
+                },
+                {
+                  "id": "self_check",
+                  "label": "Verify evidence",
+                  "summary": "Check citation count and document coverage before synthesis."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "document",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Use selected documents and synthesize a grounded answer.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What does remote work require?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What does remote work require?"
+                }
+              ],
+              "source": "agent-query-planner",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "2-query_planner",
+            "input": null,
+            "kind": "plan",
+            "label": "Query Planner",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+            "traceStepId": "2-query_planner",
+            "type": "query_planner",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": true,
+              "citations": 0,
+              "durationMs": "<elapsed>",
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "document_rag:primary",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What does remote work require?",
+              "replaySafe": false,
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "sessionId": "session-1",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Document RAG",
+            "output": {
+              "abstained": true,
+              "citationCount": 0,
+              "text": "The documents do not say."
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Document RAG ran but reported insufficient evidence.",
+            "traceStepId": "document_rag:primary",
+            "type": "document_rag",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Document answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 1
+              },
+              "gaps": [
+                {
+                  "message": "Document RAG reported insufficient evidence.",
+                  "severity": "blocking",
+                  "type": "insufficient_evidence"
+                },
+                {
+                  "message": "Document answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Document RAG explicitly reported insufficient evidence.",
+                "Document answer has no citations.",
+                "Citations cover 0 of 1 required documents.",
+                "1 answer claim lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false,
+              "traceStatus": "failed"
+            },
+            "error": {
+              "message": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support."
+            },
+            "id": "4-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Self Check",
+            "output": {
+              "gapCount": 3,
+              "passed": false,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 1
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support.",
+            "traceStepId": "4-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "durationMs": "<elapsed>",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": {
+              "question": "What does remote work require?"
+            },
+            "kind": "tool_call",
+            "label": "Web Search",
+            "output": {
+              "abstained": false,
+              "citationCount": 0,
+              "text": "Remote work requires manager approval, says the web."
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Web search returned supplemental context.",
+            "traceStepId": "web_search:primary",
+            "type": "web_search",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 1,
+                  "researchQuestions": 0,
+                  "traceSteps": 5,
+                  "webSearchCalls": 1
+                }
+              },
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "document_web",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": true,
+              "hasResearchBrief": false,
+              "hasWebResult": true,
+              "sourceCount": 0
+            },
+            "kind": "decision",
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 111,
+              "sourceCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "traceStepId": "6-synthesis",
+            "type": "synthesis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "finalAnswer": true,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Final answer has no citations.",
+                "Final answer citations do not include checkable evidence text.",
+                "4 final answer claims lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 0,
+              "retryRecommended": false,
+              "traceStatus": "failed"
+            },
+            "error": {
+              "message": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support."
+            },
+            "id": "7-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Self Check",
+            "output": {
+              "gapCount": 5,
+              "passed": false,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 4
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support.",
+            "traceStepId": "7-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "finalAnswer": true,
+              "followUpRecommended": false,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "8-gap_analysis",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Gap Analysis",
+            "output": {
+              "finalAnswer": true,
+              "followUpRecommended": false,
+              "gapCount": 5
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Identified 5 evidence gaps for follow-up: missing_citations, unsupported_claim.",
+            "traceStepId": "8-gap_analysis",
+            "type": "gap_analysis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": true,
+              "changed": true,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "reason": "missing_checkable_citation_text",
+              "removedClaims": [
+                "Document evidence:",
+                "The documents do not say",
+                "Web context:",
+                "Remote work requires manager approval, says the web"
+              ],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "9-answer_finalizer",
+            "input": null,
+            "kind": "observation",
+            "label": "Answer Finalizer",
+            "output": {
+              "abstained": true,
+              "changed": true,
+              "removedClaimCount": 4,
+              "skippedReason": "",
+              "unsupportedClaimCount": 4
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Finalizer removed 4 unsupported claims and returned an evidence-limited answer.",
+            "traceStepId": "9-answer_finalizer",
+            "type": "answer_finalizer",
+            "updatedAt": "<time>"
+          }
+        ],
+        "agentSkills": [
+          {
+            "label": "Document RAG",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "status": "completed"
+          },
+          {
+            "label": "Web Search",
+            "skillId": "web_search",
+            "skillVersion": "1.0.0",
+            "status": "completed"
+          }
+        ],
+        "agentTrace": [
+          {
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Use selected documents and synthesize a grounded answer."
+                },
+                {
+                  "id": "document_rag",
+                  "label": "Run document RAG",
+                  "summary": "Search 1 selected document."
+                },
+                {
+                  "id": "self_check",
+                  "label": "Verify evidence",
+                  "summary": "Check citation count and document coverage before synthesis."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "document"
+            },
+            "id": "1-plan",
+            "label": "Plan",
+            "status": "completed",
+            "summary": "Use selected documents and synthesize a grounded answer.",
+            "type": "plan"
+          },
+          {
+            "detail": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What does remote work require?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What does remote work require?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "id": "2-query_planner",
+            "label": "Query Planner",
+            "status": "completed",
+            "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+            "type": "query_planner"
+          },
+          {
+            "detail": {
+              "abstained": true,
+              "citations": 0,
+              "durationMs": "<elapsed>",
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            "error": null,
+            "id": "document_rag:primary",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What does remote work require?",
+              "replaySafe": false,
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "sessionId": "session-1",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "label": "Document RAG",
+            "output": {
+              "abstained": true,
+              "citationCount": 0,
+              "text": "The documents do not say."
+            },
+            "status": "completed",
+            "summary": "Document RAG ran but reported insufficient evidence.",
+            "type": "document_rag"
+          },
+          {
+            "detail": {
+              "answerLabel": "Document answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 1
+              },
+              "gaps": [
+                {
+                  "message": "Document RAG reported insufficient evidence.",
+                  "severity": "blocking",
+                  "type": "insufficient_evidence"
+                },
+                {
+                  "message": "Document answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Document RAG explicitly reported insufficient evidence.",
+                "Document answer has no citations.",
+                "Citations cover 0 of 1 required documents.",
+                "1 answer claim lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false
+            },
+            "id": "4-self_check",
+            "label": "Self Check",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support.",
+            "type": "self_check"
+          },
+          {
+            "detail": {
+              "durationMs": "<elapsed>",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": {
+              "question": "What does remote work require?"
+            },
+            "label": "Web Search",
+            "output": {
+              "abstained": false,
+              "citationCount": 0,
+              "text": "Remote work requires manager approval, says the web."
+            },
+            "status": "completed",
+            "summary": "Web search returned supplemental context.",
+            "type": "web_search"
+          },
+          {
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 1,
+                  "researchQuestions": 0,
+                  "traceSteps": 5,
+                  "webSearchCalls": 1
+                }
+              }
+            },
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "document_web",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": true,
+              "hasResearchBrief": false,
+              "hasWebResult": true,
+              "sourceCount": 0
+            },
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 111,
+              "sourceCount": 0
+            },
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "type": "synthesis"
+          },
+          {
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "finalAnswer": true,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Final answer has no citations.",
+                "Final answer citations do not include checkable evidence text.",
+                "4 final answer claims lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 0,
+              "retryRecommended": false
+            },
+            "id": "7-self_check",
+            "label": "Final Self Check",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support.",
+            "type": "self_check"
+          },
+          {
+            "detail": {
+              "finalAnswer": true,
+              "followUpRecommended": false,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "skillId": "web_search",
+              "skillVersion": "1.0.0"
+            },
+            "id": "8-gap_analysis",
+            "label": "Final Gap Analysis",
+            "status": "completed",
+            "summary": "Identified 5 evidence gaps for follow-up: missing_citations, unsupported_claim.",
+            "type": "gap_analysis"
+          },
+          {
+            "detail": {
+              "abstained": true,
+              "changed": true,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "reason": "missing_checkable_citation_text",
+              "removedClaims": [
+                "Document evidence:",
+                "The documents do not say",
+                "Web context:",
+                "Remote work requires manager approval, says the web"
+              ]
+            },
+            "id": "9-answer_finalizer",
+            "label": "Answer Finalizer",
+            "status": "completed",
+            "summary": "Finalizer removed 4 unsupported claims and returned an evidence-limited answer.",
+            "type": "answer_finalizer"
+          }
+        ],
+        "agentWorkingMemory": {
+          "checkedQueries": [
+            {
+              "label": "Original request",
+              "phase": "primary",
+              "primary": true,
+              "query": "What does remote work require?",
+              "queryId": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Exact citation evidence",
+              "phase": "primary",
+              "primary": false,
+              "query": "Find exact cited evidence for: What does remote work require?",
+              "queryId": "fact-citation",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "docIds": [
+            "doc-1"
+          ],
+          "goal": "What does remote work require?",
+          "resolvedGaps": [],
+          "supportedClaims": [],
+          "unresolvedGaps": [
+            {
+              "message": "Final answer has no citations.",
+              "phase": "final",
+              "severity": "blocking",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "type": "missing_citations"
+            },
+            {
+              "claim": "Document evidence:",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "phase": "final",
+              "severity": "repairable",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0,
+              "type": "unsupported_claim"
+            },
+            {
+              "claim": "The documents do not say",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "phase": "final",
+              "severity": "repairable",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0,
+              "type": "unsupported_claim"
+            },
+            {
+              "claim": "Web context:",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "phase": "final",
+              "severity": "repairable",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0,
+              "type": "unsupported_claim"
+            },
+            {
+              "claim": "Remote work requires manager approval, says the web",
+              "message": "Answer claim lacks citation support.",
+              "missingAnchors": [],
+              "phase": "final",
+              "severity": "repairable",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "tokenOverlap": 0,
+              "type": "unsupported_claim"
+            }
+          ],
+          "unsupportedClaims": [
+            {
+              "anchors": [],
+              "missingAnchors": [],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "The documents do not say",
+              "tokenOverlap": 0
+            },
+            {
+              "anchors": [],
+              "missingAnchors": [],
+              "phase": "final",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "text": "Document evidence:",
+              "tokenOverlap": 0
+            },
+            {
+              "anchors": [],
+              "missingAnchors": [],
+              "phase": "final",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "text": "Web context:",
+              "tokenOverlap": 0
+            },
+            {
+              "anchors": [
+                "require"
+              ],
+              "missingAnchors": [],
+              "phase": "final",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "text": "Remote work requires manager approval, says the web",
+              "tokenOverlap": 0
+            }
+          ],
+          "version": "1.0"
+        },
+        "errors": {
+          "mcp": null,
+          "rag": null
+        },
+        "mcpAnswer": "Remote work requires manager approval, says the web.",
+        "ragAbstainReason": null,
+        "ragAbstained": true,
+        "ragAnswer": "I do not have enough citation-backed evidence to answer reliably.",
+        "ragEvidenceSummary": null,
+        "ragGapPlan": null,
+        "ragMemoryApplied": false,
+        "ragResolvedQuestion": "What does remote work require?",
+        "ragSources": [],
+        "researchBrief": null
+      },
+      "status": 200
+    },
+    "runs": [
+      {
+        "error": null,
+        "events": [
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:1",
+            "payload": {
+              "status": "running"
+            },
+            "type": "run_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:2",
+            "payload": {
+              "traceStepCount": 2
+            },
+            "type": "run_prepared"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:3",
+            "payload": {
+              "planner": {
+                "fallback": false,
+                "fallbackReason": null,
+                "requestedPlannerId": "deterministic",
+                "selectedPlannerId": "deterministic",
+                "status": "selected",
+                "stepIds": [
+                  "arxiv_import",
+                  "workspace_action",
+                  "research_brief",
+                  "inventory",
+                  "document_discovery",
+                  "document_rag",
+                  "web_search"
+                ]
+              }
+            },
+            "type": "execution_planned"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:4",
+            "payload": {
+              "status": "running",
+              "stepId": "document_rag:primary"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:5",
+            "payload": {
+              "status": "completed",
+              "stepId": "document_rag:primary"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:6",
+            "payload": {
+              "status": "running",
+              "stepId": "web_search:primary"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:7",
+            "payload": {
+              "status": "completed",
+              "stepId": "web_search:primary"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:8",
+            "payload": {
+              "status": "completed"
+            },
+            "type": "run_completed"
+          }
+        ],
+        "result": {
+          "agentMode": "document_web",
+          "answer": "I do not have enough citation-backed evidence to answer reliably.",
+          "citationCount": 0,
+          "ragAbstained": true,
+          "status": 200
+        },
+        "status": "completed",
+        "steps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Use selected documents and synthesize a grounded answer."
+                },
+                {
+                  "id": "document_rag",
+                  "label": "Run document RAG",
+                  "summary": "Search 1 selected document."
+                },
+                {
+                  "id": "self_check",
+                  "label": "Verify evidence",
+                  "summary": "Check citation count and document coverage before synthesis."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "document",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Use selected documents and synthesize a grounded answer.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What does remote work require?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What does remote work require?"
+                }
+              ],
+              "source": "agent-query-planner",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "2-query_planner",
+            "input": null,
+            "kind": "plan",
+            "label": "Query Planner",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+            "traceStepId": "2-query_planner",
+            "type": "query_planner",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": true,
+              "citations": 0,
+              "durationMs": "<elapsed>",
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "document_rag:primary",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What does remote work require?",
+              "replaySafe": false,
+              "retrievalPlan": {
+                "intent": "fact",
+                "phase": "primary",
+                "retrievalOptions": {
+                  "profile": "narrow",
+                  "queryCount": 2,
+                  "topK": 4,
+                  "topKPerDoc": 2
+                },
+                "retrievalQueries": [
+                  {
+                    "id": "primary",
+                    "label": "Original request",
+                    "primary": true,
+                    "query": "What does remote work require?"
+                  },
+                  {
+                    "id": "fact-citation",
+                    "label": "Exact citation evidence",
+                    "primary": false,
+                    "query": "Find exact cited evidence for: What does remote work require?"
+                  }
+                ],
+                "source": "agent-query-planner"
+              },
+              "sessionId": "session-1",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Document RAG",
+            "output": {
+              "abstained": true,
+              "citationCount": 0,
+              "text": "The documents do not say."
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Document RAG ran but reported insufficient evidence.",
+            "traceStepId": "document_rag:primary",
+            "type": "document_rag",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Document answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 1
+              },
+              "gaps": [
+                {
+                  "message": "Document RAG reported insufficient evidence.",
+                  "severity": "blocking",
+                  "type": "insufficient_evidence"
+                },
+                {
+                  "message": "Document answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Document RAG explicitly reported insufficient evidence.",
+                "Document answer has no citations.",
+                "Citations cover 0 of 1 required documents.",
+                "1 answer claim lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false,
+              "traceStatus": "failed"
+            },
+            "error": {
+              "message": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support."
+            },
+            "id": "4-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Self Check",
+            "output": {
+              "gapCount": 3,
+              "passed": false,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 1
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Document RAG explicitly reported insufficient evidence. Document answer has no citations. Citations cover 0 of 1 required documents. 1 answer claim lacks citation support.",
+            "traceStepId": "4-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "durationMs": "<elapsed>",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": {
+              "question": "What does remote work require?"
+            },
+            "kind": "tool_call",
+            "label": "Web Search",
+            "output": {
+              "abstained": false,
+              "citationCount": 0,
+              "text": "Remote work requires manager approval, says the web."
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Web search returned supplemental context.",
+            "traceStepId": "web_search:primary",
+            "type": "web_search",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 1,
+                  "researchQuestions": 0,
+                  "traceSteps": 5,
+                  "webSearchCalls": 1
+                }
+              },
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "document_web",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": true,
+              "hasResearchBrief": false,
+              "hasWebResult": true,
+              "sourceCount": 0
+            },
+            "kind": "decision",
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 111,
+              "sourceCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "traceStepId": "6-synthesis",
+            "type": "synthesis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 0,
+              "citedDocCount": 0,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "finalAnswer": true,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "passed": false,
+              "reasons": [
+                "Final answer has no citations.",
+                "Final answer citations do not include checkable evidence text.",
+                "4 final answer claims lacks citation support."
+              ],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 0,
+              "retryRecommended": false,
+              "traceStatus": "failed"
+            },
+            "error": {
+              "message": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support."
+            },
+            "id": "7-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Self Check",
+            "output": {
+              "gapCount": 5,
+              "passed": false,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 4
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "failed",
+            "summary": "Evidence check needs attention: Final answer has no citations. Final answer citations do not include checkable evidence text. 4 final answer claims lacks citation support.",
+            "traceStepId": "7-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "finalAnswer": true,
+              "followUpRecommended": false,
+              "gaps": [
+                {
+                  "message": "Final answer has no citations.",
+                  "severity": "blocking",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "type": "missing_citations"
+                },
+                {
+                  "claim": "Document evidence:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "The documents do not say",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Web context:",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                },
+                {
+                  "claim": "Remote work requires manager approval, says the web",
+                  "message": "Answer claim lacks citation support.",
+                  "missingAnchors": [],
+                  "severity": "repairable",
+                  "skillId": "web_search",
+                  "skillVersion": "1.0.0",
+                  "tokenOverlap": 0,
+                  "type": "unsupported_claim"
+                }
+              ],
+              "skillId": "web_search",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "8-gap_analysis",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Gap Analysis",
+            "output": {
+              "finalAnswer": true,
+              "followUpRecommended": false,
+              "gapCount": 5
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Identified 5 evidence gaps for follow-up: missing_citations, unsupported_claim.",
+            "traceStepId": "8-gap_analysis",
+            "type": "gap_analysis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": true,
+              "changed": true,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Document evidence:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "The documents do not say",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Web context:",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [],
+                    "supported": false,
+                    "supportedCitedDocIds": [],
+                    "supportedSourceRanks": [],
+                    "text": "Remote work requires manager approval, says the web",
+                    "tokenOverlap": 0,
+                    "verifiedSourceRanks": []
+                  }
+                ],
+                "supportedClaimCount": 0,
+                "unsupportedClaimCount": 4
+              },
+              "reason": "missing_checkable_citation_text",
+              "removedClaims": [
+                "Document evidence:",
+                "The documents do not say",
+                "Web context:",
+                "Remote work requires manager approval, says the web"
+              ],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "9-answer_finalizer",
+            "input": null,
+            "kind": "observation",
+            "label": "Answer Finalizer",
+            "output": {
+              "abstained": true,
+              "changed": true,
+              "removedClaimCount": 4,
+              "skippedReason": "",
+              "unsupportedClaimCount": 4
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Finalizer removed 4 unsupported claims and returned an evidence-limited answer.",
+            "traceStepId": "9-answer_finalizer",
+            "type": "answer_finalizer",
+            "updatedAt": "<time>"
+          }
+        ]
+      }
+    ]
+  },
+  "runs": []
+}

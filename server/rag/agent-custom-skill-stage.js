@@ -231,14 +231,17 @@ export const runCustomSkillStage = async ({
 
   // Refused before anything durable exists: a request that cannot run on
   // LangGraph must not leave a graph checkpoint for recovery to resume. The
-  // executor checks again at its own entry. A removed AGENT_RUNTIME value
-  // asked for the native scheduler, which no longer exists: running the graph
-  // on LangGraph instead would ignore it silently.
+  // executor checks again at its own entry. A removed AGENT_RUNTIME or
+  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, which no
+  // longer exists: running the graph on LangGraph instead would ignore it
+  // silently.
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();
-  // Imported on first use, so a process that never runs a guarded graph (the
-  // api edge of a split deployment, a deployment whose rollout is off) never
-  // loads LangGraph.
+  // Imported on first use. That keeps the graph executor and compiler out of
+  // a process that never runs a guarded graph; LangGraph itself is loaded by
+  // then in any process that answers agent requests, because the outer plan
+  // that reached this stage runs on it (ADR 0001 phase 7). The api edge of a
+  // split deployment runs no agent and loads neither.
   const { runExecutionGraphOnLangGraph: executeGraph } = await import(
     "./langgraph/run-execution-graph.js"
   );

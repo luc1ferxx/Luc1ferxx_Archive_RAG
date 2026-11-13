@@ -1,0 +1,669 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Search the web because no document context is selected.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-capability_approval_gate",
+        "label": "Capability Approval",
+        "status": "needs_input",
+        "summary": "Web Search requires approval before execution.",
+        "type": "capability_approval_gate"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "approval",
+        "detail": {
+          "clarification": {
+            "detail": {
+              "approvalGate": {
+                "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date"
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              },
+              "approvalGates": [
+                {
+                  "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                  "capabilityId": "web.search",
+                  "capabilityLabel": "Web Search",
+                  "capabilityVersion": "1.0.0",
+                  "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                  "inputPreview": {
+                    "question": "Search the web for the current launch date"
+                  },
+                  "policy": {
+                    "externalCall": true,
+                    "mode": "user_confirmation",
+                    "storesResult": false,
+                    "writesWorkspace": false
+                  },
+                  "reason": "User confirmation is required before this capability can execute.",
+                  "riskFlags": [
+                    "external_call"
+                  ],
+                  "snapshotVersion": 1,
+                  "status": "pending",
+                  "type": "capability_approval"
+                }
+              ],
+              "policyResult": {
+                "decision": "needs_approval",
+                "reasons": [
+                  "user_confirmation_required"
+                ],
+                "riskFlags": [
+                  "external_call"
+                ]
+              }
+            },
+            "needed": true,
+            "question": "Approve Web Search?",
+            "reason": "capability_approval_required"
+          },
+          "runStatus": "waiting_for_user",
+          "webSearchCallsBeforeDeny": 0
+        },
+        "id": "web_gate_created_without_call",
+        "label": "Web approval gate was created before any external call",
+        "passed": true
+      },
+      {
+        "category": "approval",
+        "detail": {
+          "result": {
+            "agentMode": "clarification",
+            "answer": "Approve Web Search?",
+            "approvalDenied": true,
+            "citationCount": 0,
+            "deniedGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "ragAbstained": true,
+            "status": 200
+          },
+          "runStatus": "completed",
+          "skippedPrimaryStep": {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "",
+            "createdAt": "<time>",
+            "decision": "deny",
+            "detail": {
+              "approvalDenied": true,
+              "approvalGate": {
+                "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date"
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              },
+              "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "capabilityId": "web.search",
+              "interruptType": "capability_approval_required"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": null,
+            "kind": "tool_call",
+            "label": "Web Search",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "<time>",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "skipped",
+            "summary": "Web Search was skipped because approval was denied.",
+            "traceStepId": "",
+            "type": "web_search",
+            "updatedAt": "<time>"
+          },
+          "skippedStep": {
+            "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "attempt": 1,
+            "capabilityId": "web.search",
+            "capabilityVersion": "1.0.0",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "deny",
+            "detail": {
+              "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c"
+            },
+            "error": null,
+            "id": "capability:web.search:approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "input": null,
+            "kind": "capability_call",
+            "label": "Web Search",
+            "output": null,
+            "parentStepId": "2-capability_approval_gate",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "skipped",
+            "summary": "Capability call was skipped because approval was denied.",
+            "traceStepId": "",
+            "type": "capability_call",
+            "updatedAt": "<time>"
+          },
+          "webSearchCalls": 0
+        },
+        "id": "deny_skips_capability",
+        "label": "Deny skipped the capability call",
+        "passed": true
+      },
+      {
+        "category": "approval",
+        "detail": [
+          "run_created",
+          "run_prepared",
+          "execution_planned",
+          "step_started",
+          "step_paused",
+          "approval_gate_created",
+          "approval_gate_denied"
+        ],
+        "id": "deny_event_recorded",
+        "label": "Run events record approval denial without step execution",
+        "passed": true
+      }
+    ],
+    "description": "Denying a web capability approval should complete the run without executing the external call.",
+    "failedCheckCount": 0,
+    "id": "web_approval_deny",
+    "label": "Web approval deny",
+    "passed": true,
+    "response": {
+      "agentMode": "clarification",
+      "agentSkills": [],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 2,
+          "webSearchCalls": 1
+        }
+      },
+      "clarification": {
+        "detail": {
+          "approvalGate": {
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "capabilityId": "web.search",
+            "capabilityLabel": "Web Search",
+            "capabilityVersion": "1.0.0",
+            "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "inputPreview": {
+              "question": "Search the web for the current launch date"
+            },
+            "policy": {
+              "externalCall": true,
+              "mode": "user_confirmation",
+              "storesResult": false,
+              "writesWorkspace": false
+            },
+            "reason": "User confirmation is required before this capability can execute.",
+            "riskFlags": [
+              "external_call"
+            ],
+            "snapshotVersion": 1,
+            "status": "pending",
+            "type": "capability_approval"
+          },
+          "approvalGates": [
+            {
+              "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "inputPreview": {
+                "question": "Search the web for the current launch date"
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            }
+          ],
+          "policyResult": {
+            "decision": "needs_approval",
+            "reasons": [
+              "user_confirmation_required"
+            ],
+            "riskFlags": [
+              "external_call"
+            ]
+          }
+        },
+        "needed": true,
+        "question": "Approve Web Search?",
+        "reason": "capability_approval_required"
+      },
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [],
+        "gapsIdentified": 0,
+        "maxFollowUps": 1,
+        "stoppedReason": "not_needed",
+        "version": "1.0"
+      },
+      "observed": {
+        "denied": {
+          "approvalDenied": true,
+          "runStatus": "completed",
+          "skippedCapabilityStatus": "skipped",
+          "skippedPrimaryStatus": "skipped",
+          "webSearchCalls": 0
+        },
+        "eventTypes": [
+          "run_created",
+          "run_prepared",
+          "execution_planned",
+          "step_started",
+          "step_paused",
+          "approval_gate_created",
+          "approval_gate_denied"
+        ],
+        "pending": {
+          "clarificationReason": "capability_approval_required",
+          "runStatus": "waiting_for_user",
+          "webSearchCalls": 0
+        }
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "webSearchCalls",
+          "label": "Web Search",
+          "skillId": "web_search",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 0,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [
+        "plan",
+        "capability_approval_gate"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 0,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": [
+    {
+      "error": null,
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 1
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "paused",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_paused"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "capabilityId": "web.search",
+            "gateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "status": "waiting_for_user"
+          },
+          "type": "approval_gate_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:7",
+          "payload": {
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "capabilityId": "web.search",
+            "gateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "reason": "Trajectory test denial.",
+            "stepId": "2-capability_approval_gate"
+          },
+          "type": "approval_gate_denied"
+        }
+      ],
+      "result": {
+        "agentMode": "clarification",
+        "answer": "Approve Web Search?",
+        "approvalDenied": true,
+        "citationCount": 0,
+        "deniedGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+        "ragAbstained": true,
+        "status": 200
+      },
+      "status": "completed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Search the web because no document context is selected."
+              },
+              {
+                "id": "web_search",
+                "label": "Use web fallback",
+                "summary": "Use web context only after document evidence is checked."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": 300000,
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [],
+            "mode": "web",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Search the web because no document context is selected.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "deny",
+          "detail": {
+            "action": "deny",
+            "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "capabilityId": "web.search"
+          },
+          "error": null,
+          "id": "2-capability_approval_gate",
+          "input": null,
+          "kind": "approval_gate",
+          "label": "Capability Approval",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Web Search requires approval before execution.",
+          "traceStepId": "2-capability_approval_gate",
+          "type": "capability_approval_gate",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "deny",
+          "detail": {
+            "approvalDenied": true,
+            "approvalGate": {
+              "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+              "inputPreview": {
+                "question": "Search the web for the current launch date"
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+            "capabilityId": "web.search",
+            "interruptType": "capability_approval_required"
+          },
+          "error": null,
+          "id": "web_search:primary",
+          "input": null,
+          "kind": "tool_call",
+          "label": "Web Search",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "skipped",
+          "summary": "Web Search was skipped because approval was denied.",
+          "traceStepId": "",
+          "type": "web_search",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "deny",
+          "detail": {
+            "approvalObjectHash": "sha256:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c"
+          },
+          "error": null,
+          "id": "capability:web.search:approval:web.search:1.0.0:433dbdd4b4392a0c9311a2d747b9e271b64c02f566fe2d45650138357c6da52c",
+          "input": null,
+          "kind": "capability_call",
+          "label": "Web Search",
+          "output": null,
+          "parentStepId": "2-capability_approval_gate",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "skipped",
+          "summary": "Capability call was skipped because approval was denied.",
+          "traceStepId": "",
+          "type": "capability_call",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  ]
+}

@@ -160,8 +160,10 @@ const projectRun = (run) => {
   };
 };
 
-// The outer-plan dial is pinned unset, the production setting: the outer plan
-// stays on the native loop, so only the custom-Skill DAG runs on LangGraph.
+// The removed outer-plan dial is pinned unset. Since ADR 0001 phase 7 the
+// outer plan around the custom-Skill DAG runs on LangGraph as well; the
+// goldens below were frozen while it still ran on the native loop, and phase
+// 7 found every one of them unchanged.
 const PASS_ENV = Object.freeze({ ...ANSWER_RATE_FLAGS_OFF, AGENT_OUTER_PLAN_RUNTIME: undefined });
 
 /**
@@ -228,10 +230,10 @@ const assertLangGraphRecords = (langgraph) => {
     for (const record of run.langGraphRecordsWritten) {
       assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT);
       assert.equal(record.threadId, deriveLangGraphThreadId(run.accessScope, run.runId));
-      // The graph checkpoints into the root namespace, never a subgraph's
-      // (with AGENT_OUTER_PLAN_RUNTIME=langgraph it is invoked from inside the
-      // outer plan graph's custom_skills node, test/agent-run-chat-statement-
-      // count.test.mjs pins that case).
+      // The graph checkpoints into the root namespace, never a subgraph's,
+      // although it is invoked from inside the outer plan graph's
+      // custom_skills node (test/agent-run-chat-statement-count.test.mjs
+      // pins the same).
       assert.deepStrictEqual(record.namespaces.map((namespace) => namespace.ns), [""]);
       assert.equal(JSON.stringify(record).includes(run.goal), false);
     }

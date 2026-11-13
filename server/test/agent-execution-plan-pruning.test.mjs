@@ -18,16 +18,19 @@ import {
 } from "../rag/agent-execution-plan-runner.js";
 import { runAgentExecutionPlanOnLangGraph } from "../rag/langgraph/execution-plan-graph.js";
 import {
+  CLIENT_CLOSED_REQUEST_STATUS,
+  REQUEST_CANCELLATION_CODES,
   REQUEST_CANCELLATION_REASONS,
   createRequestCancellation,
   runWithRequestCancellation,
 } from "../rag/request-deadline.js";
 import { AGENT_SKILL_IDS, createDefaultSkillRegistry } from "../rag/skills/registry.js";
 
-// The outer plan on LangGraph does not schedule a built-in stage whose Skill
+// The outer plan's scheduler does not schedule a built-in stage whose Skill
 // was not selected (isAgentExecutionPlanStageStaticallyInert,
 // rag/langgraph/execution-plan-graph.js). That is behaviour-free only if
-// such a stage body, run natively, does nothing at all. Here every
+// such a stage body, called on its own, does nothing at all (the native loop
+// ADR 0001 phase 7 removed called every one). Here every
 // collaborator the stage bodies close over -- the step lifecycle (steps and
 // run events), the trace callbacks, the budget state, the Skill callbacks,
 // the services, the run-store hooks -- is a tripwire that records any
@@ -172,7 +175,7 @@ const collectAgentEvents = async (work) => {
 };
 
 for (const [stageId, skillId, stateField] of INERT_STAGES) {
-  test(`${stageId} without its Skill does nothing at all natively, and the predicate says so through the same lookup`, async () => {
+  test(`${stageId} without its Skill does nothing at all when its body is called, and the predicate says so through the same lookup`, async () => {
     const executionPlan = [stageId];
     const stateLookup = createLookup();
     const initialState = buildInitialState(
@@ -186,7 +189,7 @@ for (const [stageId, skillId, stateField] of INERT_STAGES) {
     assert.equal(step.condition, AGENT_EXECUTION_CONDITIONS.selectedSkill);
     assert.deepStrictEqual(touches, [], "building the stages touches no collaborator");
 
-    // The stage body exactly as the native loop calls it.
+    // The stage body exactly as a scheduler calls it.
     const { events, result } = await collectAgentEvents(() => getStage(step)(step));
 
     assert.equal(result, undefined);
@@ -233,51 +236,77 @@ for (const [stageId, skillId, stateField] of INERT_STAGES) {
   });
 }
 
-test("the native loop and the LangGraph runner run a plan of unselected built-in stages without any effect, and return the same state", async () => {
+// The runner under both of its names: runAgentExecutionPlan (what agent.js
+// calls) hands every plan to runAgentExecutionPlanOnLangGraph.
+const RUNNERS = Object.freeze([
+  ["runAgentExecutionPlan", runAgentExecutionPlan],
+  ["runAgentExecutionPlanOnLangGraph", runAgentExecutionPlanOnLangGraph],
+]);
+
+test("the runner runs a plan of unselected built-in stages without any effect, and returns the state a walk of every stage body leaves", async () => {
   const executionPlan = INERT_STAGES.map(([stageId]) => stageId);
   const initialState = buildInitialState(
     createStageOptions({ executionPlan, getSelectedSkill: createLookup().getSelectedSkill }).options
   );
-  const results = {};
 
-  for (const [runtime, run] of [
-    ["native", runAgentExecutionPlan],
-    ["langgraph", runAgentExecutionPlanOnLangGraph],
-  ]) {
+  // Every stage body in plan order, which is what the removed native loop
+  // did: no effect, the state as built, one lookup per stage.
+  {
+    const { getSelectedSkill, lookups } = createLookup();
+    const { options, touches } = createStageOptions({ executionPlan, getSelectedSkill });
+    const { executionPlan: validatedPlan, getStage, state } = createAgentExecutionPlanStages(options);
+    const { events } = await collectAgentEvents(async () => {
+      for (const step of validatedPlan) {
+        await getStage(step)(step);
+      }
+    });
+
+    assert.deepStrictEqual(touches, [], "walk");
+    assert.deepStrictEqual(events, [], "walk");
+    assert.deepStrictEqual(state, initialState, "walk");
+    assert.deepStrictEqual(
+      lookups,
+      INERT_STAGES.map(([, skillId]) => skillId)
+    );
+  }
+
+  for (const [entry, run] of RUNNERS) {
     const { getSelectedSkill, lookups } = createLookup();
     const { options, touches } = createStageOptions({ executionPlan, getSelectedSkill });
     const { events, result } = await collectAgentEvents(() => run(options));
 
-    assert.deepStrictEqual(touches, [], runtime);
-    assert.deepStrictEqual(events, [], runtime);
-    assert.deepStrictEqual(result, initialState, runtime);
-    results[runtime] = { lookups, result };
+    assert.deepStrictEqual(touches, [], entry);
+    assert.deepStrictEqual(events, [], entry);
+    // The same state the walk leaves.
+    assert.deepStrictEqual(result, initialState, entry);
+    // The predicate looks up all five, and the one stage a plan of inert
+    // stages keeps (its first) looks its Skill up once more when it runs.
+    assert.deepStrictEqual(
+      lookups,
+      [...INERT_STAGES.map(([, skillId]) => skillId), AGENT_SKILL_IDS.arxivImport],
+      entry
+    );
   }
-
-  // Natively each stage body looks up its Skill. On LangGraph the predicate
-  // looks up all five, and the one stage a plan of inert stages keeps (its
-  // first) looks its Skill up once more when it runs.
-  assert.deepStrictEqual(
-    results.native.lookups,
-    INERT_STAGES.map(([, skillId]) => skillId)
-  );
-  assert.deepStrictEqual(results.langgraph.lookups, [
-    ...INERT_STAGES.map(([, skillId]) => skillId),
-    AGENT_SKILL_IDS.arxivImport,
-  ]);
-  assert.deepStrictEqual(results.langgraph.result, results.native.result);
 });
 
-test("a cancellation before an unselected built-in stage ends both runtimes with the same error and no effect", async () => {
+// The removed native loop threw the request's cancellation at the safe point
+// before its first stage; a plan of inert stages keeps its first stage so the
+// graph passes that safe point too.
+test("a cancellation before an unselected built-in stage ends the run with the request's cancellation and no effect", async () => {
   const executionPlan = INERT_STAGES.map(([stageId]) => stageId);
+  const expected = {
+    [REQUEST_CANCELLATION_REASONS.clientCancelled]: {
+      code: REQUEST_CANCELLATION_CODES.clientCancelled,
+      status: CLIENT_CLOSED_REQUEST_STATUS,
+    },
+    [REQUEST_CANCELLATION_REASONS.deadlineExceeded]: {
+      code: REQUEST_CANCELLATION_CODES.deadlineExceeded,
+      status: 504,
+    },
+  };
 
   for (const reason of Object.values(REQUEST_CANCELLATION_REASONS)) {
-    const outcomes = {};
-
-    for (const [runtime, run] of [
-      ["native", runAgentExecutionPlan],
-      ["langgraph", runAgentExecutionPlanOnLangGraph],
-    ]) {
+    for (const [entry, run] of RUNNERS) {
       const { getSelectedSkill } = createLookup();
       const { options, touches } = createStageOptions({ executionPlan, getSelectedSkill });
       const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
@@ -293,18 +322,19 @@ test("a cancellation before an unselected built-in stage ends both runtimes with
           .finally(cancellation.dispose)
       );
 
-      assert.deepStrictEqual(touches, [], `${runtime} ${reason}`);
-      assert.deepStrictEqual(events, [], `${runtime} ${reason}`);
-      outcomes[runtime] = {
-        code: result.error?.code,
-        name: result.error?.name,
-        reason: result.error?.reason,
-        status: result.error?.status,
-      };
+      assert.deepStrictEqual(touches, [], `${entry} ${reason}`);
+      assert.deepStrictEqual(events, [], `${entry} ${reason}`);
+      assert.deepStrictEqual(
+        {
+          code: result.error?.code,
+          name: result.error?.name,
+          reason: result.error?.reason,
+          status: result.error?.status,
+        },
+        { ...expected[reason], name: "RequestCancelledError", reason },
+        `${entry} ${reason}`
+      );
     }
-
-    assert.equal(outcomes.native.reason, reason);
-    assert.deepStrictEqual(outcomes.langgraph, outcomes.native, reason);
   }
 });
 
@@ -325,8 +355,8 @@ test("the predicate is never true for a stage that decides at run time, an unval
       !runtimeDecided,
       step.id
     );
-    // No lookup, or a lookup that throws: the stage runs (and fails) as
-    // natively.
+    // No lookup, or a lookup that throws: the stage is scheduled, and fails
+    // as its body fails.
     assert.equal(isAgentExecutionPlanStageStaticallyInert(step, {}), false, step.id);
     assert.equal(
       isAgentExecutionPlanStageStaticallyInert(step, {

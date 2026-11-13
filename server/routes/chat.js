@@ -2,14 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { getRequestAccessScope } from "../auth.js";
-import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
 import {
-  getAgentOuterPlanRuntime,
   getChatMaxDocIds,
   getChatMaxIdChars,
   getChatMaxQuestionChars,
 } from "../rag/config.js";
 import { describeAgentRequestFailure } from "../rag/dependency-outage.js";
+import { streamAgentRun, toAgentStreamFrame } from "../rag/langgraph/agent-stream.js";
 import { toDatabaseTenant } from "../rag/postgres-tenant.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 import { recordTenantUsage, TENANT_USAGE_METRICS } from "../rag/tenant-usage.js";
@@ -196,46 +195,29 @@ export const createChatRouter = (services) => {
     let doneSent = false;
 
     try {
-      if (getAgentOuterPlanRuntime() === "langgraph") {
-        // AGENT_OUTER_PLAN_RUNTIME=langgraph (experimental): the same events,
-        // result and done come out of one generator
-        // (rag/langgraph/agent-stream.js), which bridges the sink into the
-        // outer plan graph's custom stream and refuses a LangSmith tracer
-        // before the run exists; its modules are loaded only on this dial.
-        // It follows the outer plan's dial only: the relay only matters to a
-        // graph that streams "custom" chunks, which only the outer plan graph
-        // does. The custom-Skill DAG and the v3 graph, always on LangGraph
-        // since phase 6, are invoked without the relay, so their nodes emit
-        // to the sink the native branch below binds around the run
-        // (agent-event-stream.js), and their own entries refuse LangSmith.
-        const { streamAgentRun, toAgentStreamFrame } = await import(
-          "../rag/langgraph/agent-stream.js"
-        );
-
-        await runAgentRequestWithCancellation(req, res, async () => {
-          const events = streamAgentRun({
-            answer: () => answer(request),
-            describeError: describeAgentRouteError,
-            fallbackMessage,
-          });
-
-          for await (const event of events) {
-            const frame = toAgentStreamFrame(event);
-
-            send(frame.event, frame.data);
-            doneSent ||= frame.event === "done";
-          }
+      // The events, the result (or the error) and done come out of one
+      // generator (rag/langgraph/agent-stream.js): it binds the event sink
+      // around the whole run, so the planner steps, the steps of whichever
+      // graph answers (the outer plan, a custom-Skill DAG inside it, a v3
+      // graph) and the finalizer step reach the client in emission order, and
+      // it refuses a LangSmith tracer before the run exists. The outer plan
+      // graph relays its stages' events (a custom-Skill DAG's among them)
+      // through LangGraph's custom stream into that sink; a v3 graph, which
+      // is not scheduled inside the outer plan, emits to it directly.
+      await runAgentRequestWithCancellation(req, res, async () => {
+        const events = streamAgentRun({
+          answer: () => answer(request),
+          describeError: describeAgentRouteError,
+          fallbackMessage,
         });
-      } else {
-        const response = await runAgentRequestWithCancellation(req, res, () =>
-          runWithAgentEventSink(
-            (event) => send(event.type, event),
-            () => answer(request)
-          )
-        );
 
-        send("result", { body: response.body, status: response.status });
-      }
+        for await (const event of events) {
+          const frame = toAgentStreamFrame(event);
+
+          send(frame.event, frame.data);
+          doneSent ||= frame.event === "done";
+        }
+      });
     } catch (error) {
       const { body, status } = describeAgentRouteError(error, fallbackMessage);
 

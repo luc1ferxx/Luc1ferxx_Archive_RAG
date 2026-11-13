@@ -292,9 +292,11 @@ export const runUnifiedGraphStage = async ({
 
   // Refused before anything durable exists: a request that cannot run on
   // LangGraph must not leave a graph checkpoint for recovery to resume. The
-  // executor checks again at its own entry. Imported on first use, so a
-  // process that never runs a guarded v3 graph never loads LangGraph. A
-  // removed AGENT_RUNTIME value is refused at the same point.
+  // executor checks again at its own entry. A removed AGENT_RUNTIME or
+  // AGENT_OUTER_PLAN_RUNTIME value is refused at the same point. The executor
+  // is imported on first use, so a process that never runs a guarded v3 graph
+  // never loads it (LangGraph itself is loaded by the V1 outer plan in any
+  // process that answers agent requests, ADR 0001 phase 7).
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();
   const { runExecutionGraphOnLangGraph: executeGraph } = await import(

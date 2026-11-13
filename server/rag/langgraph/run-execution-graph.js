@@ -107,8 +107,8 @@ import {
 // checkpoint, gets the fresh invocation; a thread that contradicts the
 // checkpoint refuses the continuation.
 //
-// The invocation is always a root one. With the outer plan on LangGraph too
-// (AGENT_OUTER_PLAN_RUNTIME=langgraph), the custom-Skill graph is invoked from
+// The invocation is always a root one. The outer plan runs on LangGraph too
+// (since ADR 0001 phase 7 always), so the custom-Skill graph is invoked from
 // inside the outer execution plan's custom_skills node
 // (execution-plan-graph.js), where LangGraph's ambient config carries that
 // node's nesting keys; invoked there as is, the graph would run as a subgraph
@@ -225,8 +225,9 @@ export const runExecutionGraphOnLangGraph = async ({
   assertLangSmithTracingDisabled();
   // Every graph is scheduled here, whoever called (a route, a task, startup
   // recovery, an evaluation runner calling runAgentRag directly): a removed
-  // AGENT_RUNTIME value asked for the native scheduler, and running LangGraph
-  // instead would ignore it silently (ADR 0001 phase 6).
+  // AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value asked for a native
+  // scheduler, and running LangGraph instead would ignore it silently (ADR
+  // 0001 phases 6 and 7).
   assertAgentRuntimeSupported();
 
   const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({

@@ -1,0 +1,106 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "error": {
+      "causeCode": null,
+      "code": "AGENT_DEADLINE_EXCEEDED",
+      "dependency": null,
+      "message": "The request deadline passed before the answer was complete.",
+      "name": "RequestCancelledError",
+      "reason": "deadline_exceeded",
+      "retryable": true,
+      "status": 504
+    },
+    "errorIsCancellation": true,
+    "errorIsOutage": false,
+    "response": null,
+    "runs": [
+      {
+        "error": {
+          "code": "AGENT_DEADLINE_EXCEEDED",
+          "message": "The request deadline passed before the answer was complete.",
+          "name": "RequestCancelledError",
+          "reason": "deadline_exceeded",
+          "retryable": true
+        },
+        "events": [
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:1",
+            "payload": {
+              "status": "running"
+            },
+            "type": "run_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:2",
+            "payload": {
+              "traceStepCount": 2
+            },
+            "type": "run_prepared"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:3",
+            "payload": {
+              "planner": {
+                "fallback": false,
+                "fallbackReason": null,
+                "requestedPlannerId": "interleaved_test_plan",
+                "selectedPlannerId": "interleaved_test_plan",
+                "status": "selected",
+                "stepIds": [
+                  "inventory",
+                  "document_rag",
+                  "research_brief",
+                  "web_search"
+                ]
+              }
+            },
+            "type": "execution_planned"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:4",
+            "payload": {
+              "error": {
+                "code": "AGENT_DEADLINE_EXCEEDED",
+                "message": "The request deadline passed before the answer was complete.",
+                "name": "RequestCancelledError",
+                "reason": "deadline_exceeded",
+                "retryable": true
+              }
+            },
+            "type": "run_failed"
+          }
+        ],
+        "result": {},
+        "status": "failed",
+        "steps": []
+      }
+    ]
+  },
+  "runs": []
+}

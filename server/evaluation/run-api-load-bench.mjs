@@ -190,7 +190,7 @@
 //     [--llm-max-concurrency 8] [--embedding-dimensions 1536]
 //     [--documents 20] [--pages 4] [--cheap-path /documents]
 //     [--request-timeout-ms 120000] [--planner deterministic|llm]
-//     [--agent-runtime langgraph] [--outer-plan-runtime native|langgraph]
+//     [--agent-runtime langgraph] [--outer-plan-runtime langgraph]
 //     [--auth] [--rate-limit] [--no-embedding-cache] [--tenant] [--no-analyze]
 //     [--postgres-pid-file <postmaster.pid>] [--repeat 1]
 //     [--read-replica-url <disposable streaming replica URL>]   (pgvector, --tenant)
@@ -313,7 +313,11 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // pg_stat_statements per node over each measured /chat level (on with
   // --read-replica-url; --node-statements asks for it on the primary alone).
   nodeStatements: false,
-  outerPlanRuntime: "native",
+  // The scheduler of the V1 outer plan and the /chat/stream relay, recorded
+  // in the report: always LangGraph since ADR 0001 phase 7 removed the native
+  // loop and AGENT_OUTER_PLAN_RUNTIME=native (`--outer-plan-runtime
+  // langgraph` is still accepted, and changes nothing).
+  outerPlanRuntime: "langgraph",
   pages: 4,
   planner: "deterministic",
   postgresPidFile: "",
@@ -363,15 +367,18 @@ const PLANNER_MODES = new Set(["deterministic", "llm"]);
 // accepted, it is recorded and nothing is set in the app's environment (the
 // app refuses AGENT_RUNTIME=native at start-up). Reports written before phase
 // 4 ran `native` unless they say otherwise; a report that recorded
-// agentRuntime `native` measured the rollback that phase 6 removed. It no
-// longer puts the V1 outer plan on LangGraph, so a run now is not the
-// configuration the phase-3 latest-load-test-p3-langgraph-* reports measured
-// (those predate the split and ran the outer plan on LangGraph too).
-// --outer-plan-runtime is AGENT_OUTER_PLAN_RUNTIME (getAgentOuterPlanRuntime),
-// the scheduler of the V1 outer plan and the /chat/stream relay; reproducing
-// those reports takes it at `langgraph`.
+// agentRuntime `native` measured the rollback that phase 6 removed.
+// --outer-plan-runtime names the scheduler of the V1 outer plan and the
+// /chat/stream relay. Since phase 7 that is always LangGraph too: only
+// `langgraph` is accepted, it is recorded and nothing is set in the app's
+// environment (the app refuses AGENT_OUTER_PLAN_RUNTIME=native at start-up).
+// Reports written before phase 7 ran the outer plan on the native loop unless
+// they recorded outerPlanRuntime `langgraph` (the phase-3
+// latest-load-test-p3-langgraph-* reports predate the field and ran it on
+// LangGraph through AGENT_RUNTIME), so a /chat figure from before phase 7 is
+// about 1 ms of CPU per request below what the same commit measures now.
 const AGENT_RUNTIMES = new Set(["langgraph"]);
-const OUTER_PLAN_RUNTIMES = new Set(["native", "langgraph"]);
+const OUTER_PLAN_RUNTIMES = new Set(["langgraph"]);
 const SCENARIOS = new Set(["chat", "ingest", "index-switch"]);
 const EMBED_BATCHING_MODES = new Set(["on", "off"]);
 const INGEST_MODES = new Set(["sync", "async"]);
@@ -552,8 +559,12 @@ export const parseLoadTestArgs = (argv = []) => {
     options.agentRuntime = raw["agent-runtime"];
   }
   if (raw["outer-plan-runtime"] !== undefined) {
+    if (raw["outer-plan-runtime"] === "native")
+      throw new Error(
+        "--outer-plan-runtime native was removed (ADR 0001 phase 7): the V1 outer plan and the /chat/stream relay always run on LangGraph; drop the flag."
+      );
     if (!OUTER_PLAN_RUNTIMES.has(raw["outer-plan-runtime"]))
-      throw new Error("--outer-plan-runtime must be native or langgraph.");
+      throw new Error("--outer-plan-runtime must be langgraph, the only outer-plan scheduler since ADR 0001 phase 7.");
     options.outerPlanRuntime = raw["outer-plan-runtime"];
   }
   if (raw["agent-request-timeout-ms"] !== undefined)
@@ -2210,9 +2221,9 @@ export const buildAppEnvironment = ({
     AGENT_PLANNER_ROLLOUT: options.planner === "llm" ? "llm" : "deterministic",
     AGENT_INTENT_PLANNER: options.planner,
     AGENT_EXECUTION_PLANNER: options.planner,
-    // No AGENT_RUNTIME: its inherited value was dropped above, and unset is
-    // the only graph scheduler (LangGraph) since phase 6.
-    AGENT_OUTER_PLAN_RUNTIME: options.outerPlanRuntime,
+    // No AGENT_RUNTIME and no AGENT_OUTER_PLAN_RUNTIME: their inherited
+    // values were dropped above, and unset is the only scheduler (LangGraph)
+    // of the graphs since phase 6 and of the outer plan since phase 7.
     LOAD_TEST_STORAGE: storage,
     LOAD_TEST_TEMP_ROOT: tempRoot,
     LOAD_TEST_ROLE: role,
@@ -5982,6 +5993,8 @@ export const formatLoadTestMarkdown = (report) => {
     // A report written before AGENT_OUTER_PLAN_RUNTIME existed has no
     // outerPlanRuntime: AGENT_RUNTIME scheduled the outer plan then, so say
     // which runtime that was rather than print a native the run never had.
+    // A report from between that split and phase 7 recorded `native` unless
+    // told otherwise; since phase 7 the field is always `langgraph`.
     `| Outer plan runtime (AGENT_OUTER_PLAN_RUNTIME: V1 outer plan, /chat/stream relay) | ${
       config.outerPlanRuntime ??
       `${config.agentRuntime ?? "native"} (not recorded: before AGENT_OUTER_PLAN_RUNTIME, AGENT_RUNTIME scheduled the outer plan too)`

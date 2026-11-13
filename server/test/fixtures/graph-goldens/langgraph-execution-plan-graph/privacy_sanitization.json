@@ -1,0 +1,128 @@
+{
+  "events": [],
+  "outcome": {
+    "checks": [
+      {
+        "category": "privacy",
+        "detail": {
+          "approvalObjectHash": "sha256:64ce37bad47dfe3bd88eefa934ef3d0fad88aa1baf85262515d937b5eb0c27e1",
+          "capabilityId": "recommendation.import_selected",
+          "capabilityLabel": "Recommendation Import",
+          "capabilityVersion": "1.0.0",
+          "id": "approval:recommendation.import_selected:1.0.0:64ce37bad47dfe3bd88eefa934ef3d0fad88aa1baf85262515d937b5eb0c27e1",
+          "inputPreview": {
+            "docId": "doc-1",
+            "provider": "arxiv",
+            "selectedIds": [
+              "2401.00001v1"
+            ]
+          },
+          "policy": {
+            "externalCall": true,
+            "mode": "user_confirmation",
+            "storesResult": true,
+            "writesWorkspace": true
+          },
+          "reason": "User confirmation is required before this capability can execute.",
+          "riskFlags": [
+            "external_call",
+            "writes_workspace",
+            "stores_result"
+          ],
+          "snapshotVersion": 1,
+          "status": "pending",
+          "type": "capability_approval"
+        },
+        "id": "approval_required_for_import",
+        "label": "Recommendation import requires approval",
+        "passed": true
+      },
+      {
+        "category": "privacy",
+        "detail": {
+          "docId": "doc-1",
+          "provider": "arxiv",
+          "selectedIds": [
+            "2401.00001v1"
+          ]
+        },
+        "id": "selection_token_not_previewed",
+        "label": "Selection token is not included in approval preview",
+        "passed": true
+      },
+      {
+        "category": "privacy",
+        "detail": {
+          "docId": "doc-1",
+          "provider": "arxiv",
+          "selectedIds": [
+            "2401.00001v1"
+          ]
+        },
+        "id": "safe_preview_fields_remain",
+        "label": "Approval preview keeps safe contextual fields",
+        "passed": true
+      },
+      {
+        "category": "privacy",
+        "detail": [
+          "external_call",
+          "writes_workspace",
+          "stores_result"
+        ],
+        "id": "risk_flags_visible",
+        "label": "Approval gate exposes privacy risk flags",
+        "passed": true
+      }
+    ],
+    "description": "Capability approval previews should expose only whitelisted sanitized fields, not private selection tokens.",
+    "failedCheckCount": 0,
+    "id": "privacy_sanitization",
+    "label": "Privacy sanitization",
+    "passed": true,
+    "response": {
+      "agentMode": "capability_privacy",
+      "agentSkills": [],
+      "budget": null,
+      "clarification": null,
+      "executionLoop": null,
+      "observed": {
+        "approvalCapabilityId": "recommendation.import_selected",
+        "decision": "needs_approval",
+        "preview": {
+          "docId": "doc-1",
+          "provider": "arxiv",
+          "selectedIds": [
+            "2401.00001v1"
+          ]
+        },
+        "previewKeys": [
+          "docId",
+          "provider",
+          "selectedIds"
+        ],
+        "riskFlags": [
+          "external_call",
+          "writes_workspace",
+          "stores_result"
+        ],
+        "selectionTokenPresent": false
+      },
+      "selectedSkills": [],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 0,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [],
+      "workingMemory": {
+        "checkedQueryCount": 0,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

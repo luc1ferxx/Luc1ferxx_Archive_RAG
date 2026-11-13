@@ -31,7 +31,7 @@
 
 一场项目深挖通常 20–40 分钟，你讲不完这个项目的十分之一。所以策略只有一个：**3 条主线讲到第 5 层，其余每块只准备一句话和一个入口函数**，被问到再展开。面试官会抓住你话里的每个名词往下追，**你主动说出口的每一个名词，都要能再讲三层**；讲不深的，就不要主动提。
 
-**这个项目最大的优势**：几乎每个决定都有数字，而且有大量"测了、没改默认"的记录（门控阈值、LLM 评审、按句切块、Docling、外层计划上 LangGraph……）。这比"提升了 X%"更难伪造，是工程判断力的直接证据，要当卖点讲。
+**这个项目最大的优势**：几乎每个决定都有数字，而且有大量"测了、没改默认"的记录（门控阈值、LLM 评审、按句切块、Docling……）。这比"提升了 X%"更难伪造，是工程判断力的直接证据，要当卖点讲。外层计划上 LangGraph 不再算这一类：压测门两次没过、默认一度没改，2026-11-13 按用户决定还是改了，要讲成"明知代价的取舍"（见 5.4）。
 
 **最大的两个风险**：一是夸大，尤其是把默认关闭的功能说成已上线、把不显著的差异说成"更好"；二是被追问到函数级细节时讲不出来。第 6 节和第 7 节专门对付这两点。
 
@@ -50,7 +50,7 @@
 ┌──────▼──────── Agent 编排  server/rag/agent*.js ──────┐  ┌▼── 入库  rag/ingest-*.js ─────┐
 │ 意图规划（正则候选 → LLM 在 enum 里选）              │  │ parse → chunk → embed → index │
 │ 执行规划（strict schema，白名单阶段）                 │  │ 每段落库、各自重试、死信队列  │
-│ 外层原生循环 runAgentExecutionPlan：                  │  │ PDF：pdf.js 段落识别（默认）  │
+│ 外层计划 runAgentExecutionPlan（LangGraph 调度）：    │  │ PDF：pdf.js 段落识别（默认）  │
 │   custom_skills → typed DAG（LangGraph 调度）         │  │      Docling / auto（可选）   │
 │   document_rag  → 门控 → 作答 → claim 校验 → 补检索 │  │ FOR UPDATE SKIP LOCKED + 围栏 │
 │   web / capability（审批门）                          │  └──────────────┬────────────────┘
@@ -83,7 +83,7 @@ routes/chat.js handleChatRequest
       ├─ 建 run（PostgreSQL 1 次 INSERT）
       ├─ prepareAgentRun（agent-preparation-flow.js：澄清门、查询规划）
       ├─ createAgentExecutionPlanResult（agent-execution-plan.js，strict schema）... 模型调用 ②
-      ├─ runAgentExecutionPlan（agent-execution-plan-runner.js，原生外层循环）
+      ├─ runAgentExecutionPlan（agent-execution-plan-runner.js，外层计划交给 LangGraph 调度）
       │    ├─ custom_skills → runExecutionGraphOnLangGraph（validateExecutionGraph 整图校验）
       │    ├─ document_rag  → runDocumentRagLoop（agent-document-loop.js）
       │    │     └─ executeDocumentRag → executeQaRag（document-rag-execution.js）
@@ -174,7 +174,7 @@ routes/chat.js handleChatRequest
 ### 4.1 三条主线
 
 简历和自我介绍只突出 3 条主线，其余等被问到再展开：
-- 主线 1：受控 Agent 编排。「模型只提议、运行时决定」+ 按请求生成 strict schema（7B 降级 56%→8%）+ typed DAG 整图校验 + LangGraph 只接管需要 checkpoint/中断的两张图（外层因压测 +17.6% 不过门留在原生）。配套讲持久化、重放矩阵、审批哈希绑定、fencing，以及「不是 exactly-once」。
+- 主线 1：受控 Agent 编排。「模型只提议、运行时决定」+ 按请求生成 strict schema（7B 降级 56%→8%）+ typed DAG 整图校验 + 编排只有 LangGraph 一种运行时（真正需要 checkpoint/中断的只有两张图；外层计划压测 +17.6% 没过 10% 的门、一度留在原生，2026-11-13 按用户决定迁过去，代价明说）。配套讲持久化、重放矩阵、审批哈希绑定、fencing，以及「不是 exactly-once」。
 - 主线 2：有证据的 RAG + 评测方法论。hybrid（pgvector + PG 内 BM25，加权 RRF）+ 拒答门控 + 词法 claim 校验 + finalizer；评测用外部标注的 QASPER、配对 bootstrap、事先定规则、train/dev 分离。把「测了不改默认」当成卖点：伪 embedding 反转、评审/开关三轮不过规则、按句切块 dev 不复现。必须主动说 agent 路径答题率低（0/41）。
 - 主线 3：生产化可靠性与性能。LLM 容错/熔断/公平队列（79→100%、取消计失败 bug），用 pg_stat_statements 定位往返 167→22，claim memo CPU 12–13→约 5 ms，RLS 多租户一次往返流水线。
 只在被问到时讲：服务四层拆分与签名 token、读副本（没达标）、索引版本蓝绿切换、语义缓存、查询适配器、Docling/auto 与 worker 池、信封加密与 crypto-shred、审计哈希链、RBAC/OIDC、Prometheus/SLO、MCP server、备份恢复、入库分阶段队列。
@@ -189,16 +189,16 @@ routes/chat.js handleChatRequest
 ### 4.2 面试前必须能脱稿讲的 12 件事
 
 1. 一句话定位 + 「模型只提议、运行时决定」的四个落点：意图在正则候选的 enum 里选；外层 8 种固定阶段；只有 custom Skill 阶段画 typed DAG、整图校验；scope/docIds/预算/审批/并发归运行时
-2. 一次 /chat 的函数链能脱稿画：runAgentRag → createAgentIntentPlanResult → createAgentSession → prepareAgentRun → createAgentExecutionPlanResult → runAgentExecutionPlan（custom_skills 走 LangGraph DAG、document_rag 走 runDocumentRagLoop）→ finalizeAgentRun；默认配置有 3 次模型调用（两次规划 + 一次答案）
+2. 一次 /chat 的函数链能脱稿画：runAgentRag → createAgentIntentPlanResult → createAgentSession → prepareAgentRun → createAgentExecutionPlanResult → runAgentExecutionPlan（外层计划由 LangGraph 按计划顺序调度；custom_skills 走 LangGraph DAG、document_rag 走 runDocumentRagLoop）→ finalizeAgentRun；默认配置有 3 次模型调用（两次规划 + 一次答案）
 3. 防幻觉四道关和它的代价：门控 0.51 → 词法 claim 校验 → 补检索 1 轮 → finalizer 删句；只词法正确改写接受 3/42、agent 路径 QASPER train 0/41；评审默认关因为会答不可答题（0/9→2/9）
 4. 评测方法论三件事：伪 embedding 反转排序；QASPER dev 821 题配对 bootstrap，hybrid 只显著好于 BM25；规则事先定、train 调 dev 确认（按句切块、门控阈值都是「测了不改」）
 5. 结构化输出故事：降级 56%→8%、通过 47%→80%；pattern 而非 maxLength；不限长 rationale 3810 token；parseFirstJsonValue 取第一个平衡 JSON；只修 prompt 的对照组没提升
-6. LangGraph 取舍：只两张图；外层 StateGraph +29–35%、Pregel 后并发 1 仍 +17.6%，不放宽 10% 门；自定义 checkpointer 写 run 行；drain 代替 signal；golden 102 文件后删原生，回退只能 git revert
+6. LangGraph 取舍：需要 checkpoint/中断的只有两张图；外层 StateGraph +29–35%、Pregel 后并发 1 仍 +17.6%，没过 10% 门、一度留在原生；2026-11-13 用户决定只留一种运行时，外层也迁过去，门没重测，接受进程内每次运行多约 0.3 ms CPU；自定义 checkpointer 写 run 行（外层图不带 checkpointer）；drain 代替 signal；golden 102 + 32 文件后删掉两处原生实现，回退只能 git revert
 7. 持久化与恢复：revision CAS 同语句返回事件；重放矩阵；claim fencing；自动续跑范围很窄；不是 exactly-once；主动承认 run 没有租约、多实例重启会误判
 8. 审批防 TOCTOU：approvalObjectHash + 一个 CAS 写 gate/快照/checkpoint；resume 只用运行时标记；跨进程 14/14 写入恰 1；但 4 个 custom Skill 全只读、v3 默认 off
 9. LLM 容错：等抖动退避、Retry-After 下限、超时可重试、空响应重试、注册表切备用；在途 8、5 次熔断 30 s、429 不计、取消不计；429 79→100%、宕机 0→100%（须备用）；Number(null) 和取消计失败两个 bug
 10. 多租户：RLS 兜漏写过滤（9/9→0/9）；一次往返流水线（167→22，4 实例 +37.9%）；RLS 下 GIN 不可用 → SECURITY DEFINER 函数内收窄；默认鉴权关、lenient fail-open、RLS 不防注入
-11. 性能数字的前提：假模型 0 ms、单机；claim memo 每请求 CPU 12–13→约 5 ms；拆分同机比单体慢 1.56 倍、只扩 agent 层有效；LLM 规划约 1/3 容量是推算
+11. 性能数字的前提：假模型 0 ms、单机；claim memo 每请求 CPU 12–13→约 5 ms（外层计划迁 LangGraph 之前测的，之后每请求约多 1 ms，没重测）；拆分同机比单体慢 1.56 倍、只扩 agent 层有效；LLM 规划约 1/3 容量是推算
 12. 默认关闭清单和理由（必须背熟）：评审、拒答标记/override、7 个答题率开关、交叉编码器、Docling/auto、v3 统一图、语义缓存、查询适配器、按句切块、截止时间与断连取消、加密与多数租户开关；以及边界：只测过本地 7B、无生产流量、compose.services.yml 未跑、告警未在 Prometheus 求值、OCR 只 1 份样本、注入改写 3/3
 
 ## 5. 跨模块追问链
@@ -279,7 +279,7 @@ routes/chat.js handleChatRequest
 
 **追问顺序**
 
-1. 既然用了，外层计划为什么不放上去？
+1. 外层计划压测没过门，为什么最后还是放上去了？
 2. 10% 的门怎么定的？+17.6% 怎么测出来的？
 3. checkpointer 为什么不用官方 PostgresSaver？
 4. 取消为什么不直接把 AbortSignal 传进去？
@@ -288,12 +288,13 @@ routes/chat.js handleChatRequest
 
 **答题骨架**
 
-- 只给需要持久状态和中断的两张图：custom-Skill DAG 和 v3 统一图（langgraph/run-execution-graph.js runExecutionGraphOnLangGraph）
-- 外层编成 StateGraph 并发 32 每请求 CPU +29–35%（3.28）；改底层 Pregel + 编译缓存 + 剪枝后进程内多 0.28 ms，但并发 1 仍 +17.6%、p95 +13%（3.29）→ 不放宽门，外层长期原生（runAgentExecutionPlan）
+- 需要持久状态和中断的是两张图：custom-Skill DAG 和 v3 统一图（langgraph/run-execution-graph.js runExecutionGraphOnLangGraph）；2026-11-13 起外层计划也由 LangGraph 调度（langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph，不带 checkpointer），Agent 只有一种运行时
+- 外层编成 StateGraph 并发 32 每请求 CPU +29–35%（3.28）；改底层 Pregel + 编译缓存 + 剪枝后进程内多 0.28 ms，但并发 1 仍 +17.6%、p95 +13%（3.29）→ 当时不放宽门，外层留在原生循环
+- 2026-11-13 用户不要两种运作模式，删掉原生循环和开关（3.48）：门没重测、也没通过，接受进程内每次运行 0.605 → 0.894 ms CPU；相对真实模型约 2.4 s 的回答看不出来，但不能说成性能提升
 - RunStoreCheckpointSaver 写现有 run 行，同一 CAS 和 RLS；权威是自己带 digest 的图 checkpoint；代价写放大：2 节点 /chat 多 7 次无事件 CAS
 - signal：spike 实测是至少一次（在途节点续跑时再跑）→ 改 drain（drain-bridge.js bridgeRequestSignalToDrain）
-- 删原生前冻结 golden：8 套件 102 文件；52 个调度契约测试原样跑在 LangGraph 上（3.30）
-- 局限：golden 只覆盖固定场景、Node 22 未验证、两个 PG 集成套件 native 侧没冻结；回退只能 git revert
+- 删原生前冻结 golden：8 套件 102 文件；52 个调度契约测试原样跑在 LangGraph 上（3.30）；删外层原生循环前同样先冻结，再加 32 个文件（3.48）
+- 局限：golden 只覆盖固定场景、Node 22 未验证、两个 PG 集成套件 native 侧没冻结；阶段 7 没有跑新的压测；回退只能 git revert
 
 ### 5.5 Agent 跑到一半进程崩了怎么办？
 
@@ -396,7 +397,7 @@ routes/chat.js handleChatRequest
 
 **答题骨架**
 
-- 假模型 0 ms：claim memo 后并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms（3.24）；旧的 91 req/s 是 memo 前
+- 假模型 0 ms：claim memo 后并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms（3.24）；旧的 91 req/s 是 memo 前；3.24 测于外层计划迁 LangGraph 之前，之后每请求 CPU 约多 1 ms，没重测（3.48）
 - 定位：压测里每个 /chat 166 条语句的异常值 → pg_stat_statements 差值法 → 往返 167→22
 - claim 校验是热点 → 一次 /chat 内精确 memo（self-check/evidence-context.js buildClaimSupportContentKey），不跨请求以免跨租户
 - 拆分：同机同进程数单体快 1.56 倍；价值是只扩 agent 层（×2 1.84 倍）和故障隔离（3.19）
@@ -474,7 +475,7 @@ routes/chat.js handleChatRequest
 | 我们的系统基本不会幻觉 / 零幻觉 | 校验的只是每句话是否被所引片段词法支持；MCP archive_ask 返回的答案不经 claim 自检；不判断答案是否完整；构造集每类错误只有 1–2 条 | agent /chat 路径上每句话都要被它引用的片段支持，构造集上错数字基本过不去；代价是误杀正确改写，7B 下大多以澄清结束 |
 | hybrid 检索比纯稠密检索效果更好 | QASPER dev 821 题 hybrid−dense +0.006 [−0.019, +0.031] 不显著（CURRENT-TRUTH 3.1） | hybrid 显著好于单用 BM25（+0.074），和纯稠密没有显著差异，也从没显著更差 |
 | 把稀疏检索换成 BM25 后召回提升了 | hybrid 路上 BM25 对 ts_rank_cd 是 −0.0012 [−0.0122, +0.0097]，不显著也没达到非劣性下界；默认 bm25 是产品决定（3.18） | BM25 是标准、可对照的打分，默认用它是我们的选择；QASPER 上两者没有显著差异 |
-| 整个 Agent 跑在 LangGraph 上 / 迁 LangGraph 提升了性能 | 只有 custom-Skill DAG 和 v3 统一图在 LangGraph 上；外层计划放上去 CPU +17.6% 过不了门，留在原生循环（3.29） | LangGraph 只调度需要 checkpoint 和中断的两张图，外层因压测不过门长期原生 |
+| 迁 LangGraph 提升了性能 / 外层计划后来过了压测门 | 外层计划放上去并发 1 每请求 CPU +17.6%，过不了 10% 的门（3.29）；2026-11-13 迁过去时门没有重测，进程内每次运行多 0.29 ms CPU，是用户为了只留一种运行时接受的代价（3.48）。外层图不带 checkpointer，文档循环和 V1 顺序链兜底仍是阶段内部的普通代码 | Agent 现在只有 LangGraph 一种运行时；外层计划是明知压测门没过、接受约 0.3 ms 开销迁过去的，不是因为更快，持久化仍靠 run 的步骤 |
 | 进程崩了能从断点自动续跑 | 自动续跑只覆盖 custom_skill 步骤、外层只剩 custom_skills 的 guarded 图、v3 guarded run；最常见的主 document_rag 在途会转人工 | 只在能证明安全时自动续跑，在途未知和会写记忆的步骤一律转人工 |
 | 保证 exactly-once / 副作用不会重复执行 | 显式重试主 document_rag 会再记一次会话；Capability 幂等交给 adapter；外部写和落盘之间总有崩溃窗口 | 自动恢复路径不重放副作用；写型 Capability 在 adapter 遵守幂等键时做到效果一次 |
 | 版本号 CAS 防止两个 worker 重复执行副作用 | CAS 和 claim 只挡旧 worker 的状态写，挡不住它已经发出的外部调用 | CAS/claim 挡住旧 worker 的状态写；外部写靠幂等键，在途未知靠转人工 |
@@ -551,7 +552,7 @@ routes/chat.js handleChatRequest
 
 **7.14 给你一个反直觉的结论：哪次你的直觉被数据推翻了？**
 
-挑 2 个讲细节：外层 LangGraph 两次压测都不过门、坚持不放宽（3.29）；按句切块 train 显著、dev 前三名显著更差（3.27）；软换行规则太宽让相同文档对照组误报差异（故事 6）
+挑 2 个讲细节：外层 LangGraph 两次压测都不过门（3.29；讲完要补结局：2026-11-13 用户为了只留一种运行时，明知门没过、接受开销迁了过去，3.48）；按句切块 train 显著、dev 前三名显著更差（3.27）；软换行规则太宽让相同文档对照组误报差异（故事 6）
 
 **7.15 用了 AI 编码工具吗？哪些是你自己的？**
 
@@ -582,7 +583,7 @@ routes/chat.js handleChatRequest
 - 意图：buildIntentPlanCandidates（正则）→ LLM enum 选择 → 失败回落确定性（模型调用 1）
 - createAgentSession（Skill match、工作记忆、预算）→ createRun（1 次 INSERT）
 - 执行规划：buildPlannerResponseFormat strict schema → validateAgentExecutionPlan（模型调用 2）
-- runAgentExecutionPlan 原生循环：custom_skills（LangGraph DAG）→ document_rag（runDocumentRagLoop：检索 hybrid RRF → assessQaConfidence → writeQaAnswer（模型调用 3）→ 自检 → 至多 1 次补检索）→ web 兜底
+- runAgentExecutionPlan（外层计划，LangGraph Pregel 按计划顺序一阶段一节点）：custom_skills（LangGraph DAG）→ document_rag（runDocumentRagLoop：检索 hybrid RRF → assessQaConfidence → writeQaAnswer（模型调用 3）→ 自检 → 至多 1 次补检索）→ web 兜底
 - finalizeAgentRun：finalizer 删无支持句 → completeRun（CAS）
 - 标注：每次 /chat 1 insert、3 CAS、2 事件追加、0 回读（test/agent-run-chat-statement-count.test.mjs）
 
@@ -626,8 +627,9 @@ routes/chat.js handleChatRequest
 | 180 秒稿："评测集还小，正在接 QASPER" | 外部标注集已接入（检索 821 题、答案 200 题），但只测过一个 7B 模型 |
 | 180 秒稿："只处理 PDF 文本层，没有 OCR 和表格" | 版面解析和按页分流可选，答案 F1 没有显著差异，所以默认仍是 pdf.js |
 | CURRENT-TRUTH 停在 3.30 | 新增 3.31（PDF 按页分流与 worker 池）和 3.32（租户隔离阶段 1–5） |
+| 180 秒稿、FAQ #18、故事 9（2026-11-13 改）："LangGraph 只调度两张图，外层计划长期留在原生循环" | 外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除（CURRENT-TRUTH 3.48）；压测门没有重测、没有通过，是明说接受每次运行约 0.3 ms CPU 的开销，不是性能提升 |
 
-FAQ 新增了三题（18 LangGraph 取舍、19 多租户、20 数据库往返），原来的 18、19 两道反思题顺延成 21、22；故事集新增故事 8（取消被熔断器记成失败）和故事 9（外层计划上 LangGraph 两次压测不过门）。
+FAQ 新增了三题（18 LangGraph 取舍、19 多租户、20 数据库往返），原来的 18、19 两道反思题顺延成 21、22；故事集新增故事 8（取消被熔断器记成失败）和故事 9（外层计划上 LangGraph 两次压测不过门）。2026-11-13 起 FAQ 18 的题目改成"外层计划压测没过门，为什么最后还是放到了 LangGraph 上"，故事 9 补了后续。
 
 ## 10. 练习计划
 
