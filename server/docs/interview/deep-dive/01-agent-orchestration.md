@@ -304,7 +304,7 @@
 - 没有运行时回退开关，只能 git revert
 - golden 只覆盖固定场景
 - 两个 PostgreSQL 集成套件的 native 一侧没冻结
-- golden 在 Node 24 上生成，Node 22 上未验证
+- golden 在 Node 24 上生成，CI 的 Node 22 上通过
 
 **证据**
 
@@ -568,7 +568,7 @@
 
 代码：`server/rag/agent-execution-graph-node.js orderExecutionGraphNodeStatesByLayer`；`server/rag/langgraph/run-execution-graph.js runExecutionGraphOnLangGraph`；`server/rag/agent-execution-graph-runner.js replayExecutionGraphRun`；`server/rag/config.js assertAgentRuntimeSupported`
 
-> ⚠ golden 只证明固定场景，不能证明任意图形状；两个 PostgreSQL 集成套件的 native 一侧没冻结；golden 在 Node 24 上生成，Node 22 未验证；没有运行时回退，只能 git revert；superstep 屏障让事件顺序和延迟与原生不同（已钉住）。
+> ⚠ golden 只证明固定场景，不能证明任意图形状；两个 PostgreSQL 集成套件的 native 一侧没冻结；golden 在 Node 24 上生成（CI 的 Node 22 上通过）；没有运行时回退，只能 git revert；superstep 屏障让事件顺序和延迟与原生不同（已钉住）。
 
 ### Q11. DAG 执行器的灰度门禁一直不过，你最后是怎么把它转正的？
 
@@ -677,7 +677,7 @@
 | 外层计划迁到 LangGraph 时接受的开销（阶段 7） | 进程内一次文档问答的 runAgentRag：原生循环 0.605 ms CPU，LangGraph 0.894 ms，多 0.29 ms | CURRENT-TRUTH §3.48；ADR 阶段 7 | 2026-11-13 删除原生循环之前测，同一进程，交替 7 轮、每轮 400 次，Node 24.21；阶段 7 没有跑新的压测；相对真实模型约 2.4 s 的一次回答看不出来 |
 | 阶段 3 当时的默认配置（外层原生）通过压测门 | 并发 32 每请求 CPU 3.78–4.20 → 3.82–4.34 ms，p95 区间重叠 | CURRENT-TRUTH §3.28 | 同一 harness，各 3 次；2026-11-13 起外层也在 LangGraph 上，这个结果不再描述现在的默认配置 |
 | LangGraph checkpointer 的写放大 | 2 节点 custom-Skill /chat 多 7 次无事件 CAS、1 次 run 读、1 次事件表读；完成后 run result 11,894 B（原生 11,860 B） | CURRENT-TRUTH §3.28；AGENTS.md | PostgreSQL 18 pg_stat_statements 实测，owner 路径 |
-| 删除原生调度器（阶段 6）的证据 | 3,250 个测试（通过 3,235、跳过 15、失败 0），行覆盖 90.46%；golden 8 个套件 102 个文件；trajectory 19/19、planner 7/7、recovery 8/8 屏蔽后逐字节一致；runner 文件 478 → 295 行 | CURRENT-TRUTH §3.30 | golden 只覆盖固定场景；Node 22 上未验证 |
+| 删除原生调度器（阶段 6）的证据 | 3,250 个测试（通过 3,235、跳过 15、失败 0），行覆盖 90.46%；golden 8 个套件 102 个文件；trajectory 19/19、planner 7/7、recovery 8/8 屏蔽后逐字节一致；runner 文件 478 → 295 行 | CURRENT-TRUTH §3.30 | golden 只覆盖固定场景；在 Node 24 上生成，CI 的 Node 22 上通过 |
 | 删除外层原生循环（阶段 7）的证据 | 删除前冻结 32 个 golden 文件（外层计划套件 24、流式套件 5、路由套件 3）；删除后 langgraph-execution-plan-graph 26/26、langgraph-chat-stream 8/8、langgraph-routes 8/8、agent-run-chat-statement-count 10/10、agent-runtime-removed 15/15；trajectory 19/19、planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致 | CURRENT-TRUTH §3.48 | golden 只覆盖固定场景；全量测试和代码量的数字见 ADR 0001 阶段 7 的证据小节 |
 | v3 统一图的 CPU 成本 | 文档问答 V1 约 0.8–1.2 ms CPU，v3 原生约 5.8–7.4 ms，v3 在 LangGraph 上约 11–15 ms | docs/adr/0001-langgraph-runtime.md 阶段 5「没有做的部分与理由」 | 进程内微基准，内存 run store，mock RAG |
 | 一次 /chat 的 run store 语句数 | 1 次 insert、3 次 CAS、2 次事件追加、0 次 run 或事件回读 | AGENTS.md（test/agent-run-chat-statement-count.test.mjs 钉住） | 不含 custom-Skill DAG 的 LangGraph 额外写入；外层计划迁到 LangGraph 后不变（外层图不带 checkpointer） |
@@ -699,7 +699,7 @@
 - v3 统一图默认 off：接管请求后行为会变（没有 answer_draft，非主节点失败返回 409），CPU 是 V1 的数倍到十几倍
 - 外层计划 2026-11-13 起也由 LangGraph 调度（阶段 7，用户决定只留一种运行时）：10% 的压测门两次没过、这次没有重测，进程内每次运行多 0.29 ms CPU，阶段 7 没有跑新的压测；不能说成性能提升
 - superstep 屏障让下游等最慢的兄弟节点，步骤和事件顺序、延迟与删除前的原生调度器不同（已用测试钉住）
-- 阶段 6、阶段 7 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、Node 22 上未验证，两个 PostgreSQL 集成套件的 native 一侧没冻结
+- 阶段 6、阶段 7 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、CI 的 Node 22 上通过，两个 PostgreSQL 集成套件的 native 一侧没冻结
 - LangGraph checkpointer 有写放大（每个 2 节点 custom-Skill /chat 多 7 次无事件 CAS）；取消靠 drain，只在 superstep 边界生效，在途节点要先结算
 - 预算是软截止，已开始的步骤（DAG 并发时可能多个）会跑完；规划器调用不受上限阻止；计量按每次调用新建、不跨审批累加；默认值没用真实流量校准，没有真实的单次成本分布
 - 不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 和在途节点都要人工介入

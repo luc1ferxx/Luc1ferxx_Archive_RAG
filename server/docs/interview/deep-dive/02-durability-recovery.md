@@ -532,7 +532,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 | CAS 冲突重试上限（代码常量） | DEFAULT_AGENT_RUN_MUTATION_RETRIES = 32 | server/rag/agent-runs.js | mutateStoredRun 默认 maxRetries 是 0，32 由各方法显式传入；V1 applyApprovalAction 用默认 0，冲突直接 409 |
 | 后台任务租约（代码常量） | DEFAULT_TASK_CLAIM_LEASE_MS = 60,000；心跳间隔 lease/3 | server/rag/tasks.js；server/rag/job-orchestrator.js createClaimHeartbeat | 只对任务；agent run 本身没有租约 |
 | 优雅停机窗口 | 在途请求 25 s（SERVICE_SHUTDOWN_GRACE_MS 默认），finalizer 余量 3 s，入库 worker 交回 5 s，compose stop_grace_period 30 s | AGENTS.md「Monolith shutdown」；server/server.js SHUTDOWN_FINALIZER_MARGIN_MS / INGEST_WORKER_STOP_GRACE_MS；server/rag/config.js | 只覆盖 HTTP 请求 |
-| 恢复与图回归证据 | eval:recovery-observability 8/8，删除原生调度器前后屏蔽后逐字节一致；test:pgvector 101/101；golden 8 个套件、102 个文件 | CURRENT-TRUTH.md 3.30 | golden 只代表固定场景，不是对任意图形状的证明；在 Node 24 生成，CI Node 22 未验证 |
+| 恢复与图回归证据 | eval:recovery-observability 8/8，删除原生调度器前后屏蔽后逐字节一致；test:pgvector 101/101；golden 8 个套件、102 个文件 | CURRENT-TRUTH.md 3.30 | golden 只代表固定场景，不是对任意图形状的证明；在 Node 24 生成，CI 的 Node 22 上通过 |
 | 真实模型规划 v3 统一图 | 模型计划只被接受 3/15，12 次回落确定性图，0 次回落 V1 | CURRENT-TRUTH.md 3.17；docs/evaluation.md「统一图的真实模型规划（2026-09-27）」 | 本地 qwen2.5:7b、3 轮 15 次规划；v3 默认 off，图内审批的证据是确定性提案 |
 | 依赖故障默认 Retry-After | 5 秒 | server/rag/dependency-outage.js DEFAULT_OUTAGE_RETRY_AFTER_SECONDS | 原因自带 Retry-After 时用原因的 |
 

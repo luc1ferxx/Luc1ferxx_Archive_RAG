@@ -294,7 +294,7 @@ routes/chat.js handleChatRequest
 - RunStoreCheckpointSaver 写现有 run 行，同一 CAS 和 RLS；权威是自己带 digest 的图 checkpoint；代价写放大：2 节点 /chat 多 7 次无事件 CAS
 - signal：spike 实测是至少一次（在途节点续跑时再跑）→ 改 drain（drain-bridge.js bridgeRequestSignalToDrain）
 - 删原生前冻结 golden：8 套件 102 文件；52 个调度契约测试原样跑在 LangGraph 上（3.30）；删外层原生循环前同样先冻结，再加 32 个文件（3.48）
-- 局限：golden 只覆盖固定场景、Node 22 未验证、两个 PG 集成套件 native 侧没冻结；阶段 7 没有跑新的压测；回退只能 git revert
+- 局限：golden 只覆盖固定场景（在 Node 24 上生成，CI 的 Node 22 上通过）、两个 PG 集成套件 native 侧没冻结；阶段 7 没有跑新的压测；回退只能 git revert
 
 ### 5.5 Agent 跑到一半进程崩了怎么办？
 
