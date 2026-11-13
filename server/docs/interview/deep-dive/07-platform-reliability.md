@@ -61,7 +61,7 @@
 1) 前端 src/archiveApi.js streamChat：用 fetch 发 POST，不用 EventSource，因为要带 body 和鉴权头；用 response.body.getReader() 按 SSE 事件边界解析 trace_step / answer_draft / result / error / done。
 2) api 层 app.js：stripInternalServiceHeadersMiddleware（剥掉所有 x-archive-service-* 头）→ requireApiAuth → bindDatabaseTenant → noStoreTenantData → 租户限流 → createRbacMiddleware → createAgentEdgeRouter：先用 AGENT_EDGE_ROUTES 里的 validateChatRequest 按单体同一套规则校验，再调 getServiceClient('agent').stream()。
 3) service-client.js createServiceClient：pickReplica 选在途最少的副本（同数时轮转；冷却中的副本只在还有健康副本时跳过）。buildAttempt 每次尝试都重新 signServiceToken（带 accessScope，aud=agent，iss=api，htm/htu/bdh 绑定请求），propagation.inject 注入 traceparent，另带 x-archive-service-deadline-ms（AGENT_SERVICE_TIMEOUT_MS，默认 300 s）和所有尝试共用的 request-id。POST 不幂等，字节发出后失败不换副本。
-4) agent 层 agent-service/app.js：requireServiceIdentity(audience=agent，issuers=AGENT_SERVICE_CALLER_ROLES，即 SERVICE_CALL_POLICY.agent.callers) → requireForwardedTenantScope → express.json({ verify: verifyServiceRequestBody }) → handleServiceRequestBodyError → bindDatabaseTenant → bindServiceTraceContext → bindServiceCallDeadline → routes/chat.js：runAgentRequestWithCancellation → runWithAgentEventSink → buildChatResponse（app-services.js，先刷新注册表，再调 runAgentRag）。
+4) agent 层 agent-service/app.js：requireServiceIdentity(audience=agent，issuers=AGENT_SERVICE_CALLER_ROLES，即 SERVICE_CALL_POLICY.agent.callers) → requireForwardedTenantScope → express.json({ verify: verifyServiceRequestBody }) → handleServiceRequestBodyError → bindDatabaseTenant → bindServiceTraceContext → bindServiceCallDeadline → routes/chat.js：runAgentRequestWithCancellation → streamAgentRun（rag/langgraph/agent-stream.js，2026-11-13 起 `/chat/stream` 唯一的路径，由它用 runWithAgentEventSink 绑定事件 sink）→ buildChatResponse（app-services.js，先刷新注册表，再调 runAgentRag）。
 5) 检索：document-rag-execution.js retrieveGlobalContextForQueries 分派到 retrieval-service/remote-retrieval.js → 检索层 requireServiceIdentity(allowSystem: false) → decodeWireValue → maskInvisibleDocIds → retrieve*InProcess（embedQueryCached 经网关，pgvector 稠密 + BM25 融合；如开了副本，走 acquireReadReplica，并在同一往返里先跑 buildDocumentFreshnessGuard）→ encodeWireValue 返回结果和 usage → 调用方 chargeRetrievalUsage 计入运行上限。
 6) 生成答案：openai.js completeTextWithMetadata 判断该走网关（routesThroughModelGateway）→ model-gateway/client.js（本地不重试；chat 只在网关副本没收到请求时换副本）→ 网关 createModelGatewayApp：requireServiceIdentity → quotas.admit 配额准入 → 同一份 completeTextWithMetadata（withRetry 退避、Retry-After、空响应重试，失败后 isFailoverEligible 判断是否切备用模型）→ openai-client.js sendToUpstream → upstream-pool → guardModelCall（breaker.isRejecting → limiter.acquire 按租户公平排队 → breaker.admit → send → recordSuccess / recordFailure / abandon）→ 上游模型。网关记 model_gateway_metered 事件，调用方写 model_gateway_mirror 事件。
 7) 返回：agent 层发 SSE 的 result 和 done，入口 relayEventStream 按事件边界转发；上游中断时补 error（SERVICE_STREAM_INTERRUPTED，status 502；超时是 SERVICE_TIMEOUT，status 504）和 done。span 链为 invoke_agent → agent.plan → execute_tool → chat / embeddings，跨层用 traceparent 串成一条 trace；开了 METRICS_ENABLED 时，HTTP 请求的 RED 指标写进独立端口的 /metrics。
@@ -675,7 +675,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 - 截止时间：数据库语句不取消；调用方断开不会让检索层停下；已经开始的写入型 Capability 会跑完；v3 统一图里非主节点的依赖故障仍返回 409；断开即取消默认关闭
 - 告警规则从未在真实 Prometheus 或 promtool 里加载过；compose 没打开 METRICS；99.5% 和 20 s 的 SLO 目标是建议值；指标开销测了但不下结论
 - 压测全用假模型，规划器是确定性的；生产默认的 LLM 规划器每个请求要多 2 次模型调用，「容量约为三分之一」只是推算，没有实测；压测器、应用和数据库都在同一台机器上
-- claim memo 的 2.6 倍是在假模型、短回答下测的，真实模型下的加速比没测；CURRENT-TRUTH 3.15 里「约 90 req/s、每请求 12–13 ms」是 memo 之前的数
+- claim memo 的 2.6 倍是在假模型、短回答下测的，真实模型下的加速比没测；CURRENT-TRUTH 3.15 里「约 90 req/s、每请求 12–13 ms」是 memo 之前的数；这里的 /chat 每请求 CPU 都测于外层计划迁 LangGraph 之前（2026-11-13，CURRENT-TRUTH 3.48），之后每请求约多 1 ms，没有重测
 - 异步入库：拆分模式下的入库压测没做；同步和进程内异步的吞吐区间重叠，不能排序
 - MCP server 是 stdio、只读、进程内快照（要调 archive_refresh 才能刷新），不经过 agent 规划器；租户范围只来自启动时的环境变量（ARCHIVE_MCP_USER_ID / ARCHIVE_MCP_WORKSPACE_ID），不按请求鉴权
 - 没有生产流量，也没有真实的单次查询成本分布；所有模型侧的数字都来自本地假服务或本地 7B 模型
@@ -696,7 +696,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 
 - **requestFlow 第 4 步**
   - 原以为：routes/chat.js：runAgentRequestWithCancellation → runWithAgentEventSink → runAgentRag
-  - 实际：runAgentRequestWithCancellation → runWithAgentEventSink → buildChatResponse（app-services.js，先刷新注册表，再调 runAgentRag）
+  - 实际：runAgentRequestWithCancellation → runWithAgentEventSink → buildChatResponse（app-services.js，先刷新注册表，再调 runAgentRag）。2026-11-13 起中间一环是 streamAgentRun（rag/langgraph/agent-stream.js），runWithAgentEventSink 在它里面
   - 依据：server/routes/chat.js 第 123、148、230 行调用的是 services.buildChatResponse；app-services.js 第 215 行 export const buildChatResponse
 - **requestFlow 第 7 步 + 负载均衡题 answerPoints + edge-router keyFile**
   - 原以为：上游中断时补 error（SERVICE_STREAM_INTERRUPTED 或 504）

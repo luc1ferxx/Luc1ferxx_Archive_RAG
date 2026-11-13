@@ -39,7 +39,7 @@
 
 ## 一次请求怎么经过这里
 
-一次 /chat 走默认配置的文档问答路径（V1 外层计划，原生循环）：
+一次 /chat 走默认配置的文档问答路径（V1 外层计划；2026-11-13 起由 LangGraph 调度，阶段体和下面的文档循环没有变）：
 1. agent-execution-plan-runner.js 的 documentRag 阶段调 runDocumentRagLoop（agent-document-loop.js）。它先 createSelfCheckEvidenceContext（本次 /chat 的 memo），再 consumeBudget(budgetState, documentRagSkill.budgetKey)（DEFAULT_AGENT_BUDGET.maxDocumentRagCalls = 2），然后在 runWithAnswerDraftChannel 里 executeObservedSkill(documentRagSkill)，进到 ragService.chat → executeDocumentRag。
 2. executeDocumentRag：buildRetrievalInputs → lookupSemanticCache（RAG_SEMANTIC_CACHE 默认关）→ runDocumentRag，按路由分 QA 或对比。
 3. QA（executeQaRag）：

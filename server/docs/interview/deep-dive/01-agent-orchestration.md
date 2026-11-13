@@ -6,7 +6,7 @@
 
 ## 30 秒讲法
 
-编排层是「模型只提议、运行时决定」的受控 Plan-and-Execute。正则规则先生成白名单意图候选，LLM 在按请求现生成的 strict JSON Schema 下只能从中选一个；执行规划器只能在 8 种固定阶段里挑选和排序。只有自定义 Skill 阶段由模型画 typed DAG（v3 统一图也可以，但默认关）：纯函数校验器整图接受或整图拒绝，拒绝就退到确定性图，还被拒才退回 V1 顺序链，而且只在任何节点执行之前退。权限、文档范围、预算、审批、并发、重试上限都归运行时；配了 PostgreSQL 时 run、step、事件和图 checkpoint 都在库里，用版本号 CAS 挡住旧 worker，有副作用的步骤不会自动重放。需要持久状态和审批中断的两张图（custom-Skill DAG、v3 统一图）交给 LangGraph.js 调度；外层计划放到 LangGraph 上并发 1 时 CPU +17.6%，过不了 10% 的硬门，所以一直留在原生循环。效果数字只来自本地 qwen2.5:7b：结构化输出把规划降级从 56% 降到 8%，但 7B 动态组合 Skill 只过 2/5、统一图规划只被采纳 3/15；v3 默认关，原因是接管后可见行为会变、CPU 是 V1 的数倍到十几倍，而且没有真实模型证据。
+编排层是「模型只提议、运行时决定」的受控 Plan-and-Execute。正则规则先生成白名单意图候选，LLM 在按请求现生成的 strict JSON Schema 下只能从中选一个；执行规划器只能在 8 种固定阶段里挑选和排序。只有自定义 Skill 阶段由模型画 typed DAG（v3 统一图也可以，但默认关）：纯函数校验器整图接受或整图拒绝，拒绝就退到确定性图，还被拒才退回 V1 顺序链，而且只在任何节点执行之前退。权限、文档范围、预算、审批、并发、重试上限都归运行时；配了 PostgreSQL 时 run、step、事件和图 checkpoint 都在库里，用版本号 CAS 挡住旧 worker，有副作用的步骤不会自动重放。整个 Agent 现在只有 LangGraph.js 一种运行时：需要持久状态和审批中断的两张图（custom-Skill DAG、v3 统一图）先迁过去；外层计划放到 LangGraph 上并发 1 时 CPU +17.6%，过不了 10% 的硬门，一度留在原生循环，2026-11-13 按用户「不要两种运作模式」的决定也迁了过去，门没有重测，接受的代价是进程内每次运行多约 0.3 ms CPU。效果数字只来自本地 qwen2.5:7b：结构化输出把规划降级从 56% 降到 8%，但 7B 动态组合 Skill 只过 2/5、统一图规划只被采纳 3/15；v3 默认关，原因是接管后可见行为会变、CPU 是 V1 的数倍到十几倍，而且没有真实模型证据。
 
 ## 关键文件
 
@@ -20,7 +20,7 @@
 | `server/rag/agent-bootstrap.js / agent-preparation-flow.js` | createAgentSession（Skill match、工作记忆、预算）；prepareAgentRun（执行前澄清、检索计划、skill_chain trace） |
 | `server/rag/agent-execution-plan.js` | AGENT_EXECUTION_STEP_SCHEMA 定义 8 种外层阶段；validateAgentExecutionPlan（含 validateWebFallbackOrdering）；createDeterministicAgentExecutionPlan |
 | `server/rag/agent-llm-planner-adapter.js` | LLM 执行规划：buildPlannerResponseFormat 给每个可用阶段一个变体（oneOfSchemas，实际生成 anyOf）；getSelectedExecutionStepIds 决定本次可用阶段；normalizePlannerPayload 静默丢掉未选中的阶段 |
-| `server/rag/agent-execution-plan-runner.js` | 外层计划的生产调度器 runAgentExecutionPlan（原生 for 循环）；resolveAgentExecutionPlanRunner 按 AGENT_OUTER_PLAN_RUNTIME 选调度器 |
+| `server/rag/agent-execution-plan-runner.js` | 外层计划的阶段体 createAgentExecutionPlanStages 和唯一入口 runAgentExecutionPlan：懒加载图模块，把每个计划交给 runAgentExecutionPlanOnLangGraph；isAgentExecutionPlanStageStaticallyInert 判断哪些内置阶段可以静态剪掉（阶段 7 删除了这里的原生 for 循环和 resolveAgentExecutionPlanRunner） |
 | `server/rag/structured-output.js` | strict schema 构造（boundedString 用 pattern 限长、boundedArray 用 maxItems）和 extractFirstJsonValue / parseFirstJsonValue 容错解析 |
 | `server/rag/agent-execution-graph.js` | 版本化 ExecutionGraph 契约；纯函数 validateExecutionGraph / compileExecutionGraph；EXECUTION_GRAPH_LIMITS 为 12 节点、深度 5、并发 3 |
 | `server/rag/agent-dag-planner-adapter.js` | 脱敏规划上下文 buildDagPlanningContext；capNodesToBudget；回落链 createAgentExecutionGraphResult；确定性图 createDeterministicExecutionGraph |
@@ -30,13 +30,13 @@
 | `server/rag/langgraph/run-execution-graph.js` | runExecutionGraphOnLangGraph：两张图唯一的调度器（阶段 6 删除了原生调度器） |
 | `server/rag/langgraph/checkpointer.js / concurrency-gate.js / drain-bridge.js` | RunStoreCheckpointSaver 写现有 run 行；进程内并发闸门；取消走 drain，不把 signal 交给 LangGraph |
 | `server/rag/langgraph/planner-model.js / model.js` | completePlannerText：五个规划器经 ArchiveRagChatModel 调用（maxRetries 0，拒绝 withRetry/withFallbacks） |
-| `server/rag/langgraph/execution-plan-graph.js` | 实验性的外层计划 Pregel 实现（AGENT_OUTER_PLAN_RUNTIME=langgraph），压测不达标，不计划转正 |
+| `server/rag/langgraph/execution-plan-graph.js / agent-stream.js` | runAgentExecutionPlanOnLangGraph：外层计划唯一的调度器（阶段 7 起）。底层 Pregel，不带 checkpointer，按计划形状只编译一次，静态剪掉不起作用的内置阶段；压测 10% 的门没过，是按用户决定接受的代价。streamAgentRun：`/chat/stream` 唯一的路径（阶段 7 删除了 routes/chat.js 的原生分支），SSE 字节不变 |
 | `server/rag/agent-unified-graph-run.js / -admission.js / -projection.js / agent-unified-dag-planner*.js` | v3 统一图：guarded 入口 runGuardedUnifiedAgentGraph、数据边界准入、投影回 V1 状态、模型规划与确定性图 |
 | `server/rag/skills/registry.js / skill-contract.js / authorized-catalog.js / custom/` | Skill 注册与 V1 必填字段；typed 契约（effects/idempotency/replaySafe）；面向模型的原子目录只收显式契约；4 个只读 custom Skill |
 | `server/rag/agent-budget.js / run-usage.js` | 次数预算 DEFAULT_AGENT_BUDGET；token、成本、时长上限按 AsyncLocalStorage 计到 run 上，软截止 |
 | `server/rag/agent-working-memory.js / memory.js / long-memory.js / conversation-memory-writes.js` | run 内工作记忆；会话记忆（租户哈希键、需要时用 LLM 改写追问）；长期偏好；只写用户自己话的抑制开关 |
 | `server/rag/agent-run-recovery.js / agent-execution-graph-checkpoint.js / agent-run-step-replay-safety.js` | 启动恢复（hasGraphOnlyStoredExecutionPlan、findAutoRecoverableStep）；图 checkpoint 校验与对账；步骤重放安全矩阵 |
-| `docs/adr/0001-langgraph-runtime.md` | 迁移决策、14 条不可放松约束、阶段 0–6 的结果，以及外层计划留在原生循环的最终决定 |
+| `docs/adr/0001-langgraph-runtime.md` | 迁移决策、14 条不可放松约束、阶段 0–7 的结果：阶段 5 决定外层计划留在原生循环，阶段 7（2026-11-13）按用户的新决定删除原生循环、只走 LangGraph |
 
 ## 一次请求怎么经过这里
 
@@ -48,7 +48,7 @@
 6) prepareAgentRun：记 plan trace → buildPreExecutionClarification（缺文档、对比不足 2 份、超过 12 份时直接返回澄清）→ buildAgentRetrievalPlan。
 7) AGENT_UNIFIED_GRAPH_ROLLOUT=guarded 时走 runGuardedUnifiedAgentGraph：规划 → validateExecutionGraph → assessUnifiedGraphAdmission → stage 在 LangGraph 上执行 → projectUnifiedGraphRun → finalizeAgentRun → 写 finalization 收据。被拒就记一条 unified_graph_planned rejected，落回 V1；shadow 档只记录不执行。
 8) createAgentExecutionPlanResult：llmPlannerAdapter.createExecutionPlan（schema 由 buildPlannerResponseFormat 生成）→ normalizePlannerPayload → validateAgentExecutionPlan；失败就用 createDeterministicAgentExecutionPlan。记 execution_planned 事件。
-9) resolveAgentExecutionPlanRunner(getAgentOuterPlanRuntime()) → runAgentExecutionPlan 原生循环，每个阶段前 throwIfRequestCancelled：arxiv_import / workspace_action / research_brief / inventory / document_discovery（Skill 未选中就直接返回）→ custom_skills（runCustomSkillStage → createAgentExecutionGraphResult → runExecutionGraphOnLangGraph，整图被拒走 runV1）→ document_rag（runDocumentRagLoop：主调用 → 自检 → 缺口分析 → 最多 1 次补检索）→ web_search（Web Skill 被选中时直接跑；否则只在文档弃答或失败时兜底）。哪个阶段设置了 response，计划就在那里结束。
+9) runAgentExecutionPlan → runAgentExecutionPlanOnLangGraph（langgraph/execution-plan-graph.js：底层 Pregel，按计划顺序一个阶段一个节点，每个节点入口是请求取消的安全点；阶段 7 之前这里是原生循环）：arxiv_import / workspace_action / research_brief / inventory / document_discovery（Skill 未选中时这些内置阶段被静态剪掉，不建节点）→ custom_skills（runCustomSkillStage → createAgentExecutionGraphResult → runExecutionGraphOnLangGraph，整图被拒走 runV1）→ document_rag（runDocumentRagLoop：主调用 → 自检 → 缺口分析 → 最多 1 次补检索）→ web_search（Web Skill 被选中时直接跑；否则只在文档弃答或失败时兜底）。哪个阶段设置了 response，计划就在那里结束。
 10) throwIfRequestCancelled → finalizeAgentRun（agent-finalization-flow.js：选来源、合成答案、finalizer 删掉没有支持的 claim）→ completeRecordedRunAndExperience（写经验记忆、完成 run）。
 11) 异常分支：AgentRunInterrupt → 返回审批澄清并完成 run；截止、断连、依赖故障 → resolveAgentRunTermination + endRunForTermination（failRun 走 CAS，答 504/499/503）；AGENT_GRAPH_EXECUTION_FENCED 直接抛出，不改 run；其他错误 → failRun。
 
@@ -92,7 +92,7 @@
 **为什么不用主流替代方案**
 
 - LLM 自由编排工具序列
-- LangGraph 条件边：外层不需要中断，放上去只是多开销（见 LangGraph 那条）
+- LangGraph 条件边：阶段顺序由校验过的计划决定，不需要图里再做路由。外层现在虽然由 LangGraph 调度（阶段 7，见 D8），也只是按计划顺序一个阶段一个节点，唯一的分支是某个阶段设置了 response 就提前结束
 
 **代价**
 
@@ -230,24 +230,26 @@
 
 **代码**：server/rag/config.js getAgentSkillGraphRollout, getAgentExecutionPlanner; server/app-services.js createDagPlannerAdapter
 
-### D8. LangGraph.js 只调度需要持久状态和中断的两张图（custom-Skill DAG、v3 统一图），外层计划长期留在原生循环
+### D8. 整个 Agent 只有 LangGraph.js 一种运行时：先迁需要持久状态和中断的两张图（custom-Skill DAG、v3 统一图）；外层计划因压测不过门留在原生循环，2026-11-13 按用户决定也迁过去（阶段 7）
 
 **为什么**
 
-- LangGraph 的价值是 checkpoint、interrupt()/Command({resume}) 和 stream
-- 外层计划没有中断，续跑靠 run 的 step
-- 压测硬门（CPU/请求和 p95 退化不超过 10%）不放宽
+- LangGraph 的价值是 checkpoint、interrupt()/Command({resume}) 和 stream，需要它们的是 custom-Skill DAG 和 v3 统一图
+- 外层计划没有中断，持久化靠 run 的 step（外层图不带 checkpointer）。它迁过去不是因为需要这些能力，而是用户不要两种运作模式：只用已经迁好的 LangGraph
+- 压测硬门（CPU/请求和 p95 退化不超过 10%）外层计划两次都没过，所以阶段 3、阶段 5 把它留在原生循环。阶段 7 没有重测，门仍然没过，是明知不达标、接受代价
 
 **为什么不用主流替代方案**
 
 - 全部编进 StateGraph：并发 32 时 CPU +29–35%
-- 底层 Pregel + 编译缓存 + 剪枝：并发 1 时仍 +17.6%
+- 外层长期留在原生循环（2026-10-16 的决定）：底层 Pregel + 编译缓存 + 剪枝后并发 1 仍 +17.6%，当时因此不迁；2026-11-13 被用户的新决定取代
 - ADR 方案 A（保持自研）：维护面不缩小
 - ADR 方案 B（只换 checkpointer）：脱离 Pregel 调度没有意义
 
 **代价**
 
-- 外层和图是两套调度机制
+- 外层计划每次运行多 0.29 ms CPU（进程内 0.605 → 0.894 ms）；阶段 5 的压测是并发 1 每请求 CPU +17.6%、p95 +13%，阶段 7 没有跑新的压测
+- 每个回答 agent 请求的进程在第一个请求时加载 `@langchain/*`（2026-11-13 实测一次性约 115 ms，GC 后常驻内存 82 → 143 MB；默认的 LLM 规划器本来就加载 LangChain core，阶段 7 实际多出约 50 ms、21 MB）；LangSmith 追踪变量为 true 时，所有流式请求和走到外层计划的 /chat 请求都被拒绝（server.js 本来就拒绝带这种变量启动）
+- 阶段 6、阶段 7 之后都没有运行时回退开关，只能 git revert
 - superstep 屏障：下游要等最慢的兄弟节点，事件和步骤顺序与原生不同（已钉住）
 - 依赖 1.5.0 的两个并发缺陷绕行方案
 
@@ -255,8 +257,9 @@
 
 - CURRENT-TRUTH §3.28：StateGraph 下并发 32 每请求 CPU 3.93–4.26 → 5.27–5.47 ms
 - §3.29：Pregel 进程内多 0.28 ms；并发 1 每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）
+- §3.48：删除前进程内 0.605 → 0.894 ms CPU（交替 7 轮、每轮 400 次）；删除前把原生循环的结果冻结成 32 个 golden 文件，删除后各套件只在 LangGraph 上跑、对照 golden；trajectory 19/19、planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致
 
-**代码**：server/rag/agent-execution-plan-runner.js resolveAgentExecutionPlanRunner, runAgentExecutionPlan; server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph; server/rag/config.js getAgentOuterPlanRuntime
+**代码**：server/rag/agent-execution-plan-runner.js runAgentExecutionPlan, createAgentExecutionPlanStages; server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph; server/rag/langgraph/agent-stream.js streamAgentRun; server/rag/config.js assertAgentRuntimeSupported, AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE
 
 ### D9. LangGraph 落地细节：自定义 RunStoreCheckpointSaver 写现有 run 行，图 checkpoint 仍是权威；取消用 drain，不把 AbortSignal 交给 LangGraph；并发上限放在进程内闸门；LangSmith 永不启用
 
@@ -426,12 +429,12 @@
 - 读经验记忆 → 规则生成意图候选 → LLM 选一个，失败就选（经验重排后的）第一名
 - createAgentSession：Skill 的 match() 选技能，建工作记忆和预算；随后核验文档得到原子 Skill 目录
 - 在 PostgreSQL 建 run → prepareAgentRun：缺文档、对比不足 2 份时直接澄清
-- 执行规划器挑选并排阶段 → 原生循环逐阶段执行：custom_skills 内是 LangGraph 调度的 DAG，document_rag 是自检加最多 1 次补检索，Web 选中时直接跑、否则只做兜底
+- 执行规划器挑选并排阶段 → 外层计划由 LangGraph 按计划顺序逐阶段调度（底层 Pregel，一个阶段一个节点）：custom_skills 内是另一张 LangGraph 调度的 DAG，document_rag 是自检加最多 1 次补检索，Web 选中时直接跑、否则只做兜底
 - finalizeAgentRun 删掉无支持的 claim → 完成 run；审批中断转澄清；超时、断连、依赖故障走 failRun 终态
 
-代码：`server/rag/agent.js runAgentRag, runAgentRagInScope`；`server/rag/agent-intent-planner.js createAgentIntentPlanResult`；`server/rag/agent-bootstrap.js createAgentSession`；`server/rag/agent-preparation-flow.js prepareAgentRun`；`server/rag/agent-execution-plan-runner.js runAgentExecutionPlan`；`server/rag/agent-finalization-flow.js finalizeAgentRun`
+代码：`server/rag/agent.js runAgentRag, runAgentRagInScope`；`server/rag/agent-intent-planner.js createAgentIntentPlanResult`；`server/rag/agent-bootstrap.js createAgentSession`；`server/rag/agent-preparation-flow.js prepareAgentRun`；`server/rag/agent-execution-plan-runner.js runAgentExecutionPlan`；`server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph`；`server/rag/agent-finalization-flow.js finalizeAgentRun`
 
-> ⚠ 别说「全程跑在 LangGraph 上」：外层是原生 for 循环，只有 custom-Skill DAG 和 v3 图在 LangGraph 上。也别说「每一步都由模型决定」：意图候选是正则生成的。
+> ⚠ 2026-11-13 起外层计划、custom-Skill DAG 和 v3 图都由 LangGraph 调度，可以说「Agent 只有 LangGraph 一种运行时」。但别说成「LangGraph 负责持久化」或「迁过去更快」：外层图不带 checkpointer，持久化仍是 run 的 step；文档循环和 V1 顺序链兜底是阶段内部的普通代码；外层计划的压测门没过。也别说「每一步都由模型决定」：意图候选是正则生成的。
 
 ### Q2. 这到底是 Agent 还是 workflow？意图是怎么识别的？
 
@@ -505,20 +508,23 @@
 
 > ⚠ 没做过 ReAct 对照实验（无实测），不能说「比 ReAct 准」或「ReAct 不行」。只讲这个场景下的取舍。
 
-### Q7. 既然迁了 LangGraph，为什么外层计划还留在原生循环？为什么不全换？
+### Q7. 外层计划压测没过 10% 的门、一度留在原生循环，为什么最后还是全换成了 LangGraph？
 
 *L3 为什么不用 X / 怎么证明*
 
-- LangGraph 给的是 checkpoint、interrupt()/Command({resume}) 和 stream，这两张图需要
-- 外层计划不需要中断，续跑靠 run 的 step，交给 LangGraph 只多开销
+- LangGraph 给的是 checkpoint、interrupt()/Command({resume}) 和 stream，需要它们的是 custom-Skill DAG 和 v3 统一图
+- 外层计划不需要中断，持久化靠 run 的 step，交给 LangGraph 在性能上只多开销
 - 硬门：CPU/请求和 p95 退化不超过 10%
 - 编成 StateGraph 时，并发 32 每请求 CPU +29–35%
 - 改底层 Pregel + 编译缓存 + 剪枝后，RunTree 每次调用 54 → 2，进程内只多 0.28 ms，但并发 1 仍 +17.6% CPU、p95 +13%
-- 剩下的是 Pregel 每次调用的固定开销，在库内部；最终决定不放宽门，外层长期原生，实验开关保留
+- 剩下的是 Pregel 每次调用的固定开销，在库内部；2026-10-16 的决定是不放宽门，外层留在原生循环，LangGraph 实现只作实验开关
+- 2026-11-13 用户改了决定（阶段 7）：不要两种运作模式，只用已经迁好的 LangGraph。原生循环和开关一起删除；门没有重测，也没有通过，是明知不达标、接受代价
+- 接受的代价：进程内每次运行 0.605 → 0.894 ms CPU（多 0.29 ms），相对真实模型约 2.4 s 的一次回答看不出来；阶段 7 没有跑新的压测
+- 等价靠 golden：删除前把原生循环的结果冻结成 32 个文件，删除后只在 LangGraph 上跑、对照 golden；回退只能 git revert
 
-代码：`server/rag/agent-execution-plan-runner.js resolveAgentExecutionPlanRunner, isAgentExecutionPlanStageStaticallyInert`；`server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph, EXECUTION_PLAN_GRAPH_CACHE_LIMIT`；`server/rag/config.js getAgentOuterPlanRuntime`
+代码：`server/rag/agent-execution-plan-runner.js runAgentExecutionPlan, isAgentExecutionPlanStageStaticallyInert`；`server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph, EXECUTION_PLAN_GRAPH_CACHE_LIMIT`；`server/rag/config.js assertAgentRuntimeSupported`
 
-> ⚠ 别说「为了性能迁 LangGraph」，它更慢。别说「代码大幅变少」：生产代码只净减 136 行。进程内 0.28 ms 和压测里约 1 ms 的差距，归因于降频、冷缓存是推断，没单独测过。
+> ⚠ 别说「为了性能迁 LangGraph」，它更慢。别说「门后来过了」：阶段 7 没有重测，是用户明说宁可多花约 0.3 ms 也只要一种运行时。别说「代码大幅变少」：阶段 6 生产代码只净减 136 行，阶段 7 的代码量见 ADR 0001 阶段 7 的证据小节。进程内 0.28 ms 和压测里约 1 ms 的差距，归因于降频、冷缓存是推断，没单独测过。
 
 ### Q8. checkpointer 为什么不用官方 PostgresSaver？取消为什么不直接把 AbortSignal 传给 LangGraph？并发为什么不用 LangGraph 自带的 maxConcurrency？
 
@@ -558,6 +564,7 @@
 - 原生 runner 的 52 个调度契约测试直接跑在 LangGraph 执行器上，断言一条没改
 - 两种调度器都按校验器的拓扑层序排队，720 种声明顺序 × 压力组合精确一致
 - 删除前后 trajectory 19/19、planner 7/7、recovery 8/8 屏蔽后逐字节一致
+- 阶段 7 删外层计划的原生循环用的是同一个办法：先在一个提交里把原生一侧冻结成 32 个 golden 文件，再删；删除后各套件只在 LangGraph 上跑、对照 golden（§3.48）
 
 代码：`server/rag/agent-execution-graph-node.js orderExecutionGraphNodeStatesByLayer`；`server/rag/langgraph/run-execution-graph.js runExecutionGraphOnLangGraph`；`server/rag/agent-execution-graph-runner.js replayExecutionGraphRun`；`server/rag/config.js assertAgentRuntimeSupported`
 
@@ -605,7 +612,7 @@
 
 代码：`server/rag/agent-execution-graph-checkpoint.js verifyExecutionGraphCheckpoint, reconcileExecutionGraphCheckpoint`；`server/rag/agent-run-step-replay-safety.js isAutoReplaySafeStepType`；`server/rag/agent-run-recovery.js createAgentRunRecoveryService`；`server/rag/agent-runs.js createAgentRunCursor`；`server/rag/capabilities/graph-approval-preflight.js verifyCapabilityGraphApproval`
 
-> ⚠ 这不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 不会自动重放，要运维介入。启动自动续跑只覆盖三种情况：外层计划恰好只有 custom_skills 一个阶段的 guarded 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan；确定性外层计划至少列出其余 7 个阶段，所以永远不满足），v3 guarded run，以及没有图 checkpoint 的 V1 custom_skill 步骤（矩阵里唯一 autoReplaySafe 的步骤类型，还要过持久化声明和 live 契约复核）。普通文档问答的 run 不会自动续跑。
+> ⚠ 这不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 不会自动重放，要运维介入。启动自动续跑只覆盖三种情况：外层计划恰好只有 custom_skills 一个阶段的 guarded 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan；确定性外层计划至少列出其余 7 个阶段，所以永远不满足），v3 guarded run，以及没有图 checkpoint 的 V1 custom_skill 步骤（矩阵里唯一 autoReplaySafe 的步骤类型，还要过持久化声明和 live 契约复核）。普通文档问答的 run 不会自动续跑。外层计划 2026-11-13 起由 LangGraph 调度也没有改变这一点：外层图不带 checkpointer，不从它续跑。
 
 ### Q14. 预算用完会怎样？为什么做成软截止？成本放大 100 倍怎么控？
 
@@ -626,7 +633,7 @@
 
 *L4 边界 / 规模 / 重做*
 
-- QPS：单 Node 进程用假模型时瓶颈是 CPU。§3.15（2026-09-26）约 90 req/s；§3.24 claim 校验 memo 之后，单体 pgvector + RLS、并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms。接真实模型后容量由模型并发上限决定
+- QPS：单 Node 进程用假模型时瓶颈是 CPU。§3.15（2026-09-26）约 90 req/s；§3.24 claim 校验 memo 之后，单体 pgvector + RLS、并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms（测于外层计划迁 LangGraph 之前，之后每请求 CPU 约多 1 ms，没有重测，§3.48）。接真实模型后容量由模型并发上限决定
 - 默认 LLM 规划每个请求多 2 次模型调用，容量约为三分之一（按调用次数推算，没实测）。改法：单候选跳过模型、缓存规划、规划器换小模型、agent 层单独扩
 - Skill 数：正则意图规则会互相冲突；schema 变体随目录膨胀。要换成检索式工具选择，再交给 LLM
 - 节点数：superstep 屏障让延迟取决于最慢的兄弟节点；写放大随 superstep 增长；默认预算本来就只允许 2 个 custom 节点
@@ -666,16 +673,18 @@
 | 重规划与补检索上限 | DEFAULT_MAX_REPLANS = 1；DEFAULT_AGENT_MAX_FOLLOW_UPS = 1 | server/rag/agent-replanner.js；server/rag/agent-bootstrap.js | 更高的上限没做过灰度 |
 | 外层计划编成 StateGraph 时的压测 | 并发 32 时每请求 CPU 3.93–4.26 → 5.27–5.47 ms（+29–35%）；一张空的 3–5 节点图底价 0.38–0.59 ms，而 10% 的预算只有 0.4 ms | CURRENT-TRUTH §3.28 | pgvector、模型 0 ms、每档 3 次，单机 |
 | 外层计划改底层 Pregel 后的开销 | 微基准：7 阶段 1,086 → 347 µs，文档问答 416 → 143 µs；RunTree 每次调用 54 → 2；进程内同一个 runAgentRag 多 0.28 ms（原来多 1.23 ms） | CURRENT-TRUTH §3.29；ADR 阶段 5 | 桩阶段的微基准 |
-| Pregel 版外层计划的压测硬门 | 并发 1 时每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），超过 10%，不通过 | CURRENT-TRUTH §3.29；ADR 阶段 5 | pgvector、owner 路径、模型 0 ms、确定性规划器；交替跑四轮、每轮 5 次；并发 32 同一配置轮次之间漂移约 15–20%，不下结论 |
-| 默认配置（外层原生）通过压测门 | 并发 32 每请求 CPU 3.78–4.20 → 3.82–4.34 ms，p95 区间重叠 | CURRENT-TRUTH §3.28 | 同一 harness，各 3 次 |
+| Pregel 版外层计划的压测硬门 | 并发 1 时每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），超过 10%，不通过 | CURRENT-TRUTH §3.29；ADR 阶段 5 | pgvector、owner 路径、模型 0 ms、确定性规划器；交替跑四轮、每轮 5 次；并发 32 同一配置轮次之间漂移约 15–20%，不下结论。2026-11-13 外层计划仍按用户决定迁到 LangGraph，门没有重测（§3.48） |
+| 外层计划迁到 LangGraph 时接受的开销（阶段 7） | 进程内一次文档问答的 runAgentRag：原生循环 0.605 ms CPU，LangGraph 0.894 ms，多 0.29 ms | CURRENT-TRUTH §3.48；ADR 阶段 7 | 2026-11-13 删除原生循环之前测，同一进程，交替 7 轮、每轮 400 次，Node 24.21；阶段 7 没有跑新的压测；相对真实模型约 2.4 s 的一次回答看不出来 |
+| 阶段 3 当时的默认配置（外层原生）通过压测门 | 并发 32 每请求 CPU 3.78–4.20 → 3.82–4.34 ms，p95 区间重叠 | CURRENT-TRUTH §3.28 | 同一 harness，各 3 次；2026-11-13 起外层也在 LangGraph 上，这个结果不再描述现在的默认配置 |
 | LangGraph checkpointer 的写放大 | 2 节点 custom-Skill /chat 多 7 次无事件 CAS、1 次 run 读、1 次事件表读；完成后 run result 11,894 B（原生 11,860 B） | CURRENT-TRUTH §3.28；AGENTS.md | PostgreSQL 18 pg_stat_statements 实测，owner 路径 |
 | 删除原生调度器（阶段 6）的证据 | 3,250 个测试（通过 3,235、跳过 15、失败 0），行覆盖 90.46%；golden 8 个套件 102 个文件；trajectory 19/19、planner 7/7、recovery 8/8 屏蔽后逐字节一致；runner 文件 478 → 295 行 | CURRENT-TRUTH §3.30 | golden 只覆盖固定场景；Node 22 上未验证 |
+| 删除外层原生循环（阶段 7）的证据 | 删除前冻结 32 个 golden 文件（外层计划套件 24、流式套件 5、路由套件 3）；删除后 langgraph-execution-plan-graph 26/26、langgraph-chat-stream 8/8、langgraph-routes 8/8、agent-run-chat-statement-count 10/10、agent-runtime-removed 15/15；trajectory 19/19、planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致 | CURRENT-TRUTH §3.48 | golden 只覆盖固定场景；全量测试和代码量的数字见 ADR 0001 阶段 7 的证据小节 |
 | v3 统一图的 CPU 成本 | 文档问答 V1 约 0.8–1.2 ms CPU，v3 原生约 5.8–7.4 ms，v3 在 LangGraph 上约 11–15 ms | docs/adr/0001-langgraph-runtime.md 阶段 5「没有做的部分与理由」 | 进程内微基准，内存 run store，mock RAG |
-| 一次 /chat 的 run store 语句数 | 1 次 insert、3 次 CAS、2 次事件追加、0 次 run 或事件回读 | AGENTS.md（test/agent-run-chat-statement-count.test.mjs 钉住） | 不含 custom-Skill DAG 的 LangGraph 额外写入 |
+| 一次 /chat 的 run store 语句数 | 1 次 insert、3 次 CAS、2 次事件追加、0 次 run 或事件回读 | AGENTS.md（test/agent-run-chat-statement-count.test.mjs 钉住） | 不含 custom-Skill DAG 的 LangGraph 额外写入；外层计划迁到 LangGraph 后不变（外层图不带 checkpointer） |
 | 一条真实 trace 的耗时分布 | 总 5840 ms、740 token、2 次模型调用；三个规划器各 0–2 ms，两个 Skill 的模型调用 3912 ms 和 1859 ms | CURRENT-TRUTH §3.6 | 单次 trace，确定性规划器，不是性能基准 |
 | 默认 LLM 规划器的容量影响 | 每个请求多 2 次模型调用，同样的并发上限下容量约为三分之一 | CURRENT-TRUTH §3.15 | 按调用次数推算，没有实测 |
 | Agent 路径的答题率（编排后的瓶颈） | QASPER train 41 道可答题，评审关时 0/41 被回答 | CURRENT-TRUTH §3.21 | qwen2.5:7b、确定性规划器；瓶颈是词法校验器，不是编排 |
-| 单进程吞吐（claim 校验 memo 之后） | 并发 32：每请求应用 CPU 11.7–13.5 → 4.6–4.9 ms，吞吐 83–94 → 239–258 req/s | CURRENT-TRUTH §3.24 claim 校验缓存 | 单体、pgvector、行级安全、假模型 0 ms、每档 3 次；假模型回答很短，真实模型下的加速比例没测 |
+| 单进程吞吐（claim 校验 memo 之后） | 并发 32：每请求应用 CPU 11.7–13.5 → 4.6–4.9 ms，吞吐 83–94 → 239–258 req/s | CURRENT-TRUTH §3.24 claim 校验缓存 | 单体、pgvector、行级安全、假模型 0 ms、每档 3 次；假模型回答很短，真实模型下的加速比例没测；测于外层计划迁 LangGraph 之前，之后每请求 CPU 约多 1 ms，没有重测 |
 
 ## 要主动说出口的边界
 
@@ -688,13 +697,13 @@
 - 4 个 custom Skill 全是 readOnly，副作用防护、重放矩阵守的是还没有实例的边界
 - 重规划只有 1 次，没有真实模型下的 replan 效果证据
 - v3 统一图默认 off：接管请求后行为会变（没有 answer_draft，非主节点失败返回 409），CPU 是 V1 的数倍到十几倍
-- LangGraph 只调度两张图，外层计划留在原生循环，所以有两套调度机制；外层的 LangGraph 实验开关压测不达标，不计划转正
+- 外层计划 2026-11-13 起也由 LangGraph 调度（阶段 7，用户决定只留一种运行时）：10% 的压测门两次没过、这次没有重测，进程内每次运行多 0.29 ms CPU，阶段 7 没有跑新的压测；不能说成性能提升
 - superstep 屏障让下游等最慢的兄弟节点，步骤和事件顺序、延迟与删除前的原生调度器不同（已用测试钉住）
-- 阶段 6 之后没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、Node 22 上未验证，两个 PostgreSQL 集成套件的 native 一侧没冻结
+- 阶段 6、阶段 7 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、Node 22 上未验证，两个 PostgreSQL 集成套件的 native 一侧没冻结
 - LangGraph checkpointer 有写放大（每个 2 节点 custom-Skill /chat 多 7 次无事件 CAS）；取消靠 drain，只在 superstep 边界生效，在途节点要先结算
 - 预算是软截止，已开始的步骤（DAG 并发时可能多个）会跑完；规划器调用不受上限阻止；计量按每次调用新建、不跨审批累加；默认值没用真实流量校准，没有真实的单次成本分布
 - 不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 和在途节点都要人工介入
-- 启动自动续跑只覆盖：外层计划恰好只有 custom_skills 的 guarded 图、v3 guarded run、没有图 checkpoint 的 V1 custom_skill 步骤；普通文档问答 run 不会自动续跑
+- 启动自动续跑只覆盖：外层计划恰好只有 custom_skills 的 guarded 图、v3 guarded run、没有图 checkpoint 的 V1 custom_skill 步骤；普通文档问答 run 不会自动续跑（外层计划迁到 LangGraph 后也一样，外层图不带 checkpointer）
 - 等价证据（trajectory、planner、recovery 逐字节一致）来自 mock 和确定性用例，不是真实模型的规划证据
 - 记忆没有效果评测，也没和 mem0 等方案对比过；会话改写多一次 LLM 调用；迁移 031 之前的会话对租户不可见；拆分部署时每层要用相同的 API_AUTH_ENABLED
 - Agent 路径答题率很低（QASPER train 评审关时 0/41），瓶颈在词法校验器；verify:quality 18/18 测的是不经过 agent 自检的纯 RAG 路径

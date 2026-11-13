@@ -33,7 +33,7 @@
 | `server/evaluation/run-llm-judge.mjs、run-claim-judge-eval.mjs` | LLM 评审：measureJudgeAgreement 对人工标签算一致率和 Cohen's kappa 的框架（还没在真实数据上跑）；claim judge 在构造的对照集（CLAIM_JUDGE_CONTRAST_SET、CLAIM_JUDGE_HELD_OUT_SET）上做校准 |
 | `.github/workflows/quality-gate.yml、real-model-eval.yml、release-evidence.yml、planner-real-gate.yml、robust-eval-suite.yml` | PR 三个并行 job；每周一用 Ollama 跑真实模型（不需要 key）；每周一（或手动）跑发布证据（需要 OPENAI_API_KEY）；真实规划器门（需要 key）；robust suite 手动诊断 |
 | `server/test/run.test.mjs、coverage-gate.mjs、coverage-policy.mjs、ci-workflow.test.mjs` | 测试文件自动发现（collectTestFiles），每个文件一个子进程；CI 只跑一遍 coverage:gate；ci-workflow.test.mjs 钉死 workflow 和两处发现逻辑一致，并断言 quality-gate.yml 里不出现 OPENAI_API_KEY |
-| `server/test/langgraph-support/graph-goldens.mjs、test/fixtures/graph-goldens/` | 删除原生调度器前冻结的 golden，8 个套件、102 个文件、约 5.3 MB；只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败 |
+| `server/test/langgraph-support/graph-goldens.mjs、test/fixtures/graph-goldens/` | 删除原生调度器前冻结的 golden，8 个套件、102 个文件、约 5.3 MB；2026-11-13 删外层计划的原生循环前又冻结了 32 个文件（CURRENT-TRUTH §3.48）；只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败 |
 
 ## 一次请求怎么经过这里
 
@@ -502,7 +502,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 *L3 为什么不用 X / 怎么证明*
 
 - 自动发现，每个文件一个子进程，进程级状态不会串；CI 只跑一遍 coverage:gate
-- 删除前把 native 一侧冻结成 golden：8 个套件、102 个文件
+- 删除前把 native 一侧冻结成 golden：8 个套件、102 个文件；2026-11-13 删外层计划的原生循环前用同一办法再冻结 32 个文件（§3.48）
 - 只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败，必须写明行为变化再重跑
 - 52 个调度契约测试直接跑在 LangGraph 执行器上，断言一条没改
 

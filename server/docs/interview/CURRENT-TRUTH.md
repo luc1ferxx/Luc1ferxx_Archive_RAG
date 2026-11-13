@@ -29,7 +29,7 @@
 | Prompt 版本 | 11 个 prompt、19 个钉住的模板版本（`id@version`），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，17 张表（再加每个 live 索引版本的分块表和 BM25 统计表）的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移用 owner 登录；进程级缓存加载、跨租户恢复扫描显式标成 system 工作，默认仍以 owner 登录执行，开角色拆分时切到 NOLOGIN 的 system 角色（迁移 035）。strict 上下文和角色拆分都是可选项，默认关（见 3.32） | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js`、`health.js`（`getRowLevelSecurityTables`） |
-| 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
+| 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/langgraph/agent-stream.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
 
 默认配置：hybrid 检索（pgvector 余弦 + PostgreSQL 全文检索匹配、Okapi BM25 打分，加权 RRF 融合：稠密 0.65、稀疏 0.35，k=60），rerank 关闭，规划器用 LLM，自定义 Skill 阶段默认由 typed DAG 执行（`AGENT_SKILL_GRAPH_ROLLOUT=guarded`），V1 顺序链只在整图被拒时兜底。
 
@@ -297,12 +297,12 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 | 场景（pgvector） | 结果 |
 | --- | --- |
-| `/chat`，模型 0 ms | 并发 1 时 p50 17 ms；吞吐停在约 91 req/s（并发 32 时 p50 347 ms）；每个请求约 12–13 ms 应用 CPU（claim 校验 memo 之前的数字；现状见 3.24：行级安全路径、并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms） |
+| `/chat`，模型 0 ms | 并发 1 时 p50 17 ms；吞吐停在约 91 req/s（并发 32 时 p50 347 ms）；每个请求约 12–13 ms 应用 CPU（claim 校验 memo 之前的数字；之后的数字见 3.24：行级安全路径、并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms；3.24 测于外层计划迁到 LangGraph 之前，之后每请求 CPU 约多 1 ms，没有重测，见 3.48） |
 | `/chat`，模型 800 ms | 并发 16/32 时在途峰值正好是 8（`RAG_LLM_MAX_CONCURRENCY`）；吞吐约 9.9 req/s ≈ 8 / 0.8 s；并发 32 时 p50 3.2 s |
 | `GET /documents` | 单实例、无租户，并发 32 约 12,500 req/s、p95 3.1 ms。pgvector 下每个请求先按租户重读一次文档表，这样别的实例上传或删除的文档能立即看到；同一租户的并发请求共用一次查询（每请求约 0.08 次）。多实例改动前只读内存，约 13,000 req/s |
 
 面试里的说法：
-- 单个 Node 进程的瓶颈是 CPU，约 90 req/s（2026-09-26 的数字；claim 校验 memo 之后行级安全路径、并发 32 约 239–258 req/s，见 3.24）；
+- 单个 Node 进程的瓶颈是 CPU，约 90 req/s（2026-09-26 的数字；claim 校验 memo 之后行级安全路径、并发 32 约 239–258 req/s，见 3.24；外层计划迁到 LangGraph 之后每请求 CPU 约多 1 ms，吞吐没有重测，见 3.48）；
 - 接真实模型后，容量由每个模型的并发上限决定，多出的请求排队；
 - 生产默认的 LLM 规划器每个请求要多调 2 次模型，同样的上限下容量大约只有三分之一（按调用次数推算，没有实测）。
 
@@ -334,6 +334,45 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 原来总是 dense 系列先读冷数据、后面的系列白用缓存，所以 dense 在 100 万时显示 p95 104 ms，而 hybrid 只有 21 ms；现在首次读单独计时。
 - 模型 0 ms 时的"在途峰值"是假服务同步回复造成的，没有意义，现在不显示。
 - 事件循环延迟没有减去 10 ms 的采样间隔，现在减掉了。
+
+### 3.48 LangGraph 迁移阶段 7：外层计划也只走 LangGraph，原生循环删除（2026-11-13）
+
+- **决定**：
+  - 用户的原话是"我不希望 agent 有两种运作模式，我只希望用已经迁移了的 langgraph"（ADR 0001"阶段 7 结果"）。
+  - 这取代了 2026-10-16"外层计划长期保持原生循环"的决定（3.29）。10% 的压测门没有重测，也没有通过，是明知不达标、接受代价。
+  - 改之前：外层 V1 计划（固定阶段：内置 Skill、自定义 Skill、文档循环、Web 兜底）默认由原生循环 `runAgentExecutionPlan` 调度，生产走的就是它。LangGraph 的底层 Pregel 图只是 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 后面的实验开关。`/chat/stream` 在路由里有原生和 LangGraph 转发两条分支。
+  - 现在：整个 agent 只有一种运行时。外层计划、`/chat/stream`、guarded 的 custom-Skill DAG、guarded 的 v3 统一图都跑在 LangGraph 上。
+- **删了什么**：原生调度循环；`resolveAgentExecutionPlanRunner` 和 `getAgentOuterPlanRuntime`；`routes/chat.js` 里 `/chat/stream` 的原生分支。
+- **留下什么**：
+  - `runAgentExecutionPlan` 这个名字（`rag/agent-execution-plan-runner.js`）留作唯一入口：懒加载图模块，把每个计划交给 `runAgentExecutionPlanOnLangGraph`。
+  - 图在 `rag/langgraph/execution-plan-graph.js`：底层 Pregel，不带 checkpointer，按计划形状只编译一次，静态剪掉不起作用的内置阶段。阶段体（`createAgentExecutionPlanStages`）没改。
+  - `/chat/stream` 只剩一条路径：`rag/langgraph/agent-stream.js` 的 `streamAgentRun` 生成器。SSE 字节不变。
+  - 没动的：V1 顺序链（`AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，以及整图被拒时的兜底）、`AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 默认仍是 off）、规划器、文档阶段内部的文档循环。
+  - 持久化也没动：外层计划仍靠 run 的步骤，LangGraph 只给 custom-Skill DAG 和 v3 图做 checkpoint。
+- **拒绝已删除的取值**：
+  - `AGENT_OUTER_PLAN_RUNTIME` 不再选择任何东西。未设置、空值、空白或 `langgraph` 可以。
+  - 设成 `native` 或其他任何值，进程拒绝启动，进程内的每个 agent 入口也拒绝，错误码 `AGENT_OUTER_PLAN_RUNTIME_REMOVED`。
+  - 这和阶段 6 起的 `AGENT_RUNTIME` 一样：`rag/config.js` 的 `assertAgentRuntimeSupported` 两个变量都查。
+  - 阶段 7 之前，拼错的取值会被悄悄当成 native。
+- **等价怎么保住**（和阶段 6 同一个办法）：
+  - 删除之前，在提交 3313b40b 上把各 parity 套件比较过的每个场景的原生一侧冻结成 golden。`server/test/fixtures/graph-goldens/` 下新增 32 个文件：`langgraph-execution-plan-graph` 24 个（10 个轨迹用例、14 个直接场景），`langgraph-chat-stream` 5 个（SSE 字节、帧和 run），`langgraph-routes` 3 个。
+  - 在那个提交上，原生一侧写出每个文件，LangGraph 一侧对照它。
+  - 删除之后，每个套件只在 LangGraph 上跑一次、对照 golden：`langgraph-execution-plan-graph` 26/26、`langgraph-chat-stream` 8/8、`langgraph-routes` 8/8、`agent-run-chat-statement-count` 10/10（run store 的调用次数不变，因为外层计划没有 checkpointer）。检查拒绝已删除取值的 `agent-runtime-removed` 15/15。
+  - 三个确定性 agent 评测，删除前后屏蔽后逐字节一致：`eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8。
+- **代价**（接受的）：
+  - 进程内：一次文档问答的 `runAgentRag`，原生循环 0.605 ms CPU，LangGraph 0.894 ms，多 0.29 ms。2026-11-13 删除之前测，同一进程，交替 7 轮、每轮 400 次，Node 24.21。
+  - 压测：阶段 5（pgvector、假模型 0 ms、并发 1）测到每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）。阶段 7 没有跑新的压测。
+  - 相对真实模型约 2.4 秒的一次回答，这点开销看不出来。
+- **其他后果**：
+  - 加载：每个回答 agent 请求的进程，现在都在第一个请求时加载 `@langchain/*`。2026-11-13 实测一次性约 115 ms，GC 后常驻内存 82 → 143 MB；默认的 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core，阶段 7 实际多出来的是 LangGraph 本身，约 50 ms、21 MB。拆分部署的 api 入口和入库 worker 仍然不加载。
+  - LangSmith：追踪变量为 true 时，`/chat/stream` 拒绝所有流式请求（在 run 建立之前，走不到外层计划的请求也一样），`/chat` 拒绝每个走到外层计划的请求（以 `LANGSMITH_TRACING_ENABLED` 让 run 失败；走不到外层计划的仍然回答）。以前原生循环上的普通文档问答还能回答。`server.js` 本来就拒绝带这种变量启动，所以只有进程内调用方或启动后环境被改动的进程会遇到。
+  - 压测脚本：`--outer-plan-runtime` 现在只接受 `langgraph`，`native` 被脚本自己的参数检查拒绝。阶段 7 之前写下的报告里，`/chat` 的 CPU 数字比同一提交现在测出来的每请求低约 1 ms。
+- **回退**：没有运行时开关，只能 `git revert` 阶段 7 的删除提交。
+- **面试里的说法**：
+  - 门是在假模型 0 ms 下按每请求 CPU 和 p95 判的，外层计划两次都没过，这个结论没有变。
+  - 后来的取舍是：宁可每次运行多花约 0.3 ms CPU，也只留一种运行时。这是用户明说的决定，不是测量结果变了。
+  - 不要说迁移提升了性能，也不要说门后来过了。
+  - 这里没列的数字见 ADR 0001 阶段 7 的证据小节（`docs/adr/0001-langgraph-runtime.md`）。
 
 ### 3.47 Office 解析放进工作线程：大文件不再卡住事件循环，内存耗尽只结束 worker（2026-11-13）
 
@@ -625,8 +664,8 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 - **做了什么**：用户决定提前结束 ADR 0001 约束 12 的回退窗口，删除原生图调度器（ADR"阶段 6 结果"）。约束 12 原定 LangGraph 成为默认后 `AGENT_RUNTIME=native` 至少保留一个发布周期；分支还没推送、没发布，这个周期还没开始算。这一条是被明确豁免的，不是"窗口过了"。
 - **删了什么**：`runExecutionGraph` 的调度循环；custom-Skill 阶段和 v3 阶段里的 native 分支；`getAgentRuntime()` 和依赖它的分支（启动恢复总做线程核对，规划器的模型调用总经 LangChain ChatModel 适配器，只有 LangSmith 追踪变量为 true 时直接调用）；守住回退路径的套件及其守卫；各 parity 套件里的 native 一侧。
-- **留下什么**：准入、收尾、已结算图的回放（`replayExecutionGraphRun`，不调度）和单节点执行模块不变；外层计划的原生循环不动（3.29 的最终决定）；V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 仍可用。
-- **拒绝已删除的取值**：`AGENT_RUNTIME` 只接受未设置、空值或 `langgraph`。设成 `native` 或拼错的值，`server.js` 和拆分部署的每个角色都拒绝启动（`AGENT_RUNTIME_REMOVED`），`createAppServices` 也在建任何服务之前拒绝（所有进程内 app）；不建 app、直接调用 `runAgentRag` 的 eval runner，在请求要调度图的那一刻（custom-Skill stage、v3 入口、执行器）以同一个错误失败，trajectory 报告里是一条 `case_error`。不调度图的请求不受影响，它们在两种 runtime 下本来就走同一份代码。
+- **留下什么**：准入、收尾、已结算图的回放（`replayExecutionGraphRun`，不调度）和单节点执行模块不变；外层计划的原生循环当时不动（3.29 的决定；2026-11-13 阶段 7 已删除，见 3.48）；V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 仍可用。
+- **拒绝已删除的取值**：`AGENT_RUNTIME` 只接受未设置、空值或 `langgraph`。设成 `native` 或拼错的值，`server.js` 和拆分部署的每个角色都拒绝启动（`AGENT_RUNTIME_REMOVED`），`createAppServices` 也在建任何服务之前拒绝（所有进程内 app）；不建 app、直接调用 `runAgentRag` 的 eval runner，在请求要调度图的那一刻（custom-Skill stage、v3 入口、执行器）以同一个错误失败，trajectory 报告里是一条 `case_error`。不调度图的请求不受影响，它们在两种 runtime 下本来就走同一份代码（这是阶段 6 当时的范围；阶段 7 起外层计划的入口也查，走到外层计划的请求同样被拒，见 3.48）。
 - **等价怎么保住**：删除之前先把 native 一侧的结果冻结成 golden：第一批 6 个套件、94 个文件；评审发现路由层（v3 批准/拒绝、v3 流、后台任务的审批重入、启动恢复）和外层计划套件里三个跑 custom-Skill DAG 的用例没有冻结，又从 HEAD e1385c1c 以 `AGENT_RUNTIME=native` 补冻了 8 个文件，共 8 个套件、102 个文件，扫描太大的只存 sha256。这些场景现在只在 LangGraph 上跑一次、对照 golden，屏蔽规则与删除前相同，例外两处：v3 回放扫描原来在同一进程里不屏蔽地比较，现在屏蔽后比摘要；规划器 golden 规范化了临时端口和 V8 的 JSON.parse 位置后缀。原生 runner 的 52 个调度契约测试直接跑在 LangGraph 执行器上，断言一条没改。
 - **golden 怎么改**：只有 `UPDATE_GRAPH_GOLDENS=1` 能从 LangGraph 改写；改写了也让本次测试失败，要先看 diff、在同一次改动里写明行为变化，再不带变量重跑。其他取值（如 `native`）一律拒绝。
 - **回退**：没有运行时开关了，只能 `git revert` 这次提交。
@@ -638,18 +677,18 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 - **做了什么**：对照目标文件的"完成定义"逐条处理（ADR 0001"阶段 5 结果"）。外层 V1 计划的 LangGraph 实现从 StateGraph 改为底层 Pregel：按计划形状只编译一次，请求状态放在 `config.configurable`，未选中 Skill 的五个内置阶段静态剪掉。五个规划器的模型调用在 `AGENT_RUNTIME=langgraph` 下改走 LangChain 的 ChatModel 适配器，结果与原生一致（3.30 起只剩这条路径）。
 - **开销**（微基准，桩阶段）：文档问答 416 → 143 µs CPU，7 阶段 1,086 → 347 µs；每次调用的 LangSmith `RunTree` 54 → 2。进程内同一个 `runAgentRag`：外层计划放到 LangGraph 上多 0.28 ms（原来 1.23 ms）。
-- **压测硬门仍不过**：pgvector、模型 0 ms，native 与 langgraph 交替跑四轮、每轮 5 次。并发 1 时每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），超过 10%。并发 32 两对结果方向相反（同一配置不同轮次就漂移约 15–20%），不下结论。所以外层计划默认仍是原生循环。
-- **最终决定**（用户认可）：不放宽 10% 的门，外层计划长期保持原生循环，它不在要删的调度代码之列；LangGraph 实现留作实验开关。只有 LangGraph 升级后单次调用开销明显下降，才按同样的方法重测。
+- **压测硬门仍不过**：pgvector、模型 0 ms，native 与 langgraph 交替跑四轮、每轮 5 次。并发 1 时每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%），超过 10%。并发 32 两对结果方向相反（同一配置不同轮次就漂移约 15–20%），不下结论。所以外层计划默认仍是原生循环（当时；2026-11-13 起只走 LangGraph，见 3.48）。
+- **最终决定**（用户认可）：不放宽 10% 的门，外层计划长期保持原生循环，它不在要删的调度代码之列；LangGraph 实现留作实验开关。只有 LangGraph 升级后单次调用开销明显下降，才按同样的方法重测。（2026-11-13 已被用户的新决定取代：只留 LangGraph 一种运行时，原生循环和这个开关都删了；门没有重测，是明知不达标、接受代价，见 3.48。）
 - **交回原生调度器的情形已消除**：两种调度器都改为按校验器的拓扑层序排队，LangGraph 不再把任何图交给原生调度器；v3 stage 的两处直接调用（结算回放、没有 run 目标的分支）也已替换，`AGENT_RUNTIME=langgraph` 下没有生产路径再调用原生图调度器。代价是不按层声明的图在 `native` 下执行顺序变了（生产里只有带 Web 的 v3 文档图，答案不变）。等价扫描覆盖 720 种声明顺序与压力组合，两种 runtime 精确一致；全量测试 3,300 个，0 失败。原生图调度器当时只等回退窗口结束再删（3.30 已按用户决定提前删除）。
 - **没做的**：v3 统一图不设为默认（mock 下每请求 CPU 是 V1 的数倍到十几倍，还会改变拒答、Skill、错误码和流式草稿等可见行为）；原生调度器按"新默认发布一个周期"的约束保留（3.30 已按用户决定提前删除）；检索和工具适配器接进生产会改变 `/chat` 契约或缺预算与观测，不接。
-- **面试里可以讲**：同一个门禁测了两次，第二次把框架开销削到四分之一，仍在低并发下超标；进程内微基准（+0.28 ms）会低估真实请求的开销（约 +1 ms），因为请求之间有空闲。结论是记录偏离和理由，不放宽门。
+- **面试里可以讲**：同一个门禁测了两次，第二次把框架开销削到四分之一，仍在低并发下超标；进程内微基准（+0.28 ms）会低估真实请求的开销（约 +1 ms），因为请求之间有空闲。结论是记录偏离和理由，不放宽门。（后续：2026-11-13 外层计划还是迁到了 LangGraph。门没有重测，也没有通过，是用户为了只留一种运行时、明知不达标接受这份开销，见 3.48。）
 
 ### 3.28 编排运行时迁到 LangGraph.js：阶段 0–4（2026-10-16）
 
 - **做了什么**：按 ADR 0001（`docs/adr/0001-langgraph-runtime.md`）用 strangler 方式迁移，开关 `AGENT_RUNTIME=native|langgraph`，阶段 4 起默认 `langgraph`，`native` 作为整体回退保留一个发布周期（回退后未完成的 run 由原生路径从图 checkpoint 接管；3.30 已删除 `native` 和原生调度器）。`langgraph` 下 custom-Skill typed DAG 和 v3 统一图由 LangGraph 调度：节点执行代码和原生调度器共用（`agent-execution-graph-node.js`），状态只放回执，typed 输出仍在 agent run 的私有 checkpoint；审批用 `interrupt()` + `Command({resume})` 在同一线程续跑；checkpointer 是写现有 run store 的自定义 `BaseCheckpointSaver`，没有新表；取消走 drain（`RunControl.requestDrain`），不把请求 signal 交给 LangGraph（直接交会让在途节点被重跑）。LangSmith 永不启用（追踪变量为 true 时拒绝启动）。
 - **等价证据**：两种 runtime 下 `eval:trajectory` 19/19、`eval:planner` 7/7、`eval:recovery-observability` 8/8 屏蔽 id 和时间后逐字节一致；原生 runner 的 51 个测试改指 LangGraph 执行器全部通过；`test:pgvector` 109/109（含跨进程审批续跑、写入后崩溃转人工、拒绝审批）；`verify:quality` 18/18。
-- **压测硬门（≤10%）先没过，后来过了**：最初把外层 V1 计划也编成 StateGraph，每个 `/chat` 多约 1.2 ms CPU：pgvector、模型 0 ms、每档 3 次，并发 32 时每请求 CPU 3.93–4.26 → 5.27–5.47 ms（+29–35%），p95 125–138 → 165–169 ms。剖析：LangChain core 每个节点调用都新建一个 `RunTree`（无法配置关闭），空的 3–5 节点图底价 0.38–0.59 ms，而 10% 的预算只有 0.4 ms，属于结构性开销。决定：外层计划保持 native 循环（改到实验开关 `AGENT_OUTER_PLAN_RUNTIME` 后面），LangGraph 只跑需要持久状态和中断的图。复测（同一 harness，各 3 次）：并发 32 每请求 CPU 3.78–4.20 → 3.82–4.34 ms、p95 121.8–123.5 → 120.6–126.4 ms，区间重叠，通过。
-- **面试里可以讲**：框架迁移要有硬性的性能门和回退开关（这次的回退开关在分支发布前按决定删除，见 3.30）；这次门禁抓到了一个结构性开销，结论是"只把需要 checkpoint 和中断的图交给框架"，而不是全盘替换或调参硬过。
+- **压测硬门（≤10%）先没过，后来过了**：最初把外层 V1 计划也编成 StateGraph，每个 `/chat` 多约 1.2 ms CPU：pgvector、模型 0 ms、每档 3 次，并发 32 时每请求 CPU 3.93–4.26 → 5.27–5.47 ms（+29–35%），p95 125–138 → 165–169 ms。剖析：LangChain core 每个节点调用都新建一个 `RunTree`（无法配置关闭），空的 3–5 节点图底价 0.38–0.59 ms，而 10% 的预算只有 0.4 ms，属于结构性开销。决定：外层计划保持 native 循环（改到实验开关 `AGENT_OUTER_PLAN_RUNTIME` 后面），LangGraph 只跑需要持久状态和中断的图。复测（同一 harness，各 3 次）：并发 32 每请求 CPU 3.78–4.20 → 3.82–4.34 ms、p95 121.8–123.5 → 120.6–126.4 ms，区间重叠，通过。（这是当时的决定，"通过"说的是外层留在原生循环时的默认配置。原生循环和这个开关 2026-11-13 已删除，现在外层也在 LangGraph 上，没有为它重跑压测，见 3.48。）
+- **面试里可以讲**：框架迁移要有硬性的性能门和回退开关（这次的回退开关在分支发布前按决定删除，见 3.30）；这次门禁抓到了一个结构性开销，结论是"只把需要 checkpoint 和中断的图交给框架"，而不是全盘替换或调参硬过。（这个结论 2026-11-13 被用户的新决定取代：外层计划也交给 LangGraph，压测门没有重测、明知不达标，见 3.48。门禁抓到结构性开销这件事仍然成立。）
 - **写放大**（阶段 4 接上 K=2 保留和完成即丢弃线程记录）：真库 `pg_stat_statements`，一次 2 节点 custom-Skill `/chat`，langgraph 比 native 多 7 次无事件 CAS、1 次 run 读、1 次事件表读；完成后 run 行的 `result` 11,894 字节（native 11,860，阶段 3 时 17,006）。
 - **局限**：只用 mock 和确定性用例证明等价，不是真实模型的规划证据；部分不按层声明且并发受限的图仍交回原生调度器，所以原生调度器还不能删（阶段 5 已改为两种调度器都按层序排队，不再交回，见 3.29；剩下的只是回退窗口）；维护面要等删掉原生调度器后才会缩小（3.30 已删除，数字见那里）。
 - 测试：阶段 3 提交时后端全量 3296 个（通过 3281、跳过 15、失败 0），全局行覆盖 90.46%；阶段 4 的数字见提交说明。
@@ -693,7 +732,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 | 32 | 11.7–13.5 → **4.6–4.9** | 83–94 → **239–258** | 394–413 → 139–148 |
 
   三档的区间都不重叠，按规则算"更快、吞吐更高"。数据库查询数和 PostgreSQL CPU 不变。拆分部署下 agent 层占总 CPU 62–67%（以前 84% 是另一天的测量，不是配对数据）。
-- 局限：假模型的回答很短；真实模型的回答结论更多，加速比例没有测。
+- 局限：假模型的回答很短；真实模型的回答结论更多，加速比例没有测。这张表是外层计划还在原生循环时测的：阶段 7（3.48）之后，同一提交现在测出来的 `/chat` 每请求 CPU 会高约 1 ms，表里的数字没有重测。
 - **CI 提速**：同一个任务里后端测试不再跑两遍（只保留覆盖率门禁那一遍，测试集完全相同）；发布门禁测试从约 63 秒降到约 28 秒。
 - 测试：后端全量 2876 个（新增的缓存一致性测试会重放 7 个 claim 校验套件），通过 2862，跳过 14，失败 0。
 
@@ -854,7 +893,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **拆分部署**：只在一台机器上测过；同样进程数下单体比拆分快 1.56 倍，拆分的收益是只扩瓶颈层和故障隔离，不是效率；层间身份可选 Ed25519（每服务一把私钥），但仍不是 mTLS；没有 K8s 和服务发现，拆分用的 `compose.services.yml` 没有真正跑过（只用 `docker compose config` 校验过）。
 - **读副本**：主库语句只减少 28.8%，没达到事先定的 30%，吞吐也没变快；副本和主库在同一台机器上，CI 里没有副本。
 - **告警规则**：没有在真实 Prometheus 里加载和求值过，99.5% 可用性和 20 秒延迟目标是建议值，不是从真实流量定的。
-- **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。LangGraph 运行时（3.28）是 custom-Skill DAG 和 v3 统一图唯一的调度器（原生调度器已删除，没有运行时回退开关，只能 revert，见 3.30），只接管这两张图；外层计划交给 LangGraph 起初让每个 `/chat` 多约 30% CPU；阶段 5 改用底层 Pregel 后降到低并发 +17.6%，仍超 10% 的门，所以保持原生循环（3.29）。规划器的模型调用经 LangChain ChatModel 适配器。
+- **架构**：V2 typed DAG 已是自定义 Skill 阶段的默认执行器，V1 顺序链只作为整图被拒时的兜底和运维回退；v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。整个 agent 只有 LangGraph 一种运行时（3.28）：它是 custom-Skill DAG 和 v3 统一图唯一的调度器（原生图调度器已删除，见 3.30），2026-11-13 起也是外层计划和 `/chat/stream` 唯一的路径（原生循环已删除，见 3.48）；都没有运行时回退开关，只能 revert。外层计划交给 LangGraph 起初让每个 `/chat` 多约 30% CPU；阶段 5 改用底层 Pregel 后降到低并发 +17.6%，仍超 10% 的门，当时保持原生循环（3.29）。阶段 7 没有重测这个门：是用户为了只留一种运行时、明知不达标接受的开销（进程内每次运行多 0.29 ms CPU），不能说成性能提升。外层计划的持久化仍靠 run 的步骤，LangGraph 只给 custom-Skill DAG 和 v3 图做 checkpoint。规划器的模型调用经 LangChain ChatModel 适配器。
 - **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。修了两个校验器 bug（"twelve (12)"被算成两个数；证据在 PDF 换行处被切断）后，合同和政策题从 2/21 升到 4/21（各 3 轮），论文题不变；剩下的主要是改写用词过不了词法校验。打开 LLM 评审后合同和政策题 3/21 → 14/21 得到回答且 14 个全对，p50 延迟多约 0.8 秒；两道管辖法律题仍在检索阶段判为证据不足。2026-10-03 按正确口径重测（见 3.21）：QASPER 训练题评审关 0/41 可答题被回答；开评审能答 10–17/41，但会回答不可答题，所以默认仍关。
 - **流式草稿**：机制已上线并有测试，但在上面的校验器下很少产生草稿（修 bug 后合同和政策题 21 次里 4 次，论文题 0 次），所以还没有实际的延迟收益。
 
