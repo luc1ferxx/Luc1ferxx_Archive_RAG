@@ -270,7 +270,7 @@
 - §3.29：Pregel 进程内多 0.28 ms；并发 1 每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）
 - §3.48：删除前进程内 0.605 → 0.894 ms CPU（交替 7 轮、每轮 400 次）；删除前把原生循环的结果冻结成 32 个 golden 文件，删除后各套件只在 LangGraph 上跑、对照 golden；trajectory 19/19、planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致
 - §3.49：删顺序链之后覆盖率闸门 4,595 个测试、0 失败，复核修正之后 4,598 个、0 失败（本机 Node 24）；planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致；trajectory 从 19/19（84 项检查）变成 17/17（76 项），共有的 17 个用例里 16 个逐字节一致，另一个只差 V1 对照从 4 次变 2 次
-- §3.50：阶段 9 之后覆盖率闸门 4,607 个测试、0 失败（本机 Node 24，CI 的 Node 22 还没跑过）；planner 7/7、trajectory 17/17 改动前后屏蔽后逐字节一致；recovery 8/8，检查项 29 → 27，报告有 51 处差异，都在随功能删掉的范围内；冻结提交把 custom_skill 步骤被单独重放时的行为写成 10 个测试（test/agent-skill-step-replay.test.mjs）
+- §3.50：阶段 9 之后覆盖率闸门 4,607 个测试、0 失败（本机 Node 24；合并进 main 之后 CI 的 Node 22.23.4 上也通过（合并提交 db3ed97b，运行 43529876304：4,607 个测试，4,599 通过、8 跳过、0 失败，行覆盖 92.52%））；planner 7/7、trajectory 17/17 改动前后屏蔽后逐字节一致；recovery 8/8，检查项 29 → 27，报告有 51 处差异，都在随功能删掉的范围内；冻结提交把 custom_skill 步骤被单独重放时的行为写成 10 个测试（test/agent-skill-step-replay.test.mjs）
 
 **代码**：server/rag/agent-execution-plan-runner.js runAgentExecutionPlan, createAgentExecutionPlanStages; server/rag/langgraph/execution-plan-graph.js runAgentExecutionPlanOnLangGraph; server/rag/langgraph/agent-stream.js streamAgentRun; server/rag/config.js assertAgentRuntimeSupported, AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE, AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE
 
@@ -701,7 +701,7 @@
 | 删除外层原生循环（阶段 7）的证据 | 删除前冻结 32 个 golden 文件（外层计划套件 24、流式套件 5、路由套件 3）；删除后 langgraph-execution-plan-graph 26/26、langgraph-chat-stream 8/8、langgraph-routes 8/8、agent-run-chat-statement-count 10/10、agent-runtime-removed 15/15；trajectory 19/19、planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致 | CURRENT-TRUTH §3.48 | golden 只覆盖固定场景；全量测试和代码量的数字见 ADR 0001 阶段 7 的证据小节。这是阶段 7 当时的数字，阶段 8 之后 agent-runtime-removed 是 19 个测试、trajectory 是 17 个用例 |
 | 删除 V1 顺序链之前的调查（阶段 8） | 给 custom Skill 阶段加记录点，全量测试和三个确定性 agent 评测进入阶段 188 次：133 次走图，27 次显式 off，12 次 shadow，14 次被拒后回落到顺序链（全在测试里），1 次检查点重放，1 次无 Skill 空跑；三个评测里回落 0 次 | CURRENT-TRUTH §3.49；ADR 阶段 8 | main 的 e11ced91，临时 worktree。「默认配置下回落在生产里不会执行任何 Skill」是从代码、默认配置和这组计数推出来的，没有生产流量数据 |
 | 删除 V1 顺序链（阶段 8）的证据 | 覆盖率闸门 4,595 个测试（通过 4,588、跳过 7、失败 0），全局行覆盖 92.54%；复核修正之后 4,598 个（通过 4,591、跳过 7、失败 0），92.55%；planner 7/7、recovery 8/8 删除前后屏蔽后逐字节一致；trajectory 19/19（84 项检查）→ 17/17（76 项），共有的 17 个用例里 16 个逐字节一致，另一个只差 V1 对照；agent-runtime-removed 19 个测试（原 15 个），agent-custom-skill-stage 24 个 | CURRENT-TRUTH §3.49；ADR 阶段 8 | 删除之后、本机 Node 24、一次性 PostgreSQL + pgvector；合并进 main 之后 CI 的 Node 22 上通过（合并提交 7fbf8974：4,598 个测试、4,590 通过、8 跳过、0 失败，92.53%）；删掉的两个 trajectory 用例没有替代，阈值没改；没有量性能，真实模型下的答案质量没有重测 |
-| custom Skill 步骤不再单独重放（阶段 9）的证据 | 覆盖率闸门 4,607 个测试（通过 4,600、跳过 7、失败 0），全局行覆盖 92.53%；planner 7/7、trajectory 17/17（76 项检查）改动前后屏蔽后逐字节一致；recovery 8/8，检查项 29 → 27，报告有 51 处差异，都在随功能删掉的范围内；agent-skill-step-replay 12/12（冻结时 10 个），agent-run-step-executor 22/22（原 26 个） | CURRENT-TRUTH §3.50；ADR 阶段 9 | 独立复核修正之后、在 015f06a1 上，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；独立复核没有高级缺陷；CI 的 Node 22 还没跑过，合并进 main 之后才有；恢复评测去掉的两项检查随功能一起消失，阈值没改；真实浏览器里的恢复面板、真实 PostgreSQL 上的旧链 run 没有验证 |
+| custom Skill 步骤不再单独重放（阶段 9）的证据 | 覆盖率闸门 4,607 个测试（通过 4,600、跳过 7、失败 0），全局行覆盖 92.53%；planner 7/7、trajectory 17/17（76 项检查）改动前后屏蔽后逐字节一致；recovery 8/8，检查项 29 → 27，报告有 51 处差异，都在随功能删掉的范围内；agent-skill-step-replay 12/12（冻结时 10 个），agent-run-step-executor 22/22（原 26 个） | CURRENT-TRUTH §3.50；ADR 阶段 9 | 独立复核修正之后、在 015f06a1 上，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；独立复核没有高级缺陷；合并进 main 之后 CI 的 Node 22.23.4 上也通过（合并提交 db3ed97b，运行 43529876304：4,607 个测试，4,599 通过、8 跳过、0 失败，行覆盖 92.52%）；恢复评测去掉的两项检查随功能一起消失，阈值没改；真实浏览器里的恢复面板、真实 PostgreSQL 上的旧链 run 没有验证 |
 | v3 统一图的 CPU 成本 | 文档问答 V1 约 0.8–1.2 ms CPU，v3 原生约 5.8–7.4 ms，v3 在 LangGraph 上约 11–15 ms | docs/adr/0001-langgraph-runtime.md 阶段 5「没有做的部分与理由」 | 进程内微基准，内存 run store，mock RAG |
 | 一次 /chat 的 run store 语句数 | 1 次 insert、3 次 CAS、2 次事件追加、0 次 run 或事件回读 | AGENTS.md（test/agent-run-chat-statement-count.test.mjs 钉住） | 不含 custom-Skill DAG 的 LangGraph 额外写入；外层计划迁到 LangGraph 后不变（外层图不带 checkpointer） |
 | 一条真实 trace 的耗时分布 | 总 5840 ms、740 token、2 次模型调用；三个规划器各 0–2 ms，两个 Skill 的模型调用 3912 ms 和 1859 ms | CURRENT-TRUTH §3.6 | 单次 trace，确定性规划器，不是性能基准 |
@@ -725,7 +725,7 @@
 - custom Skill 只走图（阶段 8，2026-11-13）：V1 顺序链删除后，整张图因预算以外的原因被拒时选中的 Skill 一个都不跑，各记一条失败结果；没有类型契约的 custom Skill 不再运行；不能再手动重试单个失败的 custom Skill 步骤（默认配置下这项能力从 2026-09-25 起就不可用）；trajectory 少了两个用例，没有替代
 - 删顺序链的依据「默认配置下它作为兜底在生产里已经不会真正执行任何 Skill」是从代码、默认配置和测试里的计数推出来的，没有生产流量数据；真实模型下的答案质量没有为这次删除重测（默认路径七周以来一直是图）；没有量性能，不能说成性能改进
 - custom Skill 步骤不再单独重放（阶段 9，2026-11-13）：顺序链留下的旧 run 中断了只能取消、失败了不能单步重试；恢复面板只有「重试失败步骤」和「取消」，失败的 custom Skill 节点没有重试按钮。「这些代码只有旧 run 走得到」是从代码的调用关系读出来的，没有线上数据；真实浏览器里的恢复面板和真实 PostgreSQL 上的旧链 run 都没有验证过
-- 阶段 6、阶段 7、阶段 8、阶段 9 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、CI 的 Node 22 上通过（阶段 8 合并之后 CI 的 Node 22 上同样通过；阶段 9 的结果只在本机 Node 24 上跑过，CI 的 Node 22 要等合并进 main 之后才有），两个 PostgreSQL 集成套件的 native 一侧没冻结
+- 阶段 6、阶段 7、阶段 8、阶段 9 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、CI 的 Node 22 上通过（阶段 8 合并之后 CI 的 Node 22 上同样通过；阶段 9 的结果本机 Node 24 上测，合并进 main 之后 CI 的 Node 22 上也通过，合并提交 db3ed97b），两个 PostgreSQL 集成套件的 native 一侧没冻结
 - LangGraph checkpointer 有写放大（每个 2 节点 custom-Skill /chat 多 7 次无事件 CAS）；取消靠 drain，只在 superstep 边界生效，在途节点要先结算
 - 预算是软截止，已开始的步骤（DAG 并发时可能多个）会跑完；规划器调用不受上限阻止；计量按每次调用新建、不跨审批累加；默认值没用真实流量校准，没有真实的单次成本分布
 - 不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 和在途节点都要人工介入

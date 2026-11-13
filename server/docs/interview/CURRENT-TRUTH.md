@@ -400,8 +400,8 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - `quality:current` 按 CI 的 `quality-gate` 步骤运行（干净 worktree、一次性 PostgreSQL + pgvector）：通过，八项检查全部 `pass`。前端（`vitest run`）：28 个文件、243 个测试全部通过，`vite build` 通过。受影响的 17 个服务端测试文件另外用 Node 20.20.2 跑过，340 个测试全部通过。
   - 单文件套件：`agent-skill-step-replay` 12/12、`agent-run-recovery` 17/17、`agent-run-recovery-actions` 7/7、`agent-run-step-executor` 22/22（原 26 个）、`agent-run-step-replay-safety` 9/9、`recovery-observability-eval` 9/9。
   - golden 改写 1 个（`langgraph-runtime-parity/recovery_observability_skill_graph_signal.json`）：事件从 37 条变成 33 条，其中 17 条图事件逐字节未变；其余 golden 未动。
+  - CI 的 Node 22：合并提交 db3ed97b 的 Quality Gate 运行（43529876304，2026-11-13）三个任务全部通过。`server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,607 个测试，4,599 通过、8 跳过、0 失败，全局行覆盖 92.52%（比本机多跳过 1 个）。`quality-gate`：trajectory 17/17、planner 7/7、recovery-observability 8/8（27 项检查），`quality:current` 通过。`frontend-checks`：28 个文件、243 个测试通过，构建完成。
 - **没有验证的**：
-  - CI 的 Node 22（本机只有 Node 20 和 24）。合并进 main 之后才有。
   - 真实浏览器里的恢复面板和聊天答案里的 Retry 按钮：前端只跑了组件测试，没有起应用看。
   - 真实 PostgreSQL 上的旧链 run：`postgres-agent-run-store` 用的是假的 pg 客户端，本机和 CI 的数据库里也没有这种存量 run。
 - **回退**：没有运行时开关，只能 `git revert` 删除提交 be353b62。
@@ -409,7 +409,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 这是阶段 8 的收尾：custom Skill 只走图之后，只有旧 run 才走得到的重试和恢复代码也删了。“只有旧 run 走得到”是从代码的调用关系读出来的，没有线上数据。
   - 被问“崩溃后哪些 run 能自动续跑”时答两种，都是续跑整张图。不要再说第三种，也不要说“只读的步骤会自动重放”：现在没有步骤被单独自动重放。
   - 人能做的只有重试失败步骤和取消，失败的 custom Skill 节点不能重试；旧链留下的 run 中断了只能取消。这些要主动说。
-  - 恢复评测的检查项从 29 变成 27，是随功能删掉的两项，阈值没改。CI 的 Node 22 还没跑过，要照实说。
+  - 恢复评测的检查项从 29 变成 27，是随功能删掉的两项，阈值没改。本机 Node 24 和 CI 的 Node 22 上都通过。
 
 ### 3.49 LangGraph 迁移阶段 8：custom Skill 只走图，V1 顺序链删除（2026-11-13）
 
@@ -1020,7 +1020,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 ### 3.13 工程基线（2026-09-26，压测与规模提交）
 
-- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-13 阶段 9 删除 custom Skill 步骤的单独重放之后的 4,607 个测试、0 失败，本机 Node 24、接一次性 PostgreSQL + pgvector，见 3.50；这个结果还没在 CI 的 Node 22 上跑过。阶段 8 的 4,598 个在 CI 的 Node 22 上通过，见 3.49。）
+- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-13 阶段 9 删除 custom Skill 步骤的单独重放之后的 4,607 个测试、0 失败，本机 Node 24、接一次性 PostgreSQL + pgvector，见 3.50；合并之后在 CI 的 Node 22 上同样通过（4,607 个测试，4,599 通过、8 跳过、0 失败）。）
 - 后端测试 2214 个：2205 通过，0 失败，9 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。pgvector 集成测试在一次性 PostgreSQL 18 集群上 46/46（本次测得，含租户流水线和 run 行锁等待用例）；Redis 集成测试 5/5。
 - 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 113 个全部通过，生产构建通过（Docker 镜像构建时执行）。
