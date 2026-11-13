@@ -15,29 +15,26 @@ import {
 } from "./agent-built-in-skill-runners.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { runWebSearchSkill } from "./agent-web-runner.js";
-import { getAgentOuterPlanRuntime } from "./config.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
-import { throwIfRequestCancelled } from "./request-deadline.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 
 // The V1 outer execution plan: the fixed stages (built-in Skills, custom
 // Skills, the document loop, the Web fallback) in the order the validated plan
-// lists them. Two schedulers walk the same stages: runAgentExecutionPlan below
-// (the native loop, the production scheduler) and
-// rag/langgraph/execution-plan-graph.js (a low-level LangGraph Pregel, only
-// under the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph). The stages, their
-// closure-owned state and the two decisions the loop makes between them (the
-// safe point before a stage, the early return once a stage produced the
-// response) are defined here once, so the graph reuses them and never
-// re-derives the plan.
+// lists them. One scheduler walks them: the LangGraph Pregel graph of
+// rag/langgraph/execution-plan-graph.js, which runAgentExecutionPlan below
+// hands every plan to. The stages, their closure-owned state and the two
+// decisions made between them (the safe point before a stage, the end of the
+// plan once a stage produced the response) are defined here, and the graph
+// calls them unchanged; it never re-derives the plan.
 //
-// The native loop was never part of the graph-runtime rollback that phase 6
-// of docs/adr/0001-langgraph-runtime.md deleted with the native graph
-// scheduler: the phase-3 load test decided that the outer plan stays on it,
-// and phase 5 made that final, so it is the production scheduler of the
-// outer plan, not a fallback to delete. AGENT_OUTER_PLAN_RUNTIME defaults to
-// `native`; AGENT_RUNTIME (only a refusal of removed values since phase 6)
-// never selected it.
+// Until phase 7 of docs/adr/0001-langgraph-runtime.md a native loop in this
+// file was the production scheduler and the graph an opt-in behind
+// AGENT_OUTER_PLAN_RUNTIME (the phase-3 and phase-5 load tests measured the
+// graph at about +1 ms of CPU per /chat and kept the loop). Phase 7 removed
+// the loop and the dial on the owner's decision that the agent has one
+// runtime: the variable is now only checked for removed values
+// (assertAgentRuntimeSupported in config.js), and the loop's results are the
+// goldens under test/fixtures/graph-goldens/ that the graph is held to.
 
 const getCustomSkills = (selectedSkills = []) =>
   selectedSkills.filter((skill) => skill.kind === "custom");
@@ -86,8 +83,7 @@ const SELECTED_SKILL_ONLY_STAGE_SKILL_IDS = Object.freeze({
  * which the next stage's safe point (or the end of the plan) stands in for,
  * because the skipped body could not have changed anything in between.
  * Anything it cannot decide (no lookup, a lookup that throws) is not inert,
- * so the stage runs and fails exactly as natively. The native loop never
- * calls it.
+ * so the stage is scheduled and fails as its body fails.
  */
 export const isAgentExecutionPlanStageStaticallyInert = (step, { getSelectedSkill } = {}) => {
   const skillId = Object.hasOwn(SELECTED_SKILL_ONLY_STAGE_SKILL_IDS, step?.id)
@@ -110,7 +106,7 @@ export const isAgentExecutionPlanStageStaticallyInert = (step, { getSelectedSkil
 };
 
 /**
- * An error a stage threw, as the loop rethrows it: an approval interrupt
+ * An error a stage threw, as the run rethrows it: an approval interrupt
  * carries the execution state so far (agent.js answers the clarification
  * with the document result already in hand); every other error is unchanged.
  */
@@ -126,13 +122,12 @@ export const tagAgentExecutionPlanError = (error, state) => {
  * Validates the plan and builds its stages over one shared state object:
  * `{ executionPlan, getStage, state }`, where `getStage(step)` returns the
  * stage body of a validated step (and throws for an unknown one). Each stage
- * decides for itself whether its Skill was selected, exactly as the native
- * loop always ran them (a built-in stage without its Skill returns null,
- * the custom stage may run authorized Skills the intent did not select, and
- * the Web stage reads the document result), so a scheduler enters the
- * stages of the plan in order and reads the two decisions above between them
- * (the native loop enters every one; the experimental Pregel graph leaves out
- * a stage isAgentExecutionPlanStageStaticallyInert proves inert).
+ * decides for itself whether its Skill was selected (a built-in stage without
+ * its Skill returns null, the custom stage may run authorized Skills the
+ * intent did not select, and the Web stage reads the document result), so the
+ * scheduler enters the stages of the plan in order and reads the two
+ * decisions above between them, leaving out only a stage
+ * isAgentExecutionPlanStageStaticallyInert proves inert.
  */
 export const createAgentExecutionPlanStages = ({
   accessScope,
@@ -427,46 +422,23 @@ export const createAgentExecutionPlanStages = ({
   return { executionPlan: validatedExecutionPlan, getStage, state };
 };
 
-export const runAgentExecutionPlan = async (options = {}) => {
-  const { executionPlan, getStage, state } = createAgentExecutionPlanStages(options);
-
-  for (const step of executionPlan) {
-    const runStep = getStage(step);
-
-    try {
-      // Each stage boundary is a safe point for a cancelled request
-      // (request-deadline.js); inside a stage, step starts are.
-      throwIfRequestCancelled();
-      await runStep(step);
-    } catch (error) {
-      throw tagAgentExecutionPlanError(error, state);
-    }
-
-    if (hasAgentExecutionPlanResponse(state)) {
-      return state;
-    }
-  }
-
-  return state;
-};
-
 /**
- * The scheduler of the outer plan for `runtime` (AGENT_OUTER_PLAN_RUNTIME;
- * config.js says why it is a dial of its own): the native loop, or the LangGraph
- * Pregel over the same stages. The LangGraph module is imported only when
- * selected, so a process with the outer plan on the native loop never loads
- * it. Both take runAgentExecutionPlan's options and return its state.
+ * Runs the validated outer plan and resolves to its execution state (the
+ * `state` of createAgentExecutionPlanStages), or throws the run's error: a
+ * stage's own error object, an approval interrupt with `agentExecutionState`
+ * attached, or the request's cancellation.
+ *
+ * The plan is scheduled on LangGraph (rag/langgraph/execution-plan-graph.js:
+ * one Pregel node per scheduled stage, a safe point for a cancelled request
+ * at every node's entry, the plan ending at the stage that set the response).
+ * That module is imported on first use, so a process that never runs an agent
+ * request (the api edge of a split deployment, the ingest worker) never loads
+ * LangGraph.
  */
-export const resolveAgentExecutionPlanRunner = async (
-  runtime = getAgentOuterPlanRuntime()
-) => {
-  if (runtime !== "langgraph") {
-    return runAgentExecutionPlan;
-  }
-
+export const runAgentExecutionPlan = async (options = {}) => {
   const { runAgentExecutionPlanOnLangGraph } = await import(
     "./langgraph/execution-plan-graph.js"
   );
 
-  return runAgentExecutionPlanOnLangGraph;
+  return runAgentExecutionPlanOnLangGraph(options);
 };

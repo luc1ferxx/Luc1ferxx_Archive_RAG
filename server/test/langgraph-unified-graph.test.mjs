@@ -128,8 +128,9 @@ const assertMatchesNativeGolden = (caseName, outcome) =>
   assertMatchesGraphGolden(GOLDEN_SUITE, caseName, outcome);
 
 const ENV = Object.freeze({
-  // The production setting: the v3 graph on LangGraph, and the outer plan of
-  // a V1 fallback on the native loop.
+  // The removed outer-plan dial stays unset: the v3 graph and the outer plan
+  // of a V1 fallback both run on LangGraph (the latter since ADR 0001 phase
+  // 7; the goldens were frozen while it ran on the native loop).
   AGENT_OUTER_PLAN_RUNTIME: undefined,
   AGENT_PLANNER_ROLLOUT: "deterministic",
   AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",

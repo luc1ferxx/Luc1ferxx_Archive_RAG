@@ -107,8 +107,8 @@ const GOLDEN_SUITE = "langgraph-unified-graph-without-run-target";
 const assertMatchesNativeGolden = (caseName, outcome) =>
   assertMatchesGraphGolden(GOLDEN_SUITE, caseName, outcome);
 
-// As test/langgraph-unified-graph.test.mjs: the guarded v3 graph with the
-// outer plan on the native loop, and the answer-rate flags off.
+// As test/langgraph-unified-graph.test.mjs: the guarded v3 graph, the removed
+// outer-plan dial unset, and the answer-rate flags off.
 const ENV = Object.freeze({
   AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined,
   AGENT_OUTER_PLAN_RUNTIME: undefined,

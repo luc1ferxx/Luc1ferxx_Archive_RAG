@@ -4,7 +4,7 @@ import {
   createAgentExecutionPlanResult,
   deterministicPlannerAdapter,
 } from "./agent-execution-plan.js";
-import { resolveAgentExecutionPlanRunner } from "./agent-execution-plan-runner.js";
+import { runAgentExecutionPlan } from "./agent-execution-plan-runner.js";
 import { createAgentRunStepLifecycle } from "./agent-run-step-lifecycle.js";
 import {
   buildAgentExperienceMemoryWriteObservability,
@@ -41,7 +41,6 @@ import {
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
-  getAgentOuterPlanRuntime,
   getAgentSkillGraphRollout,
   getAgentUnifiedGraphCapabilityIds,
   getAgentUnifiedGraphRollout,
@@ -1242,14 +1241,10 @@ const runAgentRagInScope = async ({
       },
     });
 
-    // AGENT_OUTER_PLAN_RUNTIME (AGENT_RUNTIME never chose the outer plan's
-    // scheduler, and since phase 6 selects nothing): the native loop (the
-    // default and the production scheduler), or the experimental
-    // LangGraph graph over the same stages (rag/langgraph/execution-plan-
-    // graph.js, low-level Pregel since phase 5), whose cost the load tests
-    // measured (config.js).
-    const runExecutionPlan = await resolveAgentExecutionPlanRunner(getAgentOuterPlanRuntime());
-    const executionResult = await runExecutionPlan({
+    // The outer plan's stages, scheduled on LangGraph (rag/langgraph/
+    // execution-plan-graph.js); no dial selects another scheduler since
+    // ADR 0001 phase 7 removed the native loop.
+    const executionResult = await runAgentExecutionPlan({
       accessScope,
       addBudgetLimitTrace,
       addTraceStep,

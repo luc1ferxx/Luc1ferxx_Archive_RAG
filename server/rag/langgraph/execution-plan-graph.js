@@ -11,6 +11,7 @@ import {
   isAgentExecutionPlanStageStaticallyInert,
   tagAgentExecutionPlanError,
 } from "../agent-execution-plan-runner.js";
+import { assertAgentRuntimeSupported } from "../config.js";
 import { getRequestCancellation } from "../request-deadline.js";
 import {
   AGENT_STREAM_RELAY_KEY,
@@ -21,11 +22,12 @@ import { deriveLangGraphThreadId } from "./checkpointer.js";
 import { bridgeRequestSignalToDrain, resolveDrainedInvocationError } from "./drain-bridge.js";
 import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 
-// The V1 outer execution plan on LangGraph.js (docs/adr/0001-langgraph-
-// runtime.md, phase 3), selected by the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph at the one call site in agent.js (never
-// by AGENT_RUNTIME, which since phase 6 only refuses removed values). Same
-// options and result as runAgentExecutionPlan, same errors.
+// The V1 outer execution plan on LangGraph.js: the only scheduler of the outer
+// plan since phase 7 of docs/adr/0001-langgraph-runtime.md removed the native
+// loop and the AGENT_OUTER_PLAN_RUNTIME dial. agent-execution-plan-runner.js
+// hands every plan to runAgentExecutionPlanOnLangGraph below; what the removed
+// loop did in each scenario is frozen under test/fixtures/graph-goldens/, and
+// this module is held to it.
 //
 // Built on LangGraph's public low-level Pregel API (@langchain/langgraph/
 // pregel and /channels), not on StateGraph. The phase-3 load test measured the
@@ -36,19 +38,19 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // stage), plus a START superstep. Here a stage is one Pregel node: a trigger
 // channel, the stage as a Runnable whose invoke calls it directly (no
 // runWithConfig around the stage, so no RunTree and no ambient LangChain
-// config inside it), and one ChannelWrite.
+// config inside it), and one ChannelWrite. What is left is Pregel's own
+// per-invocation work, about 0.3 ms of CPU per run in process.
 //
 // The validated plan (agent-execution-plan.js, decided by the deterministic
 // or LLM execution planner before this module is called, never re-derived
 // here) becomes one node per scheduled stage, in plan order: the input
 // triggers the first node, and each node triggers the next one through an
-// ephemeral channel, unless the stage set the response (the native loop's
-// early return, hasAgentExecutionPlanResponse) -- then the write is skipped
-// and the plan ends there. The routing reads the stages' own execution state,
-// handed to this invocation, never the graph's. Each stage is the native stage
-// body of createAgentExecutionPlanStages, called unchanged, and the native
-// safe point at every stage boundary (throwIfRequestCancelled) is kept at
-// every node's entry.
+// ephemeral channel, unless the stage set the response
+// (hasAgentExecutionPlanResponse) -- then the write is skipped and the plan
+// ends there. The routing reads the stages' own execution state, handed to
+// this invocation, never the graph's. Each stage is the stage body of
+// createAgentExecutionPlanStages, called unchanged, and every node's entry is
+// a safe point for a cancelled request (request-deadline.js).
 //
 // Scheduled stages: every stage of the plan except those
 // isAgentExecutionPlanStageStaticallyInert says would return at once without
@@ -57,7 +59,7 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // safe point, which the next node's safe point covers: nothing could have
 // changed in between. The custom-Skill, document and Web stages always run,
 // because each decides at run time. A plan of inert stages only keeps its
-// first stage, so every plan still runs on LangGraph and passes a safe point.
+// first stage, so every plan still passes a safe point.
 //
 // Compiled once per shape: the graph depends only on the scheduled stage ids,
 // so it is kept in a small LRU keyed by them. Nothing of a request lives in
@@ -90,17 +92,17 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // and are handed to the sink bound around the run. Without a client the
 // writer is never called. A node settles only once the consumer has handed
 // every chunk it relayed to that sink (createEventRelay below): when a stage
-// fails, or a drain stops the loop after it, LangGraph errors its internal
+// fails, or a drain stops the graph after it, LangGraph errors its internal
 // stream a microtask later, and a ReadableStream that errors discards every
 // chunk not yet read -- the trace steps a stage emitted just before it threw
-// would never reach the client, which the native loop always delivers.
+// would never reach the client.
 //
 // Cancellation is a drain (drain-bridge.js): the request's signal asks
 // RunControl to start no further superstep, the stage in flight settles, and
 // the run fails with the request's own RequestCancelledError; an
 // AgentRunInterruptError (an approval) and every other stage error leave the
 // invocation as the original error object, with the execution state attached
-// for an interrupt as natively.
+// for an interrupt.
 
 export const LANGGRAPH_EXECUTION_PLAN_ERROR_CODES = Object.freeze({
   receiptMismatch: "AGENT_LANGGRAPH_PLAN_RECEIPT_MISMATCH",
@@ -165,9 +167,9 @@ const createStageStoppedError = (cause) => {
   return error;
 };
 
-// The native loop's safe point before a stage, as a drain: the cancellation
-// becomes the run's fatal error (what the loop would have thrown), and the
-// GraphDrained stops LangGraph without an error write or a receipt.
+// The safe point before a stage, as a drain: the cancellation becomes the
+// run's fatal error (the error the run throws), and the GraphDrained stops
+// LangGraph without an error write or a receipt.
 const passSafePoint = (control) => {
   const cancellation = getRequestCancellation();
 
@@ -300,8 +302,8 @@ const runStageNode = async (stageId, context, config) => {
     await relayAgentEventsThroughWriter(relayConfig, () => runStage(step));
   } catch (error) {
     if (!isGraphDrained(error)) {
-      // As the native loop's catch: the first error ends the plan, and the
-      // original error object is what the run throws.
+      // The first error ends the plan, and the original error object is
+      // what the run throws.
       control.fatalError ??= tagAgentExecutionPlanError(error, state);
     }
 
@@ -335,10 +337,9 @@ const createStageNode = ({ nextStageId, stageId, trigger }) => {
   };
 
   if (nextStageId !== null) {
-    // The loop's early return: a stage that set the response ends the plan
-    // (undefined skips the write, so the next stage is never triggered);
-    // otherwise the next stage in plan order. The decision reads this
-    // invocation's execution state, as the loop does.
+    // A stage that set the response ends the plan (undefined skips the
+    // write, so the next stage is never triggered); otherwise the next stage
+    // in plan order. The decision reads this invocation's execution state.
     writes[triggerChannelOf(nextStageId)] = new ExecutionPlanGraphStep(
       `${stageId}:next`,
       (_receipt, config) =>
@@ -601,15 +602,21 @@ export const runExecutionPlanStagesOnLangGraph = async ({
 };
 
 /**
- * runAgentExecutionPlan on LangGraph: the same options, the same execution
- * state as its result, and the same errors.
+ * The outer plan on LangGraph (agent-execution-plan-runner.js's
+ * runAgentExecutionPlan calls it for every plan): createAgentExecutionPlan-
+ * Stages' options in, its execution state out, the run's own error thrown.
  */
 export const runAgentExecutionPlanOnLangGraph = async (options = {}) => {
   // Before LangGraph or LangChain configures anything (langsmith-guard.js).
   assertLangSmithTracingDisabled();
+  // A removed runtime value (AGENT_OUTER_PLAN_RUNTIME=native above all) asked
+  // for the loop that no longer exists: refuse here too, so an in-process
+  // caller that builds no app (an evaluation runner) fails loudly instead of
+  // being scheduled on LangGraph against what its environment asked for.
+  assertAgentRuntimeSupported();
 
-  // Validation and the stages exactly as the native loop builds them; an
-  // invalid plan throws here with nothing changed.
+  // Validation and the stages; an invalid plan throws here with nothing
+  // changed.
   const { executionPlan, getStage, state } = createAgentExecutionPlanStages(options);
 
   return runExecutionPlanStagesOnLangGraph({

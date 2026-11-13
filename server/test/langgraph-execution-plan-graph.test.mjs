@@ -6,44 +6,36 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import test from "node:test";
 
-// Phase-3 evidence for the V1 outer execution plan on LangGraph
-// (rag/langgraph/execution-plan-graph.js, behind the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph since the phase-3 load test; config.js
-// says why): runAgentRag must come out identical on both schedulers -- the
-// /chat response (status and
-// body, agentObservability included), the run's events, steps, result and
-// error, the trace, the agent events a streaming client would receive, and
-// the Skill calls made -- for the scenarios the outer plan owns: document QA
-// with a follow-up retrieval, an abstention that falls through to the Web
-// stage with and without a standing approval, the custom-Skill stage, a
-// Capability approval (AgentRunInterruptError -> waiting_for_user, then the
-// approval re-entry), a research brief, budget exhaustion, a cancellation at
-// a stage boundary (both reasons), a cancellation surfaced by the drain
-// after a stage settled, and a dependency outage.
-//
-// Every scenario runs twice (PASSES below), once per value of the outer
-// plan's own dial: AGENT_OUTER_PLAN_RUNTIME unset -- the production setting,
-// the outer plan on the native loop -- and AGENT_OUTER_PLAN_RUNTIME=langgraph,
-// the outer plan on the LangGraph Pregel. The custom-Skill DAG runs on
-// LangGraph in both: the native graph scheduler and the AGENT_RUNTIME dial
-// were removed in ADR 0001 phase 6 (until then a pass ran everything under
-// AGENT_RUNTIME=native and anchored the others). Before the deletion the
-// native pass of the three trajectory cases whose custom-Skill stage runs a
-// guarded DAG (`customSkillGraph` below) was frozen, masked exactly as here,
-// under test/fixtures/graph-goldens/langgraph-execution-plan-graph/ from HEAD
-// e1385c1c with AGENT_RUNTIME=native, and the production pass is now held to
-// it (assertMatchesGraphGolden); every other scenario builds no custom-Skill
-// DAG or v3 graph and plans through injected adapters, so AGENT_RUNTIME
-// never changed how it ran. Both passes answer exactly alike.
+// The V1 outer execution plan on LangGraph
+// (rag/langgraph/execution-plan-graph.js), the only scheduler of the outer
+// plan since ADR 0001 phase 7 removed the native loop and the
+// AGENT_OUTER_PLAN_RUNTIME dial. Until then every scenario here ran twice,
+// once on the native loop and once on the graph, and the two passes had to be
+// identical after masking. Before the loop was deleted its pass of every
+// scenario -- the /chat response (status and body, agentObservability
+// included) or the thrown error, the agent events a streaming client would
+// receive, and the runs' events, steps, result and error -- was frozen under
+// test/fixtures/graph-goldens/langgraph-execution-plan-graph/ (commit
+// 3313b40b, where the native pass wrote each fixture and both passes were
+// held to it), and the graph is now held to those goldens with the same
+// masking (assertMatchesGraphGolden; rewriting one is a decision, see
+// test/langgraph-support/graph-goldens.mjs). The scenarios the outer plan
+// owns: document QA with a follow-up retrieval, an abstention that falls
+// through to the Web stage with and without a standing approval, the
+// custom-Skill stage, a Capability approval (AgentRunInterruptError ->
+// waiting_for_user, then the approval re-entry), a research brief, budget
+// exhaustion, a cancellation at a stage boundary (both reasons), a
+// cancellation surfaced by the drain after a stage settled, and a dependency
+// outage. The three trajectory cases whose custom-Skill stage runs a guarded
+// DAG (`customSkillGraph` below) keep the fixtures phase 6 froze from the
+// native graph scheduler; phase 7 found them unchanged.
 //
 // The trajectory cases keep their run stores private, so the evaluation
 // modules' import of rag/agent-runs.js is redirected to the phase-2 recording
 // stand-in, and the runner's on-demand import of the graph module is
-// redirected to a tap that records each invocation; a LangGraph pass that
-// never left the native loop fails the suite, and so does a native pass that
-// left it. The custom-Skill stage's import of the LangGraph executor is
-// tapped too, so the DAG's LangGraph invocations are compared between the two
-// passes: who schedules the outer plan must not change them.
+// redirected to a tap that records each invocation: a scenario that should
+// reach the outer plan and never scheduled it on the graph fails the suite.
+// The custom-Skill stage's import of the LangGraph executor is tapped too.
 //
 // Masked, and only these: UUIDs, ISO timestamps, wall-clock measurements
 // (durationMs, latencyMs, totalDurationMs) and the checkpoint digest.
@@ -95,9 +87,8 @@ const { AgentRunInterruptError } = await import("../rag/agent-interrupts.js");
 const { AGENT_EXECUTION_STEP_IDS, validateAgentExecutionPlan } = await import(
   "../rag/agent-execution-plan.js"
 );
-const { resolveAgentExecutionPlanRunner, runAgentExecutionPlan } = await import(
-  "../rag/agent-execution-plan-runner.js"
-);
+const agentExecutionPlanRunner = await import("../rag/agent-execution-plan-runner.js");
+const { runAgentExecutionPlan } = agentExecutionPlanRunner;
 const { deterministicPlannerAdapter } = await import("../rag/agent-execution-plan.js");
 const { deterministicIntentPlannerAdapter } = await import("../rag/agent-intent-planner.js");
 const { runAgentRag } = await import("../rag/agent.js");
@@ -105,7 +96,7 @@ const { AGENT_RUN_STATUSES, createAgentRunService, createInMemoryAgentRunStore }
   "../rag/agent-runs.js"
 );
 const { CAPABILITY_IDS } = await import("../rag/capabilities/index.js");
-const { getAgentOuterPlanRuntime } = await import("../rag/config.js");
+const config = await import("../rag/config.js");
 const { DependencyOutageError } = await import("../rag/dependency-outage.js");
 const { LANGSMITH_TRACING_ENABLED_CODE } = await import("../rag/langgraph/langsmith-guard.js");
 const {
@@ -142,12 +133,13 @@ const { createPlannerFallbackCase, createPrivacySanitizationCase } = await impor
 const { createApprovalResumeCase, createCustomSkillRetryCase, createWebApprovalDenyCase } =
   await import("../evaluation/trajectory/cases/run-control.js");
 
-// The stages each LangGraph pass really scheduled: every outer-plan graph
-// LangGraph streams (one whose nodes are all execution step ids, never the
-// custom-Skill DAG's or the v3 graph's) records its node ids in order. The
-// graph leaves out a built-in stage whose Skill was not selected
-// (isAgentExecutionPlanStageStaticallyInert), so a parity pass proves that
-// pruning changed nothing only if it is seen to have pruned.
+// The stages each scenario really scheduled: every outer-plan graph LangGraph
+// streams (one whose nodes are all execution step ids, never the custom-Skill
+// DAG's or the v3 graph's) records its node ids in order. The graph leaves
+// out a built-in stage whose Skill was not selected
+// (isAgentExecutionPlanStageStaticallyInert), so a scenario that equals the
+// native loop's golden proves that pruning changed nothing only if it is seen
+// to have pruned.
 const { Pregel } = await import("@langchain/langgraph/pregel");
 const OUTER_PLAN_STEP_IDS = new Set(Object.values(AGENT_EXECUTION_STEP_IDS));
 const RUNTIME_DECIDED_STEP_IDS = new Set([
@@ -169,21 +161,6 @@ Pregel.prototype.stream = function streamRecordingOuterPlanShape(...args) {
 };
 
 const CREATED_AT = "2026-10-14T00:00:00.000Z";
-// The two passes of every scenario, by the outer plan's dial they pin (the
-// custom-Skill DAG runs on LangGraph in both):
-//   native    -- AGENT_OUTER_PLAN_RUNTIME unset, the production setting: the
-//                outer plan on the native loop;
-//   langgraph -- the experimental AGENT_OUTER_PLAN_RUNTIME=langgraph: the
-//                outer plan on the LangGraph Pregel (what this suite was
-//                written to prove).
-const PASSES = Object.freeze({
-  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined }),
-  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
-});
-const PASS_DIALS = Object.freeze({
-  native: Object.freeze({ outerPlan: "native" }),
-  langgraph: Object.freeze({ outerPlan: "langgraph" }),
-});
 const ACCESS_SCOPE = Object.freeze({ userId: "alice", workspaceId: "workspace-a" });
 const QUESTION = "What does remote work require?";
 const CITATION = Object.freeze({
@@ -211,111 +188,62 @@ process.env.RAG_HYBRID_ENABLED = "false";
 const RUN_ENV = Object.freeze({
   ...ANSWER_RATE_FLAGS_OFF,
   AGENT_CANCEL_ON_DISCONNECT: undefined,
+  // Removed dials: unset, the only setting that selects nothing.
+  AGENT_OUTER_PLAN_RUNTIME: undefined,
   AGENT_REQUEST_TIMEOUT_MS: undefined,
+  AGENT_RUNTIME: undefined,
   AGENT_SKILL_GRAPH_ROLLOUT: undefined,
   AGENT_UNIFIED_GRAPH_ROLLOUT: "off",
   RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
   RAG_LONG_MEMORY_ENABLED: "false",
 });
 
-// The pass running now (a work function may count per pass).
-let currentPass = null;
-
 /**
- * Runs `work` with both dials pinned for `pass` and returns its outcome with
- * every run the evaluation modules created, every plan-graph and custom-Skill
- * DAG executor invocation made meanwhile, and every agent event a streaming
+ * Runs `work` with the environment pinned and returns its outcome with every
+ * run the evaluation modules created, every plan-graph and custom-Skill DAG
+ * executor invocation made meanwhile, and every agent event a streaming
  * client would have received.
  */
-const runOnPass = (pass, work) =>
-  withEnv({ ...RUN_ENV, ...PASSES[pass] }, async () => {
+const runScenario = (work) =>
+  withEnv(RUN_ENV, async () => {
     await takeCreatedAgentRuns();
     takePlanGraphInvocations();
     takeLangGraphInvocations();
     scheduledShapes.splice(0);
-    assert.equal(getAgentOuterPlanRuntime(), PASS_DIALS[pass].outerPlan);
 
     const events = [];
+    const outcome = await runWithAgentEventSink((event) => events.push(event), work);
 
-    currentPass = pass;
-
-    try {
-      const outcome = await runWithAgentEventSink((event) => events.push(event), work);
-
-      return {
-        events,
-        graphInvocations: takeLangGraphInvocations(),
-        invocations: takePlanGraphInvocations(),
-        outcome,
-        runs: await takeCreatedAgentRuns(),
-        scheduledShapes: scheduledShapes.splice(0),
-      };
-    } finally {
-      currentPass = null;
-    }
+    return {
+      events,
+      graphInvocations: takeLangGraphInvocations(),
+      invocations: takePlanGraphInvocations(),
+      outcome,
+      runs: await takeCreatedAgentRuns(),
+      scheduledShapes: scheduledShapes.splice(0),
+    };
   });
 
-const runOnEveryPass = async (work) => {
-  const passes = {};
-
-  for (const pass of Object.keys(PASSES)) {
-    passes[pass] = await runOnPass(pass, work);
-  }
-
-  return passes;
-};
-
-// The LangGraph pass against the native one: the outer plan's scheduler
-// changes nothing a client, the run store or a streaming client can see.
-const assertPassesIdentical = ({ langgraph, native }) => {
-  assert.deepStrictEqual(maskVolatile(langgraph.outcome), maskVolatile(native.outcome));
-  assert.deepStrictEqual(maskVolatile(langgraph.events), maskVolatile(native.events));
-  assert.deepStrictEqual(
-    maskVolatile(langgraph.runs.map(projectAgentRun)),
-    maskVolatile(native.runs.map(projectAgentRun))
-  );
-};
-
-// The freeze before ADR 0001 phase 7 deletes the native loop: the native pass
-// of every scenario, masked exactly as assertPassesIdentical compares it, is
-// held to a golden under test/fixtures/graph-goldens/langgraph-execution-plan-
-// graph/. On this commit the native pass is the one that may write a golden
-// (UPDATE_GRAPH_GOLDENS=1), so every fixture is the record of what the native
-// loop did; the LangGraph pass is compared with the same fixture and never
-// writes it. The three custom-Skill DAG cases keep the fixtures phase 6 froze
-// (same shape, same content).
+// What the native loop left for a scenario (the golden, see the header),
+// against this run: nothing a client, the run store or a streaming client can
+// see changed when the loop was removed.
 const GOLDEN_SUITE = "langgraph-execution-plan-graph";
 
-const toPassGolden = ({ events, outcome, runs }) => ({
-  events: maskVolatile(events),
-  outcome: maskVolatile(outcome),
-  runs: maskVolatile(runs.map(projectAgentRun)),
-});
+const assertMatchesNativeGolden = (caseName, { events, outcome, runs }) =>
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, {
+    events: maskVolatile(events),
+    outcome: maskVolatile(outcome),
+    runs: maskVolatile(runs.map(projectAgentRun)),
+  });
 
-const assertPassesMatchGolden = (caseName, { langgraph, native }) => {
-  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toPassGolden(native));
-  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toPassGolden(langgraph), { write: false });
-};
+// Every plan the graph entry received was streamed as a graph of its stages
+// in plan order, without any stage that decides at run time (custom_skills,
+// document_rag, web_search) left out.
+const assertScheduledShapesFollowPlans = (run) => {
+  assert.equal(run.scheduledShapes.length, run.invocations.length);
 
-// The outer dial unset keeps the outer plan on the native loop (no plan-graph
-// invocation, no outer-plan graph streamed), and the custom-Skill DAG's
-// LangGraph invocations do not depend on who scheduled the outer plan: the
-// native loop's custom_skills stage makes exactly the ones the LangGraph
-// pass's custom_skills node makes.
-const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native }) => {
-  assert.deepStrictEqual(native.invocations, []);
-  assert.deepStrictEqual(native.scheduledShapes, []);
-  assert.deepStrictEqual(native.graphInvocations, langgraph.graphInvocations);
-};
-
-// Every plan the LangGraph pass received was streamed as a graph of its
-// stages in plan order, without any stage that decides at run time
-// (custom_skills, document_rag, web_search) left out.
-const assertScheduledShapesFollowPlans = ({ langgraph }) => {
-  assert.equal(langgraph.scheduledShapes.length, langgraph.invocations.length);
-
-  langgraph.invocations.forEach(({ stepIds }, index) => {
-    const shape = langgraph.scheduledShapes[index];
+  run.invocations.forEach(({ stepIds }, index) => {
+    const shape = run.scheduledShapes[index];
     const label = JSON.stringify({ shape, stepIds });
 
     assert.ok(shape.length > 0, label);
@@ -331,18 +259,15 @@ const assertScheduledShapesFollowPlans = ({ langgraph }) => {
   });
 };
 
-// The native pass never touches the outer-plan graph; the LangGraph pass
-// schedules every outer plan on it, with the validated plan's step ids.
-const assertScheduledOnLangGraph = (passes, { minimumInvocations = 1 } = {}) => {
-  const { langgraph } = passes;
-
-  assertOuterPlanFollowsItsOwnDial(passes);
+// Every outer plan of the scenario was scheduled on the graph, with the
+// validated plan's step ids.
+const assertScheduledOnLangGraph = (run, { minimumInvocations = 1 } = {}) => {
   assert.ok(
-    langgraph.invocations.length >= minimumInvocations,
-    `expected at least ${minimumInvocations} plan-graph invocation(s), got ${langgraph.invocations.length}`
+    run.invocations.length >= minimumInvocations,
+    `expected at least ${minimumInvocations} plan-graph invocation(s), got ${run.invocations.length}`
   );
 
-  for (const invocation of langgraph.invocations) {
+  for (const invocation of run.invocations) {
     assert.ok(invocation.stepIds.length > 0);
     assert.ok(
       invocation.stepIds.every((stepId) => Object.values(AGENT_EXECUTION_STEP_IDS).includes(stepId)),
@@ -350,7 +275,7 @@ const assertScheduledOnLangGraph = (passes, { minimumInvocations = 1 } = {}) => 
     );
   }
 
-  assertScheduledShapesFollowPlans(passes);
+  assertScheduledShapesFollowPlans(run);
 };
 
 const runTrajectoryCase = async (createCase) => {
@@ -369,12 +294,10 @@ const runTrajectoryCase = async (createCase) => {
 // one proves about the outer plan on LangGraph. `planned: false` marks a case
 // whose request never reaches the plan (a pre-execution clarification, an
 // import approval asked before execution, a goal driven through tasks): it
-// must make no plan-graph invocation on either pass. `customSkillGraph:
-// true` marks a case whose custom-Skill stage runs a guarded DAG, which both
-// passes must schedule on LangGraph (the same invocations,
-// assertOuterPlanFollowsItsOwnDial) and whose outcome, agent events and runs
-// must equal what the removed native scheduler produced (its golden); every
-// other case makes no executor invocation.
+// must make no plan-graph invocation. `customSkillGraph: true` marks a case
+// whose custom-Skill stage runs a guarded DAG, which must be scheduled on
+// LangGraph; every other case makes no executor invocation. Every case's
+// outcome, agent events and runs must equal the golden.
 const TRAJECTORY_CASES = [
   ["document_follow_up_retrieval", createFollowUpCase, "document QA with a follow-up retrieval"],
   [
@@ -435,37 +358,28 @@ for (const [
   proves,
   { customSkillGraph = false, planned = true } = {},
 ] of TRAJECTORY_CASES) {
-  test(`${caseId} is identical on both runtimes (${proves})`, async () => {
-    const passes = await runOnEveryPass(() => runTrajectoryCase(createCase));
-    const { native } = passes;
+  test(`${caseId} equals the native loop's golden (${proves})`, async () => {
+    const run = await runScenario(() => runTrajectoryCase(createCase));
 
-    // Parity of two broken runs proves nothing: the case holds natively.
-    assert.equal(native.outcome.id, caseId);
-    assert.equal(native.outcome.passed, true, JSON.stringify(native.outcome.checks));
+    // A golden of a broken run proves nothing: the case holds.
+    assert.equal(run.outcome.id, caseId);
+    assert.equal(run.outcome.passed, true, JSON.stringify(run.outcome.checks));
     // A case without a run store creates no run; the ones with one (approval
     // resume, custom-Skill retry, the Web gate, the goal lifecycle) compare
     // every run they created.
-    assertPassesIdentical(passes);
+    assertMatchesNativeGolden(caseId, run);
 
     if (planned) {
-      assertScheduledOnLangGraph(passes);
+      assertScheduledOnLangGraph(run);
     } else {
-      assert.deepStrictEqual(passes.langgraph.invocations, []);
-      assertOuterPlanFollowsItsOwnDial(passes);
+      assert.deepStrictEqual(run.invocations, []);
+      assert.deepStrictEqual(run.scheduledShapes, []);
     }
 
-    // Both passes against the golden: for the custom-Skill DAG cases what the
-    // native graph scheduler did before phase 6, for every case what the
-    // native outer loop does (frozen before phase 7).
-    assertPassesMatchGolden(caseId, passes);
-
     if (customSkillGraph) {
-      assert.ok(
-        passes.langgraph.graphInvocations.length > 0,
-        "the custom-Skill DAG was scheduled on LangGraph"
-      );
+      assert.ok(run.graphInvocations.length > 0, "the custom-Skill DAG was scheduled on LangGraph");
     } else {
-      assert.deepStrictEqual(passes.langgraph.graphInvocations, []);
+      assert.deepStrictEqual(run.graphInvocations, []);
     }
   });
 }
@@ -527,10 +441,10 @@ const readRuns = async (agentRunService) => {
   return runs;
 };
 
-// A direct scenario: its own run service per pass, the thrown error (if any)
-// as the route sees it, and every run the pass created.
+// A direct scenario: its own run service, the thrown error (if any) as the
+// route sees it, and every run it created.
 const runDirectScenario = (scenario) =>
-  runOnEveryPass(async () => {
+  runScenario(async () => {
     const agentRunService = createRunService();
     let response = null;
     let error = null;
@@ -550,28 +464,26 @@ const runDirectScenario = (scenario) =>
     };
   });
 
-test("a research brief is identical on both runtimes", async () => {
-  const passes = await runDirectScenario(({ agentRunService }) =>
+test("a research brief equals the native loop's golden", async () => {
+  const run = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
       question: "Write a research brief on the key risks in this policy.",
       ragService: createRagService(),
     })
   );
-  const { native } = passes;
 
-  assert.equal(native.outcome.error, null);
-  assert.equal(native.outcome.response.status, 200);
+  assert.equal(run.outcome.error, null);
+  assert.equal(run.outcome.response.status, 200);
   assert.ok(
-    native.outcome.runs[0].steps.some((step) => step.type === "research_question"),
+    run.outcome.runs[0].steps.some((step) => step.type === "research_question"),
     "the brief asked its research questions"
   );
-  assertPassesIdentical(passes);
-  assertPassesMatchGolden("direct-research-brief", passes);
-  assertScheduledOnLangGraph(passes);
-  assert.deepStrictEqual(passes.langgraph.invocations[0].stepIds, DETERMINISTIC_STEP_IDS);
+  assertMatchesNativeGolden("direct-research-brief", run);
+  assertScheduledOnLangGraph(run);
+  assert.deepStrictEqual(run.invocations[0].stepIds, DETERMINISTIC_STEP_IDS);
   // Only the selected built-in stage of the five is scheduled.
-  assert.deepStrictEqual(passes.langgraph.scheduledShapes, [
+  assert.deepStrictEqual(run.scheduledShapes, [
     [
       AGENT_EXECUTION_STEP_IDS.researchBrief,
       AGENT_EXECUTION_STEP_IDS.documentRag,
@@ -580,7 +492,7 @@ test("a research brief is identical on both runtimes", async () => {
   ]);
 });
 
-test("an abstention falls through to the Web stage identically: without a standing approval the run parks at the gate, with one Web answers", async () => {
+test("an abstention falls through to the Web stage as the golden records: without a standing approval the run parks at the gate, with one Web answers", async () => {
   const abstaining = async (docIds, question) => ({
     abstained: true,
     citations: [],
@@ -599,18 +511,17 @@ test("an abstention falls through to the Web stage identically: without a standi
     })
   );
 
-  assert.equal(withoutApproval.native.outcome.error, null);
-  assert.equal(withoutApproval.native.outcome.response.body.agentMode, "clarification");
+  assert.equal(withoutApproval.outcome.error, null);
+  assert.equal(withoutApproval.outcome.response.body.agentMode, "clarification");
   assert.equal(
-    withoutApproval.native.outcome.response.body.clarification.reason,
+    withoutApproval.outcome.response.body.clarification.reason,
     "capability_approval_required"
   );
-  assert.equal(withoutApproval.native.outcome.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
-  assertPassesIdentical(withoutApproval);
-  assertPassesMatchGolden("direct-abstention-without-approval", withoutApproval);
+  assert.equal(withoutApproval.outcome.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
+  assertMatchesNativeGolden("direct-abstention-without-approval", withoutApproval);
   assertScheduledOnLangGraph(withoutApproval);
 
-  const webCalls = { langgraph: 0, native: 0 };
+  let webCalls = 0;
   const withApproval = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
@@ -623,29 +534,28 @@ test("an abstention falls through to the Web stage identically: without a standi
       },
       ragService: createRagService({ chat: abstaining }),
       webChatService: async () => {
-        webCalls[currentPass] += 1;
+        webCalls += 1;
         return { text: "Remote work requires manager approval, says the web." };
       },
     })
   );
 
-  assert.equal(withApproval.native.outcome.error, null);
-  assert.equal(withApproval.native.outcome.response.status, 200);
-  assert.equal(withApproval.native.outcome.response.body.agentMode, "document_web");
+  assert.equal(withApproval.outcome.error, null);
+  assert.equal(withApproval.outcome.response.status, 200);
+  assert.equal(withApproval.outcome.response.body.agentMode, "document_web");
   assert.ok(
-    withApproval.native.outcome.runs[0].steps.some(
+    withApproval.outcome.runs[0].steps.some(
       (step) => step.id === "web_search:primary" && step.status === "completed"
     ),
     "the Web step ran"
   );
-  assert.deepStrictEqual(webCalls, { langgraph: 1, native: 1 });
-  assertPassesIdentical(withApproval);
-  assertPassesMatchGolden("direct-abstention-with-approval", withApproval);
+  assert.equal(webCalls, 1);
+  assertMatchesNativeGolden("direct-abstention-with-approval", withApproval);
   assertScheduledOnLangGraph(withApproval);
 });
 
-test("a dependency outage ends the run identically: the thrown 503, the failed run and its retryable error", async () => {
-  const passes = await runDirectScenario(({ agentRunService }) =>
+test("a dependency outage ends the run as the golden records: the thrown 503, the failed run and its retryable error", async () => {
+  const run = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
       ragService: createRagService({
@@ -658,29 +568,27 @@ test("a dependency outage ends the run identically: the thrown 503, the failed r
       }),
     })
   );
-  const { native } = passes;
 
-  assert.equal(native.outcome.errorIsOutage, true);
-  assert.equal(native.outcome.error.status, 503);
-  assert.equal(native.outcome.error.code, "AGENT_DEPENDENCY_UNAVAILABLE");
-  assert.equal(native.outcome.error.dependency, "retrieval");
-  assert.equal(native.outcome.error.causeCode, "SERVICE_UNREACHABLE");
-  assert.equal(native.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
-  assert.equal(native.outcome.runs[0].error.retryable, true);
-  assertPassesIdentical(passes);
-  assertPassesMatchGolden("direct-dependency-outage", passes);
-  assertScheduledOnLangGraph(passes);
+  assert.equal(run.outcome.errorIsOutage, true);
+  assert.equal(run.outcome.error.status, 503);
+  assert.equal(run.outcome.error.code, "AGENT_DEPENDENCY_UNAVAILABLE");
+  assert.equal(run.outcome.error.dependency, "retrieval");
+  assert.equal(run.outcome.error.causeCode, "SERVICE_UNREACHABLE");
+  assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
+  assert.equal(run.outcome.runs[0].error.retryable, true);
+  assertMatchesNativeGolden("direct-dependency-outage", run);
+  assertScheduledOnLangGraph(run);
 });
 
-// The native loop throws the request's cancellation at the stage boundary; the
-// graph's first node passes the same safe point and ends the stream with a
-// drain, which resolves to the same RequestCancelledError.
-test("a request already cancelled stops at the first stage boundary with the same code on both runtimes, for both reasons", async () => {
+// The removed native loop threw the request's cancellation at the stage
+// boundary; the graph's first node passes the same safe point and ends the
+// stream with a drain, which resolves to the same RequestCancelledError.
+test("a request already cancelled stops at the first stage boundary with the golden's code, for both reasons", async () => {
   for (const [reason, status] of [
     [REQUEST_CANCELLATION_REASONS.clientCancelled, AGENT_RUN_STATUSES.canceled],
     [REQUEST_CANCELLATION_REASONS.deadlineExceeded, AGENT_RUN_STATUSES.failed],
   ]) {
-    const passes = await runDirectScenario(({ agentRunService }) => {
+    const run = await runDirectScenario(({ agentRunService }) => {
       const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
 
       cancellation.cancel(reason);
@@ -696,31 +604,29 @@ test("a request already cancelled stops at the first stage boundary with the sam
         })
       ).finally(cancellation.dispose);
     });
-    const { native } = passes;
 
-    assert.equal(native.outcome.errorIsCancellation, true, reason);
-    assert.equal(native.outcome.error.reason, reason);
-    assert.equal(native.outcome.runs[0].status, status);
-    assert.equal(native.outcome.runs[0].error.reason, reason);
-    assert.deepStrictEqual(native.outcome.runs[0].steps, []);
-    assertPassesIdentical(passes);
-    assertPassesMatchGolden(`direct-cancelled-before-first-stage-${reason}`, passes);
-    assertScheduledOnLangGraph(passes);
+    assert.equal(run.outcome.errorIsCancellation, true, reason);
+    assert.equal(run.outcome.error.reason, reason);
+    assert.equal(run.outcome.runs[0].status, status);
+    assert.equal(run.outcome.runs[0].error.reason, reason);
+    assert.deepStrictEqual(run.outcome.runs[0].steps, []);
+    assertMatchesNativeGolden(`direct-cancelled-before-first-stage-${reason}`, run);
+    assertScheduledOnLangGraph(run);
     // The document question's five built-in stages, the first of them the
-    // one whose safe point stops the native loop, are not scheduled.
-    assert.deepStrictEqual(passes.langgraph.scheduledShapes, [
+    // one whose safe point stopped the native loop, are not scheduled.
+    assert.deepStrictEqual(run.scheduledShapes, [
       [AGENT_EXECUTION_STEP_IDS.documentRag, AGENT_EXECUTION_STEP_IDS.webSearch],
     ]);
   }
 });
 
 // The signal fires while the document stage runs, and the stage still
-// settles: natively the next stage's safe point throws; on LangGraph the
-// drain stops the loop after that superstep and the stream ends with the
-// same cancellation. Either way the document step is recorded completed and
-// the run ends canceled.
+// settles: the removed native loop threw at the next stage's safe point; on
+// LangGraph the drain stops the graph after that superstep and the stream
+// ends with the same cancellation. Either way the document step is recorded
+// completed and the run ends canceled.
 test("a cancellation during a stage surfaces after that stage settles, through the drain, with the same run record", async () => {
-  const passes = await runDirectScenario(({ agentRunService }) => {
+  const run = await runDirectScenario(({ agentRunService }) => {
     const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
 
     return runWithRequestCancellation(cancellation, () =>
@@ -742,24 +648,22 @@ test("a cancellation during a stage surfaces after that stage settles, through t
       })
     ).finally(cancellation.dispose);
   });
-  const { native } = passes;
 
-  assert.equal(native.outcome.errorIsCancellation, true);
-  assert.equal(native.outcome.error.code, "AGENT_CLIENT_CANCELLED");
-  assert.equal(native.outcome.runs[0].status, AGENT_RUN_STATUSES.canceled);
+  assert.equal(run.outcome.errorIsCancellation, true);
+  assert.equal(run.outcome.error.code, "AGENT_CLIENT_CANCELLED");
+  assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.canceled);
   assert.ok(
-    native.outcome.runs[0].steps.some(
+    run.outcome.runs[0].steps.some(
       (step) => step.id === "document_rag:primary" && step.status === "completed"
     ),
     "the document step settled before the cancellation surfaced"
   );
-  assertPassesIdentical(passes);
-  assertPassesMatchGolden("direct-cancelled-during-stage", passes);
-  assertScheduledOnLangGraph(passes);
+  assertMatchesNativeGolden("direct-cancelled-during-stage", run);
+  assertScheduledOnLangGraph(run);
 });
 
-test("a deadline that passes inside a stage ends the run failed with AGENT_DEADLINE_EXCEEDED on both runtimes", async () => {
-  const passes = await runDirectScenario(({ agentRunService }) => {
+test("a deadline that passes inside a stage ends the run failed with AGENT_DEADLINE_EXCEEDED, as the golden records", async () => {
+  const run = await runDirectScenario(({ agentRunService }) => {
     const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
 
     return runWithRequestCancellation(cancellation, () =>
@@ -781,21 +685,19 @@ test("a deadline that passes inside a stage ends the run failed with AGENT_DEADL
       })
     ).finally(cancellation.dispose);
   });
-  const { native } = passes;
 
-  assert.equal(native.outcome.errorIsCancellation, true);
-  assert.equal(native.outcome.error.code, "AGENT_DEADLINE_EXCEEDED");
-  assert.equal(native.outcome.error.status, 504);
-  assert.equal(native.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
-  assert.equal(native.outcome.runs[0].error.reason, "deadline_exceeded");
-  assertPassesIdentical(passes);
-  assertPassesMatchGolden("direct-deadline-inside-stage", passes);
-  assertScheduledOnLangGraph(passes);
+  assert.equal(run.outcome.errorIsCancellation, true);
+  assert.equal(run.outcome.error.code, "AGENT_DEADLINE_EXCEEDED");
+  assert.equal(run.outcome.error.status, 504);
+  assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
+  assert.equal(run.outcome.runs[0].error.reason, "deadline_exceeded");
+  assertMatchesNativeGolden("direct-deadline-inside-stage", run);
+  assertScheduledOnLangGraph(run);
 });
 
-// A stage that fails right after a burst of agent events. Natively each event
-// reaches the client as it is emitted, then the error. On the LangGraph
-// Pregel the events travel as custom stream chunks, and LangGraph errors its
+// A stage that fails right after a burst of agent events. On the removed
+// native loop each event reached the client as it was emitted, then the
+// error. On the Pregel the events travel as custom stream chunks, and LangGraph errors its
 // stream (a ReadableStream, which drops every chunk not yet read) a microtask
 // after a node fails or a drain stops the loop, so a node may settle only once
 // the consumer has forwarded what it relayed. Here the primary answer carries
@@ -804,12 +706,12 @@ test("a deadline that passes inside a stage ends the run failed with AGENT_DEADL
 // retrieval; the cancellation raised during the primary call throws at the
 // follow-up step's start, a safe point inside the same stage, right after
 // that burst.
-test("a stage that throws right after a burst of agent events streams every event before the error on both runtimes, for both reasons", async () => {
+test("a stage that throws right after a burst of agent events streams every event before the error, for both reasons", async () => {
   for (const [reason, code, status] of [
     [REQUEST_CANCELLATION_REASONS.deadlineExceeded, "AGENT_DEADLINE_EXCEEDED", AGENT_RUN_STATUSES.failed],
     [REQUEST_CANCELLATION_REASONS.clientCancelled, "AGENT_CLIENT_CANCELLED", AGENT_RUN_STATUSES.canceled],
   ]) {
-    const passes = await runDirectScenario(({ agentRunService }) => {
+    const run = await runDirectScenario(({ agentRunService }) => {
       const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
 
       return runWithRequestCancellation(cancellation, () =>
@@ -834,41 +736,39 @@ test("a stage that throws right after a burst of agent events streams every even
         })
       ).finally(cancellation.dispose);
     });
-    const { native } = passes;
 
-    assert.equal(native.outcome.errorIsCancellation, true, reason);
-    assert.equal(native.outcome.error.code, code, reason);
-    assert.equal(native.outcome.runs[0].status, status, reason);
+    assert.equal(run.outcome.errorIsCancellation, true, reason);
+    assert.equal(run.outcome.error.code, code, reason);
+    assert.equal(run.outcome.runs[0].status, status, reason);
     assert.ok(
-      native.outcome.runs[0].steps.some(
+      run.outcome.runs[0].steps.some(
         (step) => step.id === "document_rag:primary" && step.status === "completed"
       ),
       "the primary document step settled before the cancellation surfaced"
     );
     // The burst the stage emitted before its own safe point threw.
     assert.deepStrictEqual(
-      native.events.slice(-3).map((event) => event.step?.type),
+      run.events.slice(-3).map((event) => event.step?.type),
       ["document_rag", "self_check", "gap_analysis"],
       reason
     );
-    assertPassesIdentical(passes);
-    assertPassesMatchGolden(`direct-burst-then-throw-${reason}`, passes);
-    assertScheduledOnLangGraph(passes);
+    assertMatchesNativeGolden(`direct-burst-then-throw-${reason}`, run);
+    assertScheduledOnLangGraph(run);
   }
 });
 
-// On LangGraph a built-in stage whose Skill was not selected is not scheduled
-// at all (isAgentExecutionPlanStageStaticallyInert): its body would return at
-// once, so only its safe point is left out, and the next node's safe point or
-// the drain stands in for it. Natively that safe point is where the
-// cancellation surfaces. A plan with such stages first and between two
-// scheduled ones (inventory and research_brief here, neither selected for a
-// document question) must end every cancellation the same way: before the
-// first stage (natively at inventory's safe point; on LangGraph the drain
-// stops the pruned graph before its first superstep), and during the
-// document stage (natively at research_brief's safe point; on LangGraph the
-// drain after that superstep), for both reasons.
-test("a cancellation before a stage the LangGraph plan does not schedule ends the run identically on both runtimes", async () => {
+// A built-in stage whose Skill was not selected is not scheduled at all
+// (isAgentExecutionPlanStageStaticallyInert): its body would return at once,
+// so only its safe point is left out, and the next node's safe point or the
+// drain stands in for it. On the removed native loop that safe point was
+// where the cancellation surfaced. A plan with such stages first and between
+// two scheduled ones (inventory and research_brief here, neither selected for
+// a document question) must end every cancellation as the loop did: before
+// the first stage (the loop threw at inventory's safe point; the drain stops
+// the pruned graph before its first superstep), and during the document
+// stage (the loop threw at research_brief's safe point; the drain stops the
+// graph after that superstep), for both reasons.
+test("a cancellation before a stage the plan graph does not schedule ends the run as the golden records", async () => {
   const interleavedPlan = [
     AGENT_EXECUTION_STEP_IDS.inventory,
     AGENT_EXECUTION_STEP_IDS.documentRag,
@@ -904,7 +804,7 @@ test("a cancellation before a stage the LangGraph plan does not schedule ends th
 
   for (const { cancelBeforeTheRun, reason, status } of scenarios) {
     const label = `${reason} ${cancelBeforeTheRun ? "before the run" : "during the document stage"}`;
-    const passes = await runDirectScenario(({ agentRunService }) => {
+    const run = await runDirectScenario(({ agentRunService }) => {
       const cancellation = createRequestCancellation({ deadlineAt: Date.now() + 60_000 });
 
       if (cancelBeforeTheRun) {
@@ -935,111 +835,103 @@ test("a cancellation before a stage the LangGraph plan does not schedule ends th
         })
       ).finally(cancellation.dispose);
     });
-    const { native } = passes;
 
-    assert.equal(native.outcome.errorIsCancellation, true, label);
-    assert.equal(native.outcome.error.reason, reason, label);
-    assert.equal(native.outcome.runs[0].status, status, label);
-    assert.equal(native.outcome.runs[0].error.reason, reason, label);
+    assert.equal(run.outcome.errorIsCancellation, true, label);
+    assert.equal(run.outcome.error.reason, reason, label);
+    assert.equal(run.outcome.runs[0].status, status, label);
+    assert.equal(run.outcome.runs[0].error.reason, reason, label);
     assert.deepStrictEqual(
-      native.outcome.runs[0].steps.map((step) => [step.id, step.status]),
+      run.outcome.runs[0].steps.map((step) => [step.id, step.status]),
       cancelBeforeTheRun ? [] : [["document_rag:primary", "completed"]],
       label
     );
-    assertPassesIdentical(passes);
-    assertPassesMatchGolden(
-      `direct-interleaved-plan-${reason}-${cancelBeforeTheRun ? "before-the-run" : "during-the-document-stage"}`,
-      passes
-    );
-    assertScheduledOnLangGraph(passes);
-    // The planner's interleaved plan reached the LangGraph entry as planned
-    // (no fallback to the deterministic plan); the entry itself schedules
-    // only document_rag and web_search of it.
+    assertMatchesNativeGolden(
+      `direct-interleaved-plan-${reason}-${cancelBeforeTheRun ? "before-the-run" : "during-the-document-stage"}`, run);
+    assertScheduledOnLangGraph(run);
+    // The planner's interleaved plan reached the graph entry as planned (no
+    // fallback to the deterministic plan); the entry itself schedules only
+    // document_rag and web_search of it.
     assert.deepStrictEqual(
-      passes.langgraph.invocations.map((entry) => entry.stepIds),
+      run.invocations.map((entry) => entry.stepIds),
       [interleavedPlan],
       label
     );
     assert.deepStrictEqual(
-      passes.langgraph.scheduledShapes,
+      run.scheduledShapes,
       [[AGENT_EXECUTION_STEP_IDS.documentRag, AGENT_EXECUTION_STEP_IDS.webSearch]],
       label
     );
   }
 });
 
-// The one deliberate difference: LangGraph refuses to run with a LangSmith
-// tracer switched on, before the graph is built; the run is failed with the
-// guard's code. The outer plan on the native loop has no tracer to refuse on
-// a request that builds no LangGraph graph (a document question): the
-// refusal stays with the graphs that are built on LangGraph (the custom-Skill
-// stage and the v3 entry refuse on their own path,
-// test/langgraph-execution-graph-runtime.test.mjs and
-// test/langgraph-unified-graph.test.mjs).
-test("a LangSmith tracing variable refuses the LangGraph plan before any stage runs, and the run is failed with the guard's code", async () => {
-  const passes = await withEnv({ LANGSMITH_TRACING: "true" }, () =>
+// LangGraph never runs with a LangSmith tracer switched on: the outer plan's
+// entry refuses before the graph is built, and the run is failed with the
+// guard's code. (On the removed native loop a request that built no graph, a
+// document question, answered under such a variable; since phase 7 every
+// request that reaches the plan builds one.)
+test("a LangSmith tracing variable refuses the plan before any stage runs, and the run is failed with the guard's code", async () => {
+  const run = await withEnv({ LANGSMITH_TRACING: "true" }, () =>
     runDirectScenario(({ agentRunService }) =>
       askAgent({ agentRunService, ragService: createRagService() })
     )
   );
 
-  // The outer plan on the native loop: nothing to refuse, the native answer
-  // and run, and no graph built.
-  assert.equal(passes.native.outcome.error, null);
-  assert.equal(passes.native.outcome.response.status, 200);
-  assert.deepStrictEqual(passes.native.invocations, []);
-  assert.deepStrictEqual(passes.native.graphInvocations, []);
-
-  assert.equal(passes.langgraph.outcome.error?.code, LANGSMITH_TRACING_ENABLED_CODE);
-  assert.equal(passes.langgraph.outcome.response, null);
-  assert.equal(passes.langgraph.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
-  assert.deepStrictEqual(passes.langgraph.outcome.runs[0].steps, []);
-  // The plan reached the LangGraph entry (the tap records the invocation
-  // before handing it to the real entry), which refused before building the
-  // graph: the run was created and planned, and no stage ran.
-  assert.deepStrictEqual(passes.langgraph.invocations.map((entry) => entry.stepIds), [
-    DETERMINISTIC_STEP_IDS,
-  ]);
-  assert.deepStrictEqual(passes.langgraph.graphInvocations, []);
+  assert.equal(run.outcome.error?.code, LANGSMITH_TRACING_ENABLED_CODE);
+  assert.equal(run.outcome.response, null);
+  assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
+  assert.deepStrictEqual(run.outcome.runs[0].steps, []);
+  // The plan reached the graph entry (the tap records the invocation before
+  // handing it to the real entry), which refused before building the graph:
+  // the run was created and planned, and no stage ran.
+  assert.deepStrictEqual(run.invocations.map((entry) => entry.stepIds), [DETERMINISTIC_STEP_IDS]);
+  assert.deepStrictEqual(run.scheduledShapes, []);
+  assert.deepStrictEqual(run.graphInvocations, []);
 });
 
-// --- The dial -------------------------------------------------------------
+// --- One scheduler --------------------------------------------------------
 
-// The phase-3 load test put the outer plan behind a dial of its own
-// (config.js): only AGENT_OUTER_PLAN_RUNTIME=langgraph moves the outer plan
-// onto LangGraph, and anything else (unset, empty, whitespace, a typo) is
-// native. AGENT_RUNTIME, which since phase 6 accepts only unset or
-// `langgraph`, never moves it.
-test("AGENT_OUTER_PLAN_RUNTIME alone selects the outer plan's scheduler: it defaults to native, only `langgraph` selects the graph, and AGENT_RUNTIME never does", async () => {
-  for (const [value, expected] of [
-    [undefined, "native"],
-    ["", "native"],
-    ["   ", "native"],
-    ["\t", "native"],
-    ["native", "native"],
-    ["langgraph", "langgraph"],
-    [" LangGraph ", "langgraph"],
-    ["pregel", "native"],
-  ]) {
-    for (const runtime of [undefined, "langgraph"]) {
-      await withEnv({ AGENT_OUTER_PLAN_RUNTIME: value, AGENT_RUNTIME: runtime }, async () => {
-        const label = `AGENT_OUTER_PLAN_RUNTIME=${JSON.stringify(value)} AGENT_RUNTIME=${runtime}`;
+// Phase 7 removed the native loop and the dial that chose between it and the
+// graph: nothing resolves a runner any more, and runAgentExecutionPlan hands
+// every plan to the graph module (the tap), whatever the removed variable's
+// accepted values say. A removed value is refused at that entry
+// (test/agent-runtime-removed.test.mjs covers every check site).
+test("the outer plan has one scheduler: no dial resolves a runner, and runAgentExecutionPlan hands the plan to the graph", async () => {
+  assert.equal(Object.hasOwn(config, "getAgentOuterPlanRuntime"), false);
+  assert.equal(Object.hasOwn(agentExecutionPlanRunner, "resolveAgentExecutionPlanRunner"), false);
+  assert.notEqual(runAgentExecutionPlan, tappedPlanGraphRunner);
 
-        assert.equal(getAgentOuterPlanRuntime(), expected, label);
-        // The runner agent.js resolves with no argument follows the outer
-        // dial only.
-        assert.equal(
-          await resolveAgentExecutionPlanRunner(),
-          expected === "langgraph" ? tappedPlanGraphRunner : runAgentExecutionPlan,
-          label
-        );
-      });
-    }
+  const webSkill = { budgetKey: "webSearchCalls", id: "web_search", kind: "built_in" };
+  const options = () => ({
+    accessScope: ACCESS_SCOPE,
+    budgetState: null,
+    executionPlan: [AGENT_EXECUTION_STEP_IDS.documentRag],
+    getSelectedSkill: () => null,
+    registry: { get: (skillId) => (skillId === webSkill.id ? webSkill : null) },
+    selectedSkills: [],
+  });
+
+  for (const value of [undefined, "", "  ", "langgraph", " LangGraph "]) {
+    await withEnv({ ...RUN_ENV, AGENT_OUTER_PLAN_RUNTIME: value }, async () => {
+      takePlanGraphInvocations();
+      // The document stage fails on the collaborators these options leave
+      // out; only that the plan reached the graph entry matters here.
+      await runAgentExecutionPlan(options()).catch(() => null);
+
+      assert.deepStrictEqual(
+        takePlanGraphInvocations(),
+        [{ boundToRun: false, stepIds: [AGENT_EXECUTION_STEP_IDS.documentRag] }],
+        `AGENT_OUTER_PLAN_RUNTIME=${JSON.stringify(value)}`
+      );
+    });
   }
 
-  assert.equal(await resolveAgentExecutionPlanRunner("native"), runAgentExecutionPlan);
-  assert.equal(await resolveAgentExecutionPlanRunner("langgraph"), tappedPlanGraphRunner);
-  assert.deepStrictEqual(takePlanGraphInvocations(), []);
+  await withEnv({ ...RUN_ENV, AGENT_OUTER_PLAN_RUNTIME: "native" }, async () => {
+    await assert.rejects(runAgentExecutionPlan(options()), (error) => {
+      assert.equal(error?.code, config.AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE);
+      return true;
+    });
+  });
+  takePlanGraphInvocations();
 });
 
 // --- The compiled graph on its own --------------------------------------

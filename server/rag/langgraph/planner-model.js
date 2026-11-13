@@ -23,8 +23,8 @@
 //
 // Two deliberate details of the chat model path:
 //   - The call is a root LangChain run. A planner can run inside a LangGraph
-//     node (the DAG planner and the replanner inside the outer plan graph's
-//     custom_skills node under AGENT_OUTER_PLAN_RUNTIME=langgraph); invoked
+//     node (the DAG planner and the replanner run inside the outer plan
+//     graph's custom_skills node); invoked
 //     there as is, the model would become a child run of that node and
 //     inherit its callbacks and signal, and a "messages" stream mode would
 //     emit the planner's whole reply. So it runs under an empty LangChain
@@ -33,14 +33,15 @@
 //   - A LangSmith tracing variable set to "true" (langsmith-guard.js) sends
 //     the call down the direct path, completeTextWithMetadata, before
 //     LangChain is loaded or configured, so there is no LangChain run a
-//     tracer could attach to. It is not refused: a planner call builds no
-//     LangGraph graph, and a request that builds none answers under such a
-//     variable as it did before the migration; a refusal would turn every
-//     LLM planner (the default dials) into its deterministic fallback. The
-//     graphs keep their own refusal (the custom-Skill stage, the v3 entry,
-//     the outer plan graph), and the chat model still re-checks on every
-//     invoke (model.js), so a variable switched on while LangChain is being
-//     imported is refused there, and the planner falls back.
+//     tracer could attach to. It is not refused here: a planner call
+//     builds no LangGraph graph, and a refusal would turn every LLM planner
+//     (the default dials) into its deterministic fallback, a silent change
+//     of behaviour. The request is refused where a graph is built: the outer
+//     plan's entry (every request that reaches the plan, since ADR 0001
+//     phase 7), the custom-Skill stage and the v3 entry. The chat model
+//     still re-checks on every invoke (model.js), so a variable switched on
+//     while LangChain is being imported is refused there, and the planner
+//     falls back.
 //
 // model.js and @langchain/core are imported on first use, so a process that
 // never plans with a model (the deterministic planners, the api edge of a

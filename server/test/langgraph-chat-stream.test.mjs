@@ -7,30 +7,28 @@ import { createServer } from "node:http";
 import { register } from "node:module";
 import test from "node:test";
 
-// Phase-3 evidence for /chat/stream with the outer plan on LangGraph
-// (rag/langgraph/agent-stream.js, routes/chat.js; behind the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph since the phase-3 load test, config.js
-// says why): the real app (createApp over the local store, an in-memory run
-// store and a stand-in model) answers the same request with the outer dial
-// unset (the production setting: the native route branch and loop) and with
-// the outer plan on LangGraph, and the SSE bytes must be identical after
-// masking -- every trace_step and answer_draft event in order, the result
-// event (which equals the /chat answer), then done. Answer drafts carry only
-// sentences the finalizer's claim check supports; a deadline ends the stream
-// with the same error/done frames; a client that leaves cancels the run to
-// the same terminal record; with the outer plan on LangGraph a LangSmith
-// tracer switched on is refused as an error/done sequence before the run
-// starts, while the native branch, which builds no graph for a document
-// question, answers it. (Until ADR 0001 phase 6 a third pass ran everything
-// under AGENT_RUNTIME=native; a document question builds no graph, so that
-// pass ran exactly the code of the native pass here.)
+// /chat/stream on its only path (rag/langgraph/agent-stream.js, routes/chat.js)
+// since ADR 0001 phase 7 removed the route's native branch and the native
+// outer loop. Until then the real app (createApp over the local store, an
+// in-memory run store and a stand-in model) answered every request here
+// twice, on the native branch and through the LangGraph relay, and the SSE
+// bytes had to be identical after masking. Before the native branch was
+// deleted its pass of every stream -- the bytes on the wire, the frames they
+// parse into (every trace_step and answer_draft event in order, the result
+// event, which equals the /chat answer, then done) and every run -- was
+// frozen under test/fixtures/graph-goldens/langgraph-chat-stream/ (commit
+// 3313b40b, where the native pass wrote each fixture and both passes were
+// held to it), and the route is now held to those goldens with the same
+// masking. Answer drafts carry only sentences the finalizer's claim check
+// supports; a deadline ends the stream with the golden's error/done frames; a
+// client that leaves cancels the run to the golden's terminal record; a
+// LangSmith tracer switched on is refused as an error/done sequence before
+// the run starts.
 //
 // The runner's on-demand import of the plan graph is redirected to a tap, so
-// the suite also proves the outer-dial pass scheduled the outer plan on
-// LangGraph and the native pass did not (a stream identical because both
-// passes ran natively would prove nothing); the route's import of the stream
-// relay is tapped too, so each pass also shows which branch of the route
-// answered.
+// the suite also proves each stream scheduled the outer plan on LangGraph;
+// the route's import of the stream relay is tapped too, so each stream is
+// seen to have gone through streamAgentRun.
 const PLAN_GRAPH_TAP_URL = new URL(
   "./langgraph-execution-plan-graph/plan-graph-tap.mjs",
   import.meta.url
@@ -93,14 +91,6 @@ const { describeAgentRouteError } = await import("../routes/chat.js");
 const { assertMatchesGraphGolden } = await import("./langgraph-support/graph-goldens.mjs");
 const { getRequestSignal } = await import("../rag/request-deadline.js");
 
-// The two passes, by the outer plan's dial they pin: unset, which keeps the
-// outer plan on the native loop and the route on its native branch; and the
-// outer plan (and with it the stream relay) on LangGraph.
-const PASSES = Object.freeze({
-  native: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: undefined }),
-  langgraph: Object.freeze({ AGENT_OUTER_PLAN_RUNTIME: "langgraph" }),
-});
-const PASS_NAMES = Object.freeze(Object.keys(PASSES));
 const QUESTION = "What are the renewal term and the monthly fee?";
 const CITATION = Object.freeze({
   docId: "contract-1",
@@ -118,8 +108,10 @@ const UNSUPPORTED_SENTENCE = "The contract was signed in Paris. [Source 1]";
 const BASE_ENV = Object.freeze({
   ...ANSWER_RATE_FLAGS_OFF,
   AGENT_CANCEL_ON_DISCONNECT: undefined,
+  // Removed dials: unset, the only setting that selects nothing.
   AGENT_OUTER_PLAN_RUNTIME: undefined,
   AGENT_REQUEST_TIMEOUT_MS: undefined,
+  AGENT_RUNTIME: undefined,
   AGENT_SERVICE_URL: undefined,
   AGENT_UNIFIED_GRAPH_ROLLOUT: "off",
   ARCHIVE_RAG_ROLE: undefined,
@@ -345,102 +337,71 @@ const draftTexts = (frames) =>
   frames.filter((frame) => frame.event === "answer_draft").map((frame) => frame.data.draft.text);
 
 /**
- * One /chat/stream request per pass against a fresh monolith, returning the
- * raw SSE text, its frames, the plan-graph invocations, the route's relay
- * calls and every run.
+ * One /chat/stream request against a fresh monolith, returning the raw SSE
+ * text, its frames, the plan-graph invocations, the route's relay calls and
+ * every run.
  */
-const streamOnEveryPass = async (t, { env = {}, ragService, request = {} } = {}) => {
-  const passes = {};
+const streamOnce = async (t, { env = {}, ragService, request = {} } = {}) => {
+  const monolith = await startMonolith(t, { env, ragService });
 
-  for (const pass of PASS_NAMES) {
-    const monolith = await startMonolith(t, { env: { ...env, ...PASSES[pass] }, ragService });
+  takePlanGraphInvocations();
+  takeAgentStreamRelayCalls();
 
-    takePlanGraphInvocations();
-    takeAgentStreamRelayCalls();
+  const response = await postChat(monolith.baseUrl, "/chat/stream", request);
+  const text = await response.text();
 
-    const response = await postChat(monolith.baseUrl, "/chat/stream", request);
-    const text = await response.text();
-
-    passes[pass] = {
-      frames: parseFrames(text),
-      invocations: takePlanGraphInvocations(),
-      relayCalls: takeAgentStreamRelayCalls(),
-      runs: (await readRuns(monolith.agentRunService)).map(projectAgentRun),
-      status: response.status,
-      text,
-    };
-  }
-
-  return passes;
+  return {
+    frames: parseFrames(text),
+    invocations: takePlanGraphInvocations(),
+    relayCalls: takeAgentStreamRelayCalls(),
+    runs: (await readRuns(monolith.agentRunService)).map(projectAgentRun),
+    status: response.status,
+    text,
+  };
 };
 
-// Only the outer dial moves the outer plan and the route's stream onto
-// LangGraph: the native pass ran the native loop behind the route's native
-// branch.
-const assertOuterPlanFollowsItsOwnDial = ({ langgraph, native }) => {
-  assert.deepStrictEqual(native.invocations, []);
-  assert.equal(langgraph.invocations.length, 1, "the outer-dial pass scheduled the outer plan");
-  assert.equal(native.relayCalls, 0, "the outer dial unset streams on the native branch");
-  assert.equal(langgraph.relayCalls, 1, "the outer-dial pass streamed through the LangGraph relay");
+// The stream went through the relay generator once, and its run scheduled the
+// outer plan on LangGraph once.
+const assertStreamedThroughTheGraph = ({ invocations, relayCalls }) => {
+  assert.equal(invocations.length, 1, "the run scheduled the outer plan on LangGraph");
+  assert.equal(relayCalls, 1, "the route streamed through streamAgentRun");
 };
 
-const assertStreamsIdentical = (passes) => {
-  const { langgraph, native } = passes;
-
-  assert.equal(native.status, 200);
-  assert.equal(langgraph.status, 200);
-  // The bytes on the wire, masked, and the frames they parse into.
-  assert.equal(maskVolatileText(langgraph.text), maskVolatileText(native.text));
-  assert.deepStrictEqual(maskVolatile(langgraph.frames), maskVolatile(native.frames));
-  assert.deepStrictEqual(maskVolatile(langgraph.runs), maskVolatile(native.runs));
-
-  assertOuterPlanFollowsItsOwnDial(passes);
-};
-
-// The freeze before ADR 0001 phase 7 deletes the native route branch and
-// loop: the native pass of every stream, masked exactly as
-// assertStreamsIdentical compares it (the bytes on the wire, the frames they
-// parse into, every run), is held to a golden under
-// test/fixtures/graph-goldens/langgraph-chat-stream/. On this commit the
-// native pass is the one that may write a golden (UPDATE_GRAPH_GOLDENS=1), so
-// every fixture is the record of what the native branch sent; the LangGraph
-// pass is compared with the same fixture and never writes it.
+// What the removed native branch sent for a stream (the golden, see the
+// header) against this one: the bytes on the wire, the frames they parse
+// into and every run, masked.
 const GOLDEN_SUITE = "langgraph-chat-stream";
 
-const toStreamGolden = ({ frames, runs, status, text }) => ({
-  frames: maskVolatile(frames),
-  runs: maskVolatile(runs),
-  status,
-  text: maskVolatileText(text),
-});
-
-const assertStreamsMatchGolden = (caseName, { langgraph, native }) => {
-  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toStreamGolden(native));
-  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toStreamGolden(langgraph), { write: false });
+const assertStreamMatchesGolden = (caseName, stream) => {
+  assert.equal(stream.status, 200);
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, {
+    frames: maskVolatile(stream.frames),
+    runs: maskVolatile(stream.runs),
+    status: stream.status,
+    text: maskVolatileText(stream.text),
+  });
+  assertStreamedThroughTheGraph(stream);
 };
 
-test("a fully supported answer streams the same trace steps, drafts, result and done on both runtimes, and the result equals /chat", async (t) => {
+test("a fully supported answer streams the golden's trace steps, drafts, result and done, and the result equals /chat", async (t) => {
   installStreamingModel(t, () => SUPPORTED_SENTENCES.join("\n"));
 
-  const passes = await streamOnEveryPass(t, { ragService: createDraftingRagService() });
-  const { langgraph, native } = passes;
+  const stream = await streamOnce(t, { ragService: createDraftingRagService() });
 
-  assertStreamsIdentical(passes);
-  assertStreamsMatchGolden("supported-answer", passes);
+  assertStreamMatchesGolden("supported-answer", stream);
 
-  const eventNames = native.frames.map((frame) => frame.event);
+  const eventNames = stream.frames.map((frame) => frame.event);
 
   assert.ok(eventNames.includes("trace_step"));
   assert.deepStrictEqual(eventNames.slice(-2), ["result", "done"]);
-  assert.deepStrictEqual(draftTexts(native.frames), SUPPORTED_SENTENCES);
-  assert.deepStrictEqual(draftTexts(langgraph.frames), SUPPORTED_SENTENCES);
+  assert.deepStrictEqual(draftTexts(stream.frames), SUPPORTED_SENTENCES);
   // Drafts arrive before the finalizer step, and each appears verbatim in
   // the final answer.
   const firstDraft = eventNames.indexOf("answer_draft");
-  const finalizer = native.frames.findIndex(
+  const finalizer = stream.frames.findIndex(
     (frame) => frame.event === "trace_step" && frame.data.step.type === "answer_finalizer"
   );
-  const result = native.frames.at(-2).data;
+  const result = stream.frames.at(-2).data;
 
   assert.ok(firstDraft >= 0 && finalizer > firstDraft);
   assert.equal(result.status, 200);
@@ -448,83 +409,50 @@ test("a fully supported answer streams the same trace steps, drafts, result and 
   for (const draft of SUPPORTED_SENTENCES) {
     assert.ok(result.body.agentAnswer.includes(draft), draft);
   }
-  // The result event is the /chat answer: the same request through /chat,
-  // with the outer plan on LangGraph and with the outer dial unset, gives the
-  // same status and body.
-  for (const pass of PASS_NAMES) {
-    const monolith = await startMonolith(t, {
-      env: PASSES[pass],
-      ragService: createDraftingRagService(),
-    });
+  // The result event is the /chat answer: the same request through /chat
+  // gives the same status and body.
+  const monolith = await startMonolith(t, { ragService: createDraftingRagService() });
 
-    takePlanGraphInvocations();
+  takePlanGraphInvocations();
 
-    const plain = await postChat(monolith.baseUrl);
+  const plain = await postChat(monolith.baseUrl);
 
-    assert.equal(plain.status, 200, pass);
-    assert.deepStrictEqual(
-      maskVolatile(await plain.json()),
-      maskVolatile(langgraph.frames.at(-2).data.body),
-      pass
-    );
-    assert.equal(takePlanGraphInvocations().length, pass === "langgraph" ? 1 : 0, pass);
-  }
+  assert.equal(plain.status, 200);
+  assert.deepStrictEqual(maskVolatile(await plain.json()), maskVolatile(result.body));
+  assert.equal(takePlanGraphInvocations().length, 1);
 });
 
-test("a sentence the claim check does not support is never drafted on either runtime, and the drafts are identical", async (t) => {
+test("a sentence the claim check does not support is never drafted, and the stream equals the golden", async (t) => {
   installStreamingModel(t, () =>
     [SUPPORTED_SENTENCES[0], UNSUPPORTED_SENTENCE, SUPPORTED_SENTENCES[1]].join("\n")
   );
 
-  const passes = await streamOnEveryPass(t, { ragService: createDraftingRagService() });
-  const { langgraph, native } = passes;
+  const stream = await streamOnce(t, { ragService: createDraftingRagService() });
 
-  assertStreamsIdentical(passes);
-  assertStreamsMatchGolden("unsupported-sentence", passes);
-  assert.ok(draftTexts(native.frames).length > 0, "some sentence was drafted");
-  for (const text of [...draftTexts(native.frames), ...draftTexts(langgraph.frames)]) {
+  assertStreamMatchesGolden("unsupported-sentence", stream);
+  assert.ok(draftTexts(stream.frames).length > 0, "some sentence was drafted");
+  for (const text of draftTexts(stream.frames)) {
     assert.ok(SUPPORTED_SENTENCES.includes(text), text);
     assert.notEqual(text, UNSUPPORTED_SENTENCE);
   }
   // The unsupported claim is reported, never streamed.
   assert.ok(
-    !native.text.includes("signed in Paris") || native.frames.at(-2).event === "result",
+    !stream.text.includes("signed in Paris") || stream.frames.at(-2).event === "result",
     "the unsupported sentence can only appear in the final result's own fields"
   );
-  assert.deepStrictEqual(native.frames.map((frame) => frame.event).slice(-2), ["result", "done"]);
+  assert.deepStrictEqual(stream.frames.map((frame) => frame.event).slice(-2), ["result", "done"]);
 });
 
-test("a deadline that passes mid-run ends the stream with the same error and done frames on both runtimes", { timeout: 30_000 }, async (t) => {
+test("a deadline that passes mid-run ends the stream with the golden's error and done frames", { timeout: 30_000 }, async (t) => {
   const model = installSlowModel(t);
-  const passes = {};
+  const stream = await streamOnce(t, {
+    env: { AGENT_REQUEST_TIMEOUT_MS: "1500" },
+    ragService: createSlowRagService(),
+  });
 
-  for (const pass of PASS_NAMES) {
-    const monolith = await startMonolith(t, {
-      env: { AGENT_REQUEST_TIMEOUT_MS: "1500", ...PASSES[pass] },
-      ragService: createSlowRagService(),
-    });
+  assertStreamMatchesGolden("deadline-mid-run", stream);
 
-    takePlanGraphInvocations();
-    takeAgentStreamRelayCalls();
-
-    const response = await postChat(monolith.baseUrl, "/chat/stream");
-    const text = await response.text();
-
-    passes[pass] = {
-      frames: parseFrames(text),
-      invocations: takePlanGraphInvocations(),
-      relayCalls: takeAgentStreamRelayCalls(),
-      runs: (await readRuns(monolith.agentRunService)).map(projectAgentRun),
-      status: response.status,
-      text,
-    };
-    model.reset();
-  }
-
-  assertStreamsIdentical(passes);
-  assertStreamsMatchGolden("deadline-mid-run", passes);
-
-  const { frames, runs } = passes.native;
+  const { frames, runs } = stream;
 
   assert.deepStrictEqual(frames.slice(-2).map(({ event }) => event), ["error", "done"]);
   assert.ok(!frames.some(({ event }) => event === "result"));
@@ -533,19 +461,19 @@ test("a deadline that passes mid-run ends the stream with the same error and don
   assert.equal(frames.at(-2).data.retryable, true);
   assert.equal(runs[0].status, AGENT_RUN_STATUSES.failed);
   assert.equal(runs[0].error.reason, "deadline_exceeded");
-  assert.equal(model.calls.length, PASS_NAMES.length);
-  assert.ok(model.calls.every((call) => call.aborted), "every in-flight model call was aborted");
+  assert.equal(model.calls.length, 1);
+  assert.ok(model.calls.every((call) => call.aborted), "the in-flight model call was aborted");
 });
 
 // The deadline passes while the primary answer is produced, and that answer
 // holds an unsupported claim, so the document stage emits its document_rag,
 // self_check and gap_analysis steps and then throws at the follow-up step's
-// start, a safe point inside the same stage. With the outer plan on
-// LangGraph those steps travel as custom stream chunks, which LangGraph
-// drops when it errors its stream after the failed node unless the node
-// waits for them to be forwarded: every trace_step frame must still precede
-// the error and done frames, byte for byte as natively.
-test("a deadline that throws inside a stage right after a burst of trace steps streams every frame before error and done on both runtimes", { timeout: 30_000 }, async (t) => {
+// start, a safe point inside the same stage. Those steps travel as custom
+// stream chunks, which LangGraph drops when it errors its stream after the
+// failed node unless the node waits for them to be forwarded: every
+// trace_step frame must still precede the error and done frames, byte for
+// byte as the removed native branch sent them.
+test("a deadline that throws inside a stage right after a burst of trace steps streams every frame before error and done", { timeout: 30_000 }, async (t) => {
   const ragService = createRagService({
     chat: async (docIds, question) => {
       const signal = getRequestSignal();
@@ -569,15 +497,14 @@ test("a deadline that throws inside a stage right after a burst of trace steps s
       };
     },
   });
-  const passes = await streamOnEveryPass(t, {
+  const stream = await streamOnce(t, {
     env: { AGENT_REQUEST_TIMEOUT_MS: "200" },
     ragService,
   });
 
-  assertStreamsIdentical(passes);
-  assertStreamsMatchGolden("deadline-after-trace-burst", passes);
+  assertStreamMatchesGolden("deadline-after-trace-burst", stream);
 
-  const { frames, runs } = passes.native;
+  const { frames, runs } = stream;
 
   assert.deepStrictEqual(
     frames
@@ -591,112 +518,96 @@ test("a deadline that throws inside a stage right after a burst of trace steps s
   assert.equal(runs[0].status, AGENT_RUN_STATUSES.failed);
 });
 
-test("with AGENT_CANCEL_ON_DISCONNECT on, a client that leaves /chat/stream cancels the run to the same terminal record on both runtimes", { timeout: 30_000 }, async (t) => {
+test("with AGENT_CANCEL_ON_DISCONNECT on, a client that leaves /chat/stream cancels the run to the golden's terminal record", { timeout: 30_000 }, async (t) => {
   const model = installSlowModel(t);
-  const records = {};
+  const monolith = await startMonolith(t, {
+    env: { AGENT_CANCEL_ON_DISCONNECT: "on" },
+    ragService: createSlowRagService(),
+  });
+  const client = new AbortController();
 
-  for (const pass of PASS_NAMES) {
-    const monolith = await startMonolith(t, {
-      env: { AGENT_CANCEL_ON_DISCONNECT: "on", ...PASSES[pass] },
-      ragService: createSlowRagService(),
-    });
-    const client = new AbortController();
+  takePlanGraphInvocations();
+  takeAgentStreamRelayCalls();
 
-    takePlanGraphInvocations();
-    takeAgentStreamRelayCalls();
+  const stream = await postChat(monolith.baseUrl, "/chat/stream", { signal: client.signal });
 
-    const stream = await postChat(monolith.baseUrl, "/chat/stream", { signal: client.signal });
+  assert.equal(stream.status, 200);
 
-    assert.equal(stream.status, 200);
+  const call = await model.arrived;
 
-    const call = await model.arrived;
+  client.abort();
+  await stream.body?.cancel().catch(() => {});
 
-    client.abort();
-    await stream.body?.cancel().catch(() => {});
+  const run = await waitFor(
+    async () =>
+      (await listRuns(monolith.agentRunService)).find(
+        (listed) => listed.status === AGENT_RUN_STATUSES.canceled
+      ),
+    { label: "the run to end canceled" }
+  );
 
-    const run = await waitFor(
-      async () =>
-        (await listRuns(monolith.agentRunService)).find(
-          (listed) => listed.status === AGENT_RUN_STATUSES.canceled
-        ),
-      { label: `the ${pass} run to end canceled` }
-    );
+  assert.equal(call.aborted, true, "the in-flight model call was aborted");
+  assert.equal(call.reason.reason, "client_cancelled");
 
-    assert.equal(call.aborted, true, "the in-flight model call was aborted");
-    assert.equal(call.reason.reason, "client_cancelled");
+  const [stored] = (await readRuns(monolith.agentRunService)).filter(
+    (candidate) => candidate.runId === run.runId
+  );
+  const record = {
+    invocations: takePlanGraphInvocations(),
+    relayCalls: takeAgentStreamRelayCalls(),
+    run: projectAgentRun(stored),
+  };
 
-    const [stored] = (await readRuns(monolith.agentRunService)).filter(
-      (candidate) => candidate.runId === run.runId
-    );
-
-    records[pass] = {
-      invocations: takePlanGraphInvocations(),
-      relayCalls: takeAgentStreamRelayCalls(),
-      run: projectAgentRun(stored),
-    };
-    model.reset();
-  }
-
-  assert.deepStrictEqual(records.native.run.error, {
-    ...records.native.run.error,
+  assert.deepStrictEqual(record.run.error, {
+    ...record.run.error,
     code: "AGENT_CLIENT_CANCELLED",
     reason: "client_cancelled",
     retryable: false,
   });
-  assert.ok(records.native.run.steps.every((step) => step.status !== "running"));
-  assert.deepStrictEqual(maskVolatile(records.langgraph.run), maskVolatile(records.native.run));
-  assertMatchesGraphGolden(GOLDEN_SUITE, "client-leaves-canceled-run", maskVolatile(records.native.run));
-  assertMatchesGraphGolden(
-    GOLDEN_SUITE,
-    "client-leaves-canceled-run",
-    maskVolatile(records.langgraph.run),
-    { write: false }
-  );
-  assertOuterPlanFollowsItsOwnDial(records);
+  assert.ok(record.run.steps.every((step) => step.status !== "running"));
+  assertMatchesGraphGolden(GOLDEN_SUITE, "client-leaves-canceled-run", maskVolatile(record.run));
+  assertStreamedThroughTheGraph(record);
 });
 
-// The refusal belongs to the paths that build a LangGraph graph: with the
-// outer plan on LangGraph the stream refuses before the run exists; with the
-// outer dial unset a document question streams on the native branch and
-// loop, which build no graph and have no tracer to refuse (a custom-Skill DAG
-// or a v3 graph on that request refuses at its own entry).
-test("a LangSmith tracing variable makes the LangGraph stream refuse with an error frame and done before the run starts; the native branch is unaffected", async (t) => {
+// LangGraph never runs with a LangSmith tracer switched on, and every stream
+// builds the outer plan graph: the stream refuses before the run exists.
+// (The removed native branch built no graph for a document question and
+// answered it under such a variable.)
+test("a LangSmith tracing variable makes the stream refuse with an error frame and done before the run starts", async (t) => {
   installStreamingModel(t, () => SUPPORTED_SENTENCES.join("\n"));
 
   const monolith = await startMonolith(t, { ragService: createDraftingRagService() });
-  const requestUnderTracer = (pass) =>
-    withEnv({ ...PASSES[pass], LANGSMITH_TRACING: "true" }, async () => {
-      takeAgentStreamRelayCalls();
 
-      const response = await postChat(monolith.baseUrl, "/chat/stream");
+  takePlanGraphInvocations();
 
-      return {
-        frames: parseFrames(await response.text()),
-        relayCalls: takeAgentStreamRelayCalls(),
-        status: response.status,
-      };
-    });
+  const refused = await withEnv({ LANGSMITH_TRACING: "true" }, async () => {
+    takeAgentStreamRelayCalls();
 
-  const refused = await requestUnderTracer("langgraph");
+    const response = await postChat(monolith.baseUrl, "/chat/stream");
+
+    return {
+      frames: parseFrames(await response.text()),
+      relayCalls: takeAgentStreamRelayCalls(),
+      status: response.status,
+    };
+  });
 
   assert.equal(refused.status, 200);
   assert.deepStrictEqual(refused.frames.map(({ event }) => event), ["error", "done"]);
   assert.equal(refused.frames[0].data.status, 500);
   assert.match(refused.frames[0].data.error, /LangSmith tracing must stay off/);
   assert.match(refused.frames[0].data.error, /LANGSMITH_TRACING/);
-  // Refused before the run started: no run was recorded.
+  // Refused before the run started: no run was recorded, no plan scheduled.
   assert.deepStrictEqual(await listRuns(monolith.agentRunService), []);
   assert.equal(refused.relayCalls, 1);
-
-  takePlanGraphInvocations();
-
-  const native = await requestUnderTracer("native");
-
-  assert.equal(native.status, 200);
-  assert.deepStrictEqual(native.frames.map(({ event }) => event).slice(-2), ["result", "done"]);
-  assert.equal(native.frames.at(-2).data.status, 200);
-  assert.equal(native.relayCalls, 0);
   assert.deepStrictEqual(takePlanGraphInvocations(), []);
+
+  // With the variable gone the same app answers the same request.
+  const answered = await postChat(monolith.baseUrl, "/chat/stream");
+  const frames = parseFrames(await answered.text());
+
+  assert.deepStrictEqual(frames.map(({ event }) => event).slice(-2), ["result", "done"]);
+  assert.equal(frames.at(-2).data.status, 200);
   assert.equal((await listRuns(monolith.agentRunService)).length, 1);
 });
 

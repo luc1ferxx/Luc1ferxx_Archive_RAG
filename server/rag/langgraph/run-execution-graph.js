@@ -107,8 +107,8 @@ import {
 // checkpoint, gets the fresh invocation; a thread that contradicts the
 // checkpoint refuses the continuation.
 //
-// The invocation is always a root one. With the outer plan on LangGraph too
-// (AGENT_OUTER_PLAN_RUNTIME=langgraph), the custom-Skill graph is invoked from
+// The invocation is always a root one. The outer plan runs on LangGraph too
+// (since ADR 0001 phase 7 always), so the custom-Skill graph is invoked from
 // inside the outer execution plan's custom_skills node
 // (execution-plan-graph.js), where LangGraph's ambient config carries that
 // node's nesting keys; invoked there as is, the graph would run as a subgraph

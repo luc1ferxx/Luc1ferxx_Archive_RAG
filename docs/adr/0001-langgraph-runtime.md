@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，已定为最终决定（用户认可）。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -30,7 +30,7 @@
 | 3 | 统一图成为主图：外层阶段编进 StateGraph；审批走 `interrupt()`；SSE 走 `stream`；启动恢复走 checkpointer | `native` 下不变 |
 | 4 | `AGENT_RUNTIME` 默认改为 `langgraph`，删除被替代的调度代码，`native` 保留一个发布周期 | 切换 |
 
-阶段 5（收尾）和阶段 6（删除原生图调度器）是后加的，见各自的"结果"一节。阶段 6 提前结束了阶段 4 这一行的"`native` 保留一个发布周期"。
+阶段 5（收尾）、阶段 6（删除原生图调度器）和阶段 7（删除外层原生循环）是后加的，见各自的"结果"一节。阶段 6 提前结束了阶段 4 这一行的"`native` 保留一个发布周期"；阶段 7 之后 agent 只有 LangGraph 一种运行方式。
 
 **迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 是生产调度器，不属于被替代的调度代码，要删的只有原生图调度器 `runExecutionGraph`，阶段 6 已删除，见“阶段 5 结果”“阶段 6 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
 
@@ -521,6 +521,90 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - CI（Node 22）上的 golden 比较：还没跑。golden 在 Node 24 上生成，推送后由 CI 验证。
 - 代码量（阶段 4 说过要等删掉原生调度器后再衡量维护面）：`agent-execution-graph-runner.js` 478 → 295 行；生产代码 +397 −533 行，净减 136 行；测试（不含 golden）+4,353 −4,088 行，净增 265 行；golden 共 102 个文件、约 5.3 MB。维护面在生产代码上缩小了，测试一侧因为固定期望而变大。
 
+## 阶段 7 结果：外层计划只走 LangGraph，删除原生循环（2026-11-13）
+
+### 决定
+
+- 用户决定 agent 只保留一种运行方式（原话：“我不希望 agent 有两种运作模式，我只希望用已经迁移了的 langgraph”）。
+- 这推翻了阶段 5 的最终决定（“外层计划长期保持原生循环、不放宽压测硬门”，2026-10-16，同一位用户认可）。10% 的门没有重测，也没有通过：这次是知情地接受代价，换取只有一个调度器。
+- 删除之后 `AGENT_OUTER_PLAN_RUNTIME=native` 不再存在，也没有别的开关能回到原生循环。要回去只能 revert（见下文“怎样恢复”）。
+- 不动的部分：
+  - 各阶段的阶段体（`createAgentExecutionPlanStages`）、剪枝规则、底层 Pregel 图本身（阶段 5 的实现，未改一行调度逻辑）。
+  - 外层计划的持久性：仍然是 run 的 step 和回放矩阵，外层图不带 checkpointer。
+  - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`、`AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 默认 `off`）、三个 planner 开关。它们是灰度开关，不是调度器之分。
+
+### 代价（接受的）
+
+- 进程内（2026-11-13，删除之前在同一进程里交替 7 轮、每轮 400 次文档问答，Node 24.21.0，内存 run store、桩 ragService）：每次 `runAgentRag` 的 CPU 中位数 0.605 ms（原生循环）对 0.894 ms（LangGraph），多 0.29 ms；墙钟 0.506 对 0.701 ms。与阶段 5 的 0.28 ms 一致。
+- 压测没有重跑。阶段 5 的数字仍是唯一的端到端测量：pgvector、模型 0 ms、并发 1，每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）。阶段 7 之前写的压测报告里，`/chat` 的每请求 CPU 比同一提交现在测出来的低约 1 ms。
+- 真实模型下一次文档问答约 2.4 s，其中 99.5% 是答案模型（见 `docs/evaluation.md`“默认配置的答案漏斗、延迟和 token”），这 0.3 ms 看不出来。受影响的是 0 ms 假模型下的单进程吞吐上限。
+- 回答 agent 请求的进程在第一个请求时加载 `@langchain/*`（阶段 6 实测一次性约 174 ms）。split 部署的 api 边缘层、ingest worker、检索层和模型网关仍然不加载。
+
+### 删了什么
+
+- `agent-execution-plan-runner.js`：原生调度循环（`runAgentExecutionPlan` 里的 `for` 循环和阶段边界的 `throwIfRequestCancelled`）、`resolveAgentExecutionPlanRunner`。`runAgentExecutionPlan` 这个名字保留为唯一入口：按需导入图模块，把每个计划交给 `runAgentExecutionPlanOnLangGraph`。472 → 444 行。
+- `rag/config.js` 的 `getAgentOuterPlanRuntime()`。
+- `routes/chat.js` 的 `/chat/stream` native 分支。路由只剩 `streamAgentRun` 生成器一条路径（`rag/langgraph/agent-stream.js`，本身不依赖 `@langchain/*`，改为静态导入）。
+- `agent.js`：调用点直接调 `runAgentExecutionPlan`。
+- 压测 `evaluation/run-api-load-bench.mjs`：`--outer-plan-runtime` 只接受 `langgraph`；`native` 在参数检查时给出压测自己的错误，其他值也拒绝。app 子进程不再收到 `AGENT_OUTER_PLAN_RUNTIME`。报告的 `config.outerPlanRuntime` 从此总是 `langgraph`，旧报告照原样渲染。
+- 测试里的 native 一趟：四个对拍套件改为只在 LangGraph 上跑一次、对照 golden（见“等价保护怎么保住”）。`service-split.e2e` 不再把 `AGENT_OUTER_PLAN_RUNTIME` 从 shell 透传给各 tier。
+
+### 拒绝已删除的取值
+
+- `assertAgentRuntimeSupported(env)` 现在检查两个变量，各有错误码：`AGENT_RUNTIME`（`AGENT_RUNTIME_REMOVED`，阶段 6，文案未变）和 `AGENT_OUTER_PLAN_RUNTIME`（`AGENT_OUTER_PLAN_RUNTIME_REMOVED`）。
+  - 照常启动：未设置、空串、纯空白、`langgraph`（去首尾空白，大小写不限）。
+  - `native`：拒绝，“AGENT_OUTER_PLAN_RUNTIME=native was removed (ADR 0001 phase 7): the outer execution plan always runs on LangGraph. Unset AGENT_OUTER_PLAN_RUNTIME or set it to langgraph.”
+  - 其他值（如 `pregel`）：同样拒绝，信息里带原值。
+- 行为变化：阶段 7 之前，`AGENT_OUTER_PLAN_RUNTIME` 拼错的值静默落到 native。现在没有 native 可落，拼错即拒绝启动。`server/.env` 里如果显式写了 `AGENT_OUTER_PLAN_RUNTIME=native`，要删掉这一行。
+- 检查位置：阶段 6 的全部位置（`server.js`、`startServiceRole`、`createAppServices`、custom-Skill stage、v3 的三个入口与 stage、执行器），再加外层计划的入口 `runAgentExecutionPlanOnLangGraph`（在校验计划、建任何阶段之前）。
+- 检查范围因此变宽：阶段 6 时“不调度图的请求不检查”，因为它们在两种 runtime 下走同一份代码。现在每个走到外层计划的请求都调度图，所以不建 app、直接调 `runAgentRag` 的 eval runner 在环境里有任一已删除取值时，文档问答也以对应的 `*_REMOVED` 失败（trajectory 报告里是一条 `case_error`）。
+- LangSmith：外层计划的入口本来就在建图之前拒绝 LangSmith 追踪变量。阶段 7 之前，普通文档问答走原生循环、不建图，在这种变量下照常回答；现在每个走到外层计划的请求都被拒绝（`/chat/stream` 在 run 创建之前给出 `error`、`done` 两帧，`/chat` 在规划之后把 run 置为 failed，错误码 `LANGSMITH_TRACING_ENABLED`）。`server.js` 启动时本来就拒绝这种变量，受影响的只有绕过启动检查的进程内调用方。规划器的模型调用在这种变量下仍走直接路径、不拒绝（阶段 5 的理由不变）。
+- `test/agent-runtime-removed.test.mjs`（15 个测试，原 9 个）对两个变量各跑一遍：取值、`startServiceRole`、真实执行 `node server.js`、`createAppServices`、执行器；新增外层计划入口在读计划之前拒绝，以及 eval runner 的文档问答、custom-Skill DAG、v3 统一图三类用例在任一变量为 `native` 时得到 `case_error`。
+
+### 等价保护怎么保住
+
+- 办法和阶段 6 相同：先冻结，再删除，两个提交分开。
+- 冻结提交 3313b40b：四个对拍套件原来在同一进程里把每个场景跑两趟（原生循环一趟、LangGraph 一趟）并要求屏蔽后逐字节一致。在这个提交上，native 一趟把屏蔽后的结果写成 golden（`UPDATE_GRAPH_GOLDENS=1`，只有 native 一趟允许写），两趟都对照同一份 golden，LangGraph 一趟传 `write: false`。所以每个 fixture 都是原生循环的记录，并且在同一提交上被证明等于 LangGraph 的结果。新增 32 个文件：
+  - `langgraph-execution-plan-graph`：24 个。10 个 trajectory 用例（另外 3 个跑 custom-Skill DAG 的用例沿用阶段 6 的 fixture，内容未变）和 14 个直接场景：research brief、弃答后走 Web（有、无常设批准）、依赖故障、阶段边界取消（两种原因）、阶段内取消、阶段内超时、一串事件之后抛错（两种原因）、交错计划（两种原因 × 运行前/文档阶段中）。每份包含响应或错误、流式客户端会收到的 agent 事件、run 的事件/step/结果/错误。
+  - `langgraph-chat-stream`：5 个。线上的 SSE 字节、解析出的帧、run：完整支持的答案、含不被支持句子的答案、运行中超时、一串 trace step 之后超时、客户端离开后被取消的 run。
+  - `langgraph-routes`：3 个。`POST /chat` 文档问答、`POST /chat/stream` 连同 `GET`/`POST /chat`、V1 Capability 审批（暂停、暂停的 run、批准的响应、完成的 run）。
+- 删除提交之后，这些套件每个场景只在 LangGraph 上跑一次，对照 golden，屏蔽规则与删除前相同。fixture 在删除前后逐字节未变。
+  - `langgraph-execution-plan-graph`：26/26。另外断言每个该走到外层计划的场景确实把计划交给了图（tap），并且剪枝确实发生。
+  - `langgraph-chat-stream`：8/8。另外断言每条流经过 `streamAgentRun`、外层计划被调度一次。
+  - `langgraph-routes`：8/8。阶段 6 从原生图调度器冻结的 5 份 golden 是在外层计划走原生循环、流走 native 分支时冻结的，现在外层计划和流都在 LangGraph 上，仍然逐字节一致（包括 v3 流到审批暂停的 SSE 字节）。
+  - `agent-run-chat-statement-count`：10/10。原来的 `default`、`outerPlan` 两趟合成一趟；store 调用数和语句数不变（外层图没有 checkpointer）。
+  - `langgraph-runtime-parity`（6/6）、`langgraph-unified-graph`（25/25）、`langgraph-unified-graph-without-run-target`（4/4）、`langgraph-planner-model`（12/12）：没有改断言，golden 都是外层计划走原生循环时冻结的，现在照样通过。
+- 直接调用原生循环的套件改指同一个名字：`agent-execution-plan-runner`（13 个）断言一条没改，`runAgentExecutionPlan` 现在就是 LangGraph 入口。`agent-execution-plan-pruning`（13 个）里两个“原生对 LangGraph”的测试改为：逐个调用每个阶段体（原生循环做的事）得到的状态，等于图跑出来的状态；取消的错误码、状态码写成字面期望。
+- `UPDATE_GRAPH_GOLDENS` 规则不变（阶段 6）：现在只有 LangGraph 一侧，`=1` 从它写入，写了的那次仍然失败。
+
+### 流式实测
+
+- 外层图把阶段里发出的 agent 事件经 `config.writer` 作为 custom chunk 送出，消费循环再交给绑定在 run 外面的 sink。担心的是事件会不会攒到节点结束才到。
+- 实测（进程内，`streamAgentRun`，文档阶段的桩先发一个事件、等 300 ms、再发一个、再等 300 ms 后回答）：两个事件到达消费者的时刻比发出晚 0 ms 和 1 ms，没有攒批。answer draft 走的是同一条通道。
+- SSE 字节与原生分支一致，由 `langgraph-chat-stream` 和 `langgraph-routes` 的 golden 钉住。
+
+### 失去、且没有替代的覆盖
+
+- 两趟互比变成对照 golden 之后，新增的场景不再有原生一侧可比：以后给外层计划加场景，只能靠字面断言，或者从 LangGraph 写新的 golden。
+- 压测里的 native 对照：`--outer-plan-runtime native` 已不可用。要重现阶段 3、5 的对比，只能在删除提交之前的 checkout 上跑。
+- LangSmith 变量下“原生分支照常回答文档问答”的两条断言：原生分支不存在了，改为断言去掉变量后同一个 app 照常回答。
+
+### 怎样恢复
+
+- `git revert` 阶段 7 的删除提交。它恢复原生循环、`getAgentOuterPlanRuntime()`、`resolveAgentExecutionPlanRunner`、路由的 native 分支、压测的 `native` 取值和各套件的 native 一趟，并去掉 `AGENT_OUTER_PLAN_RUNTIME` 的启动拒绝。冻结提交可以保留。
+- 没有在途数据要处理：外层图不带 checkpointer，不写线程记录，run 的 step 和事件在两种调度下相同。
+
+### 证据
+
+- 改动前基线（b8e4d2ed）：`eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8，在原生循环和 `AGENT_OUTER_PLAN_RUNTIME=langgraph` 下各跑一次，屏蔽 UUID、时间戳、时长和 git 状态后逐字节一致。删除之后再跑一次，与基线同样一致。
+- 删除之后逐个运行的单文件套件（Node 24.21.0）：`langgraph-execution-plan-graph` 26/26、`langgraph-chat-stream` 8/8、`langgraph-routes` 8/8、`agent-run-chat-statement-count` 10/10、`agent-execution-plan-runner` 13/13、`agent-execution-plan-pruning` 13/13、`langgraph-execution-plan-graph-isolation` 7/7、`agent-runtime-removed` 15/15、`langgraph-runtime-parity` 6/6、`langgraph-planner-model` 12/12、`langgraph-unified-graph` 25/25、`langgraph-unified-graph-without-run-target` 4/4、`langgraph-execution-graph-runtime` 43/43、`agent-cancellation` 20/20、`request-deadline-split` 4/4、`load-test` 63/63、`graph-goldens` 5/5、`chat-input-bounds` 7/7。
+- 全量结果（本机 Node 24.21.0，删除之后）：
+  - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（`scripts/run-pgvector-integration.sh` 起的集群，与 CI 的 `server-tests` 同一条命令）：4,585 个测试，4,578 通过、7 跳过、0 失败；全局行覆盖 92.58%，五组覆盖率门和目标都通过。跳过的 7 个需要 Redis、读副本或旧版本 checkout，与改动无关。PostgreSQL 集成套件（`agent-execution-graph-postgres.integration`、`agent-unified-graph-postgres.integration`、`langgraph-checkpointer-postgres.integration` 等）都在其中，没有跳过。
+  - 不接数据库再跑一次：4,413 个测试，4,385 通过、28 跳过、0 失败。这种跑法下覆盖率清单会报 `tenant-encryption-maintenance.js` 缺失，因为唯一导入它的集成套件被跳过了；这是本机没有数据库时的既有现象，不是这次改动带来的。
+  - `quality:current`：见提交后的记录（删除提交上、干净工作区、一次性 PostgreSQL、五项确定性评测都由该提交生成）。
+  - CI（Node 22）上的 golden 比较：新增的 32 个 fixture 在 Node 24 上生成，推送后由 CI 验证。
+- 代码量（删除提交相对冻结提交 3313b40b）：生产代码（`server/rag`、`server/routes`）+204 −235 行，净减 31 行，其中大半是注释改写，真正删掉的是原生循环、选择调度器的函数、`getAgentOuterPlanRuntime()` 和路由的 native 分支；测试 +1,186 −1,330 行，净减 144 行（每个场景少了第二趟）。冻结提交另加 32 个 golden 文件，约 1.1 MB，golden 总量约 6.4 MB。这次换来的不是代码量，而是只有一个调度器、一条流式路径、少一个要测两遍的开关。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
@@ -555,6 +639,9 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `AGENT_RUNTIME` 只接受未设置、空值、空白或 `langgraph`，其他值拒绝启动（`AGENT_RUNTIME_REMOVED`）。
   - 恢复原生调度器的唯一办法是 `git revert` 阶段 6 的提交，见“阶段 6 结果”。
   - 仍然可用的运维回退：`AGENT_SKILL_GRAPH_ROLLOUT=off` 让 custom-Skill 阶段回到 V1 顺序链；`AGENT_UNIFIED_GRAPH_ROLLOUT` 默认 `off`，v3 图不执行。
+- 阶段 7 起：外层计划也没有运行时回退开关。
+  - 原生循环和 `AGENT_OUTER_PLAN_RUNTIME=native` 已删除，变量只接受未设置、空值、空白或 `langgraph`，其他值拒绝启动（`AGENT_OUTER_PLAN_RUNTIME_REMOVED`）。
+  - 恢复原生循环的唯一办法是 `git revert` 阶段 7 的删除提交，见“阶段 7 结果”。外层图不写线程记录，没有在途数据要处理。
 - 数据（阶段 4、5 的规则，revert 阶段 6 之后同样适用）：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。阶段 4、5 时两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。阶段 6 删掉了“交给 native 接管”这一方向的用例，revert 会把它们一起恢复；“native 留下的 run 由 LangGraph 接管”这一方向仍由删掉线程后续跑、恢复的用例钉住（见“阶段 6 结果”的“升级时在途的 run”）。
 
 ## 明确不做

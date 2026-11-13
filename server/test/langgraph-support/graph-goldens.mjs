@@ -9,7 +9,11 @@
 // comparisons that are not the pre-deletion ones (the unified-graph replay
 // sweep is now masked and digested; the planner goldens normalize a port and
 // a V8 message suffix) and the native runs that have no golden (the
-// PostgreSQL integration suites').
+// PostgreSQL integration suites'). Phase 7 did the same for the native outer
+// loop before deleting it: its pass of every scenario the outer plan answers
+// (langgraph-execution-plan-graph, langgraph-chat-stream and three
+// langgraph-routes fixtures) was frozen at commit 3313b40b, where the native
+// pass wrote each fixture and the LangGraph pass was held to it.
 //
 //   assertMatchesGraphGolden(suiteName, caseName, maskedValue)
 //     compares the canonical form of an already-masked value with
@@ -26,8 +30,8 @@
 // entries, Dates), so a property that is present-but-undefined still differs
 // from a missing one.
 //
-// Writing. A golden is the record of what the deleted native scheduler did,
-// so rewriting one is a decision, never a side effect of a run:
+// Writing. A golden is the record of what a deleted native scheduler did, so
+// rewriting one is a decision, never a side effect of a run:
 //   - Without UPDATE_GRAPH_GOLDENS a missing or different fixture fails the
 //     test, and nothing is written.
 //   - UPDATE_GRAPH_GOLDENS=1 writes from the runtime under test (LangGraph,

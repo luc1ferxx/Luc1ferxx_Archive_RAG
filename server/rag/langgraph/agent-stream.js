@@ -5,28 +5,27 @@ import {
 } from "../agent-event-stream.js";
 import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 
-// /chat/stream with the outer plan on LangGraph (docs/adr/0001-langgraph-
-// runtime.md, phase 3; routes/chat.js uses it only under the experimental
-// AGENT_OUTER_PLAN_RUNTIME=langgraph): the agent run as an async generator of
-// the events the native route sends, in the same order, ending with the
-// result event (the /chat status and body) or the error event the route
-// derives from the run's failure, then done.
+// /chat/stream (routes/chat.js, its only path since phase 7 of docs/adr/0001-
+// langgraph-runtime.md removed the route's native branch): the agent run as an
+// async generator of its events in emission order, ending with the result
+// event (the /chat status and body) or the error event the route derives from
+// the run's failure, then done. The bytes the removed branch sent are frozen
+// under test/fixtures/graph-goldens/ (langgraph-chat-stream, langgraph-routes).
 //
-// The native route binds one event sink (agent-event-stream.js) around the
-// whole run and writes each event to the response as it is emitted. This
-// module keeps that sink -- it is bound around the whole run here too, so the
-// planner steps before any graph, the finalizer step after it and the steps
-// of whichever graph answers the request (the V1 outer plan on LangGraph,
-// a guarded v3 graph) all reach the client -- and adds the bridge a graph
-// needs: inside a node of a graph that streams with the "custom" mode, the
-// sink's events go to LangGraph's config.writer, come out of graph.stream()
-// as custom chunks in emission order, and the graph's consumer loop hands
-// them to the outer sink. A graph invoked without the relay (invoke, or a
-// stream without "custom") leaves the outer sink in place and loses nothing.
+// One event sink (agent-event-stream.js) is bound around the whole run, so
+// the planner steps before any graph, the finalizer step after it and the
+// steps of whichever graph answers the request (the V1 outer plan, a guarded
+// v3 graph) all reach the client. A graph that streams with the "custom" mode
+// needs a bridge to that sink, which this module also provides: inside a node
+// the sink's events go to LangGraph's config.writer, come out of
+// graph.stream() as custom chunks in emission order, and the graph's consumer
+// loop hands them to the outer sink. A graph invoked without the relay
+// (invoke, or a stream without "custom") leaves the outer sink in place and
+// loses nothing.
 //
 // Raw answer tokens never leave the server: the only events are compact step
-// summaries and the verified answer drafts of answer-drafts.js, exactly what
-// the native sink carries. "messages" is never a stream mode here.
+// summaries and the verified answer drafts of answer-drafts.js. "messages" is
+// never a stream mode here.
 
 export const AGENT_STREAM_EVENT_TYPES = Object.freeze({
   done: "done",
@@ -134,15 +133,15 @@ const createEventQueue = () => {
  * The /chat/stream event sequence of one agent run. `answer()` runs the agent
  * and resolves to the /chat `{ status, body }`; `describeError(error,
  * fallbackMessage)` is the route's own failure description (`{ body, status
- * }`), so an error event here is byte for byte what the native route sends.
+ * }`), so an error event carries exactly what /chat would answer.
  *
  * Yields each agent event the run emits (`type` trace_step, answer_draft,
  * answer_draft_reset) as emitted, then `{ type: "result", body, status }` or
  * `{ type: "error", body, status }`, then `{ type: "done" }`. The generator
  * starts the run on its first next(), inside the caller's async context, so
- * the request's deadline, tenant and run usage bind as they do for the
- * native route. A LangSmith tracer switched on is refused before the run
- * starts, as the error/done sequence.
+ * the request's deadline, tenant and run usage bind as they do for /chat. A
+ * LangSmith tracer switched on is refused before the run starts, as the
+ * error/done sequence.
  */
 export async function* streamAgentRun({
   answer,
@@ -189,8 +188,8 @@ export async function* streamAgentRun({
 }
 
 /**
- * The SSE frame of one yielded event: `{ event, data }` as the native route
- * writes them (`event: <name>`, `data: <JSON>`): an agent event is sent whole
+ * The SSE frame of one yielded event: `{ event, data }` as the route writes
+ * them (`event: <name>`, `data: <JSON>`): an agent event is sent whole
  * under its type; result as `{ body, status }`; error as the failure body
  * plus `status`; done as `{}`.
  */

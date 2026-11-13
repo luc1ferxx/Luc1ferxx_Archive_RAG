@@ -380,15 +380,12 @@ const spawnTier = async ({ args, environment, name }) => {
 // Only what a process needs to run; nothing from the developer's shell or
 // server/.env (DOTENV_CONFIG_PATH names an empty file, and the working
 // directory is the temp root) can point a tier elsewhere.
-// AGENT_OUTER_PLAN_RUNTIME is the one setting handed through: it selects the
-// scheduler every tier runs its outer plan on
-// (docs/adr/0001-langgraph-runtime.md), so the split can be driven on either
-// outer-plan scheduler from the shell, as the monolith suites are. The agent
-// graphs always run on LangGraph; AGENT_RUNTIME, whose native value phase 6
-// removed, is not handed through, so a stale shell value cannot make the
-// tiers refuse to start.
+// The agent runs on LangGraph only (docs/adr/0001-langgraph-runtime.md):
+// neither AGENT_RUNTIME nor AGENT_OUTER_PLAN_RUNTIME, whose native values
+// phases 6 and 7 removed, is handed through, so a stale shell value cannot
+// make the tiers refuse to start.
 const INHERITED_VARIABLES =
-  /^(AGENT_OUTER_PLAN_RUNTIME|HOME|LANG|LC_ALL|NODE_V8_COVERAGE|PATH|SYSTEMROOT|TEMP|TMP|TMPDIR)$/u;
+  /^(HOME|LANG|LC_ALL|NODE_V8_COVERAGE|PATH|SYSTEMROOT|TEMP|TMP|TMPDIR)$/u;
 const emptyEnvironmentFile = path.join(tempRoot, "empty.env");
 
 writeFileSync(emptyEnvironmentFile, "", "utf8");
