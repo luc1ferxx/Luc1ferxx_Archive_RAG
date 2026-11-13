@@ -1,0 +1,259 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "document_rag:primary",
+        "label": "Document RAG",
+        "status": "completed",
+        "summary": "Document RAG returned 1 citation.",
+        "type": "document_rag"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-self_check",
+        "label": "Self Check",
+        "status": "completed",
+        "summary": "Evidence check passed with 1 citation across 1 cited document.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "5-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Final answer passed claim-level citation finalization with 1 supported claim.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "planner",
+        "detail": {
+          "candidateIntentIds": [
+            "document"
+          ],
+          "experienceMemory": {
+            "applied": false,
+            "hintCount": 0
+          },
+          "fallback": true,
+          "fallbackReason": "Invalid AgentRAG intent selection: shell.exec.",
+          "requestedPlannerId": "unsafe_intent_adapter",
+          "selectedIntentId": "document",
+          "selectedMode": "document",
+          "selectedPlannerId": "deterministic",
+          "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+          "status": "fallback"
+        },
+        "id": "intent_planner_fell_back",
+        "label": "Intent planner fell back from invalid adapter output",
+        "passed": true
+      },
+      {
+        "category": "planner",
+        "detail": {
+          "fallback": true,
+          "fallbackReason": "Invalid AgentRAG execution plan: unknown execution step shell_exec.",
+          "requestedPlannerId": "unsafe_execution_adapter",
+          "selectedPlannerId": "deterministic",
+          "status": "fallback",
+          "stepIds": [
+            "arxiv_import",
+            "workspace_action",
+            "research_brief",
+            "inventory",
+            "document_discovery",
+            "document_rag",
+            "web_search"
+          ]
+        },
+        "id": "execution_planner_fell_back",
+        "label": "Execution planner fell back from invalid adapter output",
+        "passed": true
+      },
+      {
+        "category": "planner",
+        "detail": {
+          "agentMode": "document",
+          "selectedSkills": [
+            "document_rag"
+          ],
+          "traceTypes": [
+            "plan",
+            "query_planner",
+            "document_rag",
+            "self_check",
+            "synthesis",
+            "answer_finalizer"
+          ]
+        },
+        "id": "fallback_runs_document_rag",
+        "label": "Fallback plan still runs whitelisted document RAG",
+        "passed": true
+      }
+    ],
+    "description": "Invalid intent and execution planner adapter output should fall back to deterministic whitelisted plans.",
+    "failedCheckCount": 0,
+    "id": "planner_fallback",
+    "label": "Planner fallback",
+    "passed": true,
+    "response": {
+      "agentMode": "document",
+      "agentSkills": [
+        {
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 1,
+          "researchQuestions": 0,
+          "traceSteps": 6,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": null,
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [],
+        "gapsIdentified": 0,
+        "maxFollowUps": 1,
+        "stoppedReason": "not_needed",
+        "version": "1.0"
+      },
+      "observed": {
+        "executionPlanner": {
+          "fallback": true,
+          "fallbackReason": "Invalid AgentRAG execution plan: unknown execution step shell_exec.",
+          "requestedPlannerId": "unsafe_execution_adapter",
+          "selectedPlannerId": "deterministic",
+          "status": "fallback",
+          "stepIds": [
+            "arxiv_import",
+            "workspace_action",
+            "research_brief",
+            "inventory",
+            "document_discovery",
+            "document_rag",
+            "web_search"
+          ]
+        },
+        "intentPlanner": {
+          "fallback": true,
+          "fallbackReason": "Invalid AgentRAG intent selection: shell.exec.",
+          "requestedPlannerId": "unsafe_intent_adapter",
+          "selectedIntentId": "document",
+          "selectedMode": "document",
+          "selectedPlannerId": "deterministic",
+          "status": "fallback"
+        },
+        "selectedSkillIds": [
+          "document_rag"
+        ],
+        "traceTypes": [
+          "plan",
+          "query_planner",
+          "document_rag",
+          "self_check",
+          "synthesis",
+          "answer_finalizer"
+        ]
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "documentRagCalls",
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 1,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "document_rag",
+        "self_check",
+        "synthesis",
+        "answer_finalizer"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 2,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

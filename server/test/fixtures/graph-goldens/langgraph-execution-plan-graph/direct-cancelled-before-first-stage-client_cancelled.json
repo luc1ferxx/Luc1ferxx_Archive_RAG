@@ -1,0 +1,111 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Use selected documents and synthesize a grounded answer.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "error": {
+      "causeCode": null,
+      "code": "AGENT_CLIENT_CANCELLED",
+      "dependency": null,
+      "message": "The client disconnected before the answer was complete.",
+      "name": "RequestCancelledError",
+      "reason": "client_cancelled",
+      "retryable": false,
+      "status": 499
+    },
+    "errorIsCancellation": true,
+    "errorIsOutage": false,
+    "response": null,
+    "runs": [
+      {
+        "error": {
+          "code": "AGENT_CLIENT_CANCELLED",
+          "message": "The client disconnected before the answer was complete.",
+          "name": "RequestCancelledError",
+          "reason": "client_cancelled",
+          "retryable": false
+        },
+        "events": [
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:1",
+            "payload": {
+              "status": "running"
+            },
+            "type": "run_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:2",
+            "payload": {
+              "traceStepCount": 2
+            },
+            "type": "run_prepared"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:3",
+            "payload": {
+              "planner": {
+                "fallback": false,
+                "fallbackReason": null,
+                "requestedPlannerId": "deterministic",
+                "selectedPlannerId": "deterministic",
+                "status": "selected",
+                "stepIds": [
+                  "arxiv_import",
+                  "workspace_action",
+                  "research_brief",
+                  "inventory",
+                  "document_discovery",
+                  "document_rag",
+                  "web_search"
+                ]
+              }
+            },
+            "type": "execution_planned"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:4",
+            "payload": {
+              "error": {
+                "code": "AGENT_CLIENT_CANCELLED",
+                "message": "The client disconnected before the answer was complete.",
+                "name": "RequestCancelledError",
+                "reason": "client_cancelled",
+                "retryable": false
+              },
+              "reason": "client_cancelled",
+              "status": "canceled"
+            },
+            "type": "run_canceled"
+          }
+        ],
+        "result": {},
+        "status": "canceled",
+        "steps": []
+      }
+    ]
+  },
+  "runs": []
+}

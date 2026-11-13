@@ -1,0 +1,2333 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Create a structured research brief from selected documents.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-research_plan",
+        "label": "Research Plan",
+        "status": "completed",
+        "summary": "Planned 3 document-grounded research questions.",
+        "type": "research_plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "research_question:rq-1",
+        "label": "Research Question",
+        "status": "completed",
+        "summary": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+        "type": "research_question"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "research_question:rq-2",
+        "label": "Research Question",
+        "status": "completed",
+        "summary": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+        "type": "research_question"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "research_question:rq-3",
+        "label": "Research Question",
+        "status": "completed",
+        "summary": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+        "type": "research_question"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "6-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "7-self_check",
+        "label": "Final Self Check",
+        "status": "completed",
+        "summary": "Evidence check passed with 3 citations across 1 cited document.",
+        "type": "self_check"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "8-answer_finalizer",
+        "label": "Answer Finalizer",
+        "status": "completed",
+        "summary": "Research brief findings passed claim-level citation finalization.",
+        "type": "answer_finalizer"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "error": null,
+    "errorIsCancellation": false,
+    "errorIsOutage": false,
+    "response": {
+      "body": {
+        "agentAnswer": "Executive Summary\nThe research brief ran 3 document-grounded lookups for: Write a research brief on the key risks in this policy.\n\nKey Findings\n1. Remote work requires manager approval. [Source 1] [Source 1]\n2. Remote work requires manager approval. [Source 2] [Source 2]\n3. Remote work requires manager approval. [Source 3] [Source 3]\n\nEvidence By Document\n- policy.pdf: 3 citations on page 2.\n\nConflicts Or Gaps\n- No explicit tool failures or abstentions were reported. Review citations for source-level nuance.\n\nRecommended Next Questions\n- What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+        "agentMode": "research_brief",
+        "agentObservability": {
+          "agentMode": "research_brief",
+          "budget": {
+            "limits": {
+              "maxArxivPaperFetches": 1,
+              "maxCustomSkillCalls": 2,
+              "maxDocumentRagCalls": 2,
+              "maxResearchQuestions": 3,
+              "maxTraceSteps": 16,
+              "maxWebSearchCalls": 1
+            },
+            "run": {
+              "exhausted": null,
+              "limits": {
+                "maxCostUsd": 0.5,
+                "maxDurationMs": 300000,
+                "maxTokens": 100000
+              },
+              "used": {
+                "costUsd": 0,
+                "durationMs": "<elapsed>",
+                "modelCalls": 0,
+                "tokens": 0,
+                "unpricedModelCalls": 0
+              }
+            },
+            "traceTruncated": false,
+            "used": {
+              "arxivPaperFetches": 0,
+              "customSkillCalls": 0,
+              "documentRagCalls": 0,
+              "researchQuestions": 3,
+              "traceSteps": 8,
+              "webSearchCalls": 0
+            }
+          },
+          "executionLoop": {
+            "followUpsRun": 0,
+            "gaps": [],
+            "gapsIdentified": 0,
+            "maxFollowUps": 1,
+            "stoppedReason": "not_needed",
+            "version": "1.0"
+          },
+          "executionPlanner": {
+            "fallback": false,
+            "fallbackReason": null,
+            "requestedPlannerId": "deterministic",
+            "selectedPlannerId": "deterministic",
+            "status": "selected",
+            "stepIds": [
+              "arxiv_import",
+              "workspace_action",
+              "research_brief",
+              "inventory",
+              "document_discovery",
+              "document_rag",
+              "web_search"
+            ]
+          },
+          "experienceMemory": {
+            "applied": false,
+            "enabled": false,
+            "error": null,
+            "hintCount": 0,
+            "hints": [],
+            "hitCount": 0,
+            "planningHints": [],
+            "reason": "env_disabled",
+            "status": "disabled",
+            "storedCount": 0,
+            "write": {
+              "enabled": false,
+              "error": null,
+              "prunedCount": 0,
+              "recordCount": 0,
+              "recordTypes": [],
+              "skippedReason": "env_disabled",
+              "status": "skipped",
+              "storedCount": 0,
+              "storedRecords": [],
+              "writeAttempted": false
+            },
+            "writeAttempted": false,
+            "writeSkippedReason": "env_disabled"
+          },
+          "intentPlanner": {
+            "candidateIntentIds": [
+              "research_brief",
+              "document"
+            ],
+            "experienceMemory": {
+              "applied": false,
+              "hintCount": 0
+            },
+            "fallback": false,
+            "fallbackReason": null,
+            "requestedPlannerId": "deterministic",
+            "selectedIntentId": "research_brief",
+            "selectedMode": "research_brief",
+            "selectedPlannerId": "deterministic",
+            "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+            "status": "selected"
+          },
+          "longMemory": {
+            "enabled": false,
+            "postgresConfigured": false,
+            "reason": "env_disabled",
+            "status": "disabled"
+          },
+          "planMode": "research_brief",
+          "promptTemplates": [],
+          "runs": [
+            {
+              "abstained": false,
+              "budget": null,
+              "budgetDelta": {
+                "researchQuestions": 3
+              },
+              "citationCount": 3,
+              "durationMs": "<elapsed>",
+              "error": null,
+              "label": "Research Brief",
+              "phase": "primary",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "status": "completed"
+            }
+          ],
+          "selectedSkills": [
+            {
+              "budgetKey": "researchQuestions",
+              "label": "Research Brief",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "skillChain": [],
+          "skills": [
+            {
+              "abstained": false,
+              "attempts": 1,
+              "budgetDelta": {
+                "researchQuestions": 3
+              },
+              "budgetKey": "researchQuestions",
+              "budgetLimit": null,
+              "budgetRemaining": null,
+              "budgetUsed": null,
+              "citationCount": 3,
+              "errorCount": 0,
+              "errors": [],
+              "followUpCount": 0,
+              "label": "Research Brief",
+              "lastCitationCount": 3,
+              "retryCount": 0,
+              "selected": true,
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "skippedCount": 0,
+              "status": "completed",
+              "totalDurationMs": "<elapsed>"
+            }
+          ],
+          "taskMemory": null,
+          "workingMemory": {
+            "checkedQueries": [],
+            "docIds": [
+              "doc-1"
+            ],
+            "goal": "Write a research brief on the key risks in this policy.",
+            "resolvedGaps": [],
+            "supportedClaims": [
+              {
+                "anchors": [
+                  "require"
+                ],
+                "missingAnchors": [],
+                "phase": "final",
+                "skillId": "research_brief",
+                "skillVersion": "1.0.0",
+                "text": "Remote work requires manager approval",
+                "tokenOverlap": 1
+              }
+            ],
+            "unresolvedGaps": [],
+            "unsupportedClaims": [],
+            "version": "1.0"
+          }
+        },
+        "agentRunId": "<id>",
+        "agentRunStatus": "completed",
+        "agentRunSteps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Create a structured research brief from selected documents."
+                },
+                {
+                  "id": "research_questions",
+                  "label": "Run research questions",
+                  "summary": "Break the request into deterministic document-grounded questions."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "research_brief",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Create a structured research brief from selected documents.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "questions": [
+                {
+                  "id": "rq-1",
+                  "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-2",
+                  "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-3",
+                  "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                }
+              ],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "2-research_plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Research Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Planned 3 document-grounded research questions.",
+            "traceStepId": "2-research_plan",
+            "type": "research_plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-1",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-1",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-1",
+              "resolvedQuery": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-1",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-2",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-2",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-2",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-2",
+              "resolvedQuery": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-2",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-3",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-3",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-3",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-3",
+              "resolvedQuery": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-3",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 3,
+                  "traceSteps": 5,
+                  "webSearchCalls": 0
+                }
+              },
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "research_brief",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": false,
+              "hasResearchBrief": true,
+              "hasWebResult": false,
+              "sourceCount": 3
+            },
+            "kind": "decision",
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 1041,
+              "sourceCount": 3
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "traceStepId": "6-synthesis",
+            "type": "synthesis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 3,
+              "citedDocCount": 1,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalAnswer": true,
+              "gaps": [],
+              "passed": true,
+              "reasons": [],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false,
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "7-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Self Check",
+            "output": {
+              "gapCount": 0,
+              "passed": true,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Evidence check passed with 3 citations across 1 cited document.",
+            "traceStepId": "7-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "changed": false,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalizedScope": "research_findings",
+              "removedClaims": [],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "8-answer_finalizer",
+            "input": null,
+            "kind": "observation",
+            "label": "Answer Finalizer",
+            "output": {
+              "abstained": false,
+              "changed": false,
+              "removedClaimCount": 0,
+              "skippedReason": "",
+              "unsupportedClaimCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Research brief findings passed claim-level citation finalization.",
+            "traceStepId": "8-answer_finalizer",
+            "type": "answer_finalizer",
+            "updatedAt": "<time>"
+          }
+        ],
+        "agentSkills": [
+          {
+            "label": "Research Brief",
+            "skillId": "research_brief",
+            "skillVersion": "1.0.0",
+            "status": "completed"
+          }
+        ],
+        "agentTrace": [
+          {
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Create a structured research brief from selected documents."
+                },
+                {
+                  "id": "research_questions",
+                  "label": "Run research questions",
+                  "summary": "Break the request into deterministic document-grounded questions."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "research_brief"
+            },
+            "id": "1-plan",
+            "label": "Plan",
+            "status": "completed",
+            "summary": "Create a structured research brief from selected documents.",
+            "type": "plan"
+          },
+          {
+            "detail": {
+              "questions": [
+                {
+                  "id": "rq-1",
+                  "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-2",
+                  "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-3",
+                  "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                }
+              ]
+            },
+            "id": "2-research_plan",
+            "label": "Research Plan",
+            "status": "completed",
+            "summary": "Planned 3 document-grounded research questions.",
+            "type": "research_plan"
+          },
+          {
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0"
+            },
+            "error": null,
+            "id": "research_question:rq-1",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "researchQuestionId": "rq-1",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-1",
+              "resolvedQuery": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "status": "completed",
+            "summary": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "type": "research_question"
+          },
+          {
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-2",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0"
+            },
+            "error": null,
+            "id": "research_question:rq-2",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "researchQuestionId": "rq-2",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-2",
+              "resolvedQuery": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 2]"
+            },
+            "status": "completed",
+            "summary": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "type": "research_question"
+          },
+          {
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-3",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0"
+            },
+            "error": null,
+            "id": "research_question:rq-3",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "researchQuestionId": "rq-3",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-3",
+              "resolvedQuery": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 3]"
+            },
+            "status": "completed",
+            "summary": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "type": "research_question"
+          },
+          {
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 3,
+                  "traceSteps": 5,
+                  "webSearchCalls": 0
+                }
+              }
+            },
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "research_brief",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": false,
+              "hasResearchBrief": true,
+              "hasWebResult": false,
+              "sourceCount": 3
+            },
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 1041,
+              "sourceCount": 3
+            },
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "type": "synthesis"
+          },
+          {
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 3,
+              "citedDocCount": 1,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalAnswer": true,
+              "gaps": [],
+              "passed": true,
+              "reasons": [],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false
+            },
+            "id": "7-self_check",
+            "label": "Final Self Check",
+            "status": "completed",
+            "summary": "Evidence check passed with 3 citations across 1 cited document.",
+            "type": "self_check"
+          },
+          {
+            "detail": {
+              "abstained": false,
+              "changed": false,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalizedScope": "research_findings",
+              "removedClaims": []
+            },
+            "id": "8-answer_finalizer",
+            "label": "Answer Finalizer",
+            "status": "completed",
+            "summary": "Research brief findings passed claim-level citation finalization.",
+            "type": "answer_finalizer"
+          }
+        ],
+        "agentWorkingMemory": {
+          "checkedQueries": [],
+          "docIds": [
+            "doc-1"
+          ],
+          "goal": "Write a research brief on the key risks in this policy.",
+          "resolvedGaps": [],
+          "supportedClaims": [
+            {
+              "anchors": [
+                "require"
+              ],
+              "missingAnchors": [],
+              "phase": "final",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "text": "Remote work requires manager approval",
+              "tokenOverlap": 1
+            }
+          ],
+          "unresolvedGaps": [],
+          "unsupportedClaims": [],
+          "version": "1.0"
+        },
+        "errors": {
+          "mcp": null,
+          "rag": null
+        },
+        "mcpAnswer": "Web search not used for this direct agent skill.",
+        "ragAbstainReason": null,
+        "ragAbstained": false,
+        "ragAnswer": "Executive Summary\nThe research brief ran 3 document-grounded lookups for: Write a research brief on the key risks in this policy.\n\nKey Findings\n1. Remote work requires manager approval. [Source 1] [Source 1]\n2. Remote work requires manager approval. [Source 2] [Source 2]\n3. Remote work requires manager approval. [Source 3] [Source 3]\n\nEvidence By Document\n- policy.pdf: 3 citations on page 2.\n\nConflicts Or Gaps\n- No explicit tool failures or abstentions were reported. Review citations for source-level nuance.\n\nRecommended Next Questions\n- What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+        "ragEvidenceSummary": null,
+        "ragGapPlan": null,
+        "ragMemoryApplied": false,
+        "ragResolvedQuestion": "Write a research brief on the key risks in this policy.",
+        "ragSources": [
+          {
+            "docId": "doc-1",
+            "excerpt": "Remote work requires manager approval.",
+            "fileName": "policy.pdf",
+            "pageNumber": 2,
+            "rank": 1,
+            "sourceLabel": "Source 1",
+            "text": "Remote work requires manager approval."
+          },
+          {
+            "docId": "doc-1",
+            "excerpt": "Remote work requires manager approval.",
+            "fileName": "policy.pdf",
+            "pageNumber": 2,
+            "rank": 2,
+            "sourceLabel": "Source 1",
+            "text": "Remote work requires manager approval."
+          },
+          {
+            "docId": "doc-1",
+            "excerpt": "Remote work requires manager approval.",
+            "fileName": "policy.pdf",
+            "pageNumber": 2,
+            "rank": 3,
+            "sourceLabel": "Source 1",
+            "text": "Remote work requires manager approval."
+          }
+        ],
+        "researchBrief": {
+          "citations": [
+            {
+              "docId": "doc-1",
+              "excerpt": "Remote work requires manager approval.",
+              "fileName": "policy.pdf",
+              "pageNumber": 2,
+              "rank": 1,
+              "sourceLabel": "Source 1",
+              "text": "Remote work requires manager approval."
+            },
+            {
+              "docId": "doc-1",
+              "excerpt": "Remote work requires manager approval.",
+              "fileName": "policy.pdf",
+              "pageNumber": 2,
+              "rank": 2,
+              "sourceLabel": "Source 1",
+              "text": "Remote work requires manager approval."
+            },
+            {
+              "docId": "doc-1",
+              "excerpt": "Remote work requires manager approval.",
+              "fileName": "policy.pdf",
+              "pageNumber": 2,
+              "rank": 3,
+              "sourceLabel": "Source 1",
+              "text": "Remote work requires manager approval."
+            }
+          ],
+          "findings": [
+            {
+              "abstainReason": null,
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "excerpt": "Remote work requires manager approval.",
+                  "fileName": "policy.pdf",
+                  "pageNumber": 2,
+                  "rank": 1,
+                  "sourceLabel": "Source 1",
+                  "text": "Remote work requires manager approval."
+                }
+              ],
+              "id": "rq-1",
+              "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "resolvedQuery": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            {
+              "abstainReason": null,
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "excerpt": "Remote work requires manager approval.",
+                  "fileName": "policy.pdf",
+                  "pageNumber": 2,
+                  "rank": 2,
+                  "sourceLabel": "Source 1",
+                  "text": "Remote work requires manager approval."
+                }
+              ],
+              "id": "rq-2",
+              "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "resolvedQuery": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed",
+              "text": "Remote work requires manager approval. [Source 2]"
+            },
+            {
+              "abstainReason": null,
+              "abstained": false,
+              "citations": [
+                {
+                  "docId": "doc-1",
+                  "excerpt": "Remote work requires manager approval.",
+                  "fileName": "policy.pdf",
+                  "pageNumber": 2,
+                  "rank": 3,
+                  "sourceLabel": "Source 1",
+                  "text": "Remote work requires manager approval."
+                }
+              ],
+              "id": "rq-3",
+              "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "resolvedQuery": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed",
+              "text": "Remote work requires manager approval. [Source 3]"
+            }
+          ],
+          "questions": [
+            {
+              "id": "rq-1",
+              "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed"
+            },
+            {
+              "id": "rq-2",
+              "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed"
+            },
+            {
+              "id": "rq-3",
+              "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "status": "completed"
+            }
+          ],
+          "text": "Executive Summary\nThe research brief ran 3 document-grounded lookups for: Write a research brief on the key risks in this policy.\n\nKey Findings\n1. Remote work requires manager approval. [Source 1] [Source 1]\n2. Remote work requires manager approval. [Source 2] [Source 2]\n3. Remote work requires manager approval. [Source 3] [Source 3]\n\nEvidence By Document\n- policy.pdf: 3 citations on page 2.\n\nConflicts Or Gaps\n- No explicit tool failures or abstentions were reported. Review citations for source-level nuance.\n\nRecommended Next Questions\n- What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+          "topic": "Write a research brief on the key risks in this policy."
+        }
+      },
+      "status": 200
+    },
+    "runs": [
+      {
+        "error": null,
+        "events": [
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:1",
+            "payload": {
+              "status": "running"
+            },
+            "type": "run_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:2",
+            "payload": {
+              "traceStepCount": 1
+            },
+            "type": "run_prepared"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:3",
+            "payload": {
+              "planner": {
+                "fallback": false,
+                "fallbackReason": null,
+                "requestedPlannerId": "deterministic",
+                "selectedPlannerId": "deterministic",
+                "status": "selected",
+                "stepIds": [
+                  "arxiv_import",
+                  "workspace_action",
+                  "research_brief",
+                  "inventory",
+                  "document_discovery",
+                  "document_rag",
+                  "web_search"
+                ]
+              }
+            },
+            "type": "execution_planned"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:4",
+            "payload": {
+              "status": "running",
+              "stepId": "research_question:rq-1"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:5",
+            "payload": {
+              "status": "completed",
+              "stepId": "research_question:rq-1"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:6",
+            "payload": {
+              "status": "running",
+              "stepId": "research_question:rq-2"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:7",
+            "payload": {
+              "status": "completed",
+              "stepId": "research_question:rq-2"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:8",
+            "payload": {
+              "status": "running",
+              "stepId": "research_question:rq-3"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:9",
+            "payload": {
+              "status": "completed",
+              "stepId": "research_question:rq-3"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:10",
+            "payload": {
+              "status": "completed"
+            },
+            "type": "run_completed"
+          }
+        ],
+        "result": {
+          "agentMode": "research_brief",
+          "answer": "Executive Summary\nThe research brief ran 3 document-grounded lookups for: Write a research brief on the key risks in this policy.\n\nKey Findings\n1. Remote work requires manager approval. [Source 1] [Source 1]\n2. Remote work requires manager approval. [Source 2] [Source 2]\n3. Remote work requires manager approval. [Source 3] [Source 3]\n\nEvidence By Document\n- policy.pdf: 3 citations on page 2.\n\nConflicts Or Gaps\n- No explicit tool failures or abstentions were reported. Review citations for source-level nuance.\n\nRecommended Next Questions\n- What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.\n- What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+          "citationCount": 3,
+          "ragAbstained": false,
+          "status": 200
+        },
+        "status": "completed",
+        "steps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Create a structured research brief from selected documents."
+                },
+                {
+                  "id": "research_questions",
+                  "label": "Run research questions",
+                  "summary": "Break the request into deterministic document-grounded questions."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [
+                "doc-1"
+              ],
+              "mode": "research_brief",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Create a structured research brief from selected documents.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "questions": [
+                {
+                  "id": "rq-1",
+                  "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-2",
+                  "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                },
+                {
+                  "id": "rq-3",
+                  "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+                  "status": "pending"
+                }
+              ],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "2-research_plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Research Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Planned 3 document-grounded research questions.",
+            "traceStepId": "2-research_plan",
+            "type": "research_plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-1",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-1",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-1",
+              "resolvedQuery": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "What are the most important facts, terms, and obligations related to Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-1",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-2",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-2",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-2",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-2",
+              "resolvedQuery": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Which document evidence supports or qualifies the main findings about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-2",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "citations": 1,
+              "error": null,
+              "researchQuestionId": "rq-3",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "research_question:rq-3",
+            "input": {
+              "docIds": [
+                "doc-1"
+              ],
+              "effects": "workspace_write",
+              "idempotency": "adapter_defined",
+              "question": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "replaySafe": false,
+              "researchQuestionId": "rq-3",
+              "sessionId": "session-1",
+              "skillId": "research_brief",
+              "skillVersion": "1.0.0",
+              "userId": "alice"
+            },
+            "kind": "tool_call",
+            "label": "Research Question",
+            "output": {
+              "abstained": false,
+              "citationCount": 1,
+              "researchQuestionId": "rq-3",
+              "resolvedQuery": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+              "text": "Remote work requires manager approval. [Source 1]"
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "What conflicts, gaps, risks, or uncertainties should be called out about Write a research brief on the key risks in this policy? Focus on these documents: policy.pdf.",
+            "traceStepId": "research_question:rq-3",
+            "type": "research_question",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": 300000,
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 3,
+                  "traceSteps": 5,
+                  "webSearchCalls": 0
+                }
+              },
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "6-synthesis",
+            "input": {
+              "agentMode": "research_brief",
+              "customSkillResultCount": 0,
+              "hasActionAnswer": false,
+              "hasArxivImportAnswer": false,
+              "hasDiscoveryAnswer": false,
+              "hasInventoryAnswer": false,
+              "hasRagResult": false,
+              "hasResearchBrief": true,
+              "hasWebResult": false,
+              "sourceCount": 3
+            },
+            "kind": "decision",
+            "label": "Synthesis",
+            "output": {
+              "answerLength": 1041,
+              "sourceCount": 3
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Composed the final agent answer from completed tool results.",
+            "traceStepId": "6-synthesis",
+            "type": "synthesis",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "answerLabel": "Final answer",
+              "citationCount": 3,
+              "citedDocCount": 1,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalAnswer": true,
+              "gaps": [],
+              "passed": true,
+              "reasons": [],
+              "requiredCitationCount": 1,
+              "requiredDocCoverage": 1,
+              "retryRecommended": false,
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "7-self_check",
+            "input": null,
+            "kind": "observation",
+            "label": "Final Self Check",
+            "output": {
+              "gapCount": 0,
+              "passed": true,
+              "retryRecommended": false,
+              "unsupportedClaimCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Evidence check passed with 3 citations across 1 cited document.",
+            "traceStepId": "7-self_check",
+            "type": "self_check",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "abstained": false,
+              "changed": false,
+              "claimSupport": {
+                "checked": true,
+                "claims": [
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      1
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      1
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      1
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      2
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      2
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      2
+                    ]
+                  },
+                  {
+                    "ambiguousSourceRanks": [],
+                    "anchors": [
+                      "require"
+                    ],
+                    "citedDocIds": [
+                      "doc-1"
+                    ],
+                    "misattributedCitationIdentities": [],
+                    "missingAnchors": [],
+                    "missingSourceRanks": [],
+                    "section": "",
+                    "sectionId": null,
+                    "sectionLabel": "",
+                    "sourceRanks": [
+                      3
+                    ],
+                    "supported": true,
+                    "supportedCitedDocIds": [
+                      "doc-1"
+                    ],
+                    "supportedSourceRanks": [
+                      3
+                    ],
+                    "text": "Remote work requires manager approval",
+                    "tokenOverlap": 1,
+                    "verifiedSourceRanks": [
+                      3
+                    ]
+                  }
+                ],
+                "supportedClaimCount": 3,
+                "unsupportedClaimCount": 0
+              },
+              "finalizedScope": "research_findings",
+              "removedClaims": [],
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "8-answer_finalizer",
+            "input": null,
+            "kind": "observation",
+            "label": "Answer Finalizer",
+            "output": {
+              "abstained": false,
+              "changed": false,
+              "removedClaimCount": 0,
+              "skippedReason": "",
+              "unsupportedClaimCount": 0
+            },
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Research brief findings passed claim-level citation finalization.",
+            "traceStepId": "8-answer_finalizer",
+            "type": "answer_finalizer",
+            "updatedAt": "<time>"
+          }
+        ]
+      }
+    ]
+  },
+  "runs": []
+}

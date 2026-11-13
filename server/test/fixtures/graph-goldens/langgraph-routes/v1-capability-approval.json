@@ -1,0 +1,2378 @@
+{
+  "approved": {
+    "body": {
+      "response": {
+        "agentAnswer": "Approved web answer for: Search the web for the current launch date of the product and summarize it.",
+        "agentMode": "web",
+        "agentObservability": {
+          "agentMode": "web",
+          "approvalGates": [
+            {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "decidedAt": "<time>",
+              "decision": "approve",
+              "decisionReason": "",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "approved",
+              "stepId": "2-capability_approval_gate",
+              "type": "capability_approval"
+            }
+          ],
+          "steps": [
+            {
+              "approvalGateId": "",
+              "attempt": 1,
+              "capabilityId": "",
+              "capabilityVersion": "",
+              "completedAt": "<time>",
+              "createdAt": "<time>",
+              "decision": "",
+              "detail": {
+                "actions": [
+                  {
+                    "id": "classify_request",
+                    "label": "Classify request",
+                    "summary": "Search the web because no document context is selected."
+                  },
+                  {
+                    "id": "web_search",
+                    "label": "Use web fallback",
+                    "summary": "Use web context only after document evidence is checked."
+                  },
+                  {
+                    "id": "synthesis",
+                    "label": "Synthesize answer",
+                    "summary": "Compose the final response from verified tool results."
+                  }
+                ],
+                "budget": {
+                  "limits": {
+                    "maxArxivPaperFetches": 1,
+                    "maxCustomSkillCalls": 2,
+                    "maxDocumentRagCalls": 2,
+                    "maxResearchQuestions": 3,
+                    "maxTraceSteps": 16,
+                    "maxWebSearchCalls": 1
+                  },
+                  "run": {
+                    "exhausted": null,
+                    "limits": {
+                      "maxCostUsd": 0.5,
+                      "maxDurationMs": "<elapsed>",
+                      "maxTokens": 100000
+                    },
+                    "used": {
+                      "costUsd": 0,
+                      "durationMs": "<elapsed>",
+                      "modelCalls": 0,
+                      "tokens": 0,
+                      "unpricedModelCalls": 0
+                    }
+                  },
+                  "traceTruncated": false,
+                  "used": {
+                    "arxivPaperFetches": 0,
+                    "customSkillCalls": 0,
+                    "documentRagCalls": 0,
+                    "researchQuestions": 0,
+                    "traceSteps": 0,
+                    "webSearchCalls": 0
+                  }
+                },
+                "docIds": [],
+                "mode": "web",
+                "traceStatus": "completed"
+              },
+              "error": null,
+              "id": "1-plan",
+              "input": null,
+              "kind": "plan",
+              "label": "Plan",
+              "output": null,
+              "parentStepId": "",
+              "pausedAt": "",
+              "retryOfStepId": "",
+              "startedAt": "<time>",
+              "status": "completed",
+              "summary": "Search the web because no document context is selected.",
+              "traceStepId": "1-plan",
+              "type": "plan",
+              "updatedAt": "<time>"
+            },
+            {
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "attempt": 1,
+              "capabilityId": "web.search",
+              "capabilityVersion": "1.0.0",
+              "completedAt": "<time>",
+              "createdAt": "<time>",
+              "decision": "approve",
+              "detail": {
+                "action": "approve",
+                "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search"
+              },
+              "error": null,
+              "id": "2-capability_approval_gate",
+              "input": null,
+              "kind": "approval_gate",
+              "label": "Capability Approval",
+              "output": null,
+              "parentStepId": "",
+              "pausedAt": "<time>",
+              "retryOfStepId": "",
+              "startedAt": "<time>",
+              "status": "completed",
+              "summary": "Web Search requires approval before execution.",
+              "traceStepId": "2-capability_approval_gate",
+              "type": "capability_approval_gate",
+              "updatedAt": "<time>"
+            },
+            {
+              "approvalGateId": "",
+              "attempt": 1,
+              "capabilityId": "",
+              "capabilityVersion": "",
+              "completedAt": "",
+              "createdAt": "<time>",
+              "decision": "approve",
+              "detail": {
+                "approvalDelegated": true,
+                "approvalGate": {
+                  "approvalObjectHash": "sha256:<approval-hash>",
+                  "capabilityId": "web.search",
+                  "capabilityLabel": "Web Search",
+                  "capabilityVersion": "1.0.0",
+                  "id": "approval:web.search:1.0.0:<approval-hash>",
+                  "inputPreview": {
+                    "question": "Search the web for the current launch date of the product and summarize it."
+                  },
+                  "policy": {
+                    "externalCall": true,
+                    "mode": "user_confirmation",
+                    "storesResult": false,
+                    "writesWorkspace": false
+                  },
+                  "reason": "User confirmation is required before this capability can execute.",
+                  "riskFlags": [
+                    "external_call"
+                  ],
+                  "snapshotVersion": 1,
+                  "status": "pending",
+                  "type": "capability_approval"
+                },
+                "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "delegatedStepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+                "interruptType": "capability_approval_required"
+              },
+              "error": null,
+              "id": "web_search:primary",
+              "input": null,
+              "kind": "tool_call",
+              "label": "Web Search",
+              "output": null,
+              "parentStepId": "",
+              "pausedAt": "<time>",
+              "retryOfStepId": "",
+              "startedAt": "<time>",
+              "status": "skipped",
+              "summary": "Web Search was delegated to the approved capability call.",
+              "traceStepId": "",
+              "type": "web_search",
+              "updatedAt": "<time>"
+            },
+            {
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "attempt": 1,
+              "capabilityId": "web.search",
+              "capabilityVersion": "1.0.0",
+              "completedAt": "<time>",
+              "createdAt": "<time>",
+              "decision": "approve",
+              "detail": {
+                "approvalObjectHash": "sha256:<approval-hash>"
+              },
+              "error": null,
+              "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+              "input": null,
+              "kind": "capability_call",
+              "label": "Web Search",
+              "output": {
+                "citationCount": 0,
+                "text": "Approved web answer for: Search the web for the current launch date of the product and summarize it."
+              },
+              "parentStepId": "2-capability_approval_gate",
+              "pausedAt": "",
+              "retryOfStepId": "",
+              "startedAt": "",
+              "status": "completed",
+              "summary": "Capability call is approved and ready to resume.",
+              "traceStepId": "",
+              "type": "capability_call",
+              "updatedAt": "<time>"
+            }
+          ]
+        },
+        "agentRunId": "<id>",
+        "agentRunStatus": "completed",
+        "agentRunSteps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Search the web because no document context is selected."
+                },
+                {
+                  "id": "web_search",
+                  "label": "Use web fallback",
+                  "summary": "Use web context only after document evidence is checked."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": "<elapsed>",
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [],
+              "mode": "web",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Search the web because no document context is selected.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "attempt": 1,
+            "capabilityId": "web.search",
+            "capabilityVersion": "1.0.0",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "action": "approve",
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search"
+            },
+            "error": null,
+            "id": "2-capability_approval_gate",
+            "input": null,
+            "kind": "approval_gate",
+            "label": "Capability Approval",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "<time>",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Web Search requires approval before execution.",
+            "traceStepId": "2-capability_approval_gate",
+            "type": "capability_approval_gate",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "approvalDelegated": true,
+              "approvalGate": {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              },
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "delegatedStepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+              "interruptType": "capability_approval_required"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": null,
+            "kind": "tool_call",
+            "label": "Web Search",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "<time>",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "skipped",
+            "summary": "Web Search was delegated to the approved capability call.",
+            "traceStepId": "",
+            "type": "web_search",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "attempt": 1,
+            "capabilityId": "web.search",
+            "capabilityVersion": "1.0.0",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "approvalObjectHash": "sha256:<approval-hash>"
+            },
+            "error": null,
+            "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+            "input": null,
+            "kind": "capability_call",
+            "label": "Web Search",
+            "output": {
+              "citationCount": 0,
+              "text": "Approved web answer for: Search the web for the current launch date of the product and summarize it."
+            },
+            "parentStepId": "2-capability_approval_gate",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "",
+            "status": "completed",
+            "summary": "Capability call is approved and ready to resume.",
+            "traceStepId": "",
+            "type": "capability_call",
+            "updatedAt": "<time>"
+          }
+        ],
+        "agentSkills": [],
+        "agentTrace": [
+          {
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Search the web because no document context is selected."
+                },
+                {
+                  "id": "web_search",
+                  "label": "Use web fallback",
+                  "summary": "Use web context only after document evidence is checked."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "attempt": 1,
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": "<elapsed>",
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [],
+              "kind": "plan",
+              "mode": "web",
+              "retryOfStepId": null,
+              "traceStatus": "completed"
+            },
+            "id": "1-plan",
+            "label": "Plan",
+            "status": "completed",
+            "summary": "Search the web because no document context is selected.",
+            "type": "plan"
+          },
+          {
+            "detail": {
+              "action": "approve",
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "attempt": 1,
+              "capabilityId": "web.search",
+              "kind": "approval_gate",
+              "retryOfStepId": null
+            },
+            "id": "2-capability_approval_gate",
+            "label": "Capability Approval",
+            "status": "completed",
+            "summary": "Web Search requires approval before execution.",
+            "type": "capability_approval_gate"
+          },
+          {
+            "detail": {
+              "approvalDelegated": true,
+              "approvalGate": {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              },
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "attempt": 1,
+              "capabilityId": "web.search",
+              "delegatedStepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+              "interruptType": "capability_approval_required",
+              "kind": "tool_call",
+              "retryOfStepId": null
+            },
+            "id": "web_search:primary",
+            "label": "Web Search",
+            "status": "skipped",
+            "summary": "Web Search was delegated to the approved capability call.",
+            "type": "web_search"
+          },
+          {
+            "detail": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "attempt": 1,
+              "kind": "capability_call",
+              "retryOfStepId": null
+            },
+            "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+            "label": "Web Search",
+            "status": "completed",
+            "summary": "Capability call is approved and ready to resume.",
+            "type": "capability_call"
+          }
+        ],
+        "agentWorkingMemory": {},
+        "approvalGates": [
+          {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "capabilityLabel": "Web Search",
+            "capabilityVersion": "1.0.0",
+            "decidedAt": "<time>",
+            "decision": "approve",
+            "decisionReason": "",
+            "id": "approval:web.search:1.0.0:<approval-hash>",
+            "inputPreview": {
+              "question": "Search the web for the current launch date of the product and summarize it."
+            },
+            "policy": {
+              "externalCall": true,
+              "mode": "user_confirmation",
+              "storesResult": false,
+              "writesWorkspace": false
+            },
+            "reason": "User confirmation is required before this capability can execute.",
+            "riskFlags": [
+              "external_call"
+            ],
+            "snapshotVersion": 1,
+            "status": "approved",
+            "stepId": "2-capability_approval_gate",
+            "type": "capability_approval"
+          }
+        ],
+        "clarification": {
+          "detail": null,
+          "needed": false,
+          "question": null,
+          "reason": null
+        },
+        "errors": {
+          "mcp": null,
+          "rag": null
+        },
+        "mcpAnswer": "Approved web answer for: Search the web for the current launch date of the product and summarize it.",
+        "ragAbstained": false,
+        "ragAnswer": "Approved web answer for: Search the web for the current launch date of the product and summarize it.",
+        "ragEvidenceSummary": null,
+        "ragGapPlan": null,
+        "ragMemoryApplied": false,
+        "ragResolvedQuestion": "Search the web for the current launch date of the product and summarize it.",
+        "ragSources": [],
+        "researchBrief": null
+      },
+      "run": {
+        "approvalGates": [
+          {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "capabilityLabel": "Web Search",
+            "capabilityVersion": "1.0.0",
+            "decidedAt": "<time>",
+            "decision": "approve",
+            "decisionReason": "",
+            "id": "approval:web.search:1.0.0:<approval-hash>",
+            "inputPreview": {
+              "question": "Search the web for the current launch date of the product and summarize it."
+            },
+            "policy": {
+              "externalCall": true,
+              "mode": "user_confirmation",
+              "storesResult": false,
+              "writesWorkspace": false
+            },
+            "reason": "User confirmation is required before this capability can execute.",
+            "riskFlags": [
+              "external_call"
+            ],
+            "snapshotVersion": 1,
+            "status": "approved",
+            "stepId": "2-capability_approval_gate",
+            "type": "capability_approval"
+          }
+        ],
+        "createdAt": "<time>",
+        "decisions": [
+          {
+            "type": "agent_mode",
+            "value": "clarification"
+          },
+          {
+            "type": "execution_planner",
+            "value": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          {
+            "type": "intent_planner",
+            "value": {
+              "candidateIntentIds": [
+                "web",
+                "document_web"
+              ],
+              "experienceMemory": {
+                "applied": false,
+                "hintCount": 0
+              },
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedIntentId": "web",
+              "selectedMode": "web",
+              "selectedPlannerId": "deterministic",
+              "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+              "status": "selected"
+            }
+          }
+        ],
+        "error": null,
+        "events": [
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:1",
+            "payload": {
+              "status": "running"
+            },
+            "type": "run_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:2",
+            "payload": {
+              "traceStepCount": 1
+            },
+            "type": "run_prepared"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:3",
+            "payload": {
+              "planner": {
+                "fallback": false,
+                "fallbackReason": null,
+                "requestedPlannerId": "deterministic",
+                "selectedPlannerId": "deterministic",
+                "status": "selected",
+                "stepIds": [
+                  "arxiv_import",
+                  "workspace_action",
+                  "research_brief",
+                  "inventory",
+                  "document_discovery",
+                  "document_rag",
+                  "web_search"
+                ]
+              }
+            },
+            "type": "execution_planned"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:4",
+            "payload": {
+              "status": "running",
+              "stepId": "web_search:primary"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:5",
+            "payload": {
+              "status": "paused",
+              "stepId": "web_search:primary"
+            },
+            "type": "step_paused"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:6",
+            "payload": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "gateId": "approval:web.search:1.0.0:<approval-hash>",
+              "status": "waiting_for_user"
+            },
+            "type": "approval_gate_created"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:7",
+            "payload": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "gateId": "approval:web.search:1.0.0:<approval-hash>",
+              "reason": "",
+              "stepId": "2-capability_approval_gate"
+            },
+            "type": "approval_gate_approved"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:8",
+            "payload": {
+              "status": "running",
+              "stepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>"
+            },
+            "type": "step_started"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:9",
+            "payload": {
+              "status": "completed",
+              "stepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>"
+            },
+            "type": "step_completed"
+          },
+          {
+            "createdAt": "<time>",
+            "eventId": "<id>:10",
+            "payload": {
+              "status": "completed"
+            },
+            "type": "run_completed"
+          }
+        ],
+        "goal": "Search the web for the current launch date of the product and summarize it.",
+        "input": {
+          "docIds": [],
+          "sessionId": null,
+          "userId": "web-user"
+        },
+        "observations": [
+          {
+            "abstained": false,
+            "attempts": 0,
+            "budgetDelta": {},
+            "budgetKey": "webSearchCalls",
+            "budgetLimit": null,
+            "budgetRemaining": null,
+            "budgetUsed": null,
+            "citationCount": 0,
+            "errorCount": 0,
+            "errors": [],
+            "followUpCount": 0,
+            "label": "Web Search",
+            "lastCitationCount": 0,
+            "retryCount": 0,
+            "selected": true,
+            "skillId": "web_search",
+            "skillVersion": "1.0.0",
+            "skippedCount": 0,
+            "status": "not_run",
+            "totalDurationMs": "<elapsed>"
+          },
+          {
+            "capabilityId": "web.search",
+            "status": "completed",
+            "stepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>"
+          }
+        ],
+        "plan": {
+          "mode": "web",
+          "selectedSkills": [
+            {
+              "budgetKey": "webSearchCalls",
+              "label": "Web Search",
+              "skillId": "web_search",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "summary": "Search the web because no document context is selected."
+        },
+        "result": {
+          "agentMode": "web",
+          "answer": "Approved web answer for: Search the web for the current launch date of the product and summarize it.",
+          "citationCount": 0,
+          "ragAbstained": false,
+          "status": 200
+        },
+        "runId": "<id>",
+        "status": "completed",
+        "steps": [
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "",
+            "detail": {
+              "actions": [
+                {
+                  "id": "classify_request",
+                  "label": "Classify request",
+                  "summary": "Search the web because no document context is selected."
+                },
+                {
+                  "id": "web_search",
+                  "label": "Use web fallback",
+                  "summary": "Use web context only after document evidence is checked."
+                },
+                {
+                  "id": "synthesis",
+                  "label": "Synthesize answer",
+                  "summary": "Compose the final response from verified tool results."
+                }
+              ],
+              "budget": {
+                "limits": {
+                  "maxArxivPaperFetches": 1,
+                  "maxCustomSkillCalls": 2,
+                  "maxDocumentRagCalls": 2,
+                  "maxResearchQuestions": 3,
+                  "maxTraceSteps": 16,
+                  "maxWebSearchCalls": 1
+                },
+                "run": {
+                  "exhausted": null,
+                  "limits": {
+                    "maxCostUsd": 0.5,
+                    "maxDurationMs": "<elapsed>",
+                    "maxTokens": 100000
+                  },
+                  "used": {
+                    "costUsd": 0,
+                    "durationMs": "<elapsed>",
+                    "modelCalls": 0,
+                    "tokens": 0,
+                    "unpricedModelCalls": 0
+                  }
+                },
+                "traceTruncated": false,
+                "used": {
+                  "arxivPaperFetches": 0,
+                  "customSkillCalls": 0,
+                  "documentRagCalls": 0,
+                  "researchQuestions": 0,
+                  "traceSteps": 0,
+                  "webSearchCalls": 0
+                }
+              },
+              "docIds": [],
+              "mode": "web",
+              "traceStatus": "completed"
+            },
+            "error": null,
+            "id": "1-plan",
+            "input": null,
+            "kind": "plan",
+            "label": "Plan",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Search the web because no document context is selected.",
+            "traceStepId": "1-plan",
+            "type": "plan",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "attempt": 1,
+            "capabilityId": "web.search",
+            "capabilityVersion": "1.0.0",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "action": "approve",
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search"
+            },
+            "error": null,
+            "id": "2-capability_approval_gate",
+            "input": null,
+            "kind": "approval_gate",
+            "label": "Capability Approval",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "<time>",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "completed",
+            "summary": "Web Search requires approval before execution.",
+            "traceStepId": "2-capability_approval_gate",
+            "type": "capability_approval_gate",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "",
+            "attempt": 1,
+            "capabilityId": "",
+            "capabilityVersion": "",
+            "completedAt": "",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "approvalDelegated": true,
+              "approvalGate": {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              },
+              "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "delegatedStepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+              "interruptType": "capability_approval_required"
+            },
+            "error": null,
+            "id": "web_search:primary",
+            "input": null,
+            "kind": "tool_call",
+            "label": "Web Search",
+            "output": null,
+            "parentStepId": "",
+            "pausedAt": "<time>",
+            "retryOfStepId": "",
+            "startedAt": "<time>",
+            "status": "skipped",
+            "summary": "Web Search was delegated to the approved capability call.",
+            "traceStepId": "",
+            "type": "web_search",
+            "updatedAt": "<time>"
+          },
+          {
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "attempt": 1,
+            "capabilityId": "web.search",
+            "capabilityVersion": "1.0.0",
+            "completedAt": "<time>",
+            "createdAt": "<time>",
+            "decision": "approve",
+            "detail": {
+              "approvalObjectHash": "sha256:<approval-hash>"
+            },
+            "error": null,
+            "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+            "input": null,
+            "kind": "capability_call",
+            "label": "Web Search",
+            "output": {
+              "citationCount": 0,
+              "text": "Approved web answer for: Search the web for the current launch date of the product and summarize it."
+            },
+            "parentStepId": "2-capability_approval_gate",
+            "pausedAt": "",
+            "retryOfStepId": "",
+            "startedAt": "",
+            "status": "completed",
+            "summary": "Capability call is approved and ready to resume.",
+            "traceStepId": "",
+            "type": "capability_call",
+            "updatedAt": "<time>"
+          }
+        ],
+        "updatedAt": "<time>"
+      }
+    },
+    "status": 200
+  },
+  "calls": [
+    "Search the web for the current launch date of the product and summarize it."
+  ],
+  "finished": {
+    "checkpoint": null,
+    "run": {
+      "approvalGates": [
+        {
+          "approvalObjectHash": "sha256:<approval-hash>",
+          "capabilityId": "web.search",
+          "capabilityLabel": "Web Search",
+          "capabilityVersion": "1.0.0",
+          "decidedAt": "<time>",
+          "decision": "approve",
+          "decisionReason": "",
+          "id": "approval:web.search:1.0.0:<approval-hash>",
+          "inputPreview": {
+            "question": "Search the web for the current launch date of the product and summarize it."
+          },
+          "policy": {
+            "externalCall": true,
+            "mode": "user_confirmation",
+            "storesResult": false,
+            "writesWorkspace": false
+          },
+          "reason": "User confirmation is required before this capability can execute.",
+          "riskFlags": [
+            "external_call"
+          ],
+          "snapshotVersion": 1,
+          "status": "approved",
+          "stepId": "2-capability_approval_gate",
+          "type": "capability_approval"
+        }
+      ],
+      "error": null,
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 1
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "paused",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_paused"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "gateId": "approval:web.search:1.0.0:<approval-hash>",
+            "status": "waiting_for_user"
+          },
+          "type": "approval_gate_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:7",
+          "payload": {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "gateId": "approval:web.search:1.0.0:<approval-hash>",
+            "reason": "",
+            "stepId": "2-capability_approval_gate"
+          },
+          "type": "approval_gate_approved"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:8",
+          "payload": {
+            "status": "running",
+            "stepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:9",
+          "payload": {
+            "status": "completed",
+            "stepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>"
+          },
+          "type": "step_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:10",
+          "payload": {
+            "status": "completed"
+          },
+          "type": "run_completed"
+        }
+      ],
+      "result": {
+        "agentMode": "web",
+        "answer": "Approved web answer for: Search the web for the current launch date of the product and summarize it.",
+        "citationCount": 0,
+        "ragAbstained": false,
+        "status": 200
+      },
+      "status": "completed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Search the web because no document context is selected."
+              },
+              {
+                "id": "web_search",
+                "label": "Use web fallback",
+                "summary": "Use web context only after document evidence is checked."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [],
+            "mode": "web",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Search the web because no document context is selected.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "approve",
+          "detail": {
+            "action": "approve",
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search"
+          },
+          "error": null,
+          "id": "2-capability_approval_gate",
+          "input": null,
+          "kind": "approval_gate",
+          "label": "Capability Approval",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Web Search requires approval before execution.",
+          "traceStepId": "2-capability_approval_gate",
+          "type": "capability_approval_gate",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "approve",
+          "detail": {
+            "approvalDelegated": true,
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "delegatedStepId": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+            "interruptType": "capability_approval_required"
+          },
+          "error": null,
+          "id": "web_search:primary",
+          "input": null,
+          "kind": "tool_call",
+          "label": "Web Search",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "skipped",
+          "summary": "Web Search was delegated to the approved capability call.",
+          "traceStepId": "",
+          "type": "web_search",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "approve",
+          "detail": {
+            "approvalObjectHash": "sha256:<approval-hash>"
+          },
+          "error": null,
+          "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
+          "input": null,
+          "kind": "capability_call",
+          "label": "Web Search",
+          "output": {
+            "citationCount": 0,
+            "text": "Approved web answer for: Search the web for the current launch date of the product and summarize it."
+          },
+          "parentStepId": "2-capability_approval_gate",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "",
+          "status": "completed",
+          "summary": "Capability call is approved and ready to resume.",
+          "traceStepId": "",
+          "type": "capability_call",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  },
+  "paused": {
+    "body": {
+      "agentAnswer": "Approve Web Search?",
+      "agentMode": "clarification",
+      "agentObservability": {
+        "agentMode": "clarification",
+        "budget": {
+          "limits": {
+            "maxArxivPaperFetches": 1,
+            "maxCustomSkillCalls": 2,
+            "maxDocumentRagCalls": 2,
+            "maxResearchQuestions": 3,
+            "maxTraceSteps": 16,
+            "maxWebSearchCalls": 1
+          },
+          "run": {
+            "exhausted": null,
+            "limits": {
+              "maxCostUsd": 0.5,
+              "maxDurationMs": "<elapsed>",
+              "maxTokens": 100000
+            },
+            "used": {
+              "costUsd": 0,
+              "durationMs": "<elapsed>",
+              "modelCalls": 0,
+              "tokens": 0,
+              "unpricedModelCalls": 0
+            }
+          },
+          "traceTruncated": false,
+          "used": {
+            "arxivPaperFetches": 0,
+            "customSkillCalls": 0,
+            "documentRagCalls": 0,
+            "researchQuestions": 0,
+            "traceSteps": 2,
+            "webSearchCalls": 1
+          }
+        },
+        "executionLoop": {
+          "followUpsRun": 0,
+          "gaps": [],
+          "gapsIdentified": 0,
+          "maxFollowUps": 1,
+          "stoppedReason": "not_needed",
+          "version": "1.0"
+        },
+        "executionPlanner": {
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedPlannerId": "deterministic",
+          "status": "selected",
+          "stepIds": [
+            "arxiv_import",
+            "workspace_action",
+            "research_brief",
+            "inventory",
+            "document_discovery",
+            "document_rag",
+            "web_search"
+          ]
+        },
+        "experienceMemory": {
+          "applied": false,
+          "enabled": false,
+          "error": null,
+          "hintCount": 0,
+          "hints": [],
+          "hitCount": 0,
+          "planningHints": [],
+          "reason": "env_disabled",
+          "status": "disabled",
+          "storedCount": 0,
+          "write": {
+            "enabled": false,
+            "error": null,
+            "prunedCount": 0,
+            "recordCount": 0,
+            "recordTypes": [],
+            "skippedReason": "env_disabled",
+            "status": "skipped",
+            "storedCount": 0,
+            "storedRecords": [],
+            "writeAttempted": false
+          },
+          "writeAttempted": false,
+          "writeSkippedReason": "env_disabled"
+        },
+        "intentPlanner": {
+          "candidateIntentIds": [
+            "web",
+            "document_web"
+          ],
+          "experienceMemory": {
+            "applied": false,
+            "hintCount": 0
+          },
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedIntentId": "web",
+          "selectedMode": "web",
+          "selectedPlannerId": "deterministic",
+          "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+          "status": "selected"
+        },
+        "longMemory": {
+          "enabled": false,
+          "postgresConfigured": false,
+          "reason": "env_disabled",
+          "status": "disabled"
+        },
+        "planMode": "web",
+        "promptTemplates": [],
+        "runs": [],
+        "selectedSkills": [
+          {
+            "budgetKey": "webSearchCalls",
+            "label": "Web Search",
+            "skillId": "web_search",
+            "skillVersion": "1.0.0"
+          }
+        ],
+        "skillChain": [],
+        "skills": [
+          {
+            "abstained": false,
+            "attempts": 0,
+            "budgetDelta": {},
+            "budgetKey": "webSearchCalls",
+            "budgetLimit": null,
+            "budgetRemaining": null,
+            "budgetUsed": null,
+            "citationCount": 0,
+            "errorCount": 0,
+            "errors": [],
+            "followUpCount": 0,
+            "label": "Web Search",
+            "lastCitationCount": 0,
+            "retryCount": 0,
+            "selected": true,
+            "skillId": "web_search",
+            "skillVersion": "1.0.0",
+            "skippedCount": 0,
+            "status": "not_run",
+            "totalDurationMs": "<elapsed>"
+          }
+        ],
+        "taskMemory": null,
+        "workingMemory": {
+          "checkedQueries": [],
+          "docIds": [],
+          "goal": "Search the web for the current launch date of the product and summarize it.",
+          "resolvedGaps": [],
+          "supportedClaims": [],
+          "unresolvedGaps": [],
+          "unsupportedClaims": [],
+          "version": "1.0"
+        }
+      },
+      "agentRunId": "<id>",
+      "agentRunStatus": "waiting_for_user",
+      "agentRunSteps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Search the web because no document context is selected."
+              },
+              {
+                "id": "web_search",
+                "label": "Use web fallback",
+                "summary": "Use web context only after document evidence is checked."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [],
+            "mode": "web",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Search the web because no document context is selected.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "approvalGates": [
+              {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              }
+            ],
+            "clarificationQuestion": "Approve Web Search?",
+            "policyResult": {
+              "decision": "needs_approval",
+              "reasons": [
+                "user_confirmation_required"
+              ],
+              "riskFlags": [
+                "external_call"
+              ]
+            },
+            "reason": "capability_approval_required",
+            "traceStatus": "needs_input"
+          },
+          "error": null,
+          "id": "2-capability_approval_gate",
+          "input": null,
+          "kind": "approval_gate",
+          "label": "Capability Approval",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "paused",
+          "summary": "Web Search requires approval before execution.",
+          "traceStepId": "2-capability_approval_gate",
+          "type": "capability_approval_gate",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "interruptType": "capability_approval_required"
+          },
+          "error": null,
+          "id": "web_search:primary",
+          "input": null,
+          "kind": "tool_call",
+          "label": "Web Search",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "paused",
+          "summary": "",
+          "traceStepId": "",
+          "type": "web_search",
+          "updatedAt": "<time>"
+        }
+      ],
+      "agentSkills": [],
+      "agentTrace": [
+        {
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Search the web because no document context is selected."
+              },
+              {
+                "id": "web_search",
+                "label": "Use web fallback",
+                "summary": "Use web context only after document evidence is checked."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [],
+            "mode": "web"
+          },
+          "id": "1-plan",
+          "label": "Plan",
+          "status": "completed",
+          "summary": "Search the web because no document context is selected.",
+          "type": "plan"
+        },
+        {
+          "detail": {
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "approvalGates": [
+              {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              }
+            ],
+            "clarificationQuestion": "Approve Web Search?",
+            "policyResult": {
+              "decision": "needs_approval",
+              "reasons": [
+                "user_confirmation_required"
+              ],
+              "riskFlags": [
+                "external_call"
+              ]
+            },
+            "reason": "capability_approval_required"
+          },
+          "id": "2-capability_approval_gate",
+          "label": "Capability Approval",
+          "status": "needs_input",
+          "summary": "Web Search requires approval before execution.",
+          "type": "capability_approval_gate"
+        }
+      ],
+      "agentWorkingMemory": {
+        "checkedQueries": [],
+        "docIds": [],
+        "goal": "Search the web for the current launch date of the product and summarize it.",
+        "resolvedGaps": [],
+        "supportedClaims": [],
+        "unresolvedGaps": [],
+        "unsupportedClaims": [],
+        "version": "1.0"
+      },
+      "approvalGates": [
+        {
+          "approvalObjectHash": "sha256:<approval-hash>",
+          "capabilityId": "web.search",
+          "capabilityLabel": "Web Search",
+          "capabilityVersion": "1.0.0",
+          "id": "approval:web.search:1.0.0:<approval-hash>",
+          "inputPreview": {
+            "question": "Search the web for the current launch date of the product and summarize it."
+          },
+          "policy": {
+            "externalCall": true,
+            "mode": "user_confirmation",
+            "storesResult": false,
+            "writesWorkspace": false
+          },
+          "reason": "User confirmation is required before this capability can execute.",
+          "riskFlags": [
+            "external_call"
+          ],
+          "snapshotVersion": 1,
+          "status": "pending",
+          "type": "capability_approval"
+        }
+      ],
+      "clarification": {
+        "detail": {
+          "approvalGate": {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "capabilityLabel": "Web Search",
+            "capabilityVersion": "1.0.0",
+            "id": "approval:web.search:1.0.0:<approval-hash>",
+            "inputPreview": {
+              "question": "Search the web for the current launch date of the product and summarize it."
+            },
+            "policy": {
+              "externalCall": true,
+              "mode": "user_confirmation",
+              "storesResult": false,
+              "writesWorkspace": false
+            },
+            "reason": "User confirmation is required before this capability can execute.",
+            "riskFlags": [
+              "external_call"
+            ],
+            "snapshotVersion": 1,
+            "status": "pending",
+            "type": "capability_approval"
+          },
+          "approvalGates": [
+            {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            }
+          ],
+          "policyResult": {
+            "decision": "needs_approval",
+            "reasons": [
+              "user_confirmation_required"
+            ],
+            "riskFlags": [
+              "external_call"
+            ]
+          }
+        },
+        "needed": true,
+        "question": "Approve Web Search?",
+        "reason": "capability_approval_required"
+      },
+      "errors": {
+        "mcp": null,
+        "rag": null
+      },
+      "mcpAnswer": "Web search not used: clarification needed.",
+      "ragAbstainReason": "Web Search requires approval before execution.",
+      "ragAbstained": true,
+      "ragAnswer": "Approve Web Search?",
+      "ragEvidenceSummary": null,
+      "ragGapPlan": null,
+      "ragMemoryApplied": false,
+      "ragResolvedQuestion": "Search the web for the current launch date of the product and summarize it.",
+      "ragSources": [],
+      "researchBrief": null
+    },
+    "status": 200
+  },
+  "pausedRun": {
+    "checkpoint": null,
+    "run": {
+      "approvalGates": [
+        {
+          "approvalObjectHash": "sha256:<approval-hash>",
+          "capabilityId": "web.search",
+          "capabilityLabel": "Web Search",
+          "capabilityVersion": "1.0.0",
+          "id": "approval:web.search:1.0.0:<approval-hash>",
+          "inputPreview": {
+            "question": "Search the web for the current launch date of the product and summarize it."
+          },
+          "policy": {
+            "externalCall": true,
+            "mode": "user_confirmation",
+            "storesResult": false,
+            "writesWorkspace": false
+          },
+          "reason": "User confirmation is required before this capability can execute.",
+          "riskFlags": [
+            "external_call"
+          ],
+          "snapshotVersion": 1,
+          "status": "pending",
+          "stepId": "2-capability_approval_gate",
+          "type": "capability_approval"
+        }
+      ],
+      "error": null,
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 1
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "paused",
+            "stepId": "web_search:primary"
+          },
+          "type": "step_paused"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "approvalObjectHash": "sha256:<approval-hash>",
+            "capabilityId": "web.search",
+            "gateId": "approval:web.search:1.0.0:<approval-hash>",
+            "status": "waiting_for_user"
+          },
+          "type": "approval_gate_created"
+        }
+      ],
+      "result": {
+        "agentMode": "clarification",
+        "answer": "Approve Web Search?",
+        "citationCount": 0,
+        "ragAbstained": true,
+        "status": 200
+      },
+      "status": "waiting_for_user",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Search the web because no document context is selected."
+              },
+              {
+                "id": "web_search",
+                "label": "Use web fallback",
+                "summary": "Use web context only after document evidence is checked."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [],
+            "mode": "web",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Search the web because no document context is selected.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "approval:web.search:1.0.0:<approval-hash>",
+          "attempt": 1,
+          "capabilityId": "web.search",
+          "capabilityVersion": "1.0.0",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "approvalGates": [
+              {
+                "approvalObjectHash": "sha256:<approval-hash>",
+                "capabilityId": "web.search",
+                "capabilityLabel": "Web Search",
+                "capabilityVersion": "1.0.0",
+                "id": "approval:web.search:1.0.0:<approval-hash>",
+                "inputPreview": {
+                  "question": "Search the web for the current launch date of the product and summarize it."
+                },
+                "policy": {
+                  "externalCall": true,
+                  "mode": "user_confirmation",
+                  "storesResult": false,
+                  "writesWorkspace": false
+                },
+                "reason": "User confirmation is required before this capability can execute.",
+                "riskFlags": [
+                  "external_call"
+                ],
+                "snapshotVersion": 1,
+                "status": "pending",
+                "type": "capability_approval"
+              }
+            ],
+            "clarificationQuestion": "Approve Web Search?",
+            "policyResult": {
+              "decision": "needs_approval",
+              "reasons": [
+                "user_confirmation_required"
+              ],
+              "riskFlags": [
+                "external_call"
+              ]
+            },
+            "reason": "capability_approval_required",
+            "traceStatus": "needs_input"
+          },
+          "error": null,
+          "id": "2-capability_approval_gate",
+          "input": null,
+          "kind": "approval_gate",
+          "label": "Capability Approval",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "paused",
+          "summary": "Web Search requires approval before execution.",
+          "traceStepId": "2-capability_approval_gate",
+          "type": "capability_approval_gate",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "approvalGate": {
+              "approvalObjectHash": "sha256:<approval-hash>",
+              "capabilityId": "web.search",
+              "capabilityLabel": "Web Search",
+              "capabilityVersion": "1.0.0",
+              "id": "approval:web.search:1.0.0:<approval-hash>",
+              "inputPreview": {
+                "question": "Search the web for the current launch date of the product and summarize it."
+              },
+              "policy": {
+                "externalCall": true,
+                "mode": "user_confirmation",
+                "storesResult": false,
+                "writesWorkspace": false
+              },
+              "reason": "User confirmation is required before this capability can execute.",
+              "riskFlags": [
+                "external_call"
+              ],
+              "snapshotVersion": 1,
+              "status": "pending",
+              "type": "capability_approval"
+            },
+            "interruptType": "capability_approval_required"
+          },
+          "error": null,
+          "id": "web_search:primary",
+          "input": null,
+          "kind": "tool_call",
+          "label": "Web Search",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "<time>",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "paused",
+          "summary": "",
+          "traceStepId": "",
+          "type": "web_search",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  }
+}

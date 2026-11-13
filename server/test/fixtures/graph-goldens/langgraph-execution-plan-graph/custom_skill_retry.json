@@ -1,0 +1,796 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Review selected documents for cited risks, gaps, conflicts, and exceptions.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-query_planner",
+        "label": "Query Planner",
+        "status": "completed",
+        "summary": "Planned 3 analysis retrieval queries with broad topK profile.",
+        "type": "query_planner"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "custom_skill:risk_review",
+        "label": "Risk Review",
+        "status": "failed",
+        "summary": "Risk Review failed: Transient custom skill failure.",
+        "type": "custom_skill"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "4-synthesis",
+        "label": "Synthesis",
+        "status": "completed",
+        "summary": "Composed the final agent answer from completed tool results.",
+        "type": "synthesis"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "retry",
+        "detail": {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "chainMode": false,
+            "durationMs": "<elapsed>",
+            "previousSkillCount": 0,
+            "skillId": "risk_review",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "failed"
+          },
+          "error": {
+            "message": "Transient custom skill failure.",
+            "name": "Error"
+          },
+          "id": "custom_skill:risk_review",
+          "input": {
+            "docIds": [
+              "risk-1"
+            ],
+            "effects": "read_only",
+            "idempotency": "read_only_rag",
+            "question": "Review this policy for risks and gaps.",
+            "replaySafe": true,
+            "retrievalPlan": {
+              "intent": "analysis",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "broad",
+                "queryCount": 3,
+                "topK": 10,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-findings",
+                  "label": "Key findings",
+                  "primary": false,
+                  "query": "Find key findings, obligations, risks, gaps, exceptions, and uncertainties for: Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-support",
+                  "label": "Supporting evidence",
+                  "primary": false,
+                  "query": "Find source excerpts that support or qualify the analysis for: Review this policy for risks and gaps."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "trajectory-session",
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "userId": "trajectory-user"
+          },
+          "kind": "tool_call",
+          "label": "Risk Review",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "failed",
+          "summary": "Risk Review failed: Transient custom skill failure.",
+          "traceStepId": "custom_skill:risk_review",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        },
+        "id": "failed_custom_step_persisted_input",
+        "label": "Failed custom skill step persisted retry input and error",
+        "passed": true
+      },
+      {
+        "category": "retry",
+        "detail": {
+          "initialRunId": "<id>",
+          "retryError": null,
+          "retryRunId": "<id>",
+          "runStatus": "completed"
+        },
+        "id": "retry_completed_same_run",
+        "label": "Retry completed on the same agent run",
+        "passed": true
+      },
+      {
+        "category": "retry",
+        "detail": {
+          "approvalGateId": "",
+          "attempt": 2,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "chainMode": false,
+            "durationMs": "<elapsed>",
+            "previousSkillCount": 0,
+            "skillId": "risk_review",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "failed"
+          },
+          "error": null,
+          "id": "custom_skill:risk_review:retry:2",
+          "input": {
+            "docIds": [
+              "risk-1"
+            ],
+            "priorFindings": null,
+            "question": "Review this policy for risks and gaps.",
+            "retrievalPlan": {
+              "intent": "analysis",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "broad",
+                "queryCount": 3,
+                "topK": 10,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-findings",
+                  "label": "Key findings",
+                  "primary": false,
+                  "query": "Find key findings, obligations, risks, gaps, exceptions, and uncertainties for: Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-support",
+                  "label": "Supporting evidence",
+                  "primary": false,
+                  "query": "Find source excerpts that support or qualify the analysis for: Review this policy for risks and gaps."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "trajectory-session",
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "userId": "trajectory-user"
+          },
+          "kind": "tool_call",
+          "label": "Risk Review",
+          "output": {
+            "abstained": false,
+            "citationCount": 1,
+            "text": "Risk Review - Risk: Security exceptions require written approval before production deployment. [Source 1]"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "custom_skill:risk_review",
+          "startedAt": "",
+          "status": "completed",
+          "summary": "Retry queued for Risk Review.",
+          "traceStepId": "custom_skill:risk_review",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        },
+        "id": "retry_step_completed",
+        "label": "Retried step completed with output detail",
+        "passed": true
+      },
+      {
+        "category": "retry",
+        "detail": [
+          "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- risk-policy.pdf\n\nOriginal request: Review this policy for risks and gaps.",
+          "Perform a concise citation-backed risk review from the selected documents.\n\nIdentify risks, gaps, contradictions, exceptions, missing terms, and uncertainty. Use only document evidence.\n\nDo not guess. If a risk, gap, or exception is not supported by the selected documents, say it is not specified.\n\nReturn concise bullets grouped as Risks, Gaps, Conflicts Or Exceptions, and Evidence Limits. Put source citations on every evidence-backed bullet.\n\nSelected documents:\n- risk-policy.pdf\n\nOriginal request: Review this policy for risks and gaps."
+        ],
+        "id": "custom_skill_was_retried_once",
+        "label": "Custom skill execution retried exactly once",
+        "passed": true
+      }
+    ],
+    "description": "With graph rollout off, a failed V1 custom skill step should persist input/output/error and retry from the failed step.",
+    "failedCheckCount": 0,
+    "id": "custom_skill_retry",
+    "label": "Custom skill retry",
+    "passed": true,
+    "response": {
+      "agentMode": "risk_review",
+      "agentSkills": [
+        {
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "budget": null,
+      "clarification": {
+        "detail": null,
+        "needed": false,
+        "question": null,
+        "reason": null
+      },
+      "executionLoop": null,
+      "observed": {
+        "chatCallCount": 2,
+        "failedStep": {
+          "errorMessage": "Transient custom skill failure.",
+          "hasQuestion": true,
+          "skillId": "risk_review",
+          "status": "failed"
+        },
+        "retry": {
+          "attempt": 2,
+          "citationCount": 1,
+          "retryError": null,
+          "retryOfOriginalStep": true,
+          "runStatus": "completed",
+          "sameRun": true,
+          "stepStatus": "completed"
+        }
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Risk Review",
+          "skillId": "risk_review",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 2,
+        "listDocumentCallCount": 2
+      },
+      "traceTypes": [
+        "plan",
+        "query_planner",
+        "custom_skill",
+        "synthesis",
+        "custom_skill"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 0,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": [
+    {
+      "error": null,
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 2
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "custom_skills",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "custom_skill:risk_review"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "failed",
+            "stepId": "custom_skill:risk_review"
+          },
+          "type": "step_failed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "status": "completed"
+          },
+          "type": "run_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:7",
+          "payload": {
+            "retryOfStepId": "custom_skill:risk_review",
+            "stepId": "custom_skill:risk_review:retry:2"
+          },
+          "type": "step_retry_queued"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:8",
+          "payload": {
+            "status": "running",
+            "stepId": "custom_skill:risk_review:retry:2"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:9",
+          "payload": {
+            "status": "completed",
+            "stepId": "custom_skill:risk_review:retry:2"
+          },
+          "type": "step_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:10",
+          "payload": {
+            "status": "completed"
+          },
+          "type": "run_completed"
+        }
+      ],
+      "result": {
+        "agentMode": "risk_review",
+        "answer": "Risk Review - Risk: Security exceptions require written approval before production deployment. [Source 1]",
+        "citationCount": 1,
+        "ragAbstained": false,
+        "status": 200
+      },
+      "status": "completed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Review selected documents for cited risks, gaps, conflicts, and exceptions."
+              },
+              {
+                "id": "risk_review",
+                "label": "Review risks",
+                "summary": "Review risks, gaps, and exceptions across 1 selected document."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": 300000,
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "risk-1"
+            ],
+            "mode": "risk_review",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Review selected documents for cited risks, gaps, conflicts, and exceptions.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "intent": "analysis",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "broad",
+              "queryCount": 3,
+              "topK": 10,
+              "topKPerDoc": 4
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "Review this policy for risks and gaps."
+              },
+              {
+                "id": "analysis-findings",
+                "label": "Key findings",
+                "primary": false,
+                "query": "Find key findings, obligations, risks, gaps, exceptions, and uncertainties for: Review this policy for risks and gaps."
+              },
+              {
+                "id": "analysis-support",
+                "label": "Supporting evidence",
+                "primary": false,
+                "query": "Find source excerpts that support or qualify the analysis for: Review this policy for risks and gaps."
+              }
+            ],
+            "source": "agent-query-planner",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "2-query_planner",
+          "input": null,
+          "kind": "plan",
+          "label": "Query Planner",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Planned 3 analysis retrieval queries with broad topK profile.",
+          "traceStepId": "2-query_planner",
+          "type": "query_planner",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "chainMode": false,
+            "durationMs": "<elapsed>",
+            "previousSkillCount": 0,
+            "skillId": "risk_review",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "failed"
+          },
+          "error": {
+            "message": "Transient custom skill failure.",
+            "name": "Error"
+          },
+          "id": "custom_skill:risk_review",
+          "input": {
+            "docIds": [
+              "risk-1"
+            ],
+            "effects": "read_only",
+            "idempotency": "read_only_rag",
+            "question": "Review this policy for risks and gaps.",
+            "replaySafe": true,
+            "retrievalPlan": {
+              "intent": "analysis",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "broad",
+                "queryCount": 3,
+                "topK": 10,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-findings",
+                  "label": "Key findings",
+                  "primary": false,
+                  "query": "Find key findings, obligations, risks, gaps, exceptions, and uncertainties for: Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-support",
+                  "label": "Supporting evidence",
+                  "primary": false,
+                  "query": "Find source excerpts that support or qualify the analysis for: Review this policy for risks and gaps."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "trajectory-session",
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "userId": "trajectory-user"
+          },
+          "kind": "tool_call",
+          "label": "Risk Review",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "failed",
+          "summary": "Risk Review failed: Transient custom skill failure.",
+          "traceStepId": "custom_skill:risk_review",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": 300000,
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 1,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 3,
+                "webSearchCalls": 0
+              }
+            },
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "4-synthesis",
+          "input": {
+            "agentMode": "risk_review",
+            "customSkillResultCount": 1,
+            "hasActionAnswer": false,
+            "hasArxivImportAnswer": false,
+            "hasDiscoveryAnswer": false,
+            "hasInventoryAnswer": false,
+            "hasRagResult": false,
+            "hasResearchBrief": false,
+            "hasWebResult": false,
+            "sourceCount": 0
+          },
+          "kind": "decision",
+          "label": "Synthesis",
+          "output": {
+            "answerLength": 48,
+            "sourceCount": 0
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Composed the final agent answer from completed tool results.",
+          "traceStepId": "4-synthesis",
+          "type": "synthesis",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 2,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "chainMode": false,
+            "durationMs": "<elapsed>",
+            "previousSkillCount": 0,
+            "skillId": "risk_review",
+            "skillKind": "custom",
+            "skillVersion": "1.0.0",
+            "traceStatus": "failed"
+          },
+          "error": null,
+          "id": "custom_skill:risk_review:retry:2",
+          "input": {
+            "docIds": [
+              "risk-1"
+            ],
+            "priorFindings": null,
+            "question": "Review this policy for risks and gaps.",
+            "retrievalPlan": {
+              "intent": "analysis",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "broad",
+                "queryCount": 3,
+                "topK": 10,
+                "topKPerDoc": 4
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-findings",
+                  "label": "Key findings",
+                  "primary": false,
+                  "query": "Find key findings, obligations, risks, gaps, exceptions, and uncertainties for: Review this policy for risks and gaps."
+                },
+                {
+                  "id": "analysis-support",
+                  "label": "Supporting evidence",
+                  "primary": false,
+                  "query": "Find source excerpts that support or qualify the analysis for: Review this policy for risks and gaps."
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "trajectory-session",
+            "skillId": "risk_review",
+            "skillVersion": "1.0.0",
+            "userId": "trajectory-user"
+          },
+          "kind": "tool_call",
+          "label": "Risk Review",
+          "output": {
+            "abstained": false,
+            "citationCount": 1,
+            "text": "Risk Review - Risk: Security exceptions require written approval before production deployment. [Source 1]"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "custom_skill:risk_review",
+          "startedAt": "",
+          "status": "completed",
+          "summary": "Retry queued for Risk Review.",
+          "traceStepId": "custom_skill:risk_review",
+          "type": "custom_skill",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  ]
+}

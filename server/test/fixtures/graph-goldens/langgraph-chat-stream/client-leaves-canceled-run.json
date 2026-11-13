@@ -1,0 +1,153 @@
+{
+  "error": {
+    "code": "AGENT_CLIENT_CANCELLED",
+    "message": "The client disconnected before the answer was complete.",
+    "name": "RequestCancelledError",
+    "reason": "client_cancelled",
+    "retryable": false
+  },
+  "events": [
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:1",
+      "payload": {
+        "status": "running"
+      },
+      "type": "run_created"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:2",
+      "payload": {
+        "traceStepCount": 2
+      },
+      "type": "run_prepared"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:3",
+      "payload": {
+        "planner": {
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedPlannerId": "deterministic",
+          "status": "selected",
+          "stepIds": [
+            "arxiv_import",
+            "workspace_action",
+            "research_brief",
+            "inventory",
+            "document_discovery",
+            "document_rag",
+            "web_search"
+          ]
+        }
+      },
+      "type": "execution_planned"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:4",
+      "payload": {
+        "status": "running",
+        "stepId": "document_rag:primary"
+      },
+      "type": "step_started"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:5",
+      "payload": {
+        "status": "failed",
+        "stepId": "document_rag:primary"
+      },
+      "type": "step_failed"
+    },
+    {
+      "createdAt": "<time>",
+      "eventId": "<id>:6",
+      "payload": {
+        "error": {
+          "code": "AGENT_CLIENT_CANCELLED",
+          "message": "The client disconnected before the answer was complete.",
+          "name": "RequestCancelledError",
+          "reason": "client_cancelled",
+          "retryable": false
+        },
+        "reason": "client_cancelled",
+        "status": "canceled"
+      },
+      "type": "run_canceled"
+    }
+  ],
+  "result": {},
+  "status": "canceled",
+  "steps": [
+    {
+      "approvalGateId": "",
+      "attempt": 1,
+      "capabilityId": "",
+      "capabilityVersion": "",
+      "completedAt": "<time>",
+      "createdAt": "<time>",
+      "decision": "",
+      "detail": null,
+      "error": {
+        "message": "The client disconnected before the answer was complete.",
+        "name": "RequestCancelledError"
+      },
+      "id": "document_rag:primary",
+      "input": {
+        "docIds": [
+          "contract-1"
+        ],
+        "effects": "workspace_write",
+        "idempotency": "adapter_defined",
+        "question": "What are the renewal term and the monthly fee?",
+        "replaySafe": false,
+        "retrievalPlan": {
+          "intent": "fact",
+          "phase": "primary",
+          "retrievalOptions": {
+            "profile": "narrow",
+            "queryCount": 2,
+            "topK": 4,
+            "topKPerDoc": 2
+          },
+          "retrievalQueries": [
+            {
+              "id": "primary",
+              "label": "Original request",
+              "primary": true,
+              "query": "What are the renewal term and the monthly fee?"
+            },
+            {
+              "id": "fact-citation",
+              "label": "Exact citation evidence",
+              "primary": false,
+              "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+            }
+          ],
+          "source": "agent-query-planner"
+        },
+        "sessionId": null,
+        "skillId": "document_rag",
+        "skillVersion": "1.0.0",
+        "userId": null
+      },
+      "kind": "tool_call",
+      "label": "Document RAG",
+      "output": null,
+      "parentStepId": "",
+      "pausedAt": "",
+      "retryOfStepId": "",
+      "startedAt": "<time>",
+      "status": "failed",
+      "summary": "",
+      "traceStepId": "",
+      "type": "document_rag",
+      "updatedAt": "<time>"
+    }
+  ]
+}

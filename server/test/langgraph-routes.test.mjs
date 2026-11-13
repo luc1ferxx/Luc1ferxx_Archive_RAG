@@ -489,6 +489,17 @@ test("POST /chat answers a document question identically on every pass, and only
   assert.equal(langgraph.run.run.status, "completed");
   assert.deepStrictEqual(mask(outerPlan.answer), mask(langgraph.answer));
   assert.deepStrictEqual(mask(outerPlan.run), mask(langgraph.run));
+  // The freeze before ADR 0001 phase 7 deletes the native outer loop: the
+  // production pass (the outer plan on the native loop) writes the golden,
+  // the outer-dial pass is only compared with it.
+  for (const [runtime, pass] of Object.entries(passes)) {
+    assertMatchesGraphGolden(
+      "langgraph-routes",
+      "v1-chat-document-question",
+      { answer: mask(pass.answer), run: mask(pass.run) },
+      { write: runtime === "langgraph" }
+    );
+  }
   // The production setting kept the outer plan on the native loop. With the
   // outer dial the plan was scheduled on LangGraph once, bound to the run; no
   // custom-Skill or unified graph exists on this request.
@@ -569,6 +580,25 @@ test("POST /chat/stream relays identical SSE bytes on every pass, drafts include
   assert.deepStrictEqual(mask(outerPlan.post), mask(langgraph.post));
   assert.deepStrictEqual(mask(outerPlan.runs), mask(langgraph.runs));
   assert.equal(langgraph.runs.length, 3);
+  // Frozen from the production pass (the native route branch and loop)
+  // before phase 7; the outer-dial pass is only compared with it.
+  for (const [runtime, pass] of Object.entries(passes)) {
+    assertMatchesGraphGolden(
+      "langgraph-routes",
+      "v1-chat-stream-document-question",
+      {
+        get: mask(pass.get),
+        post: mask(pass.post),
+        runs: mask(pass.runs),
+        stream: {
+          frames: mask(pass.stream.frames),
+          status: pass.stream.status,
+          text: maskVolatileText(pass.stream.text),
+        },
+      },
+      { write: runtime === "langgraph" }
+    );
+  }
   // The production setting: the native route branch and the native outer
   // loop for the stream and both /chat methods.
   assert.deepStrictEqual(langgraph.invocations, { graph: [], plan: [] });
@@ -997,6 +1027,22 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
   assert.deepStrictEqual(mask(outerPlan.finished), mask(langgraph.finished));
   assert.deepStrictEqual(outerPlan.calls, langgraph.calls);
   assert.deepStrictEqual(langgraph.calls, [WEB_QUESTION]);
+  // Frozen from the production pass (the outer plan on the native loop)
+  // before phase 7; the outer-dial pass is only compared with it.
+  for (const [runtime, pass] of Object.entries(passes)) {
+    assertMatchesGraphGolden(
+      "langgraph-routes",
+      "v1-capability-approval",
+      {
+        approved: mask(pass.approved),
+        calls: pass.calls,
+        finished: mask(pass.finished),
+        paused: mask(pass.paused),
+        pausedRun: mask(pass.pausedRun),
+      },
+      { write: runtime === "langgraph" }
+    );
+  }
   assert.equal(langgraph.approved.status, 200);
   assert.equal(langgraph.approved.body.response.agentMode, "web");
   assert.equal(langgraph.approved.body.run.status, "completed");

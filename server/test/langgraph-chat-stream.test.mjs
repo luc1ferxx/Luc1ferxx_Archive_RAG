@@ -90,6 +90,7 @@ const { completeText, configureOpenAIProvider, resetOpenAIProvider } = await imp
   "../rag/openai.js"
 );
 const { describeAgentRouteError } = await import("../routes/chat.js");
+const { assertMatchesGraphGolden } = await import("./langgraph-support/graph-goldens.mjs");
 const { getRequestSignal } = await import("../rag/request-deadline.js");
 
 // The two passes, by the outer plan's dial they pin: unset, which keeps the
@@ -396,6 +397,28 @@ const assertStreamsIdentical = (passes) => {
   assertOuterPlanFollowsItsOwnDial(passes);
 };
 
+// The freeze before ADR 0001 phase 7 deletes the native route branch and
+// loop: the native pass of every stream, masked exactly as
+// assertStreamsIdentical compares it (the bytes on the wire, the frames they
+// parse into, every run), is held to a golden under
+// test/fixtures/graph-goldens/langgraph-chat-stream/. On this commit the
+// native pass is the one that may write a golden (UPDATE_GRAPH_GOLDENS=1), so
+// every fixture is the record of what the native branch sent; the LangGraph
+// pass is compared with the same fixture and never writes it.
+const GOLDEN_SUITE = "langgraph-chat-stream";
+
+const toStreamGolden = ({ frames, runs, status, text }) => ({
+  frames: maskVolatile(frames),
+  runs: maskVolatile(runs),
+  status,
+  text: maskVolatileText(text),
+});
+
+const assertStreamsMatchGolden = (caseName, { langgraph, native }) => {
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toStreamGolden(native));
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toStreamGolden(langgraph), { write: false });
+};
+
 test("a fully supported answer streams the same trace steps, drafts, result and done on both runtimes, and the result equals /chat", async (t) => {
   installStreamingModel(t, () => SUPPORTED_SENTENCES.join("\n"));
 
@@ -403,6 +426,7 @@ test("a fully supported answer streams the same trace steps, drafts, result and 
   const { langgraph, native } = passes;
 
   assertStreamsIdentical(passes);
+  assertStreamsMatchGolden("supported-answer", passes);
 
   const eventNames = native.frames.map((frame) => frame.event);
 
@@ -456,6 +480,7 @@ test("a sentence the claim check does not support is never drafted on either run
   const { langgraph, native } = passes;
 
   assertStreamsIdentical(passes);
+  assertStreamsMatchGolden("unsupported-sentence", passes);
   assert.ok(draftTexts(native.frames).length > 0, "some sentence was drafted");
   for (const text of [...draftTexts(native.frames), ...draftTexts(langgraph.frames)]) {
     assert.ok(SUPPORTED_SENTENCES.includes(text), text);
@@ -497,6 +522,7 @@ test("a deadline that passes mid-run ends the stream with the same error and don
   }
 
   assertStreamsIdentical(passes);
+  assertStreamsMatchGolden("deadline-mid-run", passes);
 
   const { frames, runs } = passes.native;
 
@@ -549,6 +575,7 @@ test("a deadline that throws inside a stage right after a burst of trace steps s
   });
 
   assertStreamsIdentical(passes);
+  assertStreamsMatchGolden("deadline-after-trace-burst", passes);
 
   const { frames, runs } = passes.native;
 
@@ -618,6 +645,13 @@ test("with AGENT_CANCEL_ON_DISCONNECT on, a client that leaves /chat/stream canc
   });
   assert.ok(records.native.run.steps.every((step) => step.status !== "running"));
   assert.deepStrictEqual(maskVolatile(records.langgraph.run), maskVolatile(records.native.run));
+  assertMatchesGraphGolden(GOLDEN_SUITE, "client-leaves-canceled-run", maskVolatile(records.native.run));
+  assertMatchesGraphGolden(
+    GOLDEN_SUITE,
+    "client-leaves-canceled-run",
+    maskVolatile(records.langgraph.run),
+    { write: false }
+  );
   assertOuterPlanFollowsItsOwnDial(records);
 });
 

@@ -1,0 +1,152 @@
+{
+  "events": [
+    {
+      "step": {
+        "id": "1-plan",
+        "label": "Plan",
+        "status": "completed",
+        "summary": "Compare selected documents for cited common ground, differences, conflicts, and missing terms.",
+        "type": "plan"
+      },
+      "type": "trace_step"
+    },
+    {
+      "step": {
+        "id": "2-clarification_gate",
+        "label": "Clarification Gate",
+        "status": "needs_input",
+        "summary": "The comparison request needs at least two selected documents.",
+        "type": "clarification_gate"
+      },
+      "type": "trace_step"
+    }
+  ],
+  "outcome": {
+    "checks": [
+      {
+        "category": "clarification",
+        "detail": "clarification",
+        "id": "agent_mode_clarification",
+        "label": "Agent returned clarification mode",
+        "passed": true
+      },
+      {
+        "category": "clarification",
+        "detail": {
+          "detail": {
+            "requiredDocumentCount": 2,
+            "selectedDocumentCount": 1
+          },
+          "needed": true,
+          "question": "Which two or more documents should I compare? Select the documents, then send the comparison request again.",
+          "reason": "comparison_requires_multiple_documents"
+        },
+        "id": "comparison_reason",
+        "label": "Clarification reason identifies missing comparison document",
+        "passed": true
+      },
+      {
+        "category": "clarification",
+        "detail": [
+          "plan",
+          "clarification_gate"
+        ],
+        "id": "clarification_trace",
+        "label": "Trace records the clarification gate",
+        "passed": true
+      },
+      {
+        "category": "clarification",
+        "detail": [],
+        "id": "no_tool_execution_before_clarification",
+        "label": "No document chat ran before clarification",
+        "passed": true
+      }
+    ],
+    "description": "A comparison request with only one selected document should ask for clarification instead of running tools.",
+    "failedCheckCount": 0,
+    "id": "comparison_requires_clarification",
+    "label": "Comparison clarification gate",
+    "passed": true,
+    "response": {
+      "agentMode": "clarification",
+      "agentSkills": [],
+      "budget": {
+        "limits": {
+          "maxArxivPaperFetches": 1,
+          "maxCustomSkillCalls": 2,
+          "maxDocumentRagCalls": 2,
+          "maxResearchQuestions": 3,
+          "maxTraceSteps": 16,
+          "maxWebSearchCalls": 1
+        },
+        "run": {
+          "exhausted": null,
+          "limits": {
+            "maxCostUsd": 0.5,
+            "maxDurationMs": 300000,
+            "maxTokens": 100000
+          },
+          "used": {
+            "costUsd": 0,
+            "durationMs": "<elapsed>",
+            "modelCalls": 0,
+            "tokens": 0,
+            "unpricedModelCalls": 0
+          }
+        },
+        "traceTruncated": false,
+        "used": {
+          "arxivPaperFetches": 0,
+          "customSkillCalls": 0,
+          "documentRagCalls": 0,
+          "researchQuestions": 0,
+          "traceSteps": 2,
+          "webSearchCalls": 0
+        }
+      },
+      "clarification": {
+        "detail": {
+          "requiredDocumentCount": 2,
+          "selectedDocumentCount": 1
+        },
+        "needed": true,
+        "question": "Which two or more documents should I compare? Select the documents, then send the comparison request again.",
+        "reason": "comparison_requires_multiple_documents"
+      },
+      "executionLoop": {
+        "followUpsRun": 0,
+        "gaps": [],
+        "gapsIdentified": 0,
+        "maxFollowUps": 1,
+        "stoppedReason": "not_needed",
+        "version": "1.0"
+      },
+      "selectedSkills": [
+        {
+          "budgetKey": "customSkillCalls",
+          "label": "Compare Documents",
+          "skillId": "compare_documents",
+          "skillVersion": "1.0.0"
+        }
+      ],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 0,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [
+        "plan",
+        "clarification_gate"
+      ],
+      "workingMemory": {
+        "checkedQueryCount": 0,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

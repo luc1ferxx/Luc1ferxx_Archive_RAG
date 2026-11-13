@@ -276,6 +276,27 @@ const assertPassesIdentical = ({ langgraph, native }) => {
   );
 };
 
+// The freeze before ADR 0001 phase 7 deletes the native loop: the native pass
+// of every scenario, masked exactly as assertPassesIdentical compares it, is
+// held to a golden under test/fixtures/graph-goldens/langgraph-execution-plan-
+// graph/. On this commit the native pass is the one that may write a golden
+// (UPDATE_GRAPH_GOLDENS=1), so every fixture is the record of what the native
+// loop did; the LangGraph pass is compared with the same fixture and never
+// writes it. The three custom-Skill DAG cases keep the fixtures phase 6 froze
+// (same shape, same content).
+const GOLDEN_SUITE = "langgraph-execution-plan-graph";
+
+const toPassGolden = ({ events, outcome, runs }) => ({
+  events: maskVolatile(events),
+  outcome: maskVolatile(outcome),
+  runs: maskVolatile(runs.map(projectAgentRun)),
+});
+
+const assertPassesMatchGolden = (caseName, { langgraph, native }) => {
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toPassGolden(native));
+  assertMatchesGraphGolden(GOLDEN_SUITE, caseName, toPassGolden(langgraph), { write: false });
+};
+
 // The outer dial unset keeps the outer plan on the native loop (no plan-graph
 // invocation, no outer-plan graph streamed), and the custom-Skill DAG's
 // LangGraph invocations do not depend on who scheduled the outer plan: the
@@ -433,14 +454,12 @@ for (const [
       assertOuterPlanFollowsItsOwnDial(passes);
     }
 
+    // Both passes against the golden: for the custom-Skill DAG cases what the
+    // native graph scheduler did before phase 6, for every case what the
+    // native outer loop does (frozen before phase 7).
+    assertPassesMatchGolden(caseId, passes);
+
     if (customSkillGraph) {
-      // The production pass (the other one equals it, above) against what
-      // the native scheduler did before phase 6.
-      assertMatchesGraphGolden("langgraph-execution-plan-graph", caseId, {
-        events: maskVolatile(native.events),
-        outcome: maskVolatile(native.outcome),
-        runs: maskVolatile(native.runs.map(projectAgentRun)),
-      });
       assert.ok(
         passes.langgraph.graphInvocations.length > 0,
         "the custom-Skill DAG was scheduled on LangGraph"
@@ -548,6 +567,7 @@ test("a research brief is identical on both runtimes", async () => {
     "the brief asked its research questions"
   );
   assertPassesIdentical(passes);
+  assertPassesMatchGolden("direct-research-brief", passes);
   assertScheduledOnLangGraph(passes);
   assert.deepStrictEqual(passes.langgraph.invocations[0].stepIds, DETERMINISTIC_STEP_IDS);
   // Only the selected built-in stage of the five is scheduled.
@@ -587,6 +607,7 @@ test("an abstention falls through to the Web stage identically: without a standi
   );
   assert.equal(withoutApproval.native.outcome.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
   assertPassesIdentical(withoutApproval);
+  assertPassesMatchGolden("direct-abstention-without-approval", withoutApproval);
   assertScheduledOnLangGraph(withoutApproval);
 
   const webCalls = { langgraph: 0, native: 0 };
@@ -619,6 +640,7 @@ test("an abstention falls through to the Web stage identically: without a standi
   );
   assert.deepStrictEqual(webCalls, { langgraph: 1, native: 1 });
   assertPassesIdentical(withApproval);
+  assertPassesMatchGolden("direct-abstention-with-approval", withApproval);
   assertScheduledOnLangGraph(withApproval);
 });
 
@@ -646,6 +668,7 @@ test("a dependency outage ends the run identically: the thrown 503, the failed r
   assert.equal(native.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
   assert.equal(native.outcome.runs[0].error.retryable, true);
   assertPassesIdentical(passes);
+  assertPassesMatchGolden("direct-dependency-outage", passes);
   assertScheduledOnLangGraph(passes);
 });
 
@@ -681,6 +704,7 @@ test("a request already cancelled stops at the first stage boundary with the sam
     assert.equal(native.outcome.runs[0].error.reason, reason);
     assert.deepStrictEqual(native.outcome.runs[0].steps, []);
     assertPassesIdentical(passes);
+    assertPassesMatchGolden(`direct-cancelled-before-first-stage-${reason}`, passes);
     assertScheduledOnLangGraph(passes);
     // The document question's five built-in stages, the first of them the
     // one whose safe point stops the native loop, are not scheduled.
@@ -730,6 +754,7 @@ test("a cancellation during a stage surfaces after that stage settles, through t
     "the document step settled before the cancellation surfaced"
   );
   assertPassesIdentical(passes);
+  assertPassesMatchGolden("direct-cancelled-during-stage", passes);
   assertScheduledOnLangGraph(passes);
 });
 
@@ -764,6 +789,7 @@ test("a deadline that passes inside a stage ends the run failed with AGENT_DEADL
   assert.equal(native.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
   assert.equal(native.outcome.runs[0].error.reason, "deadline_exceeded");
   assertPassesIdentical(passes);
+  assertPassesMatchGolden("direct-deadline-inside-stage", passes);
   assertScheduledOnLangGraph(passes);
 });
 
@@ -826,6 +852,7 @@ test("a stage that throws right after a burst of agent events streams every even
       reason
     );
     assertPassesIdentical(passes);
+    assertPassesMatchGolden(`direct-burst-then-throw-${reason}`, passes);
     assertScheduledOnLangGraph(passes);
   }
 });
@@ -920,6 +947,10 @@ test("a cancellation before a stage the LangGraph plan does not schedule ends th
       label
     );
     assertPassesIdentical(passes);
+    assertPassesMatchGolden(
+      `direct-interleaved-plan-${reason}-${cancelBeforeTheRun ? "before-the-run" : "during-the-document-stage"}`,
+      passes
+    );
     assertScheduledOnLangGraph(passes);
     // The planner's interleaved plan reached the LangGraph entry as planned
     // (no fallback to the deterministic plan); the entry itself schedules

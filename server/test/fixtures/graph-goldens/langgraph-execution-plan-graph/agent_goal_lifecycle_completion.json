@@ -1,0 +1,403 @@
+{
+  "events": [],
+  "outcome": {
+    "checks": [
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "completionStatus": "pending",
+          "requiredUserAction": "approve_deliverables",
+          "taskStatus": "waiting_for_user"
+        },
+        "id": "pending_approval_blocks_goal_completion",
+        "label": "Pending deliverable approval blocks goal completion",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "blockers": [],
+          "checks": [
+            {
+              "detail": {
+                "stoppedReason": "completed",
+                "taskStatus": "completed"
+              },
+              "id": "terminal_status_completed",
+              "label": "Task reached a terminal completed state",
+              "passed": true
+            },
+            {
+              "detail": {
+                "incompleteStepIds": [],
+                "totalStepCount": 8
+              },
+              "id": "plan_steps_completed",
+              "label": "All public plan steps completed",
+              "passed": true
+            },
+            {
+              "detail": {
+                "checkedQueryCount": 1,
+                "resolvedGapCount": 1,
+                "unresolvedGapCount": 0,
+                "unsupportedClaimCount": 0
+              },
+              "id": "evidence_gaps_resolved",
+              "label": "No unresolved evidence gaps remain",
+              "passed": true
+            },
+            {
+              "detail": {
+                "artifactCompleted": 2,
+                "artifactPlanned": 2,
+                "completed": 3,
+                "failed": 0,
+                "missingArtifactCapabilityIds": [],
+                "planned": 3,
+                "status": "completed"
+              },
+              "id": "deliverables_created",
+              "label": "Requested goal deliverables were created",
+              "passed": true
+            },
+            {
+              "detail": {
+                "pendingReason": "",
+                "requiredUserAction": ""
+              },
+              "id": "no_pending_user_action",
+              "label": "No pending approval or user action remains",
+              "passed": true
+            },
+            {
+              "detail": {
+                "completed": 6,
+                "status": "completed",
+                "total": 6,
+                "workflowId": "research_dossier",
+                "workflowVersion": "1.0.0"
+              },
+              "id": "research_phases_completed",
+              "label": "Research task phases completed when requested",
+              "passed": true
+            },
+            {
+              "detail": {
+                "completionCheckIds": [
+                  "terminal_status_completed",
+                  "plan_steps_completed",
+                  "evidence_gaps_resolved",
+                  "deliverables_created",
+                  "no_pending_user_action",
+                  "research_phases_completed"
+                ],
+                "currentPhaseId": null,
+                "deliverableCapabilityIds": [
+                  "document.organize",
+                  "report.export",
+                  "summary.create",
+                  "task.create"
+                ],
+                "phaseCounts": {
+                  "completed": 6,
+                  "failed": 0,
+                  "pending": 0,
+                  "running": 0,
+                  "total": 6,
+                  "waiting": 0
+                },
+                "status": "completed",
+                "workflowId": "research_dossier",
+                "workflowType": "agent_workflow",
+                "workflowVersion": "1.0.0"
+              },
+              "id": "workflow_lifecycle_recorded",
+              "label": "Workflow lifecycle contract is recorded when requested",
+              "passed": true
+            }
+          ],
+          "status": "completed",
+          "summary": "Goal completion checks passed.",
+          "version": "1.0.0"
+        },
+        "id": "goal_completion_passes_after_delivery",
+        "label": "Goal completion passes after deliverables are created",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "detail": {
+            "incompleteStepIds": [],
+            "totalStepCount": 8
+          },
+          "id": "plan_steps_completed",
+          "label": "All public plan steps completed",
+          "passed": true
+        },
+        "id": "goal_lifecycle_plan_completed",
+        "label": "Lifecycle check verifies public plan steps completed",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "detail": {
+            "checkedQueryCount": 1,
+            "resolvedGapCount": 1,
+            "unresolvedGapCount": 0,
+            "unsupportedClaimCount": 0
+          },
+          "id": "evidence_gaps_resolved",
+          "label": "No unresolved evidence gaps remain",
+          "passed": true
+        },
+        "id": "goal_lifecycle_no_unresolved_gaps",
+        "label": "Lifecycle check verifies unresolved gaps are clear",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "capabilityIds": [
+            "report.export",
+            "summary.create",
+            "task.create"
+          ],
+          "deliverableCheck": {
+            "detail": {
+              "artifactCompleted": 2,
+              "artifactPlanned": 2,
+              "completed": 3,
+              "failed": 0,
+              "missingArtifactCapabilityIds": [],
+              "planned": 3,
+              "status": "completed"
+            },
+            "id": "deliverables_created",
+            "label": "Requested goal deliverables were created",
+            "passed": true
+          },
+          "storedArtifactCount": 2
+        },
+        "id": "goal_lifecycle_deliverables_created",
+        "label": "Lifecycle check verifies deliverables were created",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "workflowLifecycle": {
+            "completionChecks": [
+              "terminal_status_completed",
+              "plan_steps_completed",
+              "evidence_gaps_resolved",
+              "deliverables_created",
+              "no_pending_user_action",
+              "research_phases_completed"
+            ],
+            "counts": {
+              "completed": 6,
+              "failed": 0,
+              "pending": 0,
+              "running": 0,
+              "total": 6,
+              "waiting": 0
+            },
+            "currentPhaseId": null,
+            "deliverables": [
+              {
+                "approvalRequired": true,
+                "artifactType": "document_organization",
+                "capabilityId": "document.organize",
+                "label": "Document organization",
+                "optional": true,
+                "title": ""
+              },
+              {
+                "approvalRequired": true,
+                "artifactType": "markdown_report",
+                "capabilityId": "report.export",
+                "label": "Markdown report",
+                "optional": false,
+                "title": ""
+              },
+              {
+                "approvalRequired": true,
+                "artifactType": "saved_summary",
+                "capabilityId": "summary.create",
+                "label": "Saved summary",
+                "optional": false,
+                "title": ""
+              },
+              {
+                "approvalRequired": true,
+                "artifactType": "follow_up_task",
+                "capabilityId": "task.create",
+                "label": "Follow-up task",
+                "optional": false,
+                "title": ""
+              }
+            ],
+            "id": "research_dossier",
+            "label": "Research dossier",
+            "status": "completed",
+            "type": "agent_workflow",
+            "version": "1.0.0"
+          },
+          "workflowLifecycleCheck": {
+            "detail": {
+              "completionCheckIds": [
+                "terminal_status_completed",
+                "plan_steps_completed",
+                "evidence_gaps_resolved",
+                "deliverables_created",
+                "no_pending_user_action",
+                "research_phases_completed"
+              ],
+              "currentPhaseId": null,
+              "deliverableCapabilityIds": [
+                "document.organize",
+                "report.export",
+                "summary.create",
+                "task.create"
+              ],
+              "phaseCounts": {
+                "completed": 6,
+                "failed": 0,
+                "pending": 0,
+                "running": 0,
+                "total": 6,
+                "waiting": 0
+              },
+              "status": "completed",
+              "workflowId": "research_dossier",
+              "workflowType": "agent_workflow",
+              "workflowVersion": "1.0.0"
+            },
+            "id": "workflow_lifecycle_recorded",
+            "label": "Workflow lifecycle contract is recorded when requested",
+            "passed": true
+          }
+        },
+        "id": "goal_lifecycle_workflow_contract_recorded",
+        "label": "Lifecycle check verifies workflow contract is recorded",
+        "passed": true
+      },
+      {
+        "category": "goal_lifecycle",
+        "detail": {
+          "check": {
+            "detail": {
+              "pendingReason": "",
+              "requiredUserAction": ""
+            },
+            "id": "no_pending_user_action",
+            "label": "No pending approval or user action remains",
+            "passed": true
+          },
+          "requiredUserAction": ""
+        },
+        "id": "goal_lifecycle_no_pending_approval",
+        "label": "Lifecycle check verifies no approval remains pending",
+        "passed": true
+      }
+    ],
+    "description": "An agent goal should remain incomplete while approval is pending, then pass goal-completion checks after approved deliverables are created.",
+    "failedCheckCount": 0,
+    "id": "agent_goal_lifecycle_completion",
+    "label": "Agent goal lifecycle completion",
+    "passed": true,
+    "response": {
+      "agentMode": "agent_goal",
+      "agentSkills": [],
+      "budget": null,
+      "clarification": null,
+      "executionLoop": null,
+      "observed": {
+        "completed": {
+          "completionChecks": [
+            {
+              "id": "terminal_status_completed",
+              "passed": true
+            },
+            {
+              "id": "plan_steps_completed",
+              "passed": true
+            },
+            {
+              "id": "evidence_gaps_resolved",
+              "passed": true
+            },
+            {
+              "id": "deliverables_created",
+              "passed": true
+            },
+            {
+              "id": "no_pending_user_action",
+              "passed": true
+            },
+            {
+              "id": "research_phases_completed",
+              "passed": true
+            },
+            {
+              "id": "workflow_lifecycle_recorded",
+              "passed": true
+            }
+          ],
+          "completionStatus": "completed",
+          "requiredUserAction": "",
+          "taskStatus": "completed"
+        },
+        "deliverables": {
+          "capabilityIds": [
+            "report.export",
+            "summary.create",
+            "task.create"
+          ],
+          "planned": 3,
+          "storedArtifactCount": 2
+        },
+        "pending": {
+          "completionStatus": "pending",
+          "noPendingUserActionPassed": false,
+          "requiredUserAction": "approve_deliverables",
+          "taskStatus": "waiting_for_user"
+        },
+        "workflow": {
+          "completedCount": 6,
+          "completionChecks": [
+            "terminal_status_completed",
+            "plan_steps_completed",
+            "evidence_gaps_resolved",
+            "deliverables_created",
+            "no_pending_user_action",
+            "research_phases_completed"
+          ],
+          "currentPhaseId": null,
+          "id": "research_dossier",
+          "reportExportPlanned": true,
+          "validationPassed": true,
+          "version": "1.0.0"
+        }
+      },
+      "selectedSkills": [],
+      "skillChain": [],
+      "status": 200,
+      "telemetry": {
+        "chatCallCount": 0,
+        "listDocumentCallCount": 0
+      },
+      "traceTypes": [],
+      "workingMemory": {
+        "checkedQueryCount": 0,
+        "resolvedGapCount": 0,
+        "unresolvedGapCount": 0,
+        "unsupportedClaimCount": 0
+      }
+    }
+  },
+  "runs": []
+}

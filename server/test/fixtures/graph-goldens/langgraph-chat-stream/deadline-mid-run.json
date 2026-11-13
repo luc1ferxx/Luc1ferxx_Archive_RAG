@@ -1,0 +1,200 @@
+{
+  "frames": [
+    {
+      "data": {
+        "step": {
+          "id": "1-plan",
+          "label": "Plan",
+          "status": "completed",
+          "summary": "Use selected documents and synthesize a grounded answer.",
+          "type": "plan"
+        },
+        "type": "trace_step"
+      },
+      "event": "trace_step"
+    },
+    {
+      "data": {
+        "step": {
+          "id": "2-query_planner",
+          "label": "Query Planner",
+          "status": "completed",
+          "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+          "type": "query_planner"
+        },
+        "type": "trace_step"
+      },
+      "event": "trace_step"
+    },
+    {
+      "data": {
+        "agentRunId": "<id>",
+        "code": "AGENT_DEADLINE_EXCEEDED",
+        "error": "The request deadline passed before the answer was complete.",
+        "reason": "deadline_exceeded",
+        "retryable": true,
+        "status": 504
+      },
+      "event": "error"
+    },
+    {
+      "data": {},
+      "event": "done"
+    }
+  ],
+  "runs": [
+    {
+      "error": {
+        "code": "AGENT_DEADLINE_EXCEEDED",
+        "message": "The request deadline passed before the answer was complete.",
+        "name": "RequestCancelledError",
+        "reason": "deadline_exceeded",
+        "retryable": true
+      },
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 2
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "document_rag:primary"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "failed",
+            "stepId": "document_rag:primary"
+          },
+          "type": "step_failed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "error": {
+              "code": "AGENT_DEADLINE_EXCEEDED",
+              "message": "The request deadline passed before the answer was complete.",
+              "name": "RequestCancelledError",
+              "reason": "deadline_exceeded",
+              "retryable": true
+            }
+          },
+          "type": "run_failed"
+        }
+      ],
+      "result": {},
+      "status": "failed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": null,
+          "error": {
+            "message": "The request deadline passed before the answer was complete.",
+            "name": "RequestCancelledError"
+          },
+          "id": "document_rag:primary",
+          "input": {
+            "docIds": [
+              "contract-1"
+            ],
+            "effects": "workspace_write",
+            "idempotency": "adapter_defined",
+            "question": "What are the renewal term and the monthly fee?",
+            "replaySafe": false,
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": null,
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "userId": null
+          },
+          "kind": "tool_call",
+          "label": "Document RAG",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "failed",
+          "summary": "",
+          "traceStepId": "",
+          "type": "document_rag",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  ],
+  "status": 200,
+  "text": "event: trace_step\ndata: {\"step\":{\"id\":\"1-plan\",\"label\":\"Plan\",\"status\":\"completed\",\"summary\":\"Use selected documents and synthesize a grounded answer.\",\"type\":\"plan\"},\"type\":\"trace_step\"}\n\nevent: trace_step\ndata: {\"step\":{\"id\":\"2-query_planner\",\"label\":\"Query Planner\",\"status\":\"completed\",\"summary\":\"Planned 2 fact retrieval queries with narrow topK profile.\",\"type\":\"query_planner\"},\"type\":\"trace_step\"}\n\nevent: error\ndata: {\"agentRunId\":\"<id>\",\"code\":\"AGENT_DEADLINE_EXCEEDED\",\"error\":\"The request deadline passed before the answer was complete.\",\"reason\":\"deadline_exceeded\",\"retryable\":true,\"status\":504}\n\nevent: done\ndata: {}\n\n"
+}

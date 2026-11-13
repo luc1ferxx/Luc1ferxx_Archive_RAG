@@ -1,0 +1,1885 @@
+{
+  "answer": {
+    "body": {
+      "agentAnswer": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]",
+      "agentMode": "document",
+      "agentObservability": {
+        "agentMode": "document",
+        "budget": {
+          "limits": {
+            "maxArxivPaperFetches": 1,
+            "maxCustomSkillCalls": 2,
+            "maxDocumentRagCalls": 2,
+            "maxResearchQuestions": 3,
+            "maxTraceSteps": 16,
+            "maxWebSearchCalls": 1
+          },
+          "run": {
+            "exhausted": null,
+            "limits": {
+              "maxCostUsd": 0.5,
+              "maxDurationMs": "<elapsed>",
+              "maxTokens": 100000
+            },
+            "used": {
+              "costUsd": 0,
+              "durationMs": "<elapsed>",
+              "modelCalls": 1,
+              "tokens": 602,
+              "unpricedModelCalls": 1
+            }
+          },
+          "traceTruncated": false,
+          "used": {
+            "arxivPaperFetches": 0,
+            "customSkillCalls": 0,
+            "documentRagCalls": 1,
+            "researchQuestions": 0,
+            "traceSteps": 6,
+            "webSearchCalls": 0
+          }
+        },
+        "executionLoop": {
+          "followUpsRun": 0,
+          "gaps": [],
+          "gapsIdentified": 0,
+          "maxFollowUps": 1,
+          "stoppedReason": "not_needed",
+          "version": "1.0"
+        },
+        "executionPlanner": {
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedPlannerId": "deterministic",
+          "status": "selected",
+          "stepIds": [
+            "arxiv_import",
+            "workspace_action",
+            "research_brief",
+            "inventory",
+            "document_discovery",
+            "document_rag",
+            "web_search"
+          ]
+        },
+        "experienceMemory": {
+          "applied": false,
+          "enabled": false,
+          "error": null,
+          "hintCount": 0,
+          "hints": [],
+          "hitCount": 0,
+          "planningHints": [],
+          "reason": "env_disabled",
+          "status": "disabled",
+          "storedCount": 0,
+          "write": {
+            "enabled": false,
+            "error": null,
+            "prunedCount": 0,
+            "recordCount": 0,
+            "recordTypes": [],
+            "skippedReason": "env_disabled",
+            "status": "skipped",
+            "storedCount": 0,
+            "storedRecords": [],
+            "writeAttempted": false
+          },
+          "writeAttempted": false,
+          "writeSkippedReason": "env_disabled"
+        },
+        "intentPlanner": {
+          "candidateIntentIds": [
+            "document"
+          ],
+          "experienceMemory": {
+            "applied": false,
+            "hintCount": 0
+          },
+          "fallback": false,
+          "fallbackReason": null,
+          "requestedPlannerId": "deterministic",
+          "selectedIntentId": "document",
+          "selectedMode": "document",
+          "selectedPlannerId": "deterministic",
+          "selectionReason": "Selected the highest-priority deterministic rule candidate.",
+          "status": "selected"
+        },
+        "longMemory": {
+          "enabled": false,
+          "postgresConfigured": false,
+          "reason": "env_disabled",
+          "status": "disabled"
+        },
+        "planMode": "document",
+        "promptTemplates": [
+          {
+            "calls": 1,
+            "fingerprint": "69647d5ad62c",
+            "id": "qa_answer",
+            "tokens": 602,
+            "version": "v2.2"
+          }
+        ],
+        "runs": [
+          {
+            "abstained": false,
+            "budget": {
+              "key": "documentRagCalls",
+              "label": "document RAG",
+              "limit": 2,
+              "ok": true,
+              "reason": null,
+              "remaining": 1,
+              "used": 1
+            },
+            "budgetDelta": {},
+            "citationCount": 1,
+            "durationMs": "<elapsed>",
+            "error": null,
+            "label": "Document RAG",
+            "phase": "primary",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "status": "completed"
+          }
+        ],
+        "selectedSkills": [
+          {
+            "budgetKey": "documentRagCalls",
+            "label": "Document RAG",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0"
+          }
+        ],
+        "skillChain": [],
+        "skills": [
+          {
+            "abstained": false,
+            "attempts": 1,
+            "budgetDelta": {},
+            "budgetKey": "documentRagCalls",
+            "budgetLimit": 2,
+            "budgetRemaining": 1,
+            "budgetUsed": 1,
+            "citationCount": 1,
+            "errorCount": 0,
+            "errors": [],
+            "followUpCount": 0,
+            "label": "Document RAG",
+            "lastCitationCount": 1,
+            "retryCount": 0,
+            "selected": true,
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "skippedCount": 0,
+            "status": "completed",
+            "totalDurationMs": "<elapsed>"
+          }
+        ],
+        "taskMemory": null,
+        "workingMemory": {
+          "checkedQueries": [
+            {
+              "label": "Original request",
+              "phase": "primary",
+              "primary": true,
+              "query": "What are the renewal term and the monthly fee?",
+              "queryId": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            },
+            {
+              "label": "Exact citation evidence",
+              "phase": "primary",
+              "primary": false,
+              "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?",
+              "queryId": "fact-citation",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0"
+            }
+          ],
+          "docIds": [
+            "contract-1"
+          ],
+          "goal": "What are the renewal term and the monthly fee?",
+          "resolvedGaps": [],
+          "supportedClaims": [
+            {
+              "anchors": [
+                "12"
+              ],
+              "missingAnchors": [],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "The agreement renews every 12 months",
+              "tokenOverlap": 1
+            },
+            {
+              "anchors": [
+                "12.5",
+                "1000"
+              ],
+              "missingAnchors": [],
+              "phase": "primary",
+              "skillId": "document_rag",
+              "skillVersion": "1.0.0",
+              "text": "The monthly fee is 12.5 thousand dollars",
+              "tokenOverlap": 1
+            }
+          ],
+          "unresolvedGaps": [],
+          "unsupportedClaims": [],
+          "version": "1.0"
+        }
+      },
+      "agentRunId": "<id>",
+      "agentRunStatus": "completed",
+      "agentRunSteps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Use selected documents and synthesize a grounded answer."
+              },
+              {
+                "id": "document_rag",
+                "label": "Run document RAG",
+                "summary": "Search 1 selected document."
+              },
+              {
+                "id": "self_check",
+                "label": "Verify evidence",
+                "summary": "Check citation count and document coverage before synthesis."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "contract-1"
+            ],
+            "mode": "document",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Use selected documents and synthesize a grounded answer.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "intent": "fact",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "narrow",
+              "queryCount": 2,
+              "topK": 4,
+              "topKPerDoc": 2
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "What are the renewal term and the monthly fee?"
+              },
+              {
+                "id": "fact-citation",
+                "label": "Exact citation evidence",
+                "primary": false,
+                "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+              }
+            ],
+            "source": "agent-query-planner",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "2-query_planner",
+          "input": null,
+          "kind": "plan",
+          "label": "Query Planner",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+          "traceStepId": "2-query_planner",
+          "type": "query_planner",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "citations": 1,
+            "durationMs": "<elapsed>",
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "document_rag:primary",
+          "input": {
+            "docIds": [
+              "contract-1"
+            ],
+            "effects": "workspace_write",
+            "idempotency": "adapter_defined",
+            "question": "What are the renewal term and the monthly fee?",
+            "replaySafe": false,
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "routes-session",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "userId": "routes-user"
+          },
+          "kind": "tool_call",
+          "label": "Document RAG",
+          "output": {
+            "abstained": false,
+            "citationCount": 1,
+            "text": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Document RAG returned 1 citation.",
+          "traceStepId": "document_rag:primary",
+          "type": "document_rag",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "answerLabel": "Document answer",
+            "citationCount": 1,
+            "citedDocCount": 1,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "gaps": [],
+            "passed": true,
+            "reasons": [],
+            "requiredCitationCount": 1,
+            "requiredDocCoverage": 1,
+            "retryRecommended": false,
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "4-self_check",
+          "input": null,
+          "kind": "observation",
+          "label": "Self Check",
+          "output": {
+            "gapCount": 0,
+            "passed": true,
+            "retryRecommended": false,
+            "unsupportedClaimCount": 0
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Evidence check passed with 1 citation across 1 cited document.",
+          "traceStepId": "4-self_check",
+          "type": "self_check",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 1,
+                  "tokens": 602,
+                  "unpricedModelCalls": 1
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 1,
+                "researchQuestions": 0,
+                "traceSteps": 4,
+                "webSearchCalls": 0
+              }
+            },
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "5-synthesis",
+          "input": {
+            "agentMode": "document",
+            "customSkillResultCount": 0,
+            "hasActionAnswer": false,
+            "hasArxivImportAnswer": false,
+            "hasDiscoveryAnswer": false,
+            "hasInventoryAnswer": false,
+            "hasRagResult": true,
+            "hasResearchBrief": false,
+            "hasWebResult": false,
+            "sourceCount": 1
+          },
+          "kind": "decision",
+          "label": "Synthesis",
+          "output": {
+            "answerLength": 101,
+            "sourceCount": 1
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Composed the final agent answer from completed tool results.",
+          "traceStepId": "5-synthesis",
+          "type": "synthesis",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "changed": false,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "removedClaims": [],
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "6-answer_finalizer",
+          "input": {
+            "answerLength": 101,
+            "citationCount": 1
+          },
+          "kind": "observation",
+          "label": "Answer Finalizer",
+          "output": {
+            "abstained": false,
+            "changed": false,
+            "removedClaimCount": 0,
+            "unsupportedClaimCount": 0
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Final answer passed claim-level citation finalization with 2 supported claims.",
+          "traceStepId": "6-answer_finalizer",
+          "type": "answer_finalizer",
+          "updatedAt": "<time>"
+        }
+      ],
+      "agentSkills": [
+        {
+          "label": "Document RAG",
+          "skillId": "document_rag",
+          "skillVersion": "1.0.0",
+          "status": "completed"
+        }
+      ],
+      "agentTrace": [
+        {
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Use selected documents and synthesize a grounded answer."
+              },
+              {
+                "id": "document_rag",
+                "label": "Run document RAG",
+                "summary": "Search 1 selected document."
+              },
+              {
+                "id": "self_check",
+                "label": "Verify evidence",
+                "summary": "Check citation count and document coverage before synthesis."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "contract-1"
+            ],
+            "mode": "document"
+          },
+          "id": "1-plan",
+          "label": "Plan",
+          "status": "completed",
+          "summary": "Use selected documents and synthesize a grounded answer.",
+          "type": "plan"
+        },
+        {
+          "detail": {
+            "intent": "fact",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "narrow",
+              "queryCount": 2,
+              "topK": 4,
+              "topKPerDoc": 2
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "What are the renewal term and the monthly fee?"
+              },
+              {
+                "id": "fact-citation",
+                "label": "Exact citation evidence",
+                "primary": false,
+                "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+              }
+            ],
+            "source": "agent-query-planner"
+          },
+          "id": "2-query_planner",
+          "label": "Query Planner",
+          "status": "completed",
+          "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+          "type": "query_planner"
+        },
+        {
+          "detail": {
+            "abstained": false,
+            "citations": 1,
+            "durationMs": "<elapsed>",
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0"
+          },
+          "error": null,
+          "id": "document_rag:primary",
+          "input": {
+            "docIds": [
+              "contract-1"
+            ],
+            "effects": "workspace_write",
+            "idempotency": "adapter_defined",
+            "question": "What are the renewal term and the monthly fee?",
+            "replaySafe": false,
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "routes-session",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "userId": "routes-user"
+          },
+          "label": "Document RAG",
+          "output": {
+            "abstained": false,
+            "citationCount": 1,
+            "text": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]"
+          },
+          "status": "completed",
+          "summary": "Document RAG returned 1 citation.",
+          "type": "document_rag"
+        },
+        {
+          "detail": {
+            "answerLabel": "Document answer",
+            "citationCount": 1,
+            "citedDocCount": 1,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "gaps": [],
+            "passed": true,
+            "reasons": [],
+            "requiredCitationCount": 1,
+            "requiredDocCoverage": 1,
+            "retryRecommended": false
+          },
+          "id": "4-self_check",
+          "label": "Self Check",
+          "status": "completed",
+          "summary": "Evidence check passed with 1 citation across 1 cited document.",
+          "type": "self_check"
+        },
+        {
+          "detail": {
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 1,
+                  "tokens": 602,
+                  "unpricedModelCalls": 1
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 1,
+                "researchQuestions": 0,
+                "traceSteps": 4,
+                "webSearchCalls": 0
+              }
+            }
+          },
+          "id": "5-synthesis",
+          "input": {
+            "agentMode": "document",
+            "customSkillResultCount": 0,
+            "hasActionAnswer": false,
+            "hasArxivImportAnswer": false,
+            "hasDiscoveryAnswer": false,
+            "hasInventoryAnswer": false,
+            "hasRagResult": true,
+            "hasResearchBrief": false,
+            "hasWebResult": false,
+            "sourceCount": 1
+          },
+          "label": "Synthesis",
+          "output": {
+            "answerLength": 101,
+            "sourceCount": 1
+          },
+          "status": "completed",
+          "summary": "Composed the final agent answer from completed tool results.",
+          "type": "synthesis"
+        },
+        {
+          "detail": {
+            "abstained": false,
+            "changed": false,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "removedClaims": []
+          },
+          "id": "6-answer_finalizer",
+          "input": {
+            "answerLength": 101,
+            "citationCount": 1
+          },
+          "label": "Answer Finalizer",
+          "output": {
+            "abstained": false,
+            "changed": false,
+            "removedClaimCount": 0,
+            "unsupportedClaimCount": 0
+          },
+          "status": "completed",
+          "summary": "Final answer passed claim-level citation finalization with 2 supported claims.",
+          "type": "answer_finalizer"
+        }
+      ],
+      "agentWorkingMemory": {
+        "checkedQueries": [
+          {
+            "label": "Original request",
+            "phase": "primary",
+            "primary": true,
+            "query": "What are the renewal term and the monthly fee?",
+            "queryId": "primary",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0"
+          },
+          {
+            "label": "Exact citation evidence",
+            "phase": "primary",
+            "primary": false,
+            "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?",
+            "queryId": "fact-citation",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0"
+          }
+        ],
+        "docIds": [
+          "contract-1"
+        ],
+        "goal": "What are the renewal term and the monthly fee?",
+        "resolvedGaps": [],
+        "supportedClaims": [
+          {
+            "anchors": [
+              "12"
+            ],
+            "missingAnchors": [],
+            "phase": "primary",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "text": "The agreement renews every 12 months",
+            "tokenOverlap": 1
+          },
+          {
+            "anchors": [
+              "12.5",
+              "1000"
+            ],
+            "missingAnchors": [],
+            "phase": "primary",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "text": "The monthly fee is 12.5 thousand dollars",
+            "tokenOverlap": 1
+          }
+        ],
+        "unresolvedGaps": [],
+        "unsupportedClaims": [],
+        "version": "1.0"
+      },
+      "errors": {
+        "mcp": null,
+        "rag": null
+      },
+      "mcpAnswer": "Web search not used: document evidence was sufficient.",
+      "ragAbstainReason": null,
+      "ragAbstained": false,
+      "ragAnswer": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]",
+      "ragEvidenceSummary": null,
+      "ragGapPlan": null,
+      "ragMemoryApplied": false,
+      "ragResolvedQuestion": "What are the renewal term and the monthly fee?",
+      "ragSources": [
+        {
+          "docId": "contract-1",
+          "excerpt": "The agreement renews every 12 months unless either party gives 30 days notice. The monthly fee is 12.5 thousand dollars.",
+          "fileName": "services-agreement.pdf",
+          "pageNumber": 3,
+          "rank": 1
+        }
+      ],
+      "researchBrief": null
+    },
+    "status": 200
+  },
+  "run": {
+    "checkpoint": null,
+    "run": {
+      "approvalGates": [],
+      "error": null,
+      "events": [
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:1",
+          "payload": {
+            "status": "running"
+          },
+          "type": "run_created"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:2",
+          "payload": {
+            "traceStepCount": 2
+          },
+          "type": "run_prepared"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:3",
+          "payload": {
+            "planner": {
+              "fallback": false,
+              "fallbackReason": null,
+              "requestedPlannerId": "deterministic",
+              "selectedPlannerId": "deterministic",
+              "status": "selected",
+              "stepIds": [
+                "arxiv_import",
+                "workspace_action",
+                "research_brief",
+                "inventory",
+                "document_discovery",
+                "document_rag",
+                "web_search"
+              ]
+            }
+          },
+          "type": "execution_planned"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:4",
+          "payload": {
+            "status": "running",
+            "stepId": "document_rag:primary"
+          },
+          "type": "step_started"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:5",
+          "payload": {
+            "status": "completed",
+            "stepId": "document_rag:primary"
+          },
+          "type": "step_completed"
+        },
+        {
+          "createdAt": "<time>",
+          "eventId": "<id>:6",
+          "payload": {
+            "status": "completed"
+          },
+          "type": "run_completed"
+        }
+      ],
+      "result": {
+        "agentMode": "document",
+        "answer": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]",
+        "citationCount": 1,
+        "ragAbstained": false,
+        "status": 200
+      },
+      "status": "completed",
+      "steps": [
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "actions": [
+              {
+                "id": "classify_request",
+                "label": "Classify request",
+                "summary": "Use selected documents and synthesize a grounded answer."
+              },
+              {
+                "id": "document_rag",
+                "label": "Run document RAG",
+                "summary": "Search 1 selected document."
+              },
+              {
+                "id": "self_check",
+                "label": "Verify evidence",
+                "summary": "Check citation count and document coverage before synthesis."
+              },
+              {
+                "id": "synthesis",
+                "label": "Synthesize answer",
+                "summary": "Compose the final response from verified tool results."
+              }
+            ],
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 0,
+                  "tokens": 0,
+                  "unpricedModelCalls": 0
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 0,
+                "researchQuestions": 0,
+                "traceSteps": 0,
+                "webSearchCalls": 0
+              }
+            },
+            "docIds": [
+              "contract-1"
+            ],
+            "mode": "document",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "1-plan",
+          "input": null,
+          "kind": "plan",
+          "label": "Plan",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Use selected documents and synthesize a grounded answer.",
+          "traceStepId": "1-plan",
+          "type": "plan",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "intent": "fact",
+            "phase": "primary",
+            "retrievalOptions": {
+              "profile": "narrow",
+              "queryCount": 2,
+              "topK": 4,
+              "topKPerDoc": 2
+            },
+            "retrievalQueries": [
+              {
+                "id": "primary",
+                "label": "Original request",
+                "primary": true,
+                "query": "What are the renewal term and the monthly fee?"
+              },
+              {
+                "id": "fact-citation",
+                "label": "Exact citation evidence",
+                "primary": false,
+                "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+              }
+            ],
+            "source": "agent-query-planner",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "2-query_planner",
+          "input": null,
+          "kind": "plan",
+          "label": "Query Planner",
+          "output": null,
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Planned 2 fact retrieval queries with narrow topK profile.",
+          "traceStepId": "2-query_planner",
+          "type": "query_planner",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "citations": 1,
+            "durationMs": "<elapsed>",
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "document_rag:primary",
+          "input": {
+            "docIds": [
+              "contract-1"
+            ],
+            "effects": "workspace_write",
+            "idempotency": "adapter_defined",
+            "question": "What are the renewal term and the monthly fee?",
+            "replaySafe": false,
+            "retrievalPlan": {
+              "intent": "fact",
+              "phase": "primary",
+              "retrievalOptions": {
+                "profile": "narrow",
+                "queryCount": 2,
+                "topK": 4,
+                "topKPerDoc": 2
+              },
+              "retrievalQueries": [
+                {
+                  "id": "primary",
+                  "label": "Original request",
+                  "primary": true,
+                  "query": "What are the renewal term and the monthly fee?"
+                },
+                {
+                  "id": "fact-citation",
+                  "label": "Exact citation evidence",
+                  "primary": false,
+                  "query": "Find exact cited evidence for: What are the renewal term and the monthly fee?"
+                }
+              ],
+              "source": "agent-query-planner"
+            },
+            "sessionId": "routes-session",
+            "skillId": "document_rag",
+            "skillVersion": "1.0.0",
+            "userId": "routes-user"
+          },
+          "kind": "tool_call",
+          "label": "Document RAG",
+          "output": {
+            "abstained": false,
+            "citationCount": 1,
+            "text": "The agreement renews every 12 months. [Source 1]\nThe monthly fee is 12.5 thousand dollars. [Source 1]"
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Document RAG returned 1 citation.",
+          "traceStepId": "document_rag:primary",
+          "type": "document_rag",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "answerLabel": "Document answer",
+            "citationCount": 1,
+            "citedDocCount": 1,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "gaps": [],
+            "passed": true,
+            "reasons": [],
+            "requiredCitationCount": 1,
+            "requiredDocCoverage": 1,
+            "retryRecommended": false,
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "4-self_check",
+          "input": null,
+          "kind": "observation",
+          "label": "Self Check",
+          "output": {
+            "gapCount": 0,
+            "passed": true,
+            "retryRecommended": false,
+            "unsupportedClaimCount": 0
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Evidence check passed with 1 citation across 1 cited document.",
+          "traceStepId": "4-self_check",
+          "type": "self_check",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "budget": {
+              "limits": {
+                "maxArxivPaperFetches": 1,
+                "maxCustomSkillCalls": 2,
+                "maxDocumentRagCalls": 2,
+                "maxResearchQuestions": 3,
+                "maxTraceSteps": 16,
+                "maxWebSearchCalls": 1
+              },
+              "run": {
+                "exhausted": null,
+                "limits": {
+                  "maxCostUsd": 0.5,
+                  "maxDurationMs": "<elapsed>",
+                  "maxTokens": 100000
+                },
+                "used": {
+                  "costUsd": 0,
+                  "durationMs": "<elapsed>",
+                  "modelCalls": 1,
+                  "tokens": 602,
+                  "unpricedModelCalls": 1
+                }
+              },
+              "traceTruncated": false,
+              "used": {
+                "arxivPaperFetches": 0,
+                "customSkillCalls": 0,
+                "documentRagCalls": 1,
+                "researchQuestions": 0,
+                "traceSteps": 4,
+                "webSearchCalls": 0
+              }
+            },
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "5-synthesis",
+          "input": {
+            "agentMode": "document",
+            "customSkillResultCount": 0,
+            "hasActionAnswer": false,
+            "hasArxivImportAnswer": false,
+            "hasDiscoveryAnswer": false,
+            "hasInventoryAnswer": false,
+            "hasRagResult": true,
+            "hasResearchBrief": false,
+            "hasWebResult": false,
+            "sourceCount": 1
+          },
+          "kind": "decision",
+          "label": "Synthesis",
+          "output": {
+            "answerLength": 101,
+            "sourceCount": 1
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Composed the final agent answer from completed tool results.",
+          "traceStepId": "5-synthesis",
+          "type": "synthesis",
+          "updatedAt": "<time>"
+        },
+        {
+          "approvalGateId": "",
+          "attempt": 1,
+          "capabilityId": "",
+          "capabilityVersion": "",
+          "completedAt": "<time>",
+          "createdAt": "<time>",
+          "decision": "",
+          "detail": {
+            "abstained": false,
+            "changed": false,
+            "claimSupport": {
+              "checked": true,
+              "claims": [
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The agreement renews every 12 months",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                },
+                {
+                  "ambiguousSourceRanks": [],
+                  "anchors": [
+                    "12.5",
+                    "1000"
+                  ],
+                  "citedDocIds": [
+                    "contract-1"
+                  ],
+                  "misattributedCitationIdentities": [],
+                  "missingAnchors": [],
+                  "missingSourceRanks": [],
+                  "section": "",
+                  "sectionId": null,
+                  "sectionLabel": "",
+                  "sourceRanks": [
+                    1
+                  ],
+                  "supported": true,
+                  "supportedCitedDocIds": [
+                    "contract-1"
+                  ],
+                  "supportedSourceRanks": [
+                    1
+                  ],
+                  "text": "The monthly fee is 12.5 thousand dollars",
+                  "tokenOverlap": 1,
+                  "verifiedSourceRanks": [
+                    1
+                  ]
+                }
+              ],
+              "supportedClaimCount": 2,
+              "unsupportedClaimCount": 0
+            },
+            "removedClaims": [],
+            "traceStatus": "completed"
+          },
+          "error": null,
+          "id": "6-answer_finalizer",
+          "input": {
+            "answerLength": 101,
+            "citationCount": 1
+          },
+          "kind": "observation",
+          "label": "Answer Finalizer",
+          "output": {
+            "abstained": false,
+            "changed": false,
+            "removedClaimCount": 0,
+            "unsupportedClaimCount": 0
+          },
+          "parentStepId": "",
+          "pausedAt": "",
+          "retryOfStepId": "",
+          "startedAt": "<time>",
+          "status": "completed",
+          "summary": "Final answer passed claim-level citation finalization with 2 supported claims.",
+          "traceStepId": "6-answer_finalizer",
+          "type": "answer_finalizer",
+          "updatedAt": "<time>"
+        }
+      ]
+    }
+  }
+}
