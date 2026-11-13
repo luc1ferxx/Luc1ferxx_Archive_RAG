@@ -272,9 +272,12 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | `RAG_XLSX_MAX_CELLS` | `2000000` | 一个工作簿所有可见工作表里非空单元格的总数上限。超出时整个工作簿被拒（413 `DOCUMENT_SPREADSHEET_TOO_LARGE`），不会截断后入库。SheetJS 解析之前还有一道预检：可见工作表里的单元格元素（按 SheetJS 自己的匹配方式数，带命名空间前缀的、空的带样式单元格和合并区域都算）超过这个上限的两倍时直接拒绝。SheetJS 把解析出的每个单元格都放在内存里（实测数值单元格约 130 字节），内存小的容器可以调低它。 |
 | `RAG_OFFICE_MAX_XML_BYTES` | `16777216`（16 MiB） | 一个解析器同时放进内存的 XML 上限：Word 文档所有 XML 部件加起来（mammoth 先读完全部部件再转换），演示文稿和工作簿则是每个 XML 部件单独算（工作表另由 `RAG_XLSX_MAX_CELLS` 约束）。mammoth 和 PowerPoint 读取器建出的树分别约是所读 XML 的 60–115 倍和 25–50 倍（实测），只靠总大小上限时几 MB 的文件就能把堆耗尽。Word 和 PowerPoint 在上传检查时就按它拒绝，工作簿在解析时。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。默认值下 mammoth 最多可能要约 2 GB 堆，适合 64 位主机的默认 V8 堆；内存小的容器应调低。 |
 | `RAG_OFFICE_MAX_TEXT_CHARS` | `67108864` | 一个 Office 文件所有页加起来最多提取的字符数。表格的表头标签每行都重复，共享字符串和数字格式也会让同一段文字出现很多次，没有这个上限时几 KB 的文件能展开成几百 MB 的文字（每段都要向量化）。表格行在写出时就计数，Excel 单元格的原始文字在复制前计数，超过即停。超出返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`。 |
+| `RAG_OFFICE_PARSE_WORKERS` | `1` | Office 文件在 worker_threads 池里解析：压缩包检查和 mammoth / SheetJS / PowerPoint 读取器都在 worker 里跑。这是池的大小，最大 64（超过按 64；负数或非数字按 1）。`0` 在调用线程里解析，和以前完全一样。<br>文件仍在调用线程里读取和解密，明文复制一份交给 worker；worker 和进程共用环境变量，运行中改的上限立即生效。页面、元数据和拒绝（状态码、`code`、信息）与调用线程里解析时相同。<br>效果：大文档解析不再占住事件循环。worker 内存耗尽只结束这个 worker，这份文档返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`，异步入库不重试，下一份文档在新 worker 上解析。<br>其他失败：worker 崩溃返回 500 `OFFICE_PARSE_WORKER_FAILED`，超时返回 504 `OFFICE_PARSE_TIMEOUT`，应用关停时还在解析的返回 503 `OFFICE_PARSE_POOL_STOPPED`，异步入库会重试这三种。<br>空闲 worker 不会让进程不退出。单文件打包的构建没有 worker 文件，要设成 0。代价见 docs/evaluation.md「Office 解析放进工作线程」。 |
+| `RAG_OFFICE_PARSE_TIMEOUT_MS` | `0`（不限） | worker 解析一份文档的时间上限。超时就终止这个 worker，返回 504 `OFFICE_PARSE_TIMEOUT`。调用线程里解析时没有超时。 |
+| `RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB` | `0`（Node 默认） | 每个 Office 解析 worker 的 V8 老生代上限（`resourceLimits.maxOldGenerationSizeMb`）。解析时超出它的文档返回 413 `DOCUMENT_ARCHIVE_TOO_LARGE`，进程不受影响。内存小的容器应设它。实测：设成 48 时，一个 20 万单元格的工作簿被拒，进程照常运行；同样把进程的堆限制在 48 MB、在调用线程里解析，整个进程崩溃。 |
 
-- 后六个变量必须是不小于 1 的整数（压缩比可以是不小于 1 的小数）。它们是防压缩炸弹的上限，没有"`0` 表示不限"。值不合法时应用拒绝启动（`RAG_OFFICE_LIMIT_INVALID`）。
-- 启动时检查这七个变量的是 `createAppServices`：单体、api 层、agent 层，以及会建 app 的评测脚本；单独运行的 `npm run worker:ingest` 启动时也全部检查，因为它要按 `RAG_DOCUMENT_FORMATS` 判断排队文件该怎么读（见下面"已经排队的入库任务"），所以 worker 要和 API 用同一个值。`archive-ingest` 在读任何文件之前检查 `RAG_DOCUMENT_FORMATS`。`vector:index` 和 `vector:reindex` 不读 `RAG_DOCUMENT_FORMATS`，几个上限也要等读到 Office 文件时才读，值不合法时那份文件失败。
+- `RAG_OFFICE_MAX_*` 和 `RAG_XLSX_MAX_CELLS` 这六个变量必须是不小于 1 的整数（压缩比可以是不小于 1 的小数）。它们是防压缩炸弹的上限，没有"`0` 表示不限"。值不合法时应用拒绝启动（`RAG_OFFICE_LIMIT_INVALID`）。三个 `RAG_OFFICE_PARSE_*` 变量和 `PDF_PARSE_*` 一样，负数或非数字按默认值，不会拒绝启动。
+- 启动时检查 `RAG_DOCUMENT_FORMATS` 和这六个上限的是 `createAppServices`：单体、api 层、agent 层，以及会建 app 的评测脚本；单独运行的 `npm run worker:ingest` 启动时也全部检查，因为它要按 `RAG_DOCUMENT_FORMATS` 判断排队文件该怎么读（见下面"已经排队的入库任务"），所以 worker 要和 API 用同一个值。`archive-ingest` 在读任何文件之前检查 `RAG_DOCUMENT_FORMATS`。`vector:index` 和 `vector:reindex` 不读 `RAG_DOCUMENT_FORMATS`，几个上限也要等读到 Office 文件时才读，值不合法时那份文件失败。
 - 格式判断：PDF 是前 1024 字节里出现 `%PDF`，和以前一样；启用了任何 Office 格式时，以 ZIP 头或 OLE2 头开头的文件一律不算 PDF。Office 文件是一个 ZIP，按 `_rels/.rels` 指向的主部件在 `[Content_Types].xml` 里登记的类型区分 Word、PowerPoint 和 Excel；没有 `[Content_Types].xml` 的 ZIP 不算支持的格式。文档登记的 MIME 类型是 `application/pdf` 和三种 OOXML 文档类型。
 - 压缩包检查（`server/rag/office/zip-guard.js`）：Office 文件在任何解析器读它之前先过这一关，上传检查时一次、解析时再一次，所以同步上传的 Office 文件会解压两次，两次都受上面几个上限约束。`[Content_Types].xml` 和 `_rels/.rels` 每次上传检查都要解析，各自固定不超过 4 MiB（真实文件在 10000 个条目时也不到 1.5 MB），超出返回 413。除了下表列出的情况，它还拒绝 ZIP64、结尾记录有歧义、本地文件头和中央目录不一致、只差大小写的同名条目、含反斜杠的条目名，以及 store 和 deflate 以外的压缩方式（都是 400 `DOCUMENT_ARCHIVE_INVALID`）：mammoth（内部用 JSZip）和 yauzl 读中央目录，而解析器之间对这些情况可能读出不同的内容。
 - Excel 工作簿：SheetJS 不直接读上传的 ZIP，读的是用校验过的部件重建的工作簿（可见工作表、共享字符串、样式，以及服务端自己写的 `[Content_Types].xml`、工作簿部件和关系），所以它不会去读批注、绘图、图表和外部链接，也不会自己挑另一个工作簿部件。超链接标签在交给 SheetJS 之前改名（覆盖整张表的超链接会让它给每个单元格建对象）。长度超过 255 个字符（Excel 本身的上限）或同一节里出现多个 `@` 的数字格式直接拒绝（400 `DOCUMENT_ARCHIVE_INVALID`）：SheetJS 对每个单元格都要按格式重新分析一遍，一个 9 KB 的工作簿配上 10 万字符的格式就耗尽了堆。SheetJS 解析时不再给单元格生成显示文本，而是由服务端逐个单元格调用 SheetJS 自己的格式化函数，得到的文字和以前一样，但不会同时保留所有单元格的格式化结果（一个 310 KB、190 万个单元格、套用 254 字符日期格式的工作簿以前要约 5 GB 堆）。
@@ -287,7 +290,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 | 认得出格式，但 `RAG_DOCUMENT_FORMATS` 没有启用它 | 415 | `DOCUMENT_FORMAT_DISABLED` |
 | OLE2 文件：旧版 .doc / .ppt / .xls，或任何设了打开密码的 Office 文件（加密会把整个包装进 OLE2） | 415 | `DOCUMENT_FORMAT_LEGACY_OFFICE` |
 | 启用宏的文件、模板（.dotx / .potx / .xltx）、幻灯片放映（.ppsx）和其他 Office 文件类型 | 415 | `DOCUMENT_FORMAT_OFFICE_VARIANT` |
-| 条目太多、解压后太大（声明的或实际的）、压缩比太高、`[Content_Types].xml` 或 `_rels/.rels` 超过 4 MiB、XML 超过 `RAG_OFFICE_MAX_XML_BYTES`、提取的文字超过 `RAG_OFFICE_MAX_TEXT_CHARS` | 413 | `DOCUMENT_ARCHIVE_TOO_LARGE` |
+| 条目太多、解压后太大（声明的或实际的）、压缩比太高、`[Content_Types].xml` 或 `_rels/.rels` 超过 4 MiB、XML 超过 `RAG_OFFICE_MAX_XML_BYTES`、提取的文字超过 `RAG_OFFICE_MAX_TEXT_CHARS`、解析时 worker 的内存超出上限 | 413 | `DOCUMENT_ARCHIVE_TOO_LARGE` |
 | 读不了的 ZIP、不安全的条目名（`..`、绝对路径）、加密的条目、`.xml` 或 `.rels` 部件里有 DTD（`<!DOCTYPE` / `<!ENTITY`）、缺主部件、超长或重复 `@` 的数字格式、mammoth / SheetJS / PowerPoint 读取器读不了 | 400 | `DOCUMENT_ARCHIVE_INVALID` |
 | 工作簿的非空单元格超过 `RAG_XLSX_MAX_CELLS`，或解析前的单元格元素超过它的两倍 | 413 | `DOCUMENT_SPREADSHEET_TOO_LARGE` |
 | 没有可提取的文字 | 422 | 无。PDF 的信息不变，其他格式把 "PDF" 换成 "document" |
@@ -295,7 +298,8 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 - 文件名检查在字节检查之前：用 .doc、.docm、.ppsx 这类扩展名上传的文件在文件名这一步就返回 400 `DOCUMENT_FORMAT_UNSUPPORTED`。415 的 `DOCUMENT_FORMAT_LEGACY_OFFICE` 和 `DOCUMENT_FORMAT_OFFICE_VARIANT` 针对的是名字是 .docx / .pptx / .xlsx（或浏览器报的是这三种 MIME 类型）、字节却是旧格式或变体的文件，最常见的是设了打开密码的 .docx / .pptx / .xlsx。请求里没有文件时，启用了 Office 格式返回 400 "A document file is required."，只启用 `pdf` 时仍是 "A PDF file is required."。
 - 引用位置：PowerPoint 的每张幻灯片、Excel 的每个可见工作表、Word 的每个章节（按文档用到的最高一级标题切分，第一个标题之前的文字算第 1 节）各算一"页"。这时引用的 `pageNumber` 数的是幻灯片在演示文稿里的位置（隐藏的幻灯片不入库，但占着序号）、工作表在工作簿里的位置（隐藏的工作表同样占序号）或章节的序号，并另带 `locationUnit`（`slide`、`sheet`、`section`）和 `locationLabel`（幻灯片标题、工作表名、章节标题）；PDF 的引用没有这两个字段。`GET /documents/:docId/file` 按登记的 MIME 类型返回，Office 文件作为附件下载，PDF 仍内联显示。
 - 表格：三种格式的表格都是每行一行，第一行作表头，后面的单元格写成 "表头: 值"。超过 200 个字符的表头单元格不当标签用（改用列字母），它的全文只在表头那一行出现一次。PowerPoint 的项目符号按 PowerPoint 的继承规则判断（段落自己的属性、形状的列表样式、版式和母版里对应的占位符、母版的文本样式），普通内容页里从母版继承项目符号的正文也会写成 "- " 开头的列表行。
-- 不提取的内容：Word 的页眉页脚和批注；PowerPoint 的图表、SmartArt、图片和公式；Excel 的图表（包括图表工作表）和单元格批注，公式只取文件里缓存的结果，不重新计算；任何格式里的图片都不做 OCR。Office 文件在调用线程里解析（`PDF_PARSE_WORKERS` 只管 pdf.js），大工作簿或大文档解析期间会占住事件循环；防止恶意文件耗尽堆靠的是上面的 XML 和文字上限，不是 worker 的资源限制。
+- 不提取的内容：Word 的页眉页脚和批注；PowerPoint 的图表、SmartArt、图片和公式；Excel 的图表（包括图表工作表）和单元格批注，公式只取文件里缓存的结果，不重新计算；任何格式里的图片都不做 OCR。
+- 在哪里解析：Office 文件默认在 worker 里解析（`RAG_OFFICE_PARSE_WORKERS`），大工作簿或大文档不再占住事件循环，堆耗尽也只结束 worker。上面的 XML 和文字上限照旧在解析之前挡着。上传时判断格式的那次压缩包检查仍在请求线程里做；它只解压和校验，不建文档树。
 
 ## 上传入库
 

@@ -10,65 +10,21 @@
 import "./pdf-runtime-shim.js";
 import { parentPort } from "node:worker_threads";
 import { extractPdfPageRange } from "./pdf-page-extraction.js";
-
-const serializeError = (error) => {
-  const serialized = {
-    name: typeof error?.name === "string" ? error.name : "Error",
-    message: typeof error?.message === "string" ? error.message : String(error),
-  };
-
-  for (const key of ["code", "status"]) {
-    if (typeof error?.[key] === "string" || typeof error?.[key] === "number") {
-      serialized[key] = error[key];
-    }
-  }
-
-  return serialized;
-};
-
-const exhaustHeap = () => {
-  const retained = [];
-
-  for (;;) {
-    retained.push(new Array(1_000_000).fill(retained.length));
-  }
-};
-
-// Failure modes the pool must survive, reachable only through
-// runPdfParseTask's testHook (test/pdf-parse-pool.test.mjs); nothing in the
-// application sets one.
-const runTestHook = async (hook) => {
-  switch (hook) {
-    case "exit":
-      process.exit(3);
-      break;
-    case "uncaught":
-      setImmediate(() => {
-        throw new Error("PDF parse worker test hook: uncaught error.");
-      });
-      await new Promise(() => {});
-      break;
-    case "hang":
-      await new Promise(() => {});
-      break;
-    case "out_of_memory":
-      exhaustHeap();
-      break;
-    default:
-      break;
-  }
-};
+import { runWorkerTestHook, serializeTaskError } from "./worker-task-pool.js";
 
 /** The answer to one task message; never throws. */
 export const runPdfParseWorkerTask = async ({ id, data, options, testHook } = {}) => {
   try {
+    // Failure modes the pool must survive, reachable only through
+    // runPdfParseTask's testHook (test/pdf-parse-pool.test.mjs); nothing in
+    // the application sets one.
     if (testHook) {
-      await runTestHook(testHook);
+      await runWorkerTestHook(testHook, "PDF parse worker");
     }
 
     return { id, result: await extractPdfPageRange(data, options) };
   } catch (error) {
-    return { id, error: serializeError(error) };
+    return { id, error: serializeTaskError(error) };
   }
 };
 
