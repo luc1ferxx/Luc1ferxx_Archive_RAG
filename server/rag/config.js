@@ -367,6 +367,34 @@ export const assertDocumentFormatSettings = () => {
   getOfficeMaxTextChars();
 };
 
+// Word, PowerPoint and Excel files are parsed (archive guard and reader) on a
+// pool of worker threads (rag/office-parse-pool.js) of this size: 1 by
+// default, 0 = in the calling thread, as before the pool. The worker keeps a
+// parse off the event loop, and its heap off the process's: a parse that runs
+// out of memory ends the worker, not the process. Like PDF_PARSE_WORKERS, a
+// value that is not a number counts as unset.
+export const MAX_OFFICE_PARSE_WORKERS = 64;
+
+export const getOfficeParseWorkers = () =>
+  Math.min(MAX_OFFICE_PARSE_WORKERS, Math.floor(toNonNegativeNumber(process.env.RAG_OFFICE_PARSE_WORKERS, 1)));
+
+// Bounds one worker task (one document); 0 = none. A task over the limit
+// terminates its worker. The in-process path has no timeout.
+const MAX_OFFICE_PARSE_TIMEOUT_MS = 2_147_483_647;
+
+export const getOfficeParseTimeoutMs = () =>
+  Math.min(
+    MAX_OFFICE_PARSE_TIMEOUT_MS,
+    Math.floor(toNonNegativeNumber(process.env.RAG_OFFICE_PARSE_TIMEOUT_MS, 0))
+  );
+
+// V8 old-space limit of each Office parse worker
+// (resourceLimits.maxOldGenerationSizeMb); 0 = Node's default. A document
+// whose parse needs more is refused (413 DOCUMENT_ARCHIVE_TOO_LARGE) and the
+// worker replaced.
+export const getOfficeParseWorkerMaxOldGenerationMb = () =>
+  Math.floor(toNonNegativeNumber(process.env.RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB, 0));
+
 // Task prefixes some embedding models are trained with and documented as
 // required. They are part of the model's input contract, so they apply to the
 // real embedding client only, never to a configured stand-in provider. On
