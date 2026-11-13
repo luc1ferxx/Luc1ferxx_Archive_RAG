@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。阶段 8（2026-11-13）：用户决定删除 custom Skill 阶段的 V1 顺序链和选择它的 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，agent 里不再有不走 LangGraph 的路径，见“阶段 8 结果”。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -47,7 +47,7 @@
 9. `bindDatabaseTenant` 的 AsyncLocalStorage 必须穿过节点和 Send 分支；`thread_id` 由 userId、workspaceId 和 runId 派生。
 10. 截止时间与取消的终态仍走 `failRun` 的 revision CAS，错误码不变。
 11. 预算仍由 `consumeBudget` / `reserveBudget` / `run-usage.js` 负责。
-12. V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到 LangGraph 成为默认后至少一个发布周期；`AGENT_RUNTIME=native` 是整体回退开关。**后半条已由用户于 2026-10-16 豁免**：分支还没推送、没发布，回退窗口还没开始计算，用户决定提前结束它。原生图调度器和 `AGENT_RUNTIME=native` 已删除，不再存在（阶段 6）。前半条不受影响：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 仍保留。
+12. V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到 LangGraph 成为默认后至少一个发布周期；`AGENT_RUNTIME=native` 是整体回退开关。**后半条已由用户于 2026-10-16 豁免**：分支还没推送、没发布，回退窗口还没开始计算，用户决定提前结束它。原生图调度器和 `AGENT_RUNTIME=native` 已删除，不再存在（阶段 6）。前半条当时不受影响：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到了阶段 8。**前半条已由用户于 2026-11-13 结束**：`guarded` 成为默认值七周之后，顺序链和 `off`、`shadow` 两个取值已删除（阶段 8）。
 13. 依赖固定精确版本，`@langchain/core` 单一版本，`npm audit --omit=dev` 为 0。
 14. 新代码放 `server/rag/langgraph/`，每个文件一个职责，`agent.js` 不再长大。
 
@@ -406,7 +406,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 不动的部分：
   - 外层计划的原生循环 `runAgentExecutionPlan`。按阶段 5 的最终决定，它是外层计划的生产调度器，长期保留。
   - `AGENT_OUTER_PLAN_RUNTIME` 实验开关和它的底层 Pregel 图。
-  - 约束 12 的前半条：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off`。
+  - 约束 12 的前半条：V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off`。（阶段 8 已删除。）
 
 ### 删了什么
 
@@ -531,7 +531,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 不动的部分：
   - 各阶段的阶段体（`createAgentExecutionPlanStages`）、剪枝规则、底层 Pregel 图本身（阶段 5 的实现，未改一行调度逻辑）。
   - 外层计划的持久性：仍然是 run 的 step 和回放矩阵，外层图不带 checkpointer。
-  - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`、`AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 默认 `off`）、三个 planner 开关。它们是灰度开关，不是调度器之分。
+  - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`、`AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 默认 `off`）、三个 planner 开关。它们是灰度开关，不是调度器之分。（顺序链和 `off|shadow` 在阶段 8 删除。）
 
 ### 代价（接受的）
 
@@ -623,6 +623,132 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - `quality:current` 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
 - 受修正影响的单文件套件：`agent-runtime-removed` 15/15、`langgraph-execution-plan-graph` 26/26、`langgraph-routes` 8/8、`langgraph-chat-stream` 8/8、`service-split.e2e` 1/1。
 
+## 阶段 8 结果：custom Skill 只走图，删除 V1 顺序链（2026-11-13）
+
+### 决定
+
+- 阶段 7 之后，custom Skill 阶段是 agent 里最后一处不走 LangGraph 的路径：V1 顺序链（一个接一个跑 Skill，把前面的答案拼进下一个 Skill 的问题）。它有两类入口：`AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`；默认的 `guarded` 下，整张图在任何节点运行之前被拒时回落到它。
+- 用户先要方案（原话：“先出方案”），看过调查结果和三个方案后选了方案 A（原话：“按方案 A 做”）：只走图；预算付不起的节点跳过；其他原因被拒时不执行任何 Skill 并逐个记录原因。
+- 这结束了约束 12 的前半条（V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off` 保留到 LangGraph 成为默认后至少一个发布周期）。`guarded` 从 2026-09-25 起就是默认值，顺序链已经七周不在默认路径上。
+- 删除之后没有开关能回到顺序链，要回去只能 revert（见下文“怎样恢复”）。
+- 不动的部分：
+  - 图怎么规划（模型的提议先校验，不合法就整张换成确定性图）、校验器的其他规则、执行器、图 checkpoint、启动恢复、replan。
+  - `/chat` 的响应契约。
+  - `AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 统一图，默认 `off`）和三个 planner 开关。
+
+### 删除之前的调查
+
+回落在默认配置下基本走不到。这是选方案的依据，数字来自 main 上的 e11ced91。
+
+- 规划分两层。模型提议的图不合法时，换成确定性图（把意图选中的 Skill 按顺序连起来）。只有确定性图也不合法，才算整张被拒。原因只有四种：
+
+| 原因 | 顺序链当时做什么 | 默认配置下生产里会不会发生 |
+| --- | --- | --- |
+| 意图没选任何 custom Skill，模型的提议又不合法 | 空跑，返回空结果 | 会，但链什么都没做 |
+| 预算不够付选中的 Skill（`budget_exceeded`） | 按顺序跑付得起的，其余记为因预算跳过 | 调用次数：不会。每个意图最多选 2 个 custom Skill，预算正好 2 次，只能在代码里调低。运行的 token、费用、时间上限用完：少见，此时一个 Skill 都不跑 |
+| 选中的 Skill 不在本次请求的授权目录里（`unregistered_capability`） | 照跑 | 不会。`/chat` 进 agent 之前用同一个 `getDocument` 查询核实过每个文档，四个 custom Skill 都声明了类型契约 |
+| 超过图的规模上限（深度 5、节点 12） | 照跑 | 不会，最多 2 个节点 |
+
+- 实测：在临时 worktree 里给这个阶段加记录点，跑全量测试和三个确定性 agent 评测，阶段共被进入 188 次。
+  - 133 次走图；27 次是显式的 `off`；12 次是 `shadow`；1 次检查点重放；1 次无 Skill 空跑。
+  - 14 次是被拒后回落，全部在测试里：1 个专门测预算回落，1 个是空跑，12 个是因为测试用的假 RAG 服务没有 `getDocument`，授权目录为空。
+  - 三个评测里被拒回落 0 次。
+
+### 被拒之后怎么办
+
+- **预算付不起全部选中的 Skill。** 确定性图在规划时不再按调用预算整张拒绝（`createAgentExecutionGraphResult` 里校验确定性图时不传 `budgetRemaining`，一行）。图照常执行，执行器本来就在每个节点启动时预留预算，付不起的节点记为跳过。顺序链当年是按 Skill 逐个扣预算，效果相同。模型提议的图仍然按预算整张校验：它自己决定了要规划什么，只执行预算碰巧够得着的那一部分不是它的提议。
+- **其他原因被拒。** 不执行任何 Skill。每个选中的 Skill 得到一条失败结果，写明校验器给的原因（错误码 `AGENT_SKILL_GRAPH_REJECTED`）；trace 里有一条 `skill_graph_rejected` 步骤说明这个阶段为什么什么都没做；请求继续往下走。
+- **没选 Skill、提议又不可用。** 返回空结果，和以前一样；永远不会把整个授权目录都跑一遍作为替代。
+- 图事件里的 `mode` 仍然写 `guarded`，`fallback` 仍然存在、从此总是 `null`：已存的 run、回放守卫和报告都读这两个字段。
+
+### 用户看到的差别
+
+冻结提交 2c1c6c06 把顺序链在这些情形下的回答逐字写进了 `test/agent-custom-skill-budget.test.mjs`（合同审查请求，选中“总结合同”和“风险审查”两个 Skill，默认注册表和规划器）。删除提交改的就是这些期望：
+
+| 情形 | 答案 | 记录 |
+| --- | --- | --- |
+| 默认预算（2 次） | 不变。冻结提交上链和图的响应逐字段相同 | 不变 |
+| 预算 1 次 | 不变：第一个 Skill 的答案、1 条引用、同样的 trace 步骤类型 | 被跳过的 Skill 没有结果，不再出现在 `agentSkills` 里（链把它列为 failed）；预算提示多了“needed 1”；图事件从“被拒、回落 v1”变成“已执行、partial” |
+| 预算 0 次 | 不变：“证据不足”的弃答 | 预算提示从 2 条变 1 条（第二个节点是因为它依赖的节点没跑而跳过，没有单独提示）；`agentSkills` 为空 |
+| 阶段无法核实文档（假 RAG 服务没有 `getDocument`） | **变了**：从链跑出的两段答案变成弃答 | 两个 Skill 列为 failed，trace 多一条 `skill_graph_rejected`，没有 `custom_skill` 步骤 |
+
+- 最后一行在 `/chat` 上走不到（见上表）。受影响的是直接调用 `runAgentRag`、又不提供文档查询的调用方，仓库里只有测试。
+- 运行上限（token、费用、时间）用完的情形，删除之前的表现随时机在两种形态之间变化：规划时已经用完，是“被拒、回落、每个 Skill 一条提示”；规划之后才用完，是“图执行、节点在启动时跳过”。现在只剩后一种。
+
+### 拒绝已删除的取值
+
+- `assertAgentRuntimeSupported(env)` 现在检查三个变量，各有错误码。新增的是 `AGENT_SKILL_GRAPH_ROLLOUT`（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。
+  - 照常启动：未设置、空串、纯空白、`guarded`（去首尾空白，大小写不限）。
+  - `off`、`shadow`：拒绝，“AGENT_SKILL_GRAPH_ROLLOUT=off was removed (ADR 0001 phase 8): custom Skills always run as a typed graph on LangGraph. Unset AGENT_SKILL_GRAPH_ROLLOUT or set it to guarded.”
+  - 其他值（如 `gaurded`）：同样拒绝，信息里带原值。
+- 行为变化：阶段 8 之前，这个变量拼错的值静默落到 `off`，也就是顺序链。现在拼错即拒绝启动。`server/.env` 里如果显式写了 `off`、`shadow` 或拼错的值，要先改掉。
+- 检查位置和阶段 7 相同（`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom-Skill stage、v3 的入口与 stage、执行器），所以不建 app、直接调 `runAgentRag` 的 eval runner 在环境里有这种取值时也以 `case_error` 失败。
+- `rag/config.js` 的 `getAgentSkillGraphRollout()` 已删除。两个 workflow（`release-evidence.yml`、`planner-real-gate.yml`）和几个评测脚本仍然设置 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，这是唯一还接受的取值，没有改。
+- `evaluation/rollout-readiness-report.js` 的 “custom Skill DAG 处于 guarded” 一项保留，改为直接读这个变量：环境里是别的值时进程根本起不来，这样的环境生成的报告不应该显示就绪。
+- `test/agent-runtime-removed.test.mjs`（19 个测试，原 15 个）对三个变量各跑一遍。
+
+### 删了什么
+
+- `rag/agent-custom-skill-runner.js`（`runCustomSkills`，173 行）和 `rag/agent-planner.js` 的 `buildChainedSkillQuestion`。
+- `rag/agent-custom-skill-stage.js`：`off`、`shadow` 两条路径、`runV1`、被拒后的回落、`mode` 参数和 `CUSTOM_SKILL_STAGE_MODES`。601 → 587 行（少掉的代码被新的“未执行”记录和注释抵掉大半）。
+- `rag/agent.js`、`rag/agent-execution-plan-runner.js`：`skillGraphMode` 的传递。授权目录不再因为 `off` 而置空。
+- `rag/config.js`：`getAgentSkillGraphRollout()`。
+- 评测：trajectory 的 `custom_skill_retry`、`skill_graph_shadow_comparison` 两个场景和空出来的 `retry` 分类；`unified_graph_evidence_gated_skill_hand_off` 里 V1 对照的 `off` 那一半。
+- 测试：阶段测试里只测 `off`、`shadow` 的 8 个测试（另有 4 个改写成现在的行为，新增 9 个，套件从 23 个变成 24 个），`runCustomSkills` 的 1 个测试，`config.test.mjs` 里两个取值测试；两个 golden 文件（`custom_skill_retry.json`、`skill_graph_shadow_comparison.json`）。
+
+### 保留什么
+
+- 确定性图 `createDeterministicExecutionGraph`：它就是顺序链的图版本，现在是唯一的回落。
+- 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器（`agent-run-step-handlers/custom-research-steps.js`）。新的 run 不再产生这种不带 `nodeId` 的步骤，处理器只对阶段 8 之前存下来的 run 有用。要不要删，没有在这一阶段决定。
+- 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支。图没执行的那一支现在只在“被拒、没有 Skill 运行”和“根本没有 custom Skill”时走到。
+- 场景 id、标签和描述里的 “guarded” 字样（如 `skill_graph_guarded_execution`）：`guarded` 是唯一还接受的取值，也是每个图事件记录的 mode，阶段 6 冻结的 golden 里也是这些字样。
+
+### 评测套件的改动
+
+本 ADR 的“明确不做”里有一条：不改任何评测语料、基线、阈值来让迁移“通过”。这一阶段删了两个 trajectory 场景，原因和范围如下，不属于放宽门槛。
+
+- `custom_skill_retry`：把开关设成 `off`，让顺序链的一个步骤失败，再从 run 里单独重试它。顺序链删除后这个场景跑不起来；图运行的步骤拒绝单独重试（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`，409），这一点由 `agent-run-step-executor`、`agent-execution-graph-checkpoint` 的单元测试钉住，失败节点的记录由 `agent-primary-run-persistence` 钉住。
+- `skill_graph_shadow_comparison`：`shadow` 模式本身不存在了。
+- 数量：19 个场景、84 项检查变成 17 个、76 项（减去的是这两个场景的 4 + 4 项）。其余 17 个场景的检查项一条没动；`quality-current-suite-manifest.js` 里只删了这两个场景的条目，并把统一图场景的 V1 对照从 4 次改成 2 次。阈值没有改。
+- 没有新增场景来替代它们。
+
+### 失去、且没有替代的能力和覆盖
+
+- **手动重试某个失败的 custom Skill 步骤。** 只有顺序链的步骤支持。默认走图是 2026-09-25 起的事，所以默认配置下这个能力已经七周不可用；现在彻底没有。图里的替代是有限 replan，只在模型规划器是主规划器时存在；确定性规划器下，失败的节点留下 partial 的图，没有重试。
+- **`shadow` 对照**：让顺序链回答、同时旁路规划一张图来比较。规划器自己的 shadow（`AGENT_PLANNER_ROLLOUT=shadow`，确定性图为主、模型在旁边规划）不受影响。
+- **链和 DAG 的并排对照**：统一图场景里 V1 外层计划原来在两种 custom Skill 执行方式下各跑一遍，数字相同；现在只有 DAG 一种。
+- **没有类型契约的 custom Skill**：以前靠顺序链照跑，现在不会运行，trace 里写 `no legal execution graph (unregistered_capability)`。注册时不拒绝这样的 Skill，是运行时才报。仓库里的四个 custom Skill 都有契约。
+
+### 升级时已存的 run
+
+- 顺序链留下的 run（`off`、`shadow` 或回落时创建的）：它们的 `custom_skill` 步骤没有 `nodeId`，没有图 checkpoint。启动恢复和单步重试仍然用保留下来的处理器处理它们，行为不变。
+- 历史事件里的 `fallback: "v1"` 和 `mode: "shadow"`：报告照旧读取和统计；回放守卫只认 `mode: "guarded"`、`fallback: null`、`executed: true` 的事件，和以前一样。
+- 图运行的 run：没有变化。
+
+### 怎样恢复
+
+- `git revert` 删除提交 3b3a8719。它恢复 `runCustomSkills`、`buildChainedSkillQuestion`、阶段的 `off`、`shadow` 和回落、`getAgentSkillGraphRollout()`、两个 trajectory 场景和它们的 golden，并去掉 `AGENT_SKILL_GRAPH_ROLLOUT` 的启动拒绝。冻结提交可以保留。
+- 没有数据要处理：图 checkpoint 的格式没有变。
+
+### 证据
+
+- 提交：冻结 2c1c6c06，删除 3b3a8719，清单版本 9c3c3de8（`quality-current-suite-manifest.js` 1.15.0 → 1.16.0；删场景时就该一起升，补在了后一个提交里）。下面的结果都在 9c3c3de8 上，本机 Node 24.21.0。
+- 三个确定性 agent 评测，改动前（e11ced91）和改动后各在一个干净的 worktree 里跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：
+  - `eval:planner -- --provider mock`（7/7）、`eval:recovery-observability`（8/8）：逐字节一致。
+  - `eval:trajectory`：19/19（84 项检查）变成 17/17（76 项）。除了删掉的两个场景，17 个共有场景里 16 个逐字节一致；`unified_graph_evidence_gated_skill_hand_off` 只在 V1 对照处不同（4 次变 2 次，去掉 `skillGraphRollout` 字段，对应检查项的标签改了）。
+- 全量结果：
+  - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（与 CI 的 `server-tests` 同一条命令，干净 worktree）：4,595 个测试，4,588 通过、7 跳过、0 失败；全局行覆盖 92.54%（阶段 7 是 92.58%），五组覆盖率门和目标都通过。`agent-custom-skill-stage.js` 行覆盖 100%。跳过的 7 个需要 Redis、读副本或旧版本 checkout，与改动无关。
+  - 不接数据库（3b3a8719 的内容）：4,423 个测试，4,395 通过、28 跳过、0 失败。
+  - `quality:current` 按 CI 的 `quality-gate` 步骤运行（干净 worktree、一次性 PostgreSQL + pgvector、五项确定性评测都由该提交生成）：通过，`gate-worktree`、`quality-synthetic`、`feedback`、`trajectory`、`planner-mock`、`recovery`、`quality-baseline`、`quality-metrics` 八项检查全部 `pass`。
+- 单文件套件：`agent-custom-skill-stage` 24/24、`agent-custom-skill-budget` 5/5、`agent-dag-planner-adapter` 40/40、`agent-runtime-removed` 19/19（其中一条真实执行 `node server.js`，在三个变量的已删除取值下都以非零退出）、`agent-execution-plan-runner` 13/13、`langgraph-runtime-parity` 5/5（原 6，少了 shadow 场景）、`langgraph-execution-plan-graph` 25/25（原 26，少了 `custom_skill_retry`）、`langgraph-unified-graph` 25/25。
+- golden：删除 2 个文件；改写 1 个（`langgraph-unified-graph/trajectory-unified-graph-evidence-gated-skill-hand-off.json`，只有 V1 对照的 4 → 2 次和检查项标签，原因写在 `test/langgraph-unified-graph.test.mjs` 的注释里）；其余阶段 6、7 冻结的 fixture 逐字节未变。
+- 代码量（3b3a8719 相对冻结提交）：`server/rag` +217 −404 行；`server/evaluation` +70 −497 行；测试（不含 fixture）+878 −582 行，fixture −1,956 行。冻结提交另加 386 行测试。
+- 没有验证的：
+  - CI 的 Node 22：本机只有 Node 20 和 24，合并进 main 之后由 CI 验证。
+  - 真实模型下的答案质量。顺序链和图告诉第二个 Skill 上游结果的方式不同，但默认路径七周以来就是图，这不是新变化。
+  - 真实流量。这里没有线上数据，“默认配置下生产里走不到”是从代码和默认配置推出来的，加上上面的记录点统计。
+  - `server/.env` 按规则没有读。里面如果有 `AGENT_SKILL_GRAPH_ROLLOUT=off`、`shadow` 或拼错的值，`node server.js` 现在拒绝启动。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
@@ -656,10 +782,14 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 用户豁免了约束 12 的回退窗口，原生图调度器和 `AGENT_RUNTIME=native` 已删除。
   - `AGENT_RUNTIME` 只接受未设置、空值、空白或 `langgraph`，其他值拒绝启动（`AGENT_RUNTIME_REMOVED`）。
   - 恢复原生调度器的唯一办法是 `git revert` 阶段 6 的提交，见“阶段 6 结果”。
-  - 仍然可用的运维回退：`AGENT_SKILL_GRAPH_ROLLOUT=off` 让 custom-Skill 阶段回到 V1 顺序链；`AGENT_UNIFIED_GRAPH_ROLLOUT` 默认 `off`，v3 图不执行。
+  - 当时仍然可用的运维回退：`AGENT_SKILL_GRAPH_ROLLOUT=off` 让 custom-Skill 阶段回到 V1 顺序链（阶段 8 已删除）；`AGENT_UNIFIED_GRAPH_ROLLOUT` 默认 `off`，v3 图不执行。
 - 阶段 7 起：外层计划也没有运行时回退开关。
   - 原生循环和 `AGENT_OUTER_PLAN_RUNTIME=native` 已删除，变量只接受未设置、空值、空白或 `langgraph`，其他值拒绝启动（`AGENT_OUTER_PLAN_RUNTIME_REMOVED`）。
   - 恢复原生循环的唯一办法是 `git revert` 阶段 7 的删除提交，见“阶段 7 结果”。外层图不写线程记录，没有在途数据要处理。
+- 阶段 8 起：custom Skill 阶段没有回到顺序链的开关。
+  - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow` 已删除，变量只接受未设置、空值、空白或 `guarded`，其他值拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。
+  - 恢复顺序链的唯一办法是 `git revert` 阶段 8 的删除提交，见“阶段 8 结果”。图 checkpoint 的格式没有变，没有数据要处理。
+  - 剩下的运维开关只有 `AGENT_UNIFIED_GRAPH_ROLLOUT`（默认 `off`，v3 图不执行）和三个 planner 开关。
 - 数据（阶段 4、5 的规则，revert 阶段 6 之后同样适用）：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。阶段 4、5 时两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。阶段 6 删掉了“交给 native 接管”这一方向的用例，revert 会把它们一起恢复；“native 留下的 run 由 LangGraph 接管”这一方向仍由删掉线程后续跑、恢复的用例钉住（见“阶段 6 结果”的“升级时在途的 run”）。
 
 ## 明确不做
