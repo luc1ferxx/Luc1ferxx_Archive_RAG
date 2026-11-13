@@ -51,6 +51,11 @@ const createRagService = (responses) => {
 
       return response;
     },
+    // The lookup /chat runs before the agent starts. The custom-Skill stage
+    // plans only over documents it can verify with it, so a stub without it
+    // leaves the Skill catalog empty.
+    getDocument: (docId) =>
+      docId === "doc-1" ? { docId: "doc-1", fileName: "policy.pdf" } : null,
     listDocuments: () => [
       {
         docId: "doc-1",
@@ -361,6 +366,14 @@ test("primary custom skill persists durable input, output, and stable id", async
   assert.equal(customStep.input.question, "Run a risk review for the remote work policy.");
   assert.equal(customStep.output.citationCount, 1);
   assert.equal(countSteps(run, "custom_skill:risk_review"), 1);
+  // The step is a node of the typed graph the stage planned and ran.
+  assert.equal(customStep.input.nodeId, "risk_review");
+  assert.deepEqual(
+    run.events
+      .filter((event) => event.type === "skill_graph_planned")
+      .map((event) => [event.payload.executed, event.payload.status, event.payload.fallback]),
+    [[true, "completed", null]]
+  );
 
   const safety = buildStepReplaySafetyAssessment({
     step: customStep,
@@ -391,6 +404,14 @@ test("custom skill failed Result persists structured error message", async () =>
   assert.equal(customStep.status, AGENT_RUN_STEP_STATUSES.failed);
   assert.equal(customStep.error.message, "Custom review unavailable.");
   assert.notEqual(customStep.error.message, "[object Object]");
+  // A node that failed leaves a partial graph, never a second attempt.
+  assert.equal(customStep.input.nodeId, "risk_review");
+  assert.deepEqual(
+    run.events
+      .filter((event) => event.type === "skill_graph_planned")
+      .map((event) => [event.payload.executed, event.payload.status, event.payload.fallback]),
+    [[true, "partial", null]]
+  );
 });
 
 test("research brief persists lifecycle-backed research question steps", async () => {

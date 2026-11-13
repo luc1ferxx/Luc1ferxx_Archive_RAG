@@ -214,6 +214,9 @@ test("an agent run records the template behind its LLM planner decision", async 
         resolvedQuery: "contract summary",
         text: "The agreement renews every 12 months. [Source 1]",
       }),
+      // The custom-Skill stage plans only over documents this lookup verifies.
+      getDocument: (docId) =>
+        docId === "contract-1" ? { docId, fileName: "services-agreement.pdf" } : null,
       listDocuments: () => [{ docId: "contract-1", fileName: "services-agreement.pdf" }],
     },
     sessionId: "prompt-session",
@@ -224,6 +227,8 @@ test("an agent run records the template behind its LLM planner decision", async 
   const intentTemplate = getIntentPlannerPromptDescriptor();
 
   assert.equal(response.status, 200);
+  // The planner's decision was carried out: the selected Skill answered.
+  assert.equal(response.body.agentAnswer, "The agreement renews every 12 months. [Source 1]");
   assert.deepEqual(observability.intentPlanner.promptTemplate, { ...intentTemplate });
   assert.deepEqual(
     observability.promptTemplates.map(({ calls, id, version }) => ({ calls, id, version })),

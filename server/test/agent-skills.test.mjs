@@ -42,6 +42,16 @@ import {
 } from "../rag/storage.js";
 import { withAgentExperienceMemoryEnabled } from "./agent-experience-memory-test-helpers.mjs";
 
+// The custom-Skill stage plans only over documents it can verify in the
+// caller's scope, with the lookup /chat itself runs before the agent starts
+// (ragService.getDocument). A stub without it leaves the Skill catalog empty,
+// so these stubs answer it from the same list they hand to listDocuments.
+const withDocumentLookup = (ragService) => ({
+  ...ragService,
+  getDocument: (docId, accessScope) =>
+    ragService.listDocuments(accessScope).find((document) => document.docId === docId) ?? null,
+});
+
 test("built-in skill registry selects document and web skills with stable metadata", () => {
   const registry = createBuiltInSkillRegistry();
   const selectedSkills = registry.select({
@@ -892,7 +902,7 @@ test("agent rag executes whitelisted custom timeline skill with access scope", a
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -996,7 +1006,7 @@ test("agent rag executes whitelisted custom risk review skill with access scope"
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -1100,7 +1110,7 @@ test("agent rag executes whitelisted custom contract summary skill with access s
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -1201,7 +1211,7 @@ test("agent rag chains contract summary into risk review", async () => {
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -1223,7 +1233,7 @@ test("agent rag chains contract summary into risk review", async () => {
   );
   assert.match(receivedQuestions[0], /contract summary/i);
   assert.match(receivedQuestions[1], /risk review/i);
-  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Upstream findings from an earlier step/i);
   assert.match(receivedQuestions[1], /Acme contract renews/i);
   assert.match(response.body.agentAnswer, /Acme contract renews/i);
   assert.match(response.body.agentAnswer, /Early termination requires 60 days/i);
@@ -1298,7 +1308,7 @@ test("agent rag reports sanitized experience memory write observability", async 
       },
       docIds: ["doc-1"],
       question: "Review this contract for risks and key terms.",
-      ragService,
+      ragService: withDocumentLookup(ragService),
       sessionId: "session-1",
       userId: "alice",
       webChatService: async () => ({
@@ -1384,7 +1394,7 @@ test("agent rag chains document comparison into risk review", async () => {
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -1406,7 +1416,7 @@ test("agent rag chains document comparison into risk review", async () => {
   );
   assert.match(receivedQuestions[0], /document comparison/i);
   assert.match(receivedQuestions[1], /risk review/i);
-  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Upstream findings from an earlier step/i);
   assert.match(receivedQuestions[1], /Policy A allows 2 remote days/i);
   assert.match(
     response.body.agentAnswer,
@@ -1477,7 +1487,7 @@ test("agent rag chains timeline extraction into document comparison for project 
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),
@@ -1499,7 +1509,7 @@ test("agent rag chains timeline extraction into document comparison for project 
   );
   assert.match(receivedQuestions[0], /chronological timeline/i);
   assert.match(receivedQuestions[1], /document comparison/i);
-  assert.match(receivedQuestions[1], /Previous skill outputs/i);
+  assert.match(receivedQuestions[1], /Upstream findings from an earlier step/i);
   assert.match(receivedQuestions[1], /Project Alpha started/i);
   assert.match(response.body.agentAnswer, /Project Alpha changed scope/i);
 });
@@ -1658,7 +1668,7 @@ test("agent rag executes whitelisted custom compare documents skill with access 
   };
 
   const response = await runAgentRag({
-    ragService,
+    ragService: withDocumentLookup(ragService),
     webChatService: async () => ({
       text: "web should not run",
     }),

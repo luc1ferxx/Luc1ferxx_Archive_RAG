@@ -980,4 +980,9 @@ test("every mode returns the same flat skill-result array", async () => {
 
   assert.deepEqual(shapes[0], shapes[1]);
   assert.deepEqual(shapes[0], shapes[2]);
+  // Spelled out as well: three modes agreeing on the same wrong shape would
+  // pass the two comparisons above.
+  assert.deepEqual(shapes[2], [
+    { citationCount: 1, ok: true, skillId: "compare_documents", skillVersion: "1.0.0" },
+  ]);
 });
