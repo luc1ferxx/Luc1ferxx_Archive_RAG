@@ -101,7 +101,6 @@
           "documentSufficient": true,
           "riskCallCount": 1,
           "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "off",
           "unifiedEventCount": 0
         },
         {
@@ -111,32 +110,11 @@
           "documentSufficient": false,
           "riskCallCount": 1,
           "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "off",
-          "unifiedEventCount": 0
-        },
-        {
-          "customSkillCalls": 1,
-          "customStageBeforeDocumentRag": true,
-          "documentRagCalls": 0,
-          "documentSufficient": true,
-          "riskCallCount": 1,
-          "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "guarded",
-          "unifiedEventCount": 0
-        },
-        {
-          "customSkillCalls": 1,
-          "customStageBeforeDocumentRag": true,
-          "documentRagCalls": 0,
-          "documentSufficient": false,
-          "riskCallCount": 1,
-          "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "guarded",
           "unifiedEventCount": 0
         }
       ],
       "id": "v1_same_request_runs_skill_first_and_unconditionally",
-      "label": "V1 on the same request, chain and V2 DAG, both evidence variants: the Skill runs every time, with no document answer and no upstream section",
+      "label": "V1 on the same request, both evidence variants: the Skill runs every time, with no document answer and no upstream section",
       "passed": true
     },
     {
@@ -440,7 +418,6 @@
           "documentSufficient": true,
           "riskCallCount": 1,
           "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "off",
           "unifiedEventCount": 0
         },
         {
@@ -450,27 +427,6 @@
           "documentSufficient": false,
           "riskCallCount": 1,
           "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "off",
-          "unifiedEventCount": 0
-        },
-        {
-          "customSkillCalls": 1,
-          "customStageBeforeDocumentRag": true,
-          "documentRagCalls": 0,
-          "documentSufficient": true,
-          "riskCallCount": 1,
-          "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "guarded",
-          "unifiedEventCount": 0
-        },
-        {
-          "customSkillCalls": 1,
-          "customStageBeforeDocumentRag": true,
-          "documentRagCalls": 0,
-          "documentSufficient": false,
-          "riskCallCount": 1,
-          "riskCallsWithUpstreamSection": 0,
-          "skillGraphRollout": "guarded",
           "unifiedEventCount": 0
         }
       ]

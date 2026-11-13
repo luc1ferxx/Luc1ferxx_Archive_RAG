@@ -465,12 +465,6 @@ const trajectoryChecks = {
     "capability_step_completed_after_approval",
     "approval_resume_events_recorded",
   ],
-  custom_skill_retry: [
-    "failed_custom_step_persisted_input",
-    "retry_completed_same_run",
-    "retry_step_completed",
-    "custom_skill_was_retried_once",
-  ],
   memory_not_evidence: [
     "memory_not_promoted_to_evidence",
     "memory_claim_failed_support",
@@ -512,12 +506,6 @@ const trajectoryChecks = {
     "dependent_node_bound_upstream_output",
     "node_steps_persist_replay_contract",
     "chat_contract_unchanged_under_graph",
-  ],
-  skill_graph_shadow_comparison: [
-    "shadow_answers_from_v1_chain",
-    "shadow_graph_planned_without_execution",
-    "shadow_comparison_recorded",
-    "shadow_budget_charged_once",
   ],
   skill_graph_illegal_plan_rejected: [
     "illegal_graph_rejected_before_any_node_ran",
@@ -901,40 +889,6 @@ const trajectoryResponseProjections = {
       "capability_call",
     ],
   }),
-  custom_skill_retry: trajectoryResponseProjection({
-    agentMode: "risk_review",
-    agentSkills: completedSkillIds("risk_review"),
-    observed: {
-      chatCallCount: 2,
-      failedStep: {
-        errorMessage: "Transient custom skill failure.",
-        hasQuestion: true,
-        skillId: "risk_review",
-        status: "failed",
-      },
-      retry: {
-        attempt: 2,
-        citationCount: 1,
-        retryError: null,
-        retryOfOriginalStep: true,
-        runStatus: "completed",
-        sameRun: true,
-        stepStatus: "completed",
-      },
-    },
-    selectedSkills: skillIds("risk_review"),
-    telemetry: {
-      chatCallCount: 2,
-      listDocumentCallCount: 2,
-    },
-    traceTypes: [
-      "plan",
-      "query_planner",
-      "custom_skill",
-      "synthesis",
-      "custom_skill",
-    ],
-  }),
   memory_not_evidence: trajectoryResponseProjection({
     agentMode: "clarification",
     agentSkills: completedSkillIds("document_rag"),
@@ -1263,89 +1217,6 @@ const trajectoryResponseProjections = {
           stepId: "custom_skill:risk_review",
         },
       ],
-      traceStepIds: [
-        "custom_skill:summarize_contract",
-        "custom_skill:risk_review",
-      ],
-    },
-    selectedSkills: skillIds("summarize_contract", "risk_review"),
-    skillChain: skillIds("summarize_contract", "risk_review"),
-    telemetry: {
-      chatCallCount: 2,
-      listDocumentCallCount: 2,
-    },
-    traceTypes: [
-      "plan",
-      "query_planner",
-      "skill_chain",
-      "custom_skill",
-      "custom_skill",
-      "synthesis",
-      "self_check",
-      "answer_finalizer",
-    ],
-  }),
-  skill_graph_shadow_comparison: trajectoryResponseProjection({
-    agentMode: "skill_chain",
-    agentSkills: completedSkillIds("summarize_contract", "risk_review"),
-    budget: {
-      used: {
-        customSkillCalls: 2,
-        documentRagCalls: 0,
-        webSearchCalls: 0,
-      },
-    },
-    executionLoop: {
-      followUpsRun: 0,
-      gapsIdentified: 0,
-      stoppedReason: "not_needed",
-    },
-    observed: {
-      eventCount: 1,
-      graph: {
-        executed: false,
-        fallback: null,
-        mode: "shadow",
-        nodeIds: [
-          "summarize_contract",
-          "risk_review",
-        ],
-        plannerFallback: false,
-        requestedPlannerId: "deterministic_dag",
-        selectedPlannerId: "deterministic_dag",
-        status: "selected",
-      },
-      questions: [
-        {
-          chained: false,
-          typedUpstream: false,
-        },
-        {
-          chained: true,
-          typedUpstream: false,
-        },
-      ],
-      replayContracts: [
-        {
-          effects: "read_only",
-          hasPriorFindings: false,
-          idempotency: "read_only_rag",
-          stepId: "custom_skill:summarize_contract",
-        },
-        {
-          effects: "read_only",
-          hasPriorFindings: false,
-          idempotency: "read_only_rag",
-          stepId: "custom_skill:risk_review",
-        },
-      ],
-      shadow: {
-        diverged: false,
-        error: null,
-        nodeRunCount: 0,
-        replanCount: 0,
-        requestedPlannerId: "deterministic_dag",
-      },
       traceStepIds: [
         "custom_skill:summarize_contract",
         "custom_skill:risk_review",
@@ -1789,7 +1660,6 @@ const trajectoryResponseProjections = {
           documentSufficient: true,
           riskCallCount: 1,
           riskCallsWithUpstreamSection: 0,
-          skillGraphRollout: "off",
           unifiedEventCount: 0,
         },
         {
@@ -1799,27 +1669,6 @@ const trajectoryResponseProjections = {
           documentSufficient: false,
           riskCallCount: 1,
           riskCallsWithUpstreamSection: 0,
-          skillGraphRollout: "off",
-          unifiedEventCount: 0,
-        },
-        {
-          customSkillCalls: 1,
-          customStageBeforeDocumentRag: true,
-          documentRagCalls: 0,
-          documentSufficient: true,
-          riskCallCount: 1,
-          riskCallsWithUpstreamSection: 0,
-          skillGraphRollout: "guarded",
-          unifiedEventCount: 0,
-        },
-        {
-          customSkillCalls: 1,
-          customStageBeforeDocumentRag: true,
-          documentRagCalls: 0,
-          documentSufficient: false,
-          riskCallCount: 1,
-          riskCallsWithUpstreamSection: 0,
-          skillGraphRollout: "guarded",
           unifiedEventCount: 0,
         },
       ],

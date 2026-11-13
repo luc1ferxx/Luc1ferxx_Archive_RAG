@@ -10,7 +10,6 @@ import {
   getAgentRunStoreConfigStatus,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
-  getAgentSkillGraphRollout,
   getAgentUnifiedGraphRollout,
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
@@ -63,30 +62,30 @@ test("agent planner defaults target pure LLM runtime", async () => {
   );
 });
 
-// The typed DAG is the default executor for custom Skills; the V1 chain is an
-// explicit opt-out. Who plans the graph is a separate dial and is not decided
-// here.
-test("the skill graph runs guarded unless an operator opts out", async () => {
-  for (const unset of [undefined, "", "   "]) {
-    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: unset }, async () => {
-      assert.equal(getAgentSkillGraphRollout(), "guarded");
-    });
+// The custom-Skill graph has no rollout dial any more: nothing in config.js
+// resolves AGENT_SKILL_GRAPH_ROLLOUT, and its removed values (`off`, `shadow`,
+// a typo) refuse the start instead of selecting the deleted sequential chain.
+// test/agent-runtime-removed.test.mjs covers the refusal at every entry.
+test("config resolves no skill graph rollout", async () => {
+  const config = await import("../rag/config.js");
+
+  assert.equal(Object.hasOwn(config, "getAgentSkillGraphRollout"), false);
+  assert.equal(config.AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE, "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED");
+
+  for (const accepted of [undefined, "", "   ", "guarded", " Guarded "]) {
+    assert.doesNotThrow(() =>
+      config.assertAgentRuntimeSupported(
+        accepted === undefined ? {} : { AGENT_SKILL_GRAPH_ROLLOUT: accepted }
+      )
+    );
   }
 
-  for (const mode of ["guarded", "off", "shadow"]) {
-    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: mode }, async () => {
-      assert.equal(getAgentSkillGraphRollout(), mode);
-    });
-  }
-});
-
-// Someone who set the dial and mistyped it was most likely trying to leave the
-// graph, so a typo lands on the narrower chain instead of the default.
-test("an unrecognized skill graph rollout falls back to off rather than guessing", async () => {
-  for (const typo of ["full", "of", "guard"]) {
-    await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: typo }, async () => {
-      assert.equal(getAgentSkillGraphRollout(), "off");
-    });
+  for (const refused of ["off", "shadow", "full", "of", "guard"]) {
+    assert.throws(
+      () => config.assertAgentRuntimeSupported({ AGENT_SKILL_GRAPH_ROLLOUT: refused }),
+      { code: "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED" },
+      refused
+    );
   }
 });
 

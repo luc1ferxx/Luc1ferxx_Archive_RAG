@@ -625,9 +625,13 @@ test("execution plan runner preserves the default skill execution order", async 
 
 // The plan runner owns one custom_skills stage and must keep owning exactly
 // one. These two tests are about the wiring, not the DAG: the same request, the
-// same step type, the same flat results, whichever path the stage took. What
-// the graph does inside is covered in agent-custom-skill-stage.test.mjs.
-test("the custom skills stage stays on the V1 chain when off is threaded", async () => {
+// same step type, the same flat results, whoever planned the graph. What the
+// graph does inside is covered in agent-custom-skill-stage.test.mjs.
+//
+// The stage has one executor. The plan runner used to thread a rollout mode
+// to it (`off` kept the V1 sequential chain, which recorded no graph); that
+// option is gone, and an option of that name selects nothing.
+test("without a DAG planner the custom skills stage runs the deterministic graph", async () => {
   const callOrder = [];
   const selectedSkills = createDefaultSelectedSkills(callOrder);
   const harness = createRunnerHarness({
@@ -639,14 +643,44 @@ test("the custom skills stage stays on the V1 chain when off is threaded", async
   const result = await runAgentExecutionPlan({
     ...harness.args,
     recordExecutionGraph: (record) => graphRecords.push(record),
+    // Ignored: nothing reads it since ADR 0001 phase 8.
     skillGraphMode: "off",
   });
 
-  assert.deepEqual(graphRecords, []);
+  assert.equal(result.customSkillResults.length, 1);
   assert.equal(result.customSkillResults[0].skillId, "custom_review");
+  assert.equal(result.customSkillGraphExecuted, true);
+  assert.deepEqual(
+    harness.trace.filter((step) => step.type === "custom_skill").map((step) => step.id),
+    ["custom_skill:custom_review"]
+  );
+  assert.equal(
+    callOrder.filter((skillId) => skillId === "custom_review").length,
+    1
+  );
+  assert.deepEqual(
+    graphRecords.map((record) => ({
+      executed: record.executed,
+      fallback: record.fallback,
+      mode: record.mode,
+      nodeIds: record.graph.nodeIds,
+      selectedPlannerId: record.planner.selectedPlannerId,
+      status: record.status,
+    })),
+    [
+      {
+        executed: true,
+        fallback: null,
+        mode: "guarded",
+        nodeIds: ["custom_review"],
+        selectedPlannerId: "deterministic_dag",
+        status: "completed",
+      },
+    ]
+  );
 });
 
-test("guarded mode reaches the graph through the plan runner without changing the stage contract", async () => {
+test("a DAG planner reaches the graph through the plan runner without changing the stage contract", async () => {
   const callOrder = [];
   const selectedSkills = createDefaultSelectedSkills(callOrder);
   const customSkills = selectedSkills.filter((skill) => skill.kind === "custom");
@@ -679,7 +713,6 @@ test("guarded mode reaches the graph through the plan runner without changing th
       },
       id: "test_replan",
     },
-    skillGraphMode: "guarded",
   });
 
   // Unchanged for everything downstream of the stage.

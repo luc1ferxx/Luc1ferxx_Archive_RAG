@@ -82,9 +82,12 @@ const buildMetricChecks = ({
   const minTaskRecoveryCompletedCount =
     thresholds.minTaskRecoveryCompletedCount ?? 1;
   const maxPlannerFallbackCount = thresholds.maxPlannerFallbackCount ?? 0;
-  // A guarded graph may fall back to the V1 chain only before any node has
-  // run; after that a fallback would repeat charged, possibly side-effecting
-  // work. Graph startup recovery is now a required release signal.
+  // A graph event that records a fallback after a node ran would mean charged,
+  // possibly side-effecting work was repeated. The stage has no fallback any
+  // more (the V1 chain it fell back to before any node ran was deleted in ADR
+  // 0001 phase 8, so new events always carry `fallback: null`); the ceiling
+  // stays for runs stored before that. Graph startup recovery is a required
+  // release signal.
   const maxSkillGraphUnsafeFallbackCount =
     thresholds.maxSkillGraphUnsafeFallbackCount ?? 0;
 

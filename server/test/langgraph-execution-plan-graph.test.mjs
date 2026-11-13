@@ -30,6 +30,12 @@ import test from "node:test";
 // DAG (`customSkillGraph` below) keep the fixtures phase 6 froze from the
 // native graph scheduler; phase 7 found them unchanged.
 //
+// One scenario left with phase 8: custom_skill_retry, a failed step of the V1
+// sequential chain retried on its own from the run. It set
+// AGENT_SKILL_GRAPH_ROLLOUT=off, the chain it needed is deleted, and a graph
+// run refuses a standalone step retry (agent-run-graph-replay-guard.js), so
+// the case and its fixture were removed rather than rewritten.
+//
 // The trajectory cases keep their run stores private, so the evaluation
 // modules' import of rag/agent-runs.js is redirected to the phase-2 recording
 // stand-in, and the runner's on-demand import of the graph module is
@@ -130,8 +136,9 @@ const { createGoalLifecycleCase } = await import("../evaluation/trajectory/cases
 const { createPlannerFallbackCase, createPrivacySanitizationCase } = await import(
   "../evaluation/trajectory/cases/planner-privacy.js"
 );
-const { createApprovalResumeCase, createCustomSkillRetryCase, createWebApprovalDenyCase } =
-  await import("../evaluation/trajectory/cases/run-control.js");
+const { createApprovalResumeCase, createWebApprovalDenyCase } = await import(
+  "../evaluation/trajectory/cases/run-control.js"
+);
 
 // The stages each scenario really scheduled: every outer-plan graph LangGraph
 // streams (one whose nodes are all execution step ids, never the custom-Skill
@@ -325,7 +332,6 @@ const TRAJECTORY_CASES = [
     createApprovalResumeCase,
     "an AgentRunInterruptError parks the run waiting_for_user and the approval re-entry completes it",
   ],
-  ["custom_skill_retry", createCustomSkillRetryCase, "a failed V1 custom step retried from the run"],
   ["memory_not_evidence", createMemoryNotEvidenceCase, "memory is never evidence"],
   [
     "web_approval_deny",
@@ -366,8 +372,8 @@ for (const [
     assert.equal(run.outcome.id, caseId);
     assert.equal(run.outcome.passed, true, JSON.stringify(run.outcome.checks));
     // A case without a run store creates no run; the ones with one (approval
-    // resume, custom-Skill retry, the Web gate, the goal lifecycle) compare
-    // every run they created.
+    // resume, the Web gate, the goal lifecycle) compare every run they
+    // created.
     assertMatchesNativeGolden(caseId, run);
 
     if (planned) {

@@ -553,31 +553,11 @@ export const getAgentIntentPlanner = () =>
     "llm",
   ]);
 
-// Which executor runs the custom_skills stage. The typed DAG (`guarded`) is the
-// default; the V1 chain stays as the fallback for a graph rejected before any
-// node ran, and as an explicit operator opt-out (`off`). Who plans the graph is
-// a separate dial: the DAG planner follows AGENT_EXECUTION_PLANNER, and a failed
-// LLM plan falls back to the deterministic graph rather than straight to the
-// chain.
+// The agent has one runtime, LangGraph, and no dial selects another way to run
+// a request. Three variables used to:
 //
-// An unrecognized value resolves to `off`, not to the default: an operator who
-// touched this dial and mistyped it was most likely trying to leave the graph,
-// and the chain is the narrower path.
-export const getAgentSkillGraphRollout = () => {
-  const rawValue = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-
-  if (typeof rawValue !== "string" || rawValue.trim() === "") {
-    return "guarded";
-  }
-
-  return toChoice(rawValue, "off", ["guarded", "off", "shadow"]);
-};
-
-// The agent has one runtime, LangGraph, and no dial selects another. Two
-// variables used to:
-//
-//   AGENT_RUNTIME picked who schedules a guarded custom-Skill graph and a
-//   guarded v3 unified graph: LangGraph (the default since phase 4 of
+//   AGENT_RUNTIME picked who schedules a custom-Skill graph and a guarded v3
+//   unified graph: LangGraph (the default since phase 4 of
 //   docs/adr/0001-langgraph-runtime.md) or the native scheduler kept as the
 //   rollback. Phase 6 deleted the native scheduler.
 //
@@ -592,7 +572,14 @@ export const getAgentSkillGraphRollout = () => {
 //   one run costs 0.605 -> 0.894 ms of CPU on the graph (about +0.3 ms),
 //   which does not show against a real model's seconds per answer.
 //
-// Nothing reads either variable to decide anything. Both are still checked:
+//   AGENT_SKILL_GRAPH_ROLLOUT picked what runs the custom_skills stage
+//   (agent-custom-skill-stage.js): the typed graph on LangGraph (`guarded`,
+//   the default since 2026-09-25), the V1 sequential chain (`off`), or the
+//   chain with a graph planned beside it for comparison (`shadow`). Phase 8
+//   deleted the chain, which was the last agent path that did not run on
+//   LangGraph, and with it `off` and `shadow`.
+//
+// Nothing reads any of them to decide anything. All three are still checked:
 // when a process starts (server.js, and startServiceRole in
 // agent-service/role-server.js), when the app services are built
 // (createAppServices in app-services.js, so every in-process app refuses,
@@ -600,34 +587,58 @@ export const getAgentSkillGraphRollout = () => {
 // schedules on LangGraph (the outer plan's entry, the custom-Skill stage, the
 // v3 unified graph's entries and stage, and runExecutionGraphOnLangGraph),
 // which covers in-process callers of runAgentRag that build no app, such as
-// the evaluation runners. Unset, empty, whitespace or `langgraph` (trimmed,
-// any case) pass; any other value -- `native` above all, but also a typo such
-// as "lang-graph" -- refuses, because an operator who set it was asking for a
-// scheduler that no longer exists, and running LangGraph instead would ignore
-// that silently. (Until phase 7 a mistyped AGENT_OUTER_PLAN_RUNTIME resolved
-// to the native loop.)
+// the evaluation runners. Unset, empty, whitespace or the one value left
+// (`langgraph` for the two runtime dials, `guarded` for the rollout; trimmed,
+// any case) pass. Any other value refuses: `native`, `off` and `shadow` above
+// all, but also a typo such as "lang-graph". An operator who set one was
+// asking for something that no longer exists, and running the graph on
+// LangGraph instead would ignore that silently. (Until phase 7 a mistyped
+// AGENT_OUTER_PLAN_RUNTIME resolved to the native loop, and until phase 8 a
+// mistyped AGENT_SKILL_GRAPH_ROLLOUT resolved to `off`, the chain.)
 export const AGENT_RUNTIME_REMOVED_CODE = "AGENT_RUNTIME_REMOVED";
 export const AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE = "AGENT_OUTER_PLAN_RUNTIME_REMOVED";
+export const AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE = "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED";
 
-const REMOVED_RUNTIME_DIALS = Object.freeze([
+// One entry per removed dial: the value that is left (`accepted`), the values
+// that used to select what was deleted (`removedValues`), what kind of thing
+// the variable chose (`kind`, for a value that was never one), what was
+// deleted (`removed`) and what is true now (`what`).
+const REMOVED_AGENT_DIALS = Object.freeze([
   Object.freeze({
+    accepted: "langgraph",
     code: AGENT_RUNTIME_REMOVED_CODE,
+    kind: "a runtime",
     name: "AGENT_RUNTIME",
     phase: 6,
     removed: "the native scheduler",
+    removedValues: Object.freeze(["native"]),
     what: "the agent graphs always run on LangGraph",
   }),
   Object.freeze({
+    accepted: "langgraph",
     code: AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE,
+    kind: "a runtime",
     name: "AGENT_OUTER_PLAN_RUNTIME",
     phase: 7,
     removed: "the native loop",
+    removedValues: Object.freeze(["native"]),
     what: "the outer execution plan always runs on LangGraph",
+  }),
+  Object.freeze({
+    accepted: "guarded",
+    code: AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE,
+    kind: "a rollout mode",
+    name: "AGENT_SKILL_GRAPH_ROLLOUT",
+    phase: 8,
+    removed: "the sequential Skill chain",
+    removedValues: Object.freeze(["off", "shadow"]),
+    what: "custom Skills always run as a typed graph on LangGraph",
   }),
 ]);
 
 export const assertAgentRuntimeSupported = (env = process.env) => {
-  for (const { code, name, phase, removed, what } of REMOVED_RUNTIME_DIALS) {
+  for (const dial of REMOVED_AGENT_DIALS) {
+    const { accepted, code, kind, name, phase, removed, removedValues, what } = dial;
     const rawValue = env?.[name];
 
     if (typeof rawValue !== "string") {
@@ -636,17 +647,17 @@ export const assertAgentRuntimeSupported = (env = process.env) => {
 
     const value = rawValue.trim().toLowerCase();
 
-    if (value === "" || value === "langgraph") {
+    if (value === "" || value === accepted) {
       continue;
     }
 
     const error = new Error(
-      value === "native"
-        ? `${name}=native was removed (ADR 0001 phase ${phase}): ${what}. ` +
-            `Unset ${name} or set it to langgraph.`
-        : `${name}=${JSON.stringify(rawValue)} is not a runtime: ${removed} ` +
-            `was removed (ADR 0001 phase ${phase}) and langgraph is the only one ` +
-            `left. Unset ${name} or set it to langgraph.`
+      removedValues.includes(value)
+        ? `${name}=${value} was removed (ADR 0001 phase ${phase}): ${what}. ` +
+            `Unset ${name} or set it to ${accepted}.`
+        : `${name}=${JSON.stringify(rawValue)} is not ${kind}: ${removed} ` +
+            `was removed (ADR 0001 phase ${phase}) and ${accepted} is the only one ` +
+            `left. Unset ${name} or set it to ${accepted}.`
     );
     error.code = code;
     throw error;

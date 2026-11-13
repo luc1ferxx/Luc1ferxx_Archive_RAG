@@ -2,9 +2,6 @@ export const SKILL_CHAIN_MODE = "skill_chain";
 
 const MAX_CLARIFICATION_DOCUMENTS = 12;
 
-const normalizeText = (value) =>
-  typeof value === "string" && value.trim().length > 0 ? value.trim() : "";
-
 export const buildPreExecutionClarification = ({ plan, docIds = [] } = {}) => {
   if (plan.wantsCompareDocuments && docIds.length < 2) {
     return {
@@ -66,32 +63,6 @@ export const buildSkillChainSummary = ({ chainSkills = [] } = {}) =>
   `Chained ${chainSkills.length} skill${chainSkills.length === 1 ? "" : "s"}: ${
     chainSkills.map((skill) => skill.label).join(" -> ")
   }.`;
-
-export const buildChainedSkillQuestion = ({
-  question,
-  previousResults = [],
-} = {}) => {
-  const usableResults = previousResults
-    .filter((result) => result?.ok && normalizeText(result.text))
-    .slice(-3);
-
-  if (usableResults.length === 0) {
-    return question;
-  }
-
-  return [
-    "Continue the same agent task using previous skill outputs as context.",
-    `Original request: ${normalizeText(question)}`,
-    "Previous skill outputs:",
-    ...usableResults.map((result) =>
-      [
-        `${result.label}:`,
-        normalizeText(result.text),
-      ].join("\n")
-    ),
-    "Use previous outputs to avoid repeating work, but verify every final claim against selected document citations.",
-  ].join("\n\n");
-};
 
 export const buildPlannerActions = ({ plan, docIds, skills }) => {
   const actions = [

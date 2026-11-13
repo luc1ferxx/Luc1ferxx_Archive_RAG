@@ -8,10 +8,17 @@ const VALID_EFFECTS = new Set(Object.values(SKILL_EFFECTS));
  * the intent classifier. In particular, `match()` and composite intent ids
  * must not determine which registered Skills the model is allowed to combine.
  *
- * This catalog is intentionally narrower than the V1 registry: every Skill
- * needs an explicit typed contract and document scope. A legacy Skill can
- * continue to run through V1 without silently becoming a new model-callable
- * capability. The document lookup is the same scoped lookup used by /chat.
+ * This catalog is intentionally narrower than the registry: every Skill needs
+ * an explicit typed contract and document scope, and every selected document
+ * must be one the caller can reach. The document lookup is the same scoped
+ * lookup used by /chat.
+ *
+ * It is also the only way a custom Skill runs. The V1 sequential chain used to
+ * run a selected Skill that was not in this catalog (a legacy Skill without
+ * the typed contract, or any Skill when a document could not be verified);
+ * the chain was deleted in ADR 0001 phase 8. A graph naming such a Skill is
+ * rejected whole, and the stage reports the Skill as not run
+ * (agent-custom-skill-stage.js).
  */
 export const listAuthorizedAtomicCustomSkills = ({
   accessScope,
@@ -59,8 +66,8 @@ export const listAuthorizedAtomicCustomSkills = ({
       return false;
     }
 
-    // Inferring `read_only` from missing or misspelled metadata is fine for
-    // the legacy chain, but not for adding a Skill to a model-facing catalog.
+    // Inferring `read_only` from missing or misspelled metadata is not good
+    // enough for adding a Skill to a model-facing catalog.
     if (
       !VALID_EFFECTS.has(skill.effects) ||
       !skill.inputSchema ||

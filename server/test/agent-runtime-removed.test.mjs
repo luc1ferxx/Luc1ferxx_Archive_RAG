@@ -15,17 +15,20 @@ import { LANGSMITH_TRACING_VARIABLES } from "../rag/langgraph/langsmith-guard.js
 // The agent has one runtime, LangGraph (docs/adr/0001-langgraph-runtime.md).
 // Phase 6 deleted the native graph scheduler and the AGENT_RUNTIME dial that
 // selected it; phase 7 deleted the native outer loop and the
-// AGENT_OUTER_PLAN_RUNTIME dial that selected it. Neither variable selects
-// anything any more; both are only checked (rag/config.js
-// assertAgentRuntimeSupported): unset, empty, whitespace or langgraph
-// (trimmed, any case) pass; any other value refuses, so a process asked for a
-// removed scheduler never runs LangGraph without saying so. They are checked
-// at start-up (server.js and startServiceRole), when the app services are
-// built (createAppServices: the monolith, the agent tier, an evaluation
-// runner that builds createApp), and at every entry that schedules on
-// LangGraph (the outer plan's entry, the custom-Skill stage, the v3 entries
-// and stage, and the executor), which also covers evaluation runners that
-// call runAgentRag directly without building an app.
+// AGENT_OUTER_PLAN_RUNTIME dial that selected it; phase 8 deleted the
+// sequential Skill chain and the AGENT_SKILL_GRAPH_ROLLOUT values that
+// selected it (`off`, `shadow`). None of the three variables selects anything
+// any more; all are only checked (rag/config.js assertAgentRuntimeSupported):
+// unset, empty, whitespace or the one value left (langgraph for the two
+// runtime dials, guarded for the rollout; trimmed, any case) pass; any other
+// value refuses, so a process asked for something that was removed never runs
+// LangGraph without saying so. They are checked at start-up (server.js and
+// startServiceRole), when the app services are built (createAppServices: the
+// monolith, the agent tier, an evaluation runner that builds createApp), and
+// at every entry that schedules on LangGraph (the outer plan's entry, the
+// custom-Skill stage, the v3 entries and stage, and the executor), which also
+// covers evaluation runners that call runAgentRag directly without building
+// an app.
 
 process.env.VECTOR_STORE_PROVIDER = "local";
 process.env.RAG_HYBRID_ENABLED = "false";
@@ -33,6 +36,7 @@ process.env.RAG_HYBRID_ENABLED = "false";
 const {
   AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE,
   AGENT_RUNTIME_REMOVED_CODE,
+  AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE,
   assertAgentRuntimeSupported,
 } = config;
 
@@ -40,46 +44,74 @@ const serverDirectory = fileURLToPath(new URL("..", import.meta.url));
 const quietLogger = { error() {}, log() {}, warn() {} };
 const SERVICE_KEYS = `runtime-removed:${"r".repeat(48)}`;
 
-// The two removed dials: the variable, its error code, the ADR phase that
-// removed it, a value that was never a runtime, and the getter that is gone.
+// The three removed dials: the variable, its error code, the ADR phase that
+// removed it, the one value it still accepts, the values that selected what
+// was deleted, what kind of thing it chose, a value that was never one, and
+// the getter that is gone.
 const DIALS = [
   {
+    accepted: "langgraph",
     code: AGENT_RUNTIME_REMOVED_CODE,
     getter: "getAgentRuntime",
+    kind: "a runtime",
     name: "AGENT_RUNTIME",
     phase: 6,
+    removedValues: ["native"],
     typo: "lang-graph",
   },
   {
+    accepted: "langgraph",
     code: AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE,
     getter: "getAgentOuterPlanRuntime",
+    kind: "a runtime",
     name: "AGENT_OUTER_PLAN_RUNTIME",
     phase: 7,
+    removedValues: ["native"],
     typo: "pregel",
+  },
+  {
+    accepted: "guarded",
+    code: AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE,
+    getter: "getAgentSkillGraphRollout",
+    kind: "a rollout mode",
+    name: "AGENT_SKILL_GRAPH_ROLLOUT",
+    phase: 8,
+    removedValues: ["off", "shadow"],
+    typo: "gaurded",
   },
 ];
 const DIAL_NAMES = DIALS.map(({ name }) => name);
+const capitalize = (value) => `${value[0].toUpperCase()}${value.slice(1)}`;
 
 // Each accepted value as a label and the environment it is read from.
-const acceptedFor = ({ name }) => [
+const acceptedFor = ({ accepted, name }) => [
   ["unset", {}],
   ["empty", { [name]: "" }],
   ["whitespace", { [name]: " \t " }],
-  ["langgraph", { [name]: "langgraph" }],
-  ["LangGraph with a trailing space", { [name]: "LangGraph " }],
+  [accepted, { [name]: accepted }],
+  [`${capitalize(accepted)} with a trailing space`, { [name]: `${capitalize(accepted)} ` }],
 ];
 
-const refusedFor = ({ name, phase, typo }) => {
-  const removed = new RegExp(`^${name}=native was removed \\(ADR 0001 phase ${phase}\\)`, "u");
+const removedPattern = ({ name, phase }, value) =>
+  new RegExp(`^${name}=${value} was removed \\(ADR 0001 phase ${phase}\\)`, "u");
+
+const refusedFor = (dial) => {
+  const { kind, name, removedValues, typo } = dial;
 
   return [
-    ["native", { [name]: "native" }, removed],
-    ["Native, padded", { [name]: " Native " }, removed],
-    [typo, { [name]: typo }, new RegExp(`^${name}="${typo}" is not a runtime`, "u")],
+    ...removedValues.flatMap((value) => [
+      [value, { [name]: value }, removedPattern(dial, value)],
+      [`${capitalize(value)}, padded`, { [name]: ` ${capitalize(value)} ` }, removedPattern(dial, value)],
+    ]),
+    [typo, { [name]: typo }, new RegExp(`^${name}="${typo}" is not ${kind}`, "u")],
   ];
 };
 
-// Runs `work` with exactly `env` for the two dials: a dial `env` does not
+// The first removed value of a dial, for the cases that need only one.
+const removedEnv = ({ name, removedValues }) => ({ [name]: removedValues[0] });
+const firstRemovedPattern = (dial) => removedPattern(dial, dial.removedValues[0]);
+
+// Runs `work` with exactly `env` for the three dials: a dial `env` does not
 // name is unset, whatever the ambient environment holds.
 const withDials = async (env, work) => {
   const saved = Object.fromEntries(
@@ -104,19 +136,20 @@ const withDials = async (env, work) => {
   }
 };
 
-const isRemovedRuntime = ({ code, name }, pattern) => (error) => {
+const isRemovedRuntime = ({ accepted, code, name }, pattern) => (error) => {
   assert.equal(error?.code, code);
   assert.match(error.message, pattern);
-  assert.match(error.message, new RegExp(`Unset ${name} or set it to langgraph\\.$`, "u"));
+  assert.match(error.message, new RegExp(`Unset ${name} or set it to ${accepted}\\.$`, "u"));
   return true;
 };
 
 const isNoRemovedRuntimeError = (error) =>
   DIALS.every(({ code }) => error?.code !== code);
 
-test("the dials are gone: config.js resolves no runtime, and each removed value has its own code", () => {
+test("the dials are gone: config.js resolves no runtime and no Skill rollout, and each removed value has its own code", () => {
   assert.equal(AGENT_RUNTIME_REMOVED_CODE, "AGENT_RUNTIME_REMOVED");
   assert.equal(AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE, "AGENT_OUTER_PLAN_RUNTIME_REMOVED");
+  assert.equal(AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE, "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED");
 
   for (const { getter } of DIALS) {
     assert.equal(Object.hasOwn(config, getter), false, getter);
@@ -128,28 +161,28 @@ for (const dial of DIALS) {
   const ACCEPTED = acceptedFor(dial);
   const REFUSED = refusedFor(dial);
 
-  test(`${name}: unset, empty, whitespace and langgraph (any case, trimmed) are accepted`, () => {
+  test(`${name}: unset, empty, whitespace and ${dial.accepted} (any case, trimmed) are accepted`, () => {
     for (const [label, env] of ACCEPTED) {
       assert.doesNotThrow(() => assertAgentRuntimeSupported(env), label);
     }
   });
 
-  test(`${name}: native and any other value refuse with ${code}`, () => {
+  test(`${name}: ${dial.removedValues.join(", ")} and any other value refuse with ${code}`, () => {
     for (const [label, env, pattern] of REFUSED) {
       assert.throws(() => assertAgentRuntimeSupported(env), isRemovedRuntime(dial, pattern), label);
     }
   });
 
   test(`${name}: the check reads process.env by default`, async () => {
-    await withDials({ [name]: "native" }, () => {
-      assert.throws(() => assertAgentRuntimeSupported(), isRemovedRuntime(dial, /native was removed/u));
+    await withDials(removedEnv(dial), () => {
+      assert.throws(() => assertAgentRuntimeSupported(), isRemovedRuntime(dial, firstRemovedPattern(dial)));
       // A missing environment argument is process.env.
       assert.throws(
         () => assertAgentRuntimeSupported(undefined),
-        isRemovedRuntime(dial, /native was removed/u)
+        isRemovedRuntime(dial, firstRemovedPattern(dial))
       );
     });
-    await withDials({ [name]: "langgraph" }, () => {
+    await withDials({ [name]: dial.accepted }, () => {
       assert.doesNotThrow(() => assertAgentRuntimeSupported());
     });
   });
@@ -191,28 +224,38 @@ for (const dial of DIALS) {
   });
 }
 
-test("both dials set to a removed value: the first one checked names the refusal, and one accepted value does not excuse the other", () => {
+test("several dials set to a removed value: one of them names the refusal, and accepted values do not excuse another", () => {
+  const allAccepted = Object.fromEntries(DIALS.map(({ accepted, name }) => [name, accepted]));
+  const allRemoved = Object.fromEntries(DIALS.map((dial) => Object.entries(removedEnv(dial))[0]));
+
   assert.throws(
-    () => assertAgentRuntimeSupported({ AGENT_OUTER_PLAN_RUNTIME: "native", AGENT_RUNTIME: "native" }),
+    () => assertAgentRuntimeSupported(allRemoved),
     (error) => DIALS.some(({ code }) => error?.code === code)
   );
-  assert.throws(
-    () => assertAgentRuntimeSupported({ AGENT_OUTER_PLAN_RUNTIME: "native", AGENT_RUNTIME: "langgraph" }),
-    isRemovedRuntime(DIALS[1], /native was removed/u)
-  );
-  assert.throws(
-    () => assertAgentRuntimeSupported({ AGENT_OUTER_PLAN_RUNTIME: "langgraph", AGENT_RUNTIME: "native" }),
-    isRemovedRuntime(DIALS[0], /native was removed/u)
-  );
+
+  // Every other dial holds its accepted value; the removed one still refuses.
+  for (const dial of DIALS) {
+    assert.throws(
+      () => assertAgentRuntimeSupported({ ...allAccepted, ...removedEnv(dial) }),
+      isRemovedRuntime(dial, firstRemovedPattern(dial)),
+      dial.name
+    );
+  }
+
+  assert.doesNotThrow(() => assertAgentRuntimeSupported(allAccepted));
   assert.doesNotThrow(() =>
-    assertAgentRuntimeSupported({ AGENT_OUTER_PLAN_RUNTIME: " LangGraph ", AGENT_RUNTIME: "" })
+    assertAgentRuntimeSupported({
+      AGENT_OUTER_PLAN_RUNTIME: " LangGraph ",
+      AGENT_RUNTIME: "",
+      AGENT_SKILL_GRAPH_ROLLOUT: " Guarded ",
+    })
   );
 });
 
 const runServer = async (env) => {
   const childEnv = { ...process.env, PORT: "0", STARTUP_HEALTH_STRICT: "false" };
 
-  // The LangSmith refusal runs first; keep it out of the way. Of the two
+  // The LangSmith refusal runs first; keep it out of the way. Of the three
   // dials only the one under test is set.
   for (const name of [...LANGSMITH_TRACING_VARIABLES, ...DIAL_NAMES]) {
     delete childEnv[name];
@@ -252,9 +295,9 @@ const runServer = async (env) => {
 
 // The monolith entry refuses before it builds the app: no listener, no
 // database connection, a non-zero exit and the message on stderr.
-test("node server.js refuses to start with a removed value of either dial", async () => {
+test("node server.js refuses to start with a removed value of any dial", async () => {
   for (const dial of DIALS) {
-    for (const [label, env, pattern] of refusedFor(dial).filter(([label]) => label !== "Native, padded")) {
+    for (const [label, env, pattern] of refusedFor(dial).filter(([label]) => !label.endsWith(", padded"))) {
       const result = await runServer(env);
       const caseLabel = `${dial.name} ${label}`;
 
@@ -270,7 +313,7 @@ test("node server.js refuses to start with a removed value of either dial", asyn
 // The services every in-process app is built from refuse first: nothing of
 // the options is even read (a Proxy that fails on any access stays
 // untouched).
-test("createAppServices refuses a removed value of either dial before it reads its options", async () => {
+test("createAppServices refuses a removed value of any dial before it reads its options", async () => {
   const untouchable = new Proxy(
     {},
     {
@@ -295,7 +338,7 @@ test("createAppServices refuses a removed value of either dial before it reads i
 // The executor every guarded graph is scheduled on refuses at its entry,
 // before admission: an invalid graph that admission would reject is never
 // looked at under a removed value, and is rejected by admission otherwise.
-test("the LangGraph executor refuses a removed value of either dial before admission", async () => {
+test("the LangGraph executor refuses a removed value of any dial before admission", async () => {
   const { runExecutionGraphOnLangGraph } = await import("../rag/langgraph/run-execution-graph.js");
 
   for (const dial of DIALS) {
@@ -326,7 +369,7 @@ test("the LangGraph executor refuses a removed value of either dial before admis
 // since phase 7, refuses before it validates the plan or builds a stage: the
 // options are never read under a removed value, and an accepted value reaches
 // the plan's own validation (which rejects the unknown step).
-test("the outer plan's entry refuses a removed value of either dial before it reads the plan", async () => {
+test("the outer plan's entry refuses a removed value of any dial before it reads the plan", async () => {
   const { runAgentExecutionPlan } = await import("../rag/agent-execution-plan-runner.js");
   const untouchable = new Proxy(
     {},
@@ -366,10 +409,10 @@ test("the outer plan's entry refuses a removed value of either dial before it re
 // eval:recovery-observability, eval:prompt-injection, ...): it calls
 // runAgentRag in process, never building an app. Since phase 7 every request
 // that reaches the outer plan is scheduled on LangGraph, so a document
-// question refuses with the removed-runtime error exactly as a guarded
-// custom-Skill DAG or a v3 unified graph does, instead of quietly running on
-// LangGraph: its report can never pass for native evidence.
-test("an evaluation runner's in-process run refuses a removed value of either dial", async () => {
+// question refuses with the removed-value error exactly as a custom-Skill
+// DAG or a v3 unified graph does, instead of quietly running on LangGraph:
+// its report can never pass for native or sequential-chain evidence.
+test("an evaluation runner's in-process run refuses a removed value of any dial", async () => {
   const { runTrajectoryEvaluation } = await import("../evaluation/trajectory-eval.js");
   const { createFollowUpCase, createSkillChainCase } = await import(
     "../evaluation/trajectory/cases/core-flow.js"
@@ -393,17 +436,15 @@ test("an evaluation runner's in-process run refuses a removed value of either di
     ["custom-Skill DAG", createSkillChainCase],
     ["v3 unified graph", createUnifiedGraphEvidenceGatedSkillCase],
   ]) {
-    for (const { name, phase } of DIALS) {
-      const label = `${caseLabel} under ${name}=native`;
-      const refused = await withDials({ [name]: "native" }, () => runCase(createCase));
+    for (const dial of DIALS) {
+      for (const value of dial.removedValues) {
+        const label = `${caseLabel} under ${dial.name}=${value}`;
+        const refused = await withDials({ [dial.name]: value }, () => runCase(createCase));
 
-      assert.equal(refused.passed, false, label);
-      assert.equal(caseErrors(refused).length, 1, label);
-      assert.match(
-        caseErrors(refused)[0],
-        new RegExp(`^${name}=native was removed \\(ADR 0001 phase ${phase}\\)`, "u"),
-        label
-      );
+        assert.equal(refused.passed, false, label);
+        assert.equal(caseErrors(refused).length, 1, label);
+        assert.match(caseErrors(refused)[0], removedPattern(dial, value), label);
+      }
     }
 
     const accepted = await withDials({}, () => runCase(createCase));

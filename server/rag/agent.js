@@ -41,7 +41,6 @@ import {
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
-  getAgentSkillGraphRollout,
   getAgentUnifiedGraphCapabilityIds,
   getAgentUnifiedGraphRollout,
 } from "./config.js";
@@ -637,7 +636,6 @@ const resumeAgentExecutionGraphRunInScope = async ({
     expectedGraphResumeClaimId: checkpoint.resumeClaim.claimId,
     loadExecutionGraphCheckpoint: () =>
       agentRunService.getExecutionGraphCheckpoint({ accessScope, runCursor, runId }),
-    mode: "guarded",
     plan,
     question,
     ragService,
@@ -973,15 +971,14 @@ const runAgentRagInScope = async ({
     trace,
     workingMemory,
   } = agentSession;
-  const skillGraphMode = getAgentSkillGraphRollout();
-  const authorizedCustomSkills = skillGraphMode !== "off"
-    ? listAuthorizedAtomicCustomSkills({
-        accessScope,
-        docIds,
-        ragService,
-        registry,
-      })
-    : [];
+  // The custom Skills the runtime authorizes for this request's graph: an
+  // empty list when the selected documents cannot be verified for the caller.
+  const authorizedCustomSkills = listAuthorizedAtomicCustomSkills({
+    accessScope,
+    docIds,
+    ragService,
+    registry,
+  });
   const runSnapshot = {
     input: {
       docIds,
@@ -1308,7 +1305,6 @@ const runAgentRagInScope = async ({
         : null,
       selectedSkills,
       sessionId,
-      skillGraphMode,
       stepLifecycle,
       taskMemory: taskMemoryContext,
       userId,

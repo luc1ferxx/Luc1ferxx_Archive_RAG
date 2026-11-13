@@ -570,6 +570,15 @@ test("parity: the deterministic document_web graph, declared out of layer order,
   assertMatchesNativeGolden("document-web-layer-order", await describeOutcome(context));
 });
 
+// The evidence-gated case's fixture was rewritten once, on purpose, in ADR
+// 0001 phase 8. The case also runs the V1 outer plan on the same request, to
+// show that V1 runs the Skill first and unconditionally; until phase 8 it did
+// so with the custom-Skill stage on the sequential chain and on the DAG (four
+// runs, pinned with identical numbers in both halves). The chain was deleted,
+// so `observed.v1Runs` holds the two DAG runs, without the `skillGraphRollout`
+// field that told the halves apart, and the check's label and detail follow.
+// Nothing about the v3 graph changed: every other field equals the golden the
+// native scheduler froze.
 test("parity: the two unified_graph trajectory cases report the native checks and projection", async () => {
   for (const [label, createCase] of [
     ["unified_graph_evidence_gated_skill_hand_off", createUnifiedGraphEvidenceGatedSkillCase],

@@ -108,9 +108,7 @@ test("missing adapter and observation write failure cannot execute or throw", as
 
 test("real AgentRAG request records the v3 shadow proposal while V1 still answers", async () => {
   const originalRollout = process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
-  const originalSkillRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
   process.env.AGENT_UNIFIED_GRAPH_ROLLOUT = "shadow";
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "off";
   let plannerCalls = 0;
   let ragCalls = 0;
   const agentRunService = createAgentRunService({
@@ -179,11 +177,6 @@ test("real AgentRAG request records the v3 shadow proposal while V1 still answer
       delete process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
     } else {
       process.env.AGENT_UNIFIED_GRAPH_ROLLOUT = originalRollout;
-    }
-    if (originalSkillRollout === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = originalSkillRollout;
     }
   }
 });
@@ -324,7 +317,6 @@ test("shadow runs guarded's admission: an inadmissible graph is rejected with it
 test("a real shadow request plans with the operator's Capability allowlist, as guarded does", async () => {
   const env = {
     AGENT_PLANNER_ROLLOUT: "deterministic",
-    AGENT_SKILL_GRAPH_ROLLOUT: "off",
     AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",
     AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
     RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
@@ -372,7 +364,6 @@ test("a real shadow request plans with the operator's Capability allowlist, as g
 test("a real shadow request admits a Web node with the request's standing grant, as guarded does", async () => {
   const env = {
     AGENT_PLANNER_ROLLOUT: "deterministic",
-    AGENT_SKILL_GRAPH_ROLLOUT: "off",
     AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
     RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
     RAG_LONG_MEMORY_ENABLED: "false",

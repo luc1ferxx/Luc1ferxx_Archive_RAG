@@ -16,14 +16,12 @@ import {
 } from "./planner-privacy.js";
 import {
   createApprovalResumeCase,
-  createCustomSkillRetryCase,
   createWebApprovalDenyCase,
 } from "./run-control.js";
 import {
   createSkillGraphBoundedReplanCase,
   createSkillGraphGuardedExecutionCase,
   createSkillGraphIllegalPlanCase,
-  createSkillGraphShadowComparisonCase,
 } from "./skill-graph.js";
 import { createUnifiedGraphEvidenceGatedSkillCase } from "./unified-graph.js";
 import { createUnifiedGraphApprovalGatedActionCase } from "./unified-graph-approval.js";
@@ -35,7 +33,6 @@ export const createDefaultTrajectoryCases = () => [
   createAccessScopeCase(),
   createBudgetCase(),
   createApprovalResumeCase(),
-  createCustomSkillRetryCase(),
   createMemoryNotEvidenceCase(),
   createWebApprovalDenyCase(),
   createMultiDocConflictCase(),
@@ -43,7 +40,6 @@ export const createDefaultTrajectoryCases = () => [
   createPrivacySanitizationCase(),
   createGoalLifecycleCase(),
   createSkillGraphGuardedExecutionCase(),
-  createSkillGraphShadowComparisonCase(),
   createSkillGraphIllegalPlanCase(),
   createSkillGraphBoundedReplanCase(),
   createUnifiedGraphEvidenceGatedSkillCase(),

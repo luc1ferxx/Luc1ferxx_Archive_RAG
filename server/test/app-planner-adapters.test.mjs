@@ -329,7 +329,6 @@ test("the background agent task path runs on the same governed planner and repla
 test("background agent task forwards the injected all-stage shadow planner without executing its graph", async () => {
   await withEnv({
     AGENT_PLANNER_ROLLOUT: "deterministic",
-    AGENT_SKILL_GRAPH_ROLLOUT: "off",
     AGENT_UNIFIED_GRAPH_ROLLOUT: "shadow",
   }, async () => {
     const plannerContexts = [];

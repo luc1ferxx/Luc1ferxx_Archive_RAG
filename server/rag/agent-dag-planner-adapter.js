@@ -44,7 +44,9 @@ import { normalizeText } from "../lib/normalize-text.js";
 // createAgentExecutionGraphResult treats the response as an untrusted proposal:
 // it is normalized, validated against the same pure validator the runtime uses,
 // and either accepted whole or discarded whole in favour of the deterministic
-// graph. There is no third option where a partially-legal graph runs.
+// graph. There is no third option where a partially-legal graph runs, and
+// nothing runs when the deterministic graph is refused too: the sequential
+// chain that used to take such a request was deleted (ADR 0001 phase 8).
 
 const MAX_GOAL_LENGTH = 1000;
 const MAX_ID_LENGTH = 80;
@@ -255,9 +257,10 @@ const buildNodeId = (skillId, index, usedNodeIds) => {
 };
 
 /**
- * The V1-equivalent graph: one node per selected skill, in selection order,
+ * The deterministic graph: one node per selected skill, in selection order,
  * each one handing its findings to the next through a typed priorFindings
- * binding instead of a concatenated question string.
+ * binding. It is what the deleted V1 sequential chain did, as a graph (the
+ * chain passed earlier answers on inside a rewritten question string).
  *
  * This stays a chain rather than a fan-out on purpose. It is the fallback that
  * runs when the V2 planner is unavailable or produced something illegal, and a
@@ -289,7 +292,7 @@ export const createDeterministicExecutionGraph = ({ selectedSkills = [] } = {}) 
 
     nodes.push({
       dependsOn: acceptsPriorFindings ? [previousNodeId] : [],
-      // `continue` mirrors the V1 chain, where one failing skill did not cancel
+      // `continue` is what the V1 chain did: one failing skill did not cancel
       // the skills selected after it.
       failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
       inputBindings,
@@ -612,7 +615,16 @@ export const createAgentExecutionGraphResult = async ({
     const validation = validateExecutionGraph({
       authorizedDocIds,
       authorizedSkillIds,
-      budgetRemaining,
+      // A model's graph is checked against the call budget whole: it chose
+      // what to plan, and running whichever part of it the budget happens to
+      // reach is not what it proposed. The deterministic graph is not checked
+      // here. It is the selected Skills in their order, and its budget is
+      // enforced where the sequential chain enforced it, per Skill: the
+      // executor reserves the budget when it launches a node and skips a node
+      // it cannot pay for (agent-execution-graph-node.js). Rejected here, a
+      // request whose budget covers one of its two selected Skills would have
+      // no legal graph and run neither.
+      budgetRemaining: adapter === fallbackPlannerAdapter ? null : budgetRemaining,
       graph,
       limits,
       registry,
@@ -691,11 +703,11 @@ export const createAgentExecutionGraphResult = async ({
         selectedId: fallbackPlannerId,
       });
     } catch (error) {
-      // An outer planner can request custom analysis even though the
-      // intent-selected V1 fallback has no custom Skills. Reject the empty
-      // graph as a whole; the stage may safely return its empty V1 result
-      // because no node has run. Never execute the entire authorized catalog
-      // as a substitute fallback.
+      // An outer planner can request custom analysis even though the intent
+      // selected no custom Skill, so the deterministic graph is empty. Reject
+      // the empty graph as a whole; the stage then returns no results, because
+      // no node has run. Never execute the entire authorized catalog as a
+      // substitute fallback.
       return {
         errors: error.validationErrors ?? [],
         graph: null,
@@ -742,9 +754,9 @@ export const createAgentExecutionGraphResult = async ({
     });
   } catch (fallbackError) {
     // Both planners produced something the runtime refuses to execute. Say so
-    // and let the caller abstain; there is no safe graph to fall further back
-    // onto, and inventing one here would be exactly the kind of unreviewed
-    // plan the validator exists to stop.
+    // and let the caller report the selected Skills as not run; there is no
+    // safe graph to fall further back onto, and inventing one here would be
+    // exactly the kind of unreviewed plan the validator exists to stop.
     return {
       errors: fallbackError.validationErrors ?? [],
       graph: null,
