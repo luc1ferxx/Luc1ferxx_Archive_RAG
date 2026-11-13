@@ -892,7 +892,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 证据
 
-（以下是独立复核之前、在 be353b62 上的结果，本机 Node 24.21.0。）
+（以下是独立复核之前、在 be353b62 上的结果，本机 Node 24.21.0。复核修正之后重跑的结果在“独立复核”小节末尾。）
 
 - 提交：冻结 7a2e3d99，删除 be353b62。
 - 三个确定性 agent 评测，改动前（a26eecd7）和改动后各在一个干净的 worktree 里跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：
@@ -912,6 +912,42 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 真实浏览器里的恢复面板。前端只跑了组件测试，没有起应用看。
   - 真实 PostgreSQL 上的旧链 run。`postgres-agent-run-store` 用的是假的 pg 客户端；本机和 CI 的数据库里也没有这种存量 run。
   - `server/.env` 按规则没有读。
+
+### 独立复核（2026-11-13）
+
+冻结、删除、文档三个提交（a26eecd7..264b1e5b）交给一个只读的独立复核。它不运行测试套件和评测脚本，只读代码，加上内存 run store 上的小探针：把改动前的 `server/rag` 解到仓库之外，和现在的逐项比较。结论是没有高级缺陷，被改动的生产代码里没有会出错、丢数据或让 custom Skill 在图外运行的路径；两条中级意见，都不是这次改出来的；其余是低级意见。处理如下，改动在复核修正提交 015f06a1。
+
+- **矩阵说 `web_search`、`arxiv_import` 可以手动重试，处理器却一律拒绝**（中级，改了）。这两类是需要审批的主步骤，处理器的 `prepareRetry` 和 `execute` 一直是同一个拒绝函数。于是最后一个失败步骤是 `web_search:primary` 的 failed run，恢复面板给出“Retry failed step”，点了一定是 409；它又是终态、不能取消，会一直留在恢复列表里。这正是这一阶段为 `custom_skill` 去掉的那类按钮，而且让“矩阵是能不能重试的唯一依据”这句话不成立。矩阵里这两类的重试去掉了；`agent-run-step-replay-safety` 的测试现在把矩阵和处理器放在一起核对，冻结文件加了这两种情形。
+- **`docs/agent-rag.md` 还有三处和这次改动相反**（中级，改了）：“当前限制”里还说按钮和处理器都留着；调用链表还说矩阵判断能否自动恢复、step executor 恢复安全 step；启动恢复那一段的“另有更窄的 graph-only 路径”暗示还有一条单步路径。当时未提交的一处改法又漏了 v3 图，一并改对。
+- **聊天答案里的 Retry 按钮没有动**（低级，改了）。“Failed steps” 给每个失败步骤一个 Retry，不看类型，对失败的 Skill 节点同样必 409。现在只对矩阵允许的四类显示。
+- **类型名是 `constructor` 的步骤会让恢复列表抛错**（低级，这次引入的，改了）。矩阵是普通对象，按键取值会取到原型上的属性；新加的 `isStepRetryAllowed` 在上面读 `.replayActions` 就抛 TypeError，`GET /agent-runs/recovery` 和 admin status 会对整个 scope 报 500。步骤类型都是服务端常量，没有找到客户端能写入类型的入口，只在数据损坏时遇得到。现在只认矩阵自己的键。
+- **“守卫拒绝任何状态改写、不看有没有 checkpoint”比代码强**（低级，改了说法）。无条件生效的是 step executor 的预检、`retryStep` 和 `updateRunStep`；步骤生命周期（`recordRunStep`）只在 run 上有 checkpoint 时才问守卫，没有 checkpoint 的图运行靠它写节点步骤。复核实测过不传 checkpoint 回调的图运行，两个节点正常记为 completed / failed。另外守卫比较类型区分大小写而矩阵和处理器不区分，现在统一。
+- **测试**（低级，改了）：`postgres-agent-run-store` 有两处还在给启动恢复服务传已被忽略的 `agentRunStepExecutor`，其中一条 `ragCalls.length === 0` 因此不可能失败，改成断言步骤和事件；`App.test.jsx` 里“没有 Resume step 按钮”的断言不可能失败，换成 `workbenchFormatters` 的测试；发布证据 fixture 里恢复报告的版本还是 1.1.0，改成 1.2.0。失去的覆盖（`resumeStep` 的两个测试、旧处理器的四个测试、重放前按 live registry 查副作用）上面都写了，复核没有发现没写明的重要缺口。
+- **没有调用方的代码**（低级，删了）：`createCustomSkillRegistry`、`isSideEffectingSkill`、`runRetriableStep` 里只有被删处理器用过的分支；`skill-contract.js` 里还说这份声明决定“能不能无人值守地重跑”的注释。
+- **文档小处**（低级，改了）：`docs/agent-rag.md` 文件表里一个不存在的文件名；`docs/unified-agent-dag-migration.md` 里的 manifest 版本；本节原来说 `chainMode`“服务端早已不写”，其实是阶段 8 才停写；`authorized-catalog.js` 的注释说“没有别的东西运行 custom Skill”，而 `rag/langgraph/tools.js` 这个没有接线的适配器可以。
+- **行为表没列的变化**（低级，补进了“行为的变化”）：不可重试的失败步骤不再进恢复列表和 admin 的计数、`recovery.reason` / `stepId` 的取值、混合中断的 run、不再产生的一个原因码。复核逐条判断过，都不是变差。
+
+复核用探针核对过的：
+
+- `explainInterruptedRun` 对比旧的 `findAutoRecoverableStep`：6 万个不含 `custom_skill` 的随机 run（多个不同类型的中断步骤、未知类型、待审批项、没有中断步骤），原因和原因码 0 处不同。非 custom 步骤的原因码内容和顺序 0 处不同。
+- 8 万个含 `custom_skill` 的随机 run：没有任何恢复动作指向 `custom_skill` 步骤，动作只有 `retry_failed_step` 和 `cancel`。
+- “行为的变化”表的第 1、2、4、5 行，在改动前和改动后的代码上各跑一遍内存探针，两列都复现了。
+- 守卫的 4 个调用点：当前生产路径里没有哪一条会带着 `custom_skill` 步骤经过它而被新规则挡住。守卫里删掉的那段分支和保留的标记等价，除了对 `custom_skill` 的放宽被收紧。
+- 评测和发布门：检查项 5 + 3 + 4 + 2 + 2 + 1 + 3 + 7 = 27；发布门只少了 `recoveryStepResumeCount` 一项；手写造数的数字互相一致；自动恢复尝试数为 0 时报告会失败；golden 的 17 条图事件逐字节相同；本节的代码量数字和 `git diff --numstat` 一致。
+- 残留引用：`server/`（非测试）、`server/evaluation`、`server/scripts`、`.github`、`src`（非测试）里没有对已删除导出或字段的引用。
+
+复核没能验证的：本节所有靠执行得出的数字（它不跑测试和评测）；评测的生产造数函数没有执行，那组计数是它从代码和 golden 里读出来的；真实 PostgreSQL 和真实浏览器；存量数据里是否真有旧链形状的 run；`server/.env`。
+
+修正之后重跑（复核修正提交 015f06a1，本机 Node 24.21.0）：
+
+- `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（015f06a1 的干净 worktree）：4,607 个测试，4,600 通过、7 跳过、0 失败；全局行覆盖 92.53%，覆盖率门和目标都通过。比复核之前多 3 个测试：冻结文件 10 → 12，`agent-run-step-replay-safety` 8 → 9。
+- `quality:current` 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
+- 三个确定性 agent 评测与 a26eecd7 的比较：和复核之前相同（planner-mock 逐字节一致；trajectory 17 个场景全部逐字节一致；recovery-observability 51 处差异，范围不变）。
+- 不接数据库的全量：4,435 个测试，4,407 通过、28 跳过、0 失败。
+- 前端（`vitest run`）：28 个文件、243 个测试全部通过（多一个文件 `workbenchFormatters.test.js`，4 个测试；`RenderQA` 多 1 个）；`vite build` 通过。
+- 单文件套件：`agent-skill-step-replay` 12/12、`agent-run-step-replay-safety` 9/9、`agent-run-step-executor` 22/22、`agent-run-recovery` 17/17、`agent-run-recovery-actions` 7/7、`postgres-agent-run-store` 29/29。另外用 Node 20.20.2 跑了受影响的 17 个服务端测试文件：340 个测试全部通过（CI 用的是 Node 22，本机没有）。
+- 代码量（015f06a1 相对 a26eecd7）：`server/rag` +205 −672 行；`server/evaluation` +82 −137 行；测试（不含 fixture）+1,320 −860 行，其中冻结文件 684 行；fixture +58 −395 行；前端 +189 −54 行。
+- 仍然没有验证的：CI 的 Node 22（合并进 main 之后才有）；真实浏览器里的恢复面板和聊天答案里的 Retry 按钮（只跑了组件测试）；真实 PostgreSQL 上的旧链 run。
 
 ## 后果
 

@@ -21,7 +21,7 @@
 | 有界重规划 | 最多 1 次，只能打补丁，同样经过校验器 | `rag/agent-replanner.js` |
 | 自检与补检索 | 逐条 claim 核对引用支持；有缺口时补检索一轮，最多 3 条查询；finalizer 删除无证据内容 | `rag/agent-document-loop.js`、`rag/self-check/`、`rag/agent-finalizer.js` |
 | 结构化输出 | 规划器调用发送按请求从白名单生成的 strict JSON Schema；自由文本和数组都有上限；校验器仍是最终裁决 | `rag/structured-output.js` |
-| 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 是权威，只能在节点边界续跑，启动时自动续跑只覆盖外层只剩 `custom_skills` 的 guarded 图、v3 guarded run 和没有图 checkpoint 的 `custom_skill` 步骤（最后一种只在 2026-11-13 之前由 V1 顺序链存下的 run 里有；顺序链删除后，新的 run 里每个 custom Skill 步骤都是图节点，见 3.49），在途节点转人工；LangGraph 线程只作次要记录写在同一个 run 行里，v3 恢复时和 checkpoint 对不上就转人工；认领、节点开始、完成和线程写都用运行版本号 CAS，挡住旧 worker 的状态写（挡不住它已经发出的副作用）；有副作用的步骤不会被自动重放，审批门绑定审批对象哈希（图内还绑定图摘要），图内批准后的写入带 run + 节点的幂等键；取消走 drain，不把请求 signal 交给 LangGraph | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js`、`rag/langgraph/checkpointer.js`、`rag/langgraph/drain-bridge.js` |
+| 持久化与恢复 | 运行、步骤、事件存在 PostgreSQL；guarded 图的 checkpoint 是权威，只能在节点边界续跑，启动时自动续跑只覆盖两种情形，都是续跑整张图：外层只剩 `custom_skills` 的 guarded 图，和 v3 guarded run；在途节点转人工，没有图可续的 run 也都转人工，步骤不单独重放（以前还有第三种：没有图 checkpoint 的 `custom_skill` 步骤整步重放，只有 V1 顺序链存下的 run 走得到，2026-11-13 阶段 9 删除，见 3.50）；人在恢复面板上只能重试失败步骤或取消，哪类步骤能重试由重放安全矩阵按步骤类型登记，`custom_skill` 不能；LangGraph 线程只作次要记录写在同一个 run 行里，v3 恢复时和 checkpoint 对不上就转人工；认领、节点开始、完成和线程写都用运行版本号 CAS，挡住旧 worker 的状态写（挡不住它已经发出的副作用）；有副作用的步骤不会被自动重放，审批门绑定审批对象哈希（图内还绑定图摘要），图内批准后的写入带 run + 节点的幂等键；取消走 drain，不把请求 signal 交给 LangGraph | `rag/agent-execution-graph-checkpoint.js`、`rag/agent-run-recovery.js`、`rag/agent-run-step-replay-safety.js`、`rag/agent-runs.js`、`rag/langgraph/checkpointer.js`、`rag/langgraph/drain-bridge.js` |
 | 预算 | 每次运行两层：次数（文档 RAG 2 次、自定义 Skill 2 次、Web 搜索 1 次、trace 16 步），以及用量（默认 10 万 token、0.5 美元、5 分钟）。用量按每次成功的模型调用计量，用完后下一个工具被跳过、运行降级而不报错；已开始的步骤会跑完，所以是软截止 | `rag/agent-budget.js`、`rag/run-usage.js` |
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
@@ -129,6 +129,8 @@
 `AGENT_SKILL_GRAPH_ROLLOUT` 默认值从 `off` 改为 `guarded`。项目原有的 `rollout:readiness` 门禁要求真实 LLM 规划零降级、零 mock/real 分歧，它把两个决定绑在了一起：用哪个执行器（V1 链还是 DAG 运行时），以及由谁规划 DAG（LLM 还是确定性规划器）。LLM 规划失败时退回的是确定性 DAG，不是 V1 链，所以执行器转正只需要执行语义的证据：
 
 （这一节是 2026-09-25 的记录，没有改写。2026-11-13 阶段 8 删除了 V1 顺序链和 `off`、`shadow` 两个取值，这个开关不再选择任何东西，见 3.49；下面"执行器 `off`"那一行现在跑不出来。表里轨迹评测的 17 个用例、71 项检查是当时的套件，和现在的 17 个、76 项不是同一套：中间加到过 19 个、84 项，阶段 8 删掉了两个。）
+
+（表里恢复评测的 29 项检查也是当时的数字。2026-11-13 阶段 9 去掉了两项，现在是 8 个用例、27 项检查，见 3.50。）
 
 | 证据 | 结果 |
 | --- | --- |
@@ -337,6 +339,78 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 模型 0 ms 时的"在途峰值"是假服务同步回复造成的，没有意义，现在不显示。
 - 事件循环延迟没有减去 10 ms 的采样间隔，现在减掉了。
 
+### 3.50 LangGraph 迁移阶段 9：custom Skill 步骤不再单独重放（2026-11-13）
+
+- **决定**：
+  - 阶段 8（3.49）把“只有旧 run 才走得到的重试和恢复代码”留了下来，并问了用户要不要删。用户的回答是“接着清理”（ADR 0001“阶段 9 结果”），这一阶段把它们删了。
+  - 先冻结、再删除，在 main 的 a26eecd7 之上：冻结提交 7a2e3d99 把当时的行为写进测试，删除提交 be353b62 删掉代码，文档提交 264b1e5b，独立复核之后的修正提交 015f06a1。
+- **规则**（四条）：
+  - custom Skill 只作为图节点运行。`custom_skill` 步骤不能单独重试，启动时也不单独重放。
+  - 启动恢复在 `auto` 模式下自己只做一件事：续跑中断的图（要先领到 claim）。其余中断的 run 交给人；照旧跳过、不改状态的有三种：已经标过人工恢复的 run、已被别的 worker 领取的图、停在审批门上的 v3 图。
+  - 人在恢复面板上只有两个动作：重试失败步骤（`retry_failed_step`）和取消（`cancel`）。`resume_from_step` 不再是一个动作。
+  - 重试按钮只在重放安全矩阵允许这类步骤重试时才给出，恢复面板和聊天答案里的 “Failed steps” 都一样。矩阵必须和步骤处理器一致：处理器一律拒绝的类型，矩阵不能列重试。矩阵现在允许重试的是四类：`document_rag`、`follow_up_retrieval`、`research_question`、审批绑定的 `capability_call`。
+- **对自动续跑的影响**：启动时自动续跑的情形从三种变成两种：外层计划恰好只有 `custom_skills` 一个阶段的 guarded custom-Skill 图，和走 guarded 路径的 v3 统一图。第三种（没有图 checkpoint 的 `custom_skill` 步骤整步重放）没有了。
+- **为什么这些代码只有旧 run 走得到**（从代码读出来的，没有线上数据）：
+  - 独立处理器只接不带 `nodeId` 的 `custom_skill` 步骤，带 `nodeId` 的先被回放守卫拒绝（409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。图节点写步骤时一定带 `nodeId`，不带的只有已删除的顺序链写得出来。
+  - 矩阵里“可自动重放”的步骤类型只有 `custom_skill` 一个。启动恢复的单步重放和恢复面板的 `resume_from_step` 都只在矩阵允许时才调用 `resumeStep`，所以入口也只有旧链的步骤。
+  - `resumeStep` 自己不看类型，但除了这两处没有别的调用方，路由上也没有。
+- **行为的变化**（九种情形，最后两种是独立复核找到、复核修正提交改的；“旧链形状的步骤”指不带 `nodeId`、run 上没有图 checkpoint 的 `custom_skill` 步骤）：
+  - 启动恢复（auto），旧链形状的步骤中断。之前：单独重跑这个 Skill，run 以它一个的答案完成。现在：交给人，run 是 `waiting_for_user`，原因 `graph_node_step`，步骤原样不动，只能取消。
+  - 启动恢复（auto），图节点的步骤中断、run 上没有 checkpoint。之前：每次启动都尝试单独重放，被守卫拒绝，记一条 `auto_recovery_failed`；run 一直是 `running`，不进恢复列表。现在：第一次启动交给人，之后的启动不再动它。
+  - 恢复面板，等待人工的 run 里有旧链形状的 paused 步骤。之前：给出“Resume step”，点了就单独跑这个 Skill。现在：只有“Cancel”；`resume_from_step` 返回 400。
+  - 恢复面板，失败的旧链形状的步骤。之前：给出“Retry failed step”，点了就单独跑这个 Skill。现在：不给，run 不进恢复列表；重试路由返回 409。
+  - 恢复面板，失败的图节点步骤。之前：给出“Retry failed step”，点了一定是 409。现在：不给。
+  - 失败的 `document_rag` 步骤：之前可以手动重试，现在不变。
+  - 中断的 `web_search` 步骤：之前交给人，原因 `requires_approval`，现在不变。
+  - 恢复面板，失败的 `web_search` / `arxiv_import` 主步骤。之前：给出“Retry failed step”，点了一定是 409；run 已是终态、不能取消，所以一直留在恢复列表里。现在：不给，run 不进恢复列表；重试路由仍是 409。原因是矩阵原来列着这两类的重试，而它们的处理器一直拒绝直接重试（要重试的是审批后排进来的 `capability_call` 步骤）。
+  - 聊天答案里的 “Failed steps”。之前：每个失败步骤都有 Retry 按钮，图节点和上面两类主步骤点了一定是 409。现在：失败步骤照旧列出，只有矩阵允许的四类有 Retry 按钮。
+  - 第二种和第五种是顺带修掉的：前者是没人接手的死循环（每次启动失败一次，run 永远停在 `running`），后者是阶段 8 复核记下的“点了必 409 的按钮”（3.49）。最后两种是同一类按钮，这一阶段的独立复核找到的。
+  - 随之发生、没有单列的变化：最后一个失败步骤不能重试的 completed / failed run 不再进恢复列表（admin status 的 `recoveryCount` 和 `agent_runs_need_recovery` 警告也不再算它们）；一个 `document_rag` 还在 running、旁边有 pending 旧链步骤的 run，以前启动会越过前者去重放后者，现在第一次启动就交给人。
+  - “之前”由冻结提交写成字面期望（`server/test/agent-skill-step-replay.test.mjs`，冻结时 10 个测试，用真实的 run store、step executor、启动恢复和恢复动作服务）；删除提交对这个文件的改动就是“现在”。复核修正又加了两个测试（失败的 `web_search`、`arxiv_import`），现在 12 个。
+- **删了什么**：
+  - `custom_skill` 步骤的独立处理器（`rag/agent-run-step-handlers/custom-research-steps.js`，文件改名为 `research-steps.js`，只剩研究子问题的重试）。
+  - `agentRunStepExecutor.resumeStep`：step executor 现在只有 `applyApprovalAction` 和 `retryStep`。
+  - 启动恢复里的单步重放（`runAutoRecovery`、`findAutoRecoverableStep`）和恢复动作 `resume_from_step`。
+  - 矩阵里的“可自动重放”一列（`autoReplaySafe`、`isAutoReplaySafeStepType`）、评估结果里的 `canAutoReplay`、没有策略再用的两个幂等类别（`read_only_rag`、`read_only_deterministic`）；前端的“Resume step”按钮。
+- **改了什么**：
+  - 矩阵（`rag/agent-run-step-replay-safety.js`）：`custom_skill` 的 `replayActions` 为空、`retryable: false`，幂等类别 `graph_owned`，原因码 `graph_node_step`。新增 `isStepRetryAllowed(stepType)`，恢复面板给不给“重试失败步骤”读它。
+  - 回放守卫（`rag/agent-run-graph-replay-guard.js`）：凡是 `custom_skill` 步骤一律拒绝，不再看有没有 `nodeId`。它在三处无条件生效：step executor 重试前的预检，run store 的 `retryStep` 和 `updateRunStep`。图自己写节点步骤走步骤生命周期（`recordRunStep`），那里只在 run 上有 checkpoint、而这个步骤不是 checkpoint 里的节点时才问守卫，没有 checkpoint 的图运行就靠这条路写步骤。所以不要说“任何状态改写都被拒绝”，能说的是“没有哪条路径能把它当成独立步骤重跑或改写”。
+  - 矩阵（复核修正）：`web_search`、`arxiv_import` 的 `replayActions` 也改成空、`retryable: false`；按步骤类型取策略只认矩阵自己的键（类型名是 `constructor` 这类原型属性名的步骤，原来会让恢复列表对整个 scope 抛错，只有数据损坏时遇得到）。
+  - 前端聊天答案里的 Retry 按钮（`src/components/RenderQA.jsx`）：只对矩阵允许的四类步骤显示；前端自己那份类型清单由 `src/components/workbenchFormatters.test.js` 直接对着服务端矩阵核对。
+  - 启动恢复（`rag/agent-run-recovery.js`）：没有图可续的 run 直接交给人，原因由 `explainInterruptedRun` 给出（有待审批项是 `pending_approval_gate`，否则是第一个中断步骤的第一个原因码，没有中断步骤是 `no_safe_recoverable_step`）。步骤上持久化的 Skill 契约继续进原因码，只是不再决定“能不能自动重放”。
+- **故意留下的**：
+  - `document_rag`、`follow_up_retrieval`、`research_question` 和审批绑定的 `capability_call` 四类步骤的手动重试，以及审批放行后执行 capability 步骤：它们不是 custom Skill，当前的 run 用得到。`web_search`、`arxiv_import` 的处理器也留着，作用只是用自己的报文拒绝直接重试。
+  - `rag/langgraph/tools.js`：把 Skill 包成 LangChain tool 的适配器，能在图节点之外调用 Skill，但生产路径里没有任何地方用它，只有它自己的测试在用。所以准确的说法是“接了线的路径里，custom Skill 只在图里运行”。
+  - 启动恢复 trace 和发布门里 `autoReplay*` 这组名字：名字没改（存量 trace、报告和前端都读它），含义变成“自动续跑中断的图”。
+  - connector 清单自己的 `replaySafety.autoReplaySafe`（另一套 schema，和步骤矩阵无关）；报告里图回落的两个计数和 `graph_fallback_after_execution_zero`（“必须为 0”的守卫）。
+  - 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支：没执行图的那一支服务于所有不含 custom Skill 的请求和整图被拒的请求，不是旧链专属。
+- **评测套件和发布门的改动**（去掉的是随功能一起消失的检查，不是为了“通过”放宽门槛）：
+  - `eval:recovery-observability`：8 个用例不变，检查项 29 → 27，去掉 `resume_after_partial_step_recorded` 和 `resume_step_recorded`；报告版本 1.1.0 → 1.2.0，不再有 `stepResumeCount`。之前各节（3.5、3.32）里的 29 项检查是当时的数字，没有改写。
+  - 启动恢复的造数：原来是两个旧链形状的步骤被自动重放、一个 web search 转人工；现在是一个旧链形状的步骤和一个 web search，构建函数先断言两个都转了人工、步骤和事件没有被动过，再产出事件。
+  - “自动恢复尝试过、成功率 100%、失败 0”三项检查原来由旧链形状的步骤喂数，现在只由图启动续跑探针（`skill_graph_startup_resume` 用的同一次运行）喂数。实际数值：可恢复的 run 4 → 3，转人工 1 → 2，手动动作 3 → 2，自动恢复尝试 3 → 1（成功率仍是 1）。
+  - 发布门（`evaluation/quality-recovery-gate.js`）去掉 `recoveryStepResumeCount ≥ 1`，其余阈值没动；套件 manifest 1.16.0 → 1.17.0。trajectory 的用例和检查项没有变化（17 个、76 项）。
+- **失去的，和升级时已存的 run**：
+  - 失去：旧链留下的 run 的单步恢复和单步重试（上面前四种情形）。中断的只能取消，失败的不能单步重试，要得到答案只能重新提问。这些 run 只有在设过 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`、或者整图被拒回落到链的时候才会产生。
+  - 失去：`resumeStep` 这项通用能力（恢复一个 pending 的、有处理器的步骤）；存量 trace 里的 `resume_step` / `resume_from_step` 事件不再有单独的计数。
+  - 图运行的 run：整图恢复不变，区别只在恢复面板：失败的 Skill 节点没有重试按钮，没有 checkpoint 的中断节点现在会进恢复列表。没有数据迁移，run 和 checkpoint 的格式没有变。
+- **独立复核**（只读，不跑测试和评测，用内存探针对比改动前后的代码）：没有高级缺陷；两条中级意见，都不是这次改出来的（矩阵对 `web_search`、`arxiv_import` 的说法和处理器不符；`docs/agent-rag.md` 三处旧说法），几条低级意见。都处理了，逐条记录在 ADR 阶段 9 的“独立复核”。它用探针核对过：6 万个不含 `custom_skill` 的随机 run 上，转人工的原因和改动前 0 处不同；8 万个含 `custom_skill` 的随机 run 上，没有任何恢复动作指向 `custom_skill` 步骤。
+- **证据**（复核修正之后、在 015f06a1 上的结果，本机 Node 24.21.0）：
+  - 三个确定性 agent 评测，改动前（a26eecd7）和改动后各在一个干净的 worktree 里跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：planner-mock（7/7）逐字节一致；trajectory（17/17，76 项检查）17 个用例全部逐字节一致；recovery-observability（8/8）有 51 处差异，都在上面“评测套件和发布门的改动”列出的范围内。
+  - 覆盖率闸门接一次性 PostgreSQL 18 + pgvector（与 CI 的 `server-tests` 同一条命令，干净 worktree）：4,607 个测试，4,600 通过、7 跳过、0 失败；全局行覆盖 92.53%。阶段 8 是 4,598 个：冻结文件加 12 个，其余净减 3 个。不接数据库的全量：4,435 个测试，4,407 通过、28 跳过、0 失败。
+  - `quality:current` 按 CI 的 `quality-gate` 步骤运行（干净 worktree、一次性 PostgreSQL + pgvector）：通过，八项检查全部 `pass`。前端（`vitest run`）：28 个文件、243 个测试全部通过，`vite build` 通过。受影响的 17 个服务端测试文件另外用 Node 20.20.2 跑过，340 个测试全部通过。
+  - 单文件套件：`agent-skill-step-replay` 12/12、`agent-run-recovery` 17/17、`agent-run-recovery-actions` 7/7、`agent-run-step-executor` 22/22（原 26 个）、`agent-run-step-replay-safety` 9/9、`recovery-observability-eval` 9/9。
+  - golden 改写 1 个（`langgraph-runtime-parity/recovery_observability_skill_graph_signal.json`）：事件从 37 条变成 33 条，其中 17 条图事件逐字节未变；其余 golden 未动。
+- **没有验证的**：
+  - CI 的 Node 22（本机只有 Node 20 和 24）。合并进 main 之后才有。
+  - 真实浏览器里的恢复面板和聊天答案里的 Retry 按钮：前端只跑了组件测试，没有起应用看。
+  - 真实 PostgreSQL 上的旧链 run：`postgres-agent-run-store` 用的是假的 pg 客户端，本机和 CI 的数据库里也没有这种存量 run。
+- **回退**：没有运行时开关，只能 `git revert` 删除提交 be353b62。
+- **面试里的说法**：
+  - 这是阶段 8 的收尾：custom Skill 只走图之后，只有旧 run 才走得到的重试和恢复代码也删了。“只有旧 run 走得到”是从代码的调用关系读出来的，没有线上数据。
+  - 被问“崩溃后哪些 run 能自动续跑”时答两种，都是续跑整张图。不要再说第三种，也不要说“只读的步骤会自动重放”：现在没有步骤被单独自动重放。
+  - 人能做的只有重试失败步骤和取消，失败的 custom Skill 节点不能重试；旧链留下的 run 中断了只能取消。这些要主动说。
+  - 恢复评测的检查项从 29 变成 27，是随功能删掉的两项，阈值没改。CI 的 Node 22 还没跑过，要照实说。
+
 ### 3.49 LangGraph 迁移阶段 8：custom Skill 只走图，V1 顺序链删除（2026-11-13）
 
 - **决定**：
@@ -356,7 +430,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 没选 Skill、模型的提议又不可用：返回空结果，和以前一样。
 - **删了什么**：`runCustomSkills`（`rag/agent-custom-skill-runner.js`，173 行）、`buildChainedSkillQuestion`、阶段里 `off` 和 `shadow` 两条路径、被拒后的回落、`getAgentSkillGraphRollout()`。
 - **留下什么**：
-  - 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器。新的 run 不再产生这种步骤（每个 custom Skill 步骤都是带 `nodeId` 的图节点），只有阶段 8 之前存下来的 run 里有。要不要删这些处理器，这一阶段没有决定。
+  - 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器。新的 run 不再产生这种步骤（每个 custom Skill 步骤都是带 `nodeId` 的图节点），只有阶段 8 之前存下来的 run 里有。要不要删这些处理器，这一阶段没有决定。（同一天的阶段 9 把它们删了：用户的回答是“接着清理”，见 3.50。）
   - 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支。
   - 用例 id 和图事件 `mode` 里的 "guarded" 字样：它是这个变量唯一还接受的取值。
   - 没动的：图怎么规划、校验器的其他规则、执行器、图 checkpoint、启动恢复、replan、`/chat` 的响应契约；`AGENT_UNIFIED_GRAPH_ROLLOUT`（v3 默认仍是 off）和三个 planner 开关。
@@ -386,7 +460,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 前一个 Skill 失败后照样跑后一个：只有链这样做；图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现，能用 `off` 换回链的表现这一点现在没有了。
 - **独立复核**（只读，范围是冻结、删除、清单版本三个提交和当时的文档）：没有高、中级问题；七条低级意见。
   - 改了的：代码注释和文档里“确定性图就是顺序链的图版本”说过头了，改成写明差别并加了测试；七处检查点的注释补上第三个开关；一个评测脚本和两个测试里已经无效的 `mode` 参数删掉；`docs/agent-rag.md` 把“默认配置下基本走不到”的两种情形指错了行；测试里补上跳过原因、`skill_graph_rejected` 的归类、只选中一个 Skill 的请求。
-  - 没改、记录在案的：预算被调低又开着模型规划器时，被预算跳过的确定性图会多问一次 replanner（默认配置走不到）；恢复接口和界面仍然对图 run 里失败的 Skill 节点给出“重试失败步骤”，点了一定是 409（图成为默认以来就这样）；恢复评测和发布门里的步骤级信号用的是链当年那种步骤，只说明旧 run 还能恢复；图被整张拒绝在报告里没有单独的计数。
+  - 没改、记录在案的：预算被调低又开着模型规划器时，被预算跳过的确定性图会多问一次 replanner（默认配置走不到）；恢复接口和界面仍然对图 run 里失败的 Skill 节点给出“重试失败步骤”，点了一定是 409（图成为默认以来就这样）；恢复评测和发布门里的步骤级信号用的是链当年那种步骤，只说明旧 run 还能恢复；图被整张拒绝在报告里没有单独的计数。（其中“重试失败步骤”的按钮和步骤级信号这两条，阶段 9 已经处理，见 3.50；另外两条没有变。）
   - 没验证的：顺序链创建、停在审批门上的 run 升级之后重新进入，按代码读下来会以 `AGENT_GRAPH_EXECUTION_FENCED` 失败，没有端到端跑过。
 - **证据**（删除之后，本机 Node 24。ADR 0001 阶段 8 的证据小节把这些结果记在提交 9c3c3de8 上：它排在删除提交 3b3a8719 之后，只改了 manifest 版本号）：
   - 覆盖率闸门接一次性 PostgreSQL + pgvector：4,595 个测试，4,588 通过、7 跳过、0 失败；全局行覆盖 92.54%，五组覆盖率门都通过。复核修正之后（提交 341ad5f3）重跑：4,598 个测试，4,591 通过、7 跳过、0 失败，92.55%；多出的 3 个是 `agent-custom-skill-budget` 新加的测试（5 个变 8 个）。
@@ -946,7 +1020,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 ### 3.13 工程基线（2026-09-26，压测与规模提交）
 
-- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-13 阶段 8 删除顺序链、做完复核修正之后的 4,598 个测试、0 失败，本机 Node 24、接一次性 PostgreSQL + pgvector，见 3.49。）
+- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-13 阶段 9 删除 custom Skill 步骤的单独重放之后的 4,607 个测试、0 失败，本机 Node 24、接一次性 PostgreSQL + pgvector，见 3.50；这个结果还没在 CI 的 Node 22 上跑过。阶段 8 的 4,598 个在 CI 的 Node 22 上通过，见 3.49。）
 - 后端测试 2214 个：2205 通过，0 失败，9 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。pgvector 集成测试在一次性 PostgreSQL 18 集群上 46/46（本次测得，含租户流水线和 run 行锁等待用例）；Redis 集成测试 5/5。
 - 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 113 个全部通过，生产构建通过（Docker 镜像构建时执行）。
@@ -966,7 +1040,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **拆分部署**：只在一台机器上测过；同样进程数下单体比拆分快 1.56 倍，拆分的收益是只扩瓶颈层和故障隔离，不是效率；层间身份可选 Ed25519（每服务一把私钥），但仍不是 mTLS；没有 K8s 和服务发现，拆分用的 `compose.services.yml` 没有真正跑过（只用 `docker compose config` 校验过）。
 - **读副本**：主库语句只减少 28.8%，没达到事先定的 30%，吞吐也没变快；副本和主库在同一台机器上，CI 里没有副本。
 - **告警规则**：没有在真实 Prometheus 里加载和求值过，99.5% 可用性和 20 秒延迟目标是建议值，不是从真实流量定的。
-- **架构**：V2 typed DAG 是自定义 Skill 阶段唯一的执行器。V1 顺序链 2026-11-13 已删除（3.49）：它原来是 `off`、`shadow` 两个档位的执行方式，也是整图被拒时的兜底。现在整张图在任何节点运行之前被拒时，不执行任何 Skill，逐个记录原因；预算付不起的节点跳过。随顺序链一起没有、也没有替代的：手动重试单个失败的 custom Skill 步骤（图运行的步骤拒绝单独重试；默认配置下这项能力从 2026-09-25 起就不可用了）、`shadow` 对照、没有类型契约的 custom Skill（不再运行）。v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。整个 agent 只有 LangGraph 一种运行时（3.28）：它是 custom-Skill DAG 和 v3 统一图唯一的调度器（原生图调度器已删除，见 3.30），2026-11-13 起也是外层计划和 `/chat/stream` 唯一的路径（原生循环已删除，见 3.48）；三次删除都没有留运行时回退开关，只能 revert。外层计划交给 LangGraph 起初让每个 `/chat` 多约 30% CPU；阶段 5 改用底层 Pregel 后降到低并发 +17.6%，仍超 10% 的门，当时保持原生循环（3.29）。阶段 7 没有重测这个门：是用户为了只留一种运行时、明知不达标接受的开销（进程内每次运行多 0.29 ms CPU），不能说成性能提升。删顺序链（阶段 8）没有量过性能，也不能说成性能提升。外层计划的持久化仍靠 run 的步骤，LangGraph 只给 custom-Skill DAG 和 v3 图做 checkpoint。规划器的模型调用经 LangChain ChatModel 适配器。
+- **架构**：V2 typed DAG 是自定义 Skill 阶段唯一的执行器。V1 顺序链 2026-11-13 已删除（3.49）：它原来是 `off`、`shadow` 两个档位的执行方式，也是整图被拒时的兜底。现在整张图在任何节点运行之前被拒时，不执行任何 Skill，逐个记录原因；预算付不起的节点跳过。随顺序链一起没有、也没有替代的：手动重试单个失败的 custom Skill 步骤（图运行的步骤拒绝单独重试；默认配置下这项能力从 2026-09-25 起就不可用了）、`shadow` 对照、没有类型契约的 custom Skill（不再运行）。同一天的阶段 9（3.50）接着删掉了阶段 8 留下的、只有顺序链存下的旧 run 走得到的代码：`custom_skill` 步骤的独立处理器、启动时的单步重放、恢复动作 `resume_from_step`。现在 custom Skill 只作为图节点运行，它的步骤不单独重试、也不单独重放；启动恢复自己只续跑中断的图，其余中断的 run 交给人；人在恢复面板上只能重试失败步骤（重放安全矩阵允许的步骤类型，`custom_skill` 不在其中）或取消。旧链留下的 run 中断了只能取消，失败了不能单步重试，要得到答案只能重新提问。v3 统一图有 `guarded` 档可执行（默认 off）。外层文档、Web、内置 Skill 仍是固定顺序。整个 agent 只有 LangGraph 一种运行时（3.28）：它是 custom-Skill DAG 和 v3 统一图唯一的调度器（原生图调度器已删除，见 3.30），2026-11-13 起也是外层计划和 `/chat/stream` 唯一的路径（原生循环已删除，见 3.48）；四次删除（原生图调度器、原生循环、顺序链、custom Skill 步骤的单独重放）都没有留运行时回退开关，只能 revert。外层计划交给 LangGraph 起初让每个 `/chat` 多约 30% CPU；阶段 5 改用底层 Pregel 后降到低并发 +17.6%，仍超 10% 的门，当时保持原生循环（3.29）。阶段 7 没有重测这个门：是用户为了只留一种运行时、明知不达标接受的开销（进程内每次运行多 0.29 ms CPU），不能说成性能提升。删顺序链（阶段 8）没有量过性能，也不能说成性能提升。外层计划的持久化仍靠 run 的步骤，LangGraph 只给 custom-Skill DAG 和 v3 图做 checkpoint。规划器的模型调用经 LangChain ChatModel 适配器。
 - **Agent 路径的答题率**：用 qwen2.5:7b 走 agent（`/chat` 的真实路径），合同和政策 7 题里 6 题、论文 12 题里 11 题最终改为澄清，因为词法校验器拒绝了大部分答案；`verify:quality` 的 18/18 测的是不经过 agent 自检的纯 RAG 路径。修了两个校验器 bug（"twelve (12)"被算成两个数；证据在 PDF 换行处被切断）后，合同和政策题从 2/21 升到 4/21（各 3 轮），论文题不变；剩下的主要是改写用词过不了词法校验。打开 LLM 评审后合同和政策题 3/21 → 14/21 得到回答且 14 个全对，p50 延迟多约 0.8 秒；两道管辖法律题仍在检索阶段判为证据不足。2026-10-03 按正确口径重测（见 3.21）：QASPER 训练题评审关 0/41 可答题被回答；开评审能答 10–17/41，但会回答不可答题，所以默认仍关。
 - **流式草稿**：机制已上线并有测试，但在上面的校验器下很少产生草稿（修 bug 后合同和政策题 21 次里 4 次，论文题 0 次），所以还没有实际的延迟收益。
 
