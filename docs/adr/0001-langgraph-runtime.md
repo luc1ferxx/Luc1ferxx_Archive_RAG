@@ -518,7 +518,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `eval:trajectory` 19/19、`eval:planner -- --provider mock` 7/7、`eval:recovery-observability` 8/8：删除前（e1385c1c）与删除后各跑一次，屏蔽 UUID、时间戳、时长和 git 状态后逐字节一致。
   - `test:pgvector`（一次性集群，`scripts/run-pgvector-integration.sh`）：101/101。删除前是 111 个，因为跨进程用例原来在两种 runtime 下各跑一遍。
   - `quality:current`：在删除提交 f7535832 上于模拟 CI 的环境里运行（一次性 PostgreSQL、干净工作区、五项确定性评测都由该提交生成），通过，指标 `pass`。
-  - CI（Node 22）上的 golden 比较：还没跑。golden 在 Node 24 上生成，推送后由 CI 验证。
+  - CI（Node 22）上的 golden 比较：写这一节时还没跑，golden 在 Node 24 上生成。合并进 main 之后，CI 的 `server-tests`（Node 22）带着这些套件运行并通过（例如 2026-11-13 main 上 b8e4d2ed 和 89a70d0a 的 Quality Gate 运行）。
 - 代码量（阶段 4 说过要等删掉原生调度器后再衡量维护面）：`agent-execution-graph-runner.js` 478 → 295 行；生产代码 +397 −533 行，净减 136 行；测试（不含 golden）+4,353 −4,088 行，净增 265 行；golden 共 102 个文件、约 5.3 MB。维护面在生产代码上缩小了，测试一侧因为固定期望而变大。
 
 ## 阶段 7 结果：外层计划只走 LangGraph，删除原生循环（2026-11-13）
@@ -602,7 +602,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（`scripts/run-pgvector-integration.sh` 起的集群，与 CI 的 `server-tests` 同一条命令）：4,585 个测试，4,578 通过、7 跳过、0 失败；全局行覆盖 92.58%，五组覆盖率门和目标都通过。跳过的 7 个需要 Redis、读副本或旧版本 checkout，与改动无关。PostgreSQL 集成套件（`agent-execution-graph-postgres.integration`、`agent-unified-graph-postgres.integration`、`langgraph-checkpointer-postgres.integration` 等）都在其中，没有跳过。
   - 不接数据库再跑一次：4,413 个测试，4,385 通过、28 跳过、0 失败。这种跑法下覆盖率清单会报 `tenant-encryption-maintenance.js` 缺失，因为唯一导入它的集成套件被跳过了；这是本机没有数据库时的既有现象，不是这次改动带来的。
   - `quality:current`：在删除提交 95ce9c2d 上按 CI 的 `quality-gate` 步骤运行（干净的独立 worktree、一次性 PostgreSQL + pgvector、五项确定性评测都由该提交生成），通过，`gate-worktree`、`quality-synthetic`、`feedback`、`trajectory`、`planner-mock`、`recovery`、`quality-baseline`、`quality-metrics` 八项检查全部 `pass`。
-  - Node 版本：新增的 32 个 fixture 在 Node 24.21.0 上生成；对照 golden 的五个套件（`langgraph-execution-plan-graph`、`langgraph-chat-stream`、`langgraph-routes`、`agent-run-chat-statement-count`、`langgraph-runtime-parity`，共 58 个测试）在本机的 Node 20.20.2 下同样全部通过，fixture 里没有绝对路径、端口、主机名或 Node 版本相关的报错文本。CI 用的 Node 22 在推送后验证。
+  - Node 版本：新增的 32 个 fixture 在 Node 24.21.0 上生成；对照 golden 的五个套件（`langgraph-execution-plan-graph`、`langgraph-chat-stream`、`langgraph-routes`、`agent-run-chat-statement-count`、`langgraph-runtime-parity`，共 58 个测试）在本机的 Node 20.20.2 下同样全部通过，fixture 里没有绝对路径、端口、主机名或 Node 版本相关的报错文本。CI 的 Node 22：推送后，main 上合并提交 89a70d0a 的 Quality Gate 运行（43413082658，2026-11-13）三个任务全部通过，其中 `server-tests` 在 Node 22.23.4 上带着新增的 32 个 fixture 跑完全量测试和覆盖率门：4,585 个测试，4,577 通过、8 跳过、0 失败，全局行覆盖 92.54%。
 - 代码量（删除提交相对冻结提交 3313b40b）：生产代码（`server/rag`、`server/routes`）+204 −235 行，净减 31 行，其中大半是注释改写，真正删掉的是原生循环、选择调度器的函数、`getAgentOuterPlanRuntime()` 和路由的 native 分支；测试 +1,186 −1,330 行，净减 144 行（每个场景少了第二趟）。冻结提交另加 32 个 golden 文件，约 1.1 MB，golden 总量约 6.4 MB。这次换来的不是代码量，而是只有一个调度器、一条流式路径、少一个要测两遍的开关。
 
 ### 独立复核（2026-11-13）
@@ -615,7 +615,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - `rag/config.js` 把进程内的 0.3 ms 和压测的 5.68 → 6.68 ms 写成了一句因果，现在分开写；`docs/agent-rag.md` 补上压测的数字。
 - 没有做的一条：LangGraph 在第一个 agent 请求里加载（run 已创建、截止时间已开始计时），没有在启动后预热。复核用加载钩子测得 `routes/chat.js` 之后导入图模块 141 ms、720 个模块（其中 437 个来自 `@langchain/*`），与上面“代价”里的约 115 ms 是同一量级的两次测量。每个进程只付一次，没有东西因此出错；要消掉它，可以让承载 agent tier 的角色在 listen 之后后台导入 `rag/langgraph/execution-plan-graph.js`。
 
-复核没能验证的两项：`server/.env` 按规则没有读（里面如果有 `AGENT_OUTER_PLAN_RUNTIME=native` 或拼错的值，`node server.js` 现在拒绝启动）；Node 22 上新 golden 的比较，等 CI。
+复核没能验证的两项：`server/.env` 按规则没有读（里面如果有 `AGENT_OUTER_PLAN_RUNTIME=native` 或拼错的值，`node server.js` 现在拒绝启动）；Node 22 上新 golden 的比较，当时等 CI，推送后已通过（见上面“证据”里的 Node 版本一条）。
 
 修正之后重跑（提交 9b74106c，即修正提交 8f51955f 加面试材料的文档提交，本机 Node 24.21.0）：
 

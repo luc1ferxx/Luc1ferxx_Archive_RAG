@@ -192,6 +192,7 @@
 - （2026-11-13）deep-dive/02-durability-recovery 请求流程第 3 步原句：「每个阶段入口 throwIfRequestCancelled（agent-execution-plan-runner.js）」 → 阶段入口的安全点现在在 `rag/langgraph/execution-plan-graph.js` 的阶段节点里，已取消的请求以 drain 停下。Q2 和边界里的「图 run」补了限定：指有图 checkpoint 的 custom-Skill DAG 和 v3 图；外层图不带 checkpointer，自动续跑的范围没有变。
 - （2026-11-13）deep-dive/04-grounding-safety 原句：「（V1 外层计划，原生循环）」；deep-dive/07-platform-reliability 请求流程第 4 步原句：「routes/chat.js：runAgentRequestWithCancellation → runWithAgentEventSink → buildChatResponse」 → 外层计划由 LangGraph 调度，阶段体和文档循环没变；`/chat/stream` 只剩 `rag/langgraph/agent-stream.js` 的 `streamAgentRun` 一条路径，`runWithAgentEventSink` 在它里面。deep-dive/05-evaluation 的 golden「8 个套件、102 个文件」补上阶段 7 新增的 32 个。
 - （2026-11-13）本文件第 1 条的改法「补一句：……外层计划因压测 +17.6% 不过门留在原生循环」、第 26 条的「为什么只把两张图交给 LangGraph」、第 30 条的「外层 LangGraph 两次压测不过门、坚持不放宽」，以及上面 180 秒稿那条的「也没提外层计划因压测留在原生循环」 → 这些是 2026-10-18 的改法，当时成立，原文保留；2026-11-13 起不能再照着说，以 CURRENT-TRUTH §3.48 为准。
+- （2026-11-13）deep-dive/01（四处）、deep-dive/02（一处）、deep-dive/05（三处）、DEEP-DIVE-PLAYBOOK（一处）和 CURRENT-TRUTH §3.30 原句：「golden 在 Node 24 上生成，Node 22 上未验证」 → 现在：合并进 main 之后 CI 的 server-tests（Node 22）带着这些套件运行并通过；阶段 7 新增的 32 个文件在合并提交 89a70d0a 的 CI 运行里通过。已在同一天改完；「golden 只覆盖固定场景」这半句仍然成立。
 
 ### 运行持久化、审批与崩溃恢复
 

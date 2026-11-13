@@ -307,7 +307,7 @@ Jest 快照的 --updateSnapshot：一键更新会掩盖行为变化，这里改�
 
 **代价**
 
-golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在 Node 24 上生成，CI 用 Node 22，还没验证；CI 日志要等全部跑完才有 stdout
+golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在 Node 24 上生成，CI 的 Node 22 上通过；CI 日志要等全部跑完才有 stdout
 
 **证据**
 
@@ -508,7 +508,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 
 代码：`server/test/run.test.mjs collectTestFiles`；`server/test/langgraph-support/graph-goldens.mjs isUpdatingGraphGoldens / assertMatchesGraphGolden`
 
-> ⚠ 说「golden 证明完全等价」。它只覆盖固定场景；golden 在 Node 24 上生成，Node 22 还没验证。
+> ⚠ 说「golden 证明完全等价」。它只覆盖固定场景；golden 在 Node 24 上生成，CI 的 Node 22 上也通过，但这不改变它只覆盖固定场景。
 
 ### Q14. 你的置信区间可信吗？有什么统计上的问题？（追问「显著」）
 
@@ -608,7 +608,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - QASPER 主评测从 JSON 文本导入，不经过 PDF 解析；证据只取第一位标注者；token F1 惩罚长答案，不能和排行榜比。
 - robust 门里的 rerank NDCG 提升是在伪 embedding 加启发式重排上测的；真实 embedding 下启发式重排没有带来提升。
 - 真实模型 CI（real-model-eval.yml）用 VECTOR_STORE_PROVIDER=local、不连数据库，不覆盖 pgvector / PostgreSQL BM25 路径。
-- golden 只覆盖固定场景，在 Node 24 上生成，CI 的 Node 22 上还没验证。
+- golden 只覆盖固定场景；在 Node 24 上生成，CI 的 Node 22 上通过。
 - 统计代码重复：mulberry32 PRNG 在 9 个文件里各一份，配对 bootstrap 至少 5 份独立实现；manifest 有 2215 行，维护成本高。
 
 ## 只能当推理讲的内容

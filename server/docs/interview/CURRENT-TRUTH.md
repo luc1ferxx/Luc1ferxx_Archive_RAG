@@ -372,6 +372,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 门是在假模型 0 ms 下按每请求 CPU 和 p95 判的，外层计划两次都没过，这个结论没有变。
   - 后来的取舍是：宁可每次运行多花约 0.3 ms CPU，也只留一种运行时。这是用户明说的决定，不是测量结果变了。
   - 不要说迁移提升了性能，也不要说门后来过了。
+  - 新增的 32 个基准文件在 Node 24 上生成；推送后 main 上的 CI（Node 22，合并提交 89a70d0a）通过。
   - 这里没列的数字见 ADR 0001 阶段 7 的证据小节（`docs/adr/0001-langgraph-runtime.md`）。
 
 ### 3.47 Office 解析放进工作线程：大文件不再卡住事件循环，内存耗尽只结束 worker（2026-11-13）
@@ -670,7 +671,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **golden 怎么改**：只有 `UPDATE_GRAPH_GOLDENS=1` 能从 LangGraph 改写；改写了也让本次测试失败，要先看 diff、在同一次改动里写明行为变化，再不带变量重跑。其他取值（如 `native`）一律拒绝。
 - **回退**：没有运行时开关了，只能 `git revert` 这次提交。
 - **数字**：覆盖率闸门 3,250 个测试，3,235 通过、15 跳过、0 失败，全局行覆盖 90.46%；`eval:trajectory` 19/19、`eval:planner` 7/7、`eval:recovery-observability` 8/8 与删除前屏蔽后逐字节一致；`test:pgvector` 101/101；`quality:current` 在删除提交 f7535832 上通过。代码量：`agent-execution-graph-runner.js` 478 → 295 行，生产代码净减 136 行，测试净增 265 行（不含约 5.3 MB 的 golden）。
-- **局限**：golden 只记录删除前 native 在这些固定场景上的行为，不是对任意图形状的证明；只描述 native 自身行为的少量断言没有替代；两个 PostgreSQL 集成套件原来在 native 下也跑一遍，冻结要真库，没有做，现在只有 LangGraph 一侧和用例自己的断言（`test:pgvector` 里通过）；golden 在 Node 24 上生成，CI 的 Node 22 上还没验证。
+- **局限**：golden 只记录删除前 native 在这些固定场景上的行为，不是对任意图形状的证明；只描述 native 自身行为的少量断言没有替代；两个 PostgreSQL 集成套件原来在 native 下也跑一遍，冻结要真库，没有做，现在只有 LangGraph 一侧和用例自己的断言（`test:pgvector` 里通过）；golden 在 Node 24 上生成；写这一节时 CI 的 Node 22 上还没验证，合并进 main 之后 CI 已在 Node 22 上带着这些套件运行并通过（阶段 7 新增的 32 个文件也一样，见 3.48）。
 - **面试里可以讲**：回退窗口是手段，不是目的。分支还没发布时删掉第二套调度器，等于用"把旧实现的输出冻结成 golden"代替"两套实现长期并跑"；同时把它记成对约束的豁免，并写清唯一的回退方式。
 
 ### 3.29 LangGraph 迁移收尾：外层计划再测一次，定为长期原生（2026-10-16）
