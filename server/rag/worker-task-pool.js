@@ -24,11 +24,25 @@
 import { Worker } from "node:worker_threads";
 
 /**
+ * The --max-old-space-size flag this process runs with (on its command line or
+ * in NODE_OPTIONS), or null. Node applies it to every worker as well, in place
+ * of a worker's resourceLimits.maxOldGenerationSizeMb (checked on Node 24: a
+ * worker given 64 MB under --max-old-space-size=512 got the main thread's
+ * limit), so a pool's memory limit has no effect while it is set.
+ */
+export const findProcessHeapLimitFlag = ({ execArgv = process.execArgv, nodeOptions = process.env.NODE_OPTIONS } = {}) =>
+  [...execArgv, ...String(nodeOptions ?? "").split(/\s+/)].find((argument) =>
+    /^--max[-_]old[-_]space[-_]size(?:=|$)/.test(argument)
+  ) ?? null;
+
+/**
  * A pool definition:
  *   workerUrl              the worker file (a URL)
  *   workerOptions          extra Worker options (e.g. { env: SHARE_ENV })
  *   getTimeoutMs           () => ms one task may run, 0 = none (read per task)
  *   getMaxOldGenerationMb  () => resourceLimits.maxOldGenerationSizeMb, 0 = Node's default
+ *   memoryLimitSetting     the setting getMaxOldGenerationMb reads, named in the
+ *                          warning a process heap flag that overrides it gets
  *   buildMessage(task)     => { message, transfer }: what to post for task
  *                          (task.payload is what run() was given); `id` is added
  *   toTaskError(error)     the serialized error a worker answered -> an Error
@@ -41,6 +55,7 @@ export const createWorkerTaskPool = ({
   cancelledError,
   getMaxOldGenerationMb,
   getTimeoutMs,
+  memoryLimitSetting = "the worker memory limit",
   stoppedError,
   timeoutError,
   toTaskError,
@@ -52,6 +67,23 @@ export const createWorkerTaskPool = ({
   const retiringPools = new Set();
   const totals = { completedTasks: 0, failedTasks: 0, restartedWorkers: 0 };
   let nextTaskId = 1;
+  let warnedOverriddenLimit = false;
+
+  // Once per process: a memory limit the process's own heap flag replaces.
+  const warnIfLimitOverridden = (maxOldGenerationMb) => {
+    if (warnedOverriddenLimit || !(maxOldGenerationMb > 0)) {
+      return;
+    }
+
+    const flag = findProcessHeapLimitFlag();
+
+    if (flag) {
+      warnedOverriddenLimit = true;
+      console.warn(
+        `${memoryLimitSetting}=${maxOldGenerationMb} has no effect: this process runs with ${flag}, which Node applies to every worker in its place.`
+      );
+    }
+  };
 
   const createPool = ({ size, maxOldGenerationMb }) => ({
     idle: [],
@@ -244,6 +276,7 @@ export const createWorkerTaskPool = ({
       dispatch(currentPool);
     }
 
+    warnIfLimitOverridden(maxOldGenerationMb);
     currentPool = createPool({ maxOldGenerationMb, size });
     return currentPool;
   };

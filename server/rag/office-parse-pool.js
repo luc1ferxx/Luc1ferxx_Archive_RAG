@@ -82,6 +82,7 @@ const pool = createWorkerTaskPool({
     }),
   getMaxOldGenerationMb: getOfficeParseWorkerMaxOldGenerationMb,
   getTimeoutMs: getOfficeParseTimeoutMs,
+  memoryLimitSetting: "RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB",
   stoppedError: () =>
     new OfficeParsePoolError("The Office parse pool was stopped.", { code: OFFICE_PARSE_POOL_STOPPED, status: 503 }),
   timeoutError: (timeoutMs) =>

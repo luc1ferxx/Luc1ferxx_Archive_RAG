@@ -3,6 +3,7 @@ import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { getOfficeMaxTextChars } from "../config.js";
 import { createArchiveInvalidError } from "../document-format-errors.js";
 import { buildHeaderLabels, createTextBudget, formatLabelledRow, formatPlainRow } from "./table-text.js";
+import { MAX_OFFICE_XML_NESTING } from "./xml-nesting.js";
 import { decodeXmlPart } from "./zip-guard.js";
 
 // PowerPoint (.pptx) text extraction for the Office ingest path.
@@ -71,8 +72,9 @@ const LIST_MARKER = "- ";
 
 // Generous for slides (a table inside a few nested groups stays well under
 // 40 levels) and low enough that the recursive walks below cannot exhaust the
-// stack on a hostile part: the parser refuses deeper nesting.
-const MAX_XML_NESTING = 256;
+// stack on a hostile part, on the main thread or a worker: the parser refuses
+// deeper nesting. The same cap as a Word document's (xml-nesting.js).
+const MAX_XML_NESTING = MAX_OFFICE_XML_NESTING;
 
 const DOCUMENT_TYPE_DECLARATION = /<!DOCTYPE|<!ENTITY/i;
 

@@ -21,8 +21,9 @@
 // footers, and comments are left out by its default style map: neither is
 // extracted.
 //
-// Callers run the archive guard (rag/office/zip-guard.js) on the bytes first;
-// rag/document-loader.js does.
+// Callers run the archive guard (rag/office/zip-guard.js) on the bytes first,
+// and assertDocxXmlNesting on its scan; rag/office/office-document-pages.js
+// does both.
 import { createRequire } from "node:module";
 
 import mammoth from "mammoth";
@@ -36,6 +37,8 @@ import {
   formatPlainRow,
   normalizeLineText,
 } from "./table-text.js";
+import { MAX_OFFICE_XML_NESTING, measureXmlNestingDepth } from "./xml-nesting.js";
+import { decodeXmlPart } from "./zip-guard.js";
 
 export const DOCX_EXTRACTOR = "mammoth";
 export const DOCX_LOCATION_UNIT = "section";
@@ -58,6 +61,29 @@ const MAMMOTH_OPTIONS = Object.freeze({
   externalFileAccess: false,
   includeEmbeddedStyleMap: false,
 });
+
+/**
+ * 400 DOCUMENT_ARCHIVE_INVALID when an XML part (.xml, .rels) of a Word
+ * package nests its elements more than MAX_OFFICE_XML_NESTING deep. `archive`
+ * is the archive guard's scan of the package (scanOfficeArchive); parts it did
+ * not keep are inflated again from it, and together they are bounded by
+ * RAG_OFFICE_MAX_XML_BYTES. mammoth walks the element tree recursively, so
+ * without this bound how deep a document may nest would depend on the stack
+ * of the thread that parses it (rag/office/xml-nesting.js).
+ */
+export const assertDocxXmlNesting = async (archive) => {
+  for (const name of archive.fileNames) {
+    if (!/\.(?:xml|rels)$/i.test(name)) {
+      continue;
+    }
+
+    const bytes = archive.parts.get(name) ?? (await archive.readPart(name));
+
+    if (bytes && measureXmlNestingDepth(decodeXmlPart(bytes), { limit: MAX_OFFICE_XML_NESTING }) > MAX_OFFICE_XML_NESTING) {
+      throw createArchiveInvalidError(`an XML part nests its elements more than ${MAX_OFFICE_XML_NESTING} levels deep`);
+    }
+  }
+};
 
 /** mammoth's HTML for a .docx buffer. A file mammoth cannot read is 400 DOCUMENT_ARCHIVE_INVALID. */
 export const convertDocxToHtml = async (buffer) => {
