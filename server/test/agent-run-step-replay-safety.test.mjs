@@ -2,9 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_AUTO_RECOVERY_STEP_TYPES,
-} from "../rag/agent-run-recovery.js";
-import {
   createDefaultAgentRunStepHandlerRegistry,
 } from "../rag/agent-run-step-handlers/index.js";
 import {
@@ -15,8 +12,8 @@ import {
   STEP_REPLAY_IDEMPOTENCY,
   STEP_REPLAY_SAFETY_REASON_CODES,
   buildStepReplaySafetyAssessment,
-  getAutoReplaySafeStepTypes,
   getStepReplaySafetyPolicy,
+  isStepRetryAllowed,
   listStepReplaySafetyPolicies,
 } from "../rag/agent-run-step-replay-safety.js";
 import { SKILL_EFFECTS } from "../rag/skills/skill-contract.js";
@@ -30,42 +27,56 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
     "document_rag",
     "web_search",
     "arxiv_import",
-    "custom_skill",
     "capability_call",
   ]) {
     assert.ok(matrix[stepType], `${stepType} policy is registered`);
-    assert.equal(matrix[stepType].retryable, true);
     assert.ok(matrix[stepType].requiredInput.length > 0);
     assert.ok(matrix[stepType].idempotency);
   }
 
+  for (const stepType of ["document_rag", "capability_call"]) {
+    assert.equal(matrix[stepType].retryable, true, stepType);
+    assert.ok(matrix[stepType].replayActions.includes("retry_failed_step"), stepType);
+  }
+
+  // An approval-capable primary step is not retried on its own: its handler
+  // refuses, and the retry goes through the capability_call step an approval
+  // queues. The matrix has to say the same, because the recovery panel offers
+  // "Retry failed step" from the matrix alone.
+  for (const stepType of ["web_search", "arxiv_import"]) {
+    assert.equal(matrix[stepType].retryable, false, stepType);
+    assert.deepEqual(matrix[stepType].replayActions, [], stepType);
+  }
+
+  // The matrix has no "auto replay safe" column: nothing replays a step on
+  // its own without an operator.
+  for (const policy of Object.values(matrix)) {
+    assert.equal("autoReplaySafe" in policy, false, policy.stepType);
+  }
+
   assert.deepEqual(matrix.document_rag.requiredInput, ["docIds", "question"]);
-  assert.equal(matrix.document_rag.autoReplaySafe, false);
   assert.equal(matrix.document_rag.replayRequiresApproval, false);
   assert.equal(matrix.document_rag.idempotency, STEP_REPLAY_IDEMPOTENCY.memoryWritingRag);
   assert.deepEqual(matrix.document_rag.replayActions, ["retry_failed_step"]);
   for (const stepType of ["follow_up_retrieval", "research_question"]) {
-    assert.equal(matrix[stepType].autoReplaySafe, false);
     assert.equal(matrix[stepType].idempotency, STEP_REPLAY_IDEMPOTENCY.memoryWritingRag);
     assert.deepEqual(matrix[stepType].replayActions, ["retry_failed_step"]);
   }
 
-  assert.deepEqual(matrix.custom_skill.requiredInput, [
-    "docIds",
-    "question",
-    "skillId",
-  ]);
-  assert.equal(matrix.custom_skill.autoReplaySafe, true);
+  // A custom Skill step is a graph node: nothing to replay it with, and no
+  // action of its own.
+  assert.deepEqual(matrix.custom_skill.requiredInput, []);
+  assert.deepEqual(matrix.custom_skill.replayActions, []);
+  assert.equal(matrix.custom_skill.retryable, false);
+  assert.equal(matrix.custom_skill.idempotency, STEP_REPLAY_IDEMPOTENCY.graphOwned);
 
   assert.deepEqual(matrix.web_search.requiredInput, ["question"]);
-  assert.equal(matrix.web_search.autoReplaySafe, false);
   assert.equal(
     matrix.web_search.idempotency,
     STEP_REPLAY_IDEMPOTENCY.externalReadNondeterministic
   );
 
   assert.deepEqual(matrix.arxiv_import.requiredInput, ["topic"]);
-  assert.equal(matrix.arxiv_import.autoReplaySafe, false);
   assert.equal(matrix.arxiv_import.replayRequiresApproval, true);
   assert.equal(
     matrix.arxiv_import.idempotency,
@@ -84,13 +95,40 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
   );
 });
 
-test("auto recovery safe step types are derived from replay safety matrix", () => {
-  assert.deepEqual([...DEFAULT_AUTO_RECOVERY_STEP_TYPES].sort(), [
-    "custom_skill",
-  ]);
-  assert.deepEqual(getAutoReplaySafeStepTypes().sort(), [
-    "custom_skill",
-  ]);
+test("the step types an operator may retry by hand are derived from the matrix", () => {
+  assert.deepEqual(
+    listStepReplaySafetyPolicies()
+      .map((policy) => policy.stepType)
+      .filter(isStepRetryAllowed)
+      .sort(),
+    [
+      "capability_call",
+      "document_rag",
+      "follow_up_retrieval",
+      "research_question",
+    ]
+  );
+  assert.equal(isStepRetryAllowed("custom_skill"), false);
+  assert.equal(isStepRetryAllowed("web_search"), false);
+  assert.equal(isStepRetryAllowed("arxiv_import"), false);
+  // A type without a policy has no handler either.
+  assert.equal(isStepRetryAllowed("graph_node"), false);
+  assert.equal(isStepRetryAllowed(""), false);
+});
+
+test("a step type that names an Object.prototype property has no policy", () => {
+  // The matrix is a plain object. A stored step whose type is "constructor"
+  // must not resolve to something inherited, which would make the recovery
+  // listing throw for the whole scope.
+  for (const stepType of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    assert.equal(getStepReplaySafetyPolicy(stepType), null, stepType);
+    assert.equal(isStepRetryAllowed(stepType), false, stepType);
+    assert.deepEqual(
+      buildStepReplaySafetyAssessment({ step: { id: "odd", type: stepType } }).reasonCodes,
+      [STEP_REPLAY_SAFETY_REASON_CODES.unsupportedStepType],
+      stepType
+    );
+  }
 });
 
 test("step handler registry exposes replay safety contracts", () => {
@@ -103,9 +141,46 @@ test("step handler registry exposes replay safety contracts", () => {
     documentHandler.replaySafety,
     getStepReplaySafetyPolicy("document_rag")
   );
-  assert.equal(documentHandler.replaySafety.autoReplaySafe, false);
-  assert.equal(webHandler.replaySafety.autoReplaySafe, false);
   assert.equal(webHandler.replaySafety.requiredInput[0], "question");
+  // The matrix and the handlers have to agree, because the recovery panel
+  // offers "Retry failed step" from the matrix alone. Every type the matrix
+  // lets an operator retry has a handler ...
+  const handlerIds = handlers.map((handler) => handler.id).sort();
+  const retryableTypes = listStepReplaySafetyPolicies()
+    .map((policy) => policy.stepType)
+    .filter(isStepRetryAllowed)
+    .sort();
+
+  assert.deepEqual(
+    retryableTypes.filter((stepType) => !handlerIds.includes(stepType)),
+    []
+  );
+  // ... and the only handlers for a type the matrix does not let an operator
+  // retry are the two that exist to refuse, with their own message.
+  const refusingIds = handlerIds.filter((id) => !retryableTypes.includes(id));
+
+  assert.deepEqual(refusingIds, ["arxiv_import", "web_search"]);
+  for (const id of refusingIds) {
+    const handler = registry.resolve({ step: { id: `${id}:primary`, type: id } });
+
+    for (const method of ["prepareRetry", "execute"]) {
+      assert.throws(
+        () => handler[method]({ run: {}, step: { id: `${id}:primary`, type: id } }),
+        (error) => {
+          assert.equal(error.status, 409);
+          assert.match(error.message, /cannot be retried directly/);
+          return true;
+        },
+        `${id}.${method}`
+      );
+    }
+  }
+  // There is no handler for a custom Skill step: a custom Skill runs only as
+  // a node of its graph.
+  assert.equal(
+    registry.resolve({ step: { id: "custom_skill:node", type: "custom_skill" } }),
+    null
+  );
 });
 
 test("step replay safety assessment derives replay reasons from the matrix", () => {
@@ -120,7 +195,6 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(memoryWritingDocument.canAutoReplay, false);
   assert.deepEqual(memoryWritingDocument.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
@@ -136,7 +210,6 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(missingDocumentInput.canAutoReplay, false);
   assert.deepEqual(missingDocumentInput.missingInput, ["question"]);
   assert.deepEqual(missingDocumentInput.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.missingInput,
@@ -153,7 +226,6 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(webSearch.canAutoReplay, false);
   assert.deepEqual(webSearch.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
@@ -169,7 +241,6 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(arxivImport.canAutoReplay, false);
   assert.ok(
     arxivImport.reasonCodes.includes(
       STEP_REPLAY_SAFETY_REASON_CODES.externalWrite
@@ -199,7 +270,6 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
     },
   });
 
-  assert.equal(capabilityCall.canAutoReplay, false);
   assert.ok(
     capabilityCall.reasonCodes.includes(
       STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval
@@ -252,15 +322,11 @@ test("step replay safety assessment derives replay reasons from the matrix", () 
 });
 
 /**
- * The custom_skill policy was written when one such step meant one whitelisted
- * read-only skill, so declaring the whole step type auto-replay-safe was true by
- * construction. The typed skill contract admits external_write and
- * workspace_write skills into that same step type, and a graph node runs one of
- * them under exactly the same step type as a RAG read. The step type is
- * therefore no longer sufficient on its own: the contract persisted with the
- * step has to be able to narrow it.
+ * A `custom_skill` step is the step of a graph node. Whatever the Skill that
+ * ran it declared, the step is never replayed on its own; the contract the
+ * node persisted with the step only adds what a replay would have risked.
  */
-test("a step whose persisted contract declares a side effect is never auto-replayed", () => {
+test("a custom_skill step is a graph node whatever its Skill declares", () => {
   const assess = (input) =>
     buildStepReplaySafetyAssessment({
       step: {
@@ -280,63 +346,62 @@ test("a step whose persisted contract declares a side effect is never auto-repla
     replaySafe: true,
   });
 
-  assert.equal(readOnly.canAutoReplay, true);
-  assert.deepEqual(readOnly.reasonCodes, []);
+  assert.deepEqual(readOnly.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+  ]);
+  assert.deepEqual(readOnly.missingInput, []);
+  assert.deepEqual(readOnly.policy.replayActions, []);
+  assert.deepEqual(readOnly.reasons, [
+    {
+      code: "graph_node_step",
+      label: "Graph node",
+      message:
+        "The step is a node of an execution graph and is never replayed on its own.",
+    },
+  ]);
+  // The assessment no longer carries an auto-replay verdict.
+  for (const key of ["autoReplaySafe", "canAutoReplay", "configuredAutoReplaySafe"]) {
+    assert.equal(key in readOnly, false, key);
+  }
 
   for (const effects of [
     SKILL_EFFECTS.externalWrite,
     SKILL_EFFECTS.workspaceWrite,
   ]) {
-    const writing = assess({ effects });
-
-    assert.equal(writing.canAutoReplay, false, `${effects} is not auto-replayed`);
-    assert.deepEqual(writing.reasonCodes, [
+    assert.deepEqual(assess({ effects }).reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
       STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
     ]);
   }
 
-  const externalRead = assess({ effects: SKILL_EFFECTS.externalRead });
-
-  assert.equal(externalRead.canAutoReplay, false);
-  assert.deepEqual(externalRead.reasonCodes, [
+  assert.deepEqual(assess({ effects: SKILL_EFFECTS.externalRead }).reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
 
-  // A skill may be read-only and still refuse replay -- the declaration is the
-  // skill's own, and the recovery layer has no standing to overrule it.
-  const refusesReplay = assess({
-    effects: SKILL_EFFECTS.readOnly,
-    replaySafe: false,
-  });
+  // A Skill may be read-only and still refuse replay -- the declaration is the
+  // Skill's own.
+  assert.deepEqual(
+    assess({ effects: SKILL_EFFECTS.readOnly, replaySafe: false }).reasonCodes,
+    [
+      STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+      STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy,
+    ]
+  );
 
-  assert.equal(refusesReplay.canAutoReplay, false);
-  assert.deepEqual(refusesReplay.reasonCodes, [
-    STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy,
+  // A step stored without the contract (a step of the deleted V1 chain, or a
+  // node from before the contract was persisted) has the type's reason alone.
+  assert.deepEqual(assess({}).reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
   ]);
 });
 
 /**
- * Narrowing only. Every step persisted before the typed contract existed -- and
- * every step type that never carried one -- keeps the verdict from its current
- * type policy. A legacy Document RAG step without metadata is not promoted to
- * a read-only step: its type policy now fails closed for memory writes.
+ * A step that declares no contract keeps the reasons of its type. A Document
+ * RAG step without metadata is not taken for a read-only step: its type says
+ * it may write memory.
  */
-test("a step that declares no skill contract keeps its step-type verdict", () => {
-  const legacyCustomSkill = buildStepReplaySafetyAssessment({
-    step: {
-      id: "custom_skill:risk_review",
-      input: {
-        docIds: ["doc-1"],
-        question: "Which obligations changed?",
-        skillId: "risk_review",
-      },
-      type: "custom_skill",
-    },
-  });
-
-  assert.equal(legacyCustomSkill.canAutoReplay, true);
-  assert.deepEqual(legacyCustomSkill.reasonCodes, []);
-
+test("a step that declares no skill contract keeps the reasons of its step type", () => {
   const documentRag = buildStepReplaySafetyAssessment({
     step: {
       id: "document_rag",
@@ -348,13 +413,12 @@ test("a step that declares no skill contract keeps its step-type verdict", () =>
     },
   });
 
-  assert.equal(documentRag.canAutoReplay, false);
   assert.deepEqual(documentRag.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
 });
 
-test("memory-writing RAG step types cannot be made auto-replayable by a stored read-only claim", () => {
+test("a stored read-only claim never removes a memory-writing step type's reason", () => {
   for (const type of ["document_rag", "follow_up_retrieval", "research_question"]) {
     const legacy = buildStepReplaySafetyAssessment({
       step: {
@@ -364,7 +428,6 @@ test("memory-writing RAG step types cannot be made auto-replayable by a stored r
       },
     });
     const falselySafe = buildStepReplaySafetyAssessment({
-      autoReplayStepTypes: [type],
       step: {
         id: `${type}:forged-safe`,
         input: {
@@ -389,15 +452,12 @@ test("memory-writing RAG step types cannot be made auto-replayable by a stored r
       },
     });
 
-    assert.equal(legacy.canAutoReplay, false, type);
     assert.deepEqual(legacy.reasonCodes, [
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
     ]);
-    assert.equal(falselySafe.canAutoReplay, false, type);
     assert.deepEqual(falselySafe.reasonCodes, [
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
     ]);
-    assert.equal(declaredWrite.canAutoReplay, false, type);
     assert.deepEqual(declaredWrite.reasonCodes, [
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
       STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
@@ -430,7 +490,6 @@ test("action capability replay inherits the capability call safety matrix", () =
   });
 
   assert.equal(actionCapabilityCall.policy.stepType, "capability_call");
-  assert.equal(actionCapabilityCall.canAutoReplay, false);
   assert.equal(actionCapabilityCall.replayRequiresApproval, true);
   assert.deepEqual(actionCapabilityCall.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,

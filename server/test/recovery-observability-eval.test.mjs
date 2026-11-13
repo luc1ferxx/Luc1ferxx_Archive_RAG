@@ -28,20 +28,28 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.equal(report.summary.status, "pass");
   assert.equal(report.summary.metrics.caseCount, 8);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
-  assert.equal(report.summary.metrics.checkCount, 29);
+  // 27 checks: the two that asked for a step resumed on its own
+  // (resume_after_partial_step_recorded, resume_step_recorded) went with the
+  // resume itself in ADR 0001 phase 9.
+  assert.equal(report.summary.metrics.checkCount, 27);
+  assert.equal(report.summary.version, "1.2.0");
   assert.equal(report.recovery.recoverableRunCount, 3);
-  assert.equal(report.recovery.manualRecoveryCount, 1);
-  assert.equal(report.recovery.manualRecoveryActionCount, 3);
+  assert.equal(report.recovery.manualRecoveryCount, 2);
+  assert.equal(report.recovery.manualRecoveryActionCount, 2);
   assert.equal(report.recovery.manualRecoveryActionFailureCount, 0);
-  assert.equal(report.recovery.autoReplayAttemptCount, 2);
+  assert.equal(report.recovery.autoReplayAttemptCount, 1);
   assert.equal(report.recovery.autoReplaySuccessRate, 1);
   assert.equal(report.recovery.stepLifecycleEventCount, 4);
   assert.equal(report.recovery.primaryStepStartedCount, 2);
   assert.equal(report.recovery.primaryStepCompletedCount, 1);
   assert.equal(report.recovery.primaryStepFailedCount, 1);
   assert.equal(report.recovery.stepRetryCount, 1);
-  assert.equal(report.recovery.stepResumeCount, 1);
+  assert.equal("stepResumeCount" in report.recovery, false);
   assert.equal(report.recovery.stepReplayFailureCount, 0);
+  assert.deepEqual(report.recovery.actionCounts, {
+    cancel: 1,
+    retry_failed_step: 1,
+  });
   assert.equal(report.recovery.taskRecoveryScheduledCount, 1);
   assert.equal(report.recovery.taskRecoveryResumeActionCount, 1);
   assert.equal(report.recovery.taskRecoveryResumeFailureCount, 0);
@@ -87,6 +95,15 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.match(markdown, /Skill graph reused nodes: `2`/);
   assert.match(markdown, /PASS Skill graph signal/);
   assert.match(markdown, /PASS Skill graph startup resume/);
+  assert.doesNotMatch(markdown, /Step resume count/);
+  assert.deepEqual(
+    report.cases.flatMap((caseResult) =>
+      caseResult.checks
+        .map((check) => check.id)
+        .filter((id) => /resume_(after_partial_step|step)_recorded/.test(id))
+    ),
+    []
+  );
 });
 
 test("recovery observability eval production events pass the report contract", async () => {
@@ -100,17 +117,33 @@ test("recovery observability eval production events pass the report contract", a
 
   assert.equal(report.summary.status, "pass");
   assert.equal(report.summary.metrics.caseCount, 8);
-  assert.equal(report.summary.metrics.checkCount, 29);
-  assert.equal(report.recovery.recoverableRunCount, 4);
-  assert.equal(report.recovery.manualRecoveryCount, 1);
-  assert.equal(report.recovery.manualRecoveryActionCount, 3);
-  assert.equal(report.recovery.autoReplayAttemptCount, 3);
+  assert.equal(report.summary.metrics.checkCount, 27);
+  // Three interrupted runs. Two have no graph to continue -- a custom Skill
+  // step in the shape the deleted V1 chain stored, and a web search -- and are
+  // handed to an operator. The third is an interrupted graph, and it is the
+  // one automatic recovery there is.
+  assert.equal(report.recovery.recoverableRunCount, 3);
+  assert.equal(report.recovery.manualRecoveryCount, 2);
+  assert.equal(report.recovery.manualRecoveryActionCount, 2);
+  assert.deepEqual(report.recovery.actionCounts, {
+    cancel: 1,
+    retry_failed_step: 1,
+  });
+  assert.equal(report.recovery.autoReplayAttemptCount, 1);
+  assert.equal(report.recovery.autoReplaySuccessCount, 1);
   assert.equal(report.recovery.autoReplaySuccessRate, 1);
   assert.equal(report.recovery.primaryStepStartedCount, 2);
   assert.equal(report.recovery.primaryStepCompletedCount, 1);
   assert.equal(report.recovery.primaryStepFailedCount, 1);
-  assert.ok(report.recovery.stepResumeCount >= 1);
-  assert.ok(report.recovery.stepRetryCount >= 1);
+  // The one step-level replay: an operator's retry of a failed document step.
+  assert.equal(report.recovery.stepRetryCount, 1);
+  assert.equal(report.recovery.stepReplayFailureCount, 0);
+  assert.deepEqual(
+    events
+      .filter((event) => event.traceType === "agent_run_step_replay")
+      .map((event) => [event.action, event.stepType, event.status]),
+    [["retry_step", "document_rag", "completed"]]
+  );
   assert.equal(report.recovery.taskRecoveryScheduledCount, 1);
   assert.equal(report.recovery.taskRecoveryResumeActionCount, 1);
   assert.equal(report.recovery.taskRecoveryResumeFailureCount, 0);
@@ -254,10 +287,10 @@ test("recovery observability eval fails when replay or manual action failures ar
       {
         traceType: "agent_run_recovery",
         eventType: "manual_recovery_action",
-        action: "resume_from_step",
+        action: "cancel",
         status: "failed",
         error: {
-          message: "Resume failed.",
+          message: "Cancel failed.",
         },
       },
     ],

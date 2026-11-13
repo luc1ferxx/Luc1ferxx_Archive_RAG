@@ -50,7 +50,6 @@ const compactRecoveryAction = (action = {}) => ({
   reason: normalizeText(action.reason),
   safety: action.safety
     ? {
-        canAutoReplay: action.safety.canAutoReplay === true,
         reasonCodes: toArray(action.safety.reasonCodes).map(normalizeText),
       }
     : null,
@@ -72,7 +71,6 @@ const compactRecoveryRun = (run = {}) => {
       required: recovery.required === true,
       replaySafety: recovery.replaySafety
         ? {
-            canAutoReplay: recovery.replaySafety.canAutoReplay === true,
             reasonCodes: toArray(recovery.replaySafety.reasonCodes).map(
               normalizeText
             ),

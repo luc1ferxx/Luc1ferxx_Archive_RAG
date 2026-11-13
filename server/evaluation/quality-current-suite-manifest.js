@@ -1,4 +1,4 @@
-export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.16.0";
+export const CURRENT_QUALITY_SUITE_MANIFEST_VERSION = "1.17.0";
 
 // The retrieval architecture every synthetic/feedback report must have run on.
 // It is checked against `summary.retrieval`, which the runner derives from the
@@ -606,14 +606,12 @@ const recoveryChecks = {
   ],
   manual_recovery_actions: [
     "manual_actions_recorded",
-    "resume_after_partial_step_recorded",
     "retry_after_failed_step_recorded",
     "cancel_action_recorded",
     "manual_action_failures_zero",
   ],
   step_replay_actions: [
     "retry_step_recorded",
-    "resume_step_recorded",
     "step_replay_failures_zero",
   ],
   agent_task_recovery: [

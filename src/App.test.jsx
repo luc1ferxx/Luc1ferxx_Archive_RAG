@@ -670,13 +670,12 @@ describe("App", () => {
                   actions: [
                     {
                       safety: {
-                        canAutoReplay: true,
-                        reasonCodes: [],
+                        reasonCodes: ["non_idempotent", "external_write"],
                         stepId: "step-document",
                         stepType: "document_rag",
                       },
                       stepId: "step-document",
-                      type: "resume_from_step",
+                      type: "retry_failed_step",
                     },
                     {
                       type: "cancel",
@@ -684,10 +683,10 @@ describe("App", () => {
                   ],
                   reason: "server_startup_recovery",
                   replaySafety: {
+                    reasonCodes: ["non_idempotent", "external_write"],
                     steps: [
                       {
-                        canAutoReplay: true,
-                        reasonCodes: [],
+                        reasonCodes: ["non_idempotent", "external_write"],
                         stepId: "step-document",
                         stepType: "document_rag",
                       },
@@ -707,9 +706,9 @@ describe("App", () => {
                   ],
                   reason: "requires_approval",
                   replaySafety: {
+                    reasonCodes: ["requires_approval", "non_idempotent"],
                     steps: [
                       {
-                        canAutoReplay: false,
                         reasonCodes: ["requires_approval", "non_idempotent"],
                         stepId: "step-web",
                         stepType: "web_search",
@@ -764,15 +763,18 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("server_startup_recovery")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Resume step" })
+      screen.getByRole("button", { name: "Retry failed step" })
     ).toBeInTheDocument();
+    // No step is ever run on its own, so the panel has no "auto replay"
+    // verdict: it shows what a replay would risk. (That "resume from step" has
+    // no label of its own any more is in workbenchFormatters.test.js.)
+    expect(screen.queryByText(/Auto replay/)).toBeNull();
     expect(screen.getAllByText("Run status").length).toBeGreaterThan(0);
     expect(screen.getByText("document_rag")).toBeInTheDocument();
-    expect(screen.getAllByText("Auto replay allowed").length).toBeGreaterThan(0);
-    expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(
-      screen.getAllByText("Auto replay blocked").length
+      screen.getAllByText("non_idempotent, external_write").length
     ).toBeGreaterThan(0);
+    expect(screen.getByText("web_search")).toBeInTheDocument();
     expect(
       screen.getAllByText("requires_approval, non_idempotent").length
     ).toBeGreaterThan(0);

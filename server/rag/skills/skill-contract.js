@@ -188,14 +188,14 @@ export const describeSkillForPlanner = (skill = {}) => {
 export const describeSkillsForPlanner = (skills = []) =>
   skills.map((skill) => describeSkillForPlanner(skill));
 
-export const isSideEffectingSkill = (skill = {}) =>
-  getSkillContract(skill).effects !== SKILL_EFFECTS.readOnly;
-
 /**
  * The replay-relevant slice of the contract, small enough to persist on every
- * step a skill produces. The recovery layer is handed a stored step, never a
- * live skill, so this is the only route by which a skill's own declaration
- * reaches the decision about whether that step may be re-run unattended.
+ * step a skill produces. Whoever reads a stored step has no live skill, so
+ * this is how the skill's own declaration reaches them: the replay matrix adds
+ * it to the step's reason codes for the operator, and a v3 graph's recovery
+ * compares the stored step input with what the live registry says before it
+ * continues the graph. Nothing re-runs a step unattended on the strength of
+ * this record.
  */
 export const describeSkillReplayContract = (skill = {}) => {
   const contract = getSkillContract(skill);

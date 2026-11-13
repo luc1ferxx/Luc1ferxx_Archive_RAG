@@ -1,6 +1,20 @@
 import { normalizeText } from "../lib/normalize-text.js";
 import { SKILL_EFFECTS } from "./skills/skill-contract.js";
 
+// What may happen to one persisted step after it was interrupted or failed.
+//
+// Nothing replays a step on its own automatically. Startup recovery continues
+// an interrupted execution graph as a whole (agent-run-recovery.js) and hands
+// every other interrupted run to an operator. What is left for a single step
+// is one operator action, `retry_failed_step`, and this matrix says which step
+// types have it and what a retry may repeat. Until ADR 0001 phase 9 the matrix
+// also carried an "auto replay safe" column; its only entry was the
+// `custom_skill` step of the deleted V1 sequential chain.
+//
+// `replayActions` has to agree with the step handlers
+// (agent-run-step-handlers/): a type listed with `retry_failed_step` must have
+// a handler that can retry it. The recovery panel offers the action from this
+// matrix alone, so a type whose handler always refuses must not list it.
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -14,13 +28,14 @@ export const STEP_REPLAY_IDEMPOTENCY = Object.freeze({
   capabilityDefined: "capability_defined",
   dedupedWorkspaceWrite: "deduped_workspace_write",
   externalReadNondeterministic: "external_read_nondeterministic",
+  // Decided by the execution graph that ran the node, never by the step.
+  graphOwned: "graph_owned",
   memoryWritingRag: "memory_writing_rag",
-  readOnlyDeterministic: "read_only_deterministic",
-  readOnlyRag: "read_only_rag",
 });
 
 export const STEP_REPLAY_SAFETY_REASON_CODES = Object.freeze({
   externalWrite: "external_write",
+  graphNodeStep: "graph_node_step",
   missingInput: "missing_input",
   nonIdempotent: "non_idempotent",
   requiresApproval: "requires_approval",
@@ -32,6 +47,11 @@ const STEP_REPLAY_SAFETY_REASON_DETAILS = Object.freeze({
   [STEP_REPLAY_SAFETY_REASON_CODES.externalWrite]: Object.freeze({
     label: "External write",
     message: "Replay may write to workspace or external state.",
+  }),
+  [STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep]: Object.freeze({
+    label: "Graph node",
+    message:
+      "The step is a node of an execution graph and is never replayed on its own.",
   }),
   [STEP_REPLAY_SAFETY_REASON_CODES.missingInput]: Object.freeze({
     label: "Missing input",
@@ -51,7 +71,7 @@ const STEP_REPLAY_SAFETY_REASON_DETAILS = Object.freeze({
   }),
   [STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy]: Object.freeze({
     label: "Unsafe by policy",
-    message: "Replay is not enabled by the registered policy.",
+    message: "The Skill that ran the step declares that it must not be replayed.",
   }),
 });
 
@@ -64,21 +84,22 @@ const freezePolicy = (policy) =>
   });
 
 const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
+  // An approval-capable primary step. Its handler refuses a direct retry (the
+  // step holds no hash-bound approval); what can be retried is the
+  // `capability_call` step an approval queues.
   arxiv_import: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.dedupedWorkspaceWrite,
     optionalInput: ["maxResults", "selectionToken", "selectedArxivIds"],
-    replayActions: ["retry_failed_step"],
+    replayActions: [],
     replayRequiresApproval: true,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.capabilityPolicy,
     requiredInput: ["topic"],
-    retryable: true,
+    retryable: false,
     stepType: "arxiv_import",
     summary:
-      "Workspace-writing arXiv imports replay only from persisted sanitized topic input; importer dedupe protects repeated writes.",
+      "A workspace-writing arXiv import needs approval, so its primary step is not retried on its own. The retry goes through the hash-bound capability_call step an approval queues; importer dedupe protects repeated writes.",
   }),
   capability_call: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.capabilityDefined,
     optionalInput: ["capabilityVersion"],
     replayActions: ["approve", "deny", "retry_failed_step"],
@@ -95,21 +116,23 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
     summary:
       "Capability calls replay only from a hash-bound approved gate and private execution snapshot; idempotency is delegated to the capability adapter.",
   }),
+  // A custom Skill runs only as a node of its execution graph, so its step
+  // has no action of its own: an interrupted graph is continued as a whole,
+  // and a failed node is not retried. The replay guard refuses the step
+  // whatever asks (agent-run-graph-replay-guard.js).
   custom_skill: freezePolicy({
-    autoReplaySafe: true,
-    idempotency: STEP_REPLAY_IDEMPOTENCY.readOnlyRag,
-    optionalInput: ["retrievalPlan", "sessionId", "skillVersion", "userId"],
-    replayActions: ["resume_from_step", "retry_failed_step"],
+    idempotency: STEP_REPLAY_IDEMPOTENCY.graphOwned,
+    optionalInput: [],
+    replayActions: [],
     replayRequiresApproval: false,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.none,
-    requiredInput: ["docIds", "question", "skillId"],
-    retryable: true,
+    requiredInput: [],
+    retryable: false,
     stepType: "custom_skill",
     summary:
-      "Whitelisted custom skills replay through the registered custom skill runner with persisted scope and retrieval input.",
+      "A custom Skill runs only as a node of its execution graph. Its step is never replayed on its own: an interrupted graph is continued by whole-graph recovery, and a failed node is not retried.",
   }),
   document_rag: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["retrievalPlan", "sessionId", "userId"],
     replayActions: ["retry_failed_step"],
@@ -119,10 +142,9 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
     retryable: true,
     stepType: "document_rag",
     summary:
-      "Document RAG can write session and long-term memory. Interrupted work cannot be auto-replayed; an explicit failed-step retry may repeat those writes.",
+      "Document RAG can write session and long-term memory. Interrupted work goes to an operator; an explicit failed-step retry may repeat those writes.",
   }),
   follow_up_retrieval: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["retrievalPlan", "sessionId", "userId"],
     replayActions: ["retry_failed_step"],
@@ -135,7 +157,6 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
       "Follow-up document retrieval shares Document RAG's memory-writing boundary and requires an explicit failed-step retry.",
   }),
   research_question: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.memoryWritingRag,
     optionalInput: ["researchQuestionId", "retrievalPlan", "sessionId", "userId"],
     replayActions: ["retry_failed_step"],
@@ -145,20 +166,20 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
     retryable: true,
     stepType: "research_question",
     summary:
-      "Research questions use the memory-writing RAG chat path. Interrupted work cannot be auto-replayed; an explicit failed-step retry may repeat those writes.",
+      "Research questions use the memory-writing RAG chat path. Interrupted work goes to an operator; an explicit failed-step retry may repeat those writes.",
   }),
+  // An approval-capable primary step, like arxiv_import above.
   web_search: freezePolicy({
-    autoReplaySafe: false,
     idempotency: STEP_REPLAY_IDEMPOTENCY.externalReadNondeterministic,
     optionalInput: ["maxResults"],
-    replayActions: ["retry_failed_step"],
+    replayActions: [],
     replayRequiresApproval: true,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.capabilityPolicy,
     requiredInput: ["question"],
-    retryable: true,
+    retryable: false,
     stepType: "web_search",
     summary:
-      "Web search retry is an external read through the capability adapter and is excluded from auto replay.",
+      "A web search is an external read that needs approval, so its primary step is not retried on its own. The retry goes through the hash-bound capability_call step an approval queues; interrupted work goes to an operator.",
   }),
 });
 
@@ -167,16 +188,23 @@ export const getStepReplaySafetyMatrix = () => STEP_REPLAY_SAFETY_MATRIX;
 export const listStepReplaySafetyPolicies = () =>
   Object.values(STEP_REPLAY_SAFETY_MATRIX);
 
-export const getStepReplaySafetyPolicy = (stepType) =>
-  STEP_REPLAY_SAFETY_MATRIX[normalizeText(stepType).toLowerCase()] ?? null;
+// Own keys only: a step type such as "constructor" must not resolve to
+// something inherited from Object.prototype.
+export const getStepReplaySafetyPolicy = (stepType) => {
+  const key = normalizeText(stepType).toLowerCase();
 
-export const getAutoReplaySafeStepTypes = () =>
-  listStepReplaySafetyPolicies()
-    .filter((policy) => policy.autoReplaySafe)
-    .map((policy) => policy.stepType);
+  return Object.hasOwn(STEP_REPLAY_SAFETY_MATRIX, key)
+    ? STEP_REPLAY_SAFETY_MATRIX[key]
+    : null;
+};
 
-export const isAutoReplaySafeStepType = (stepType) =>
-  Boolean(getStepReplaySafetyPolicy(stepType)?.autoReplaySafe);
+// The one action left for a single step: may an operator retry a failed step
+// of this type on its own. A type without a policy has no handler either, so
+// it is not retryable.
+export const isStepRetryAllowed = (stepType) =>
+  Boolean(
+    getStepReplaySafetyPolicy(stepType)?.replayActions.includes("retry_failed_step")
+  );
 
 const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -291,17 +319,15 @@ const hasReplayApproval = ({ context, policy }) => {
 };
 
 /**
- * A step type is a coarse category. The same custom_skill step now covers a
- * whitelisted RAG read and -- once the typed skill contract admits one -- a
- * skill that writes, so the step type alone can no longer decide replay. Where
- * the executing skill persisted its own contract with the step, that
- * declaration narrows the step-type verdict.
+ * A step type is a coarse category: the same type can cover a RAG read and a
+ * step that writes. Where the Skill that ran the step persisted its own
+ * contract with it (describeSkillReplayContract), that declaration adds to
+ * what the step type says a replay would risk.
  *
- * Narrowing only, in both directions it matters: a declaration can withhold
- * auto-replay but never grant it, and a step recorded before the contract
- * existed declares nothing and so keeps exactly the verdict it has today.
- * Unrecognised effects are treated as writing, because a value we cannot read
- * is not evidence that the skill is safe.
+ * It only ever adds a reason. A step recorded before the contract existed
+ * declares nothing and keeps the codes of its type. Unrecognised effects are
+ * treated as writing, because a value we cannot read is not evidence that the
+ * Skill is safe.
  */
 const getDeclaredContractReasonCodes = (context) => {
   const declared = context?.input ?? {};
@@ -327,7 +353,7 @@ const getDeclaredContractReasonCodes = (context) => {
   return reasonCodes;
 };
 
-const getPolicyReasonCodes = ({ configuredAutoReplaySafe, context, policy }) => {
+const getPolicyReasonCodes = ({ context, policy }) => {
   const reasonCodes = [];
   const missingInput = getMissingRequiredInput({
     context,
@@ -354,14 +380,11 @@ const getPolicyReasonCodes = ({ configuredAutoReplaySafe, context, policy }) => 
     reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent);
   }
 
-  reasonCodes.push(...getDeclaredContractReasonCodes(context));
-
-  if (
-    (!policy.autoReplaySafe || !configuredAutoReplaySafe) &&
-    reasonCodes.length === 0
-  ) {
-    reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.unsafeByPolicy);
+  if (policy.idempotency === STEP_REPLAY_IDEMPOTENCY.graphOwned) {
+    reasonCodes.push(STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep);
   }
+
+  reasonCodes.push(...getDeclaredContractReasonCodes(context));
 
   return {
     missingInput,
@@ -385,7 +408,6 @@ const getReasonDetails = ({ missingInput = [], reasonCodes = [] } = {}) =>
 const serializePolicy = (policy) =>
   policy
     ? {
-        autoReplaySafe: policy.autoReplaySafe,
         idempotency: policy.idempotency,
         optionalInput: policy.optionalInput,
         replayActions: policy.replayActions,
@@ -398,17 +420,16 @@ const serializePolicy = (policy) =>
       }
     : null;
 
+// The reason codes say what a replay of the step would risk or lack. Every
+// registered step type has at least one, which is why none is replayed without
+// an operator.
 const buildStepReplaySafetyAssessment = ({
-  autoReplayStepTypes = getAutoReplaySafeStepTypes(),
   approvedGate = null,
   run = {},
   step = {},
 } = {}) => {
   const stepType = normalizeText(step.type).toLowerCase();
   const policy = getStepReplaySafetyPolicy(stepType);
-  const configuredAutoReplaySafe = toArray(autoReplayStepTypes)
-    .map((type) => normalizeText(type).toLowerCase())
-    .includes(stepType);
 
   if (!policy) {
     const reasonCodes = [
@@ -416,9 +437,6 @@ const buildStepReplaySafetyAssessment = ({
     ];
 
     return {
-      autoReplaySafe: false,
-      canAutoReplay: false,
-      configuredAutoReplaySafe: false,
       idempotency: null,
       label: step.label ?? stepType ?? "Step",
       missingInput: [],
@@ -439,19 +457,11 @@ const buildStepReplaySafetyAssessment = ({
     step,
   });
   const { missingInput, reasonCodes } = getPolicyReasonCodes({
-    configuredAutoReplaySafe,
     context,
     policy,
   });
 
   return {
-    autoReplaySafe: policy.autoReplaySafe,
-    canAutoReplay:
-      policy.autoReplaySafe &&
-      configuredAutoReplaySafe &&
-      missingInput.length === 0 &&
-      reasonCodes.length === 0,
-    configuredAutoReplaySafe,
     idempotency: policy.idempotency,
     label: step.label ?? policy.stepType,
     missingInput,

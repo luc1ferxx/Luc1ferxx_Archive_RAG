@@ -41,7 +41,6 @@ import { createAgentRunRecoveryService } from "./rag/agent-run-recovery.js";
 import { createAgentRunService } from "./rag/agent-runs.js";
 import { createAgentRunStepExecutor } from "./rag/agent-run-step-executor.js";
 import {
-  createCustomSkillStepExecutor,
   createDocumentRagStepExecutor,
   createResearchQuestionStepExecutor,
 } from "./rag/agent-run-step-handlers/index.js";
@@ -514,10 +513,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
           skillRegistry,
           webChatService,
         }),
-      executeCustomSkillStep: createCustomSkillStepExecutor({
-        ragService,
-        skillRegistry,
-      }),
       executeDocumentRagStep: createDocumentRagStepExecutor({
         ragService,
       }),
@@ -529,7 +524,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     configuredAgentRunRecoveryService ??
     createAgentRunRecoveryService({
       agentRunService,
-      agentRunStepExecutor,
       resumeExecutionGraph: ({ accessScope, checkpoint, run, runId }) =>
         resumeAgentExecutionGraphRun({
           accessScope,

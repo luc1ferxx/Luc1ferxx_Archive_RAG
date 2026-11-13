@@ -158,7 +158,7 @@ routes/chat.js handleChatRequest
 
 坦白用了（FAQ #22 已是这个口径）。所有权讲这四样，并且每样都准备一个具体例子：
 
-1. **边界是你定的**："模型只提议、运行时决定"，哪些步骤允许自动重放、哪些转人工。
+1. **边界是你定的**："模型只提议、运行时决定"，崩溃后哪些运行自动续跑（只续跑整张图，步骤不单独重放）、哪些转人工、哪些失败的步骤允许人重试。
 2. **指标是你选的**：为什么用外部标注的 QASPER、为什么要配对 bootstrap、为什么分 cited 和 context 两种证据召回。
 3. **你知道什么时候不信一个数字**：伪 embedding 让 hybrid 看起来比 BM25 差；评测脚本只读了拆分后的第一条 claim，冤枉了 LLM 评审。
 4. **你自己定位过 bug**：`Number(null)` 让 Retry-After 失效；取消的调用被熔断器记成失败（234 次里 226 次 503）。
@@ -194,7 +194,7 @@ routes/chat.js handleChatRequest
 4. 评测方法论三件事：伪 embedding 反转排序；QASPER dev 821 题配对 bootstrap，hybrid 只显著好于 BM25；规则事先定、train 调 dev 确认（按句切块、门控阈值都是「测了不改」）
 5. 结构化输出故事：降级 56%→8%、通过 47%→80%；pattern 而非 maxLength；不限长 rationale 3810 token；parseFirstJsonValue 取第一个平衡 JSON；只修 prompt 的对照组没提升
 6. LangGraph 取舍：需要 checkpoint/中断的只有两张图；外层 StateGraph +29–35%、Pregel 后并发 1 仍 +17.6%，没过 10% 门、一度留在原生；2026-11-13 用户决定只留一种运行时，外层也迁过去，门没重测，接受进程内每次运行多约 0.3 ms CPU；自定义 checkpointer 写 run 行（外层图不带 checkpointer）；drain 代替 signal；golden 102 + 32 文件后删掉两处原生实现，回退只能 git revert；2026-11-13 还删了 custom Skill 阶段的 V1 顺序链（最后一条不走 LangGraph 的路径）：按代码和默认配置它作为兜底在生产里已经不会真正执行任何 Skill（没有生产流量数据），先把链的回答写进测试再删，失去手动重试单个 Skill 步骤和两个 trajectory 用例，不是性能改进（3.49）
-7. 持久化与恢复：revision CAS 同语句返回事件；重放矩阵；claim fencing；自动续跑范围很窄；不是 exactly-once；主动承认 run 没有租约、多实例重启会误判
+7. 持久化与恢复：revision CAS 同语句返回事件；重放矩阵（登记哪类失败步骤能由人重试）；claim fencing；自动续跑范围很窄（只续跑两种图，步骤不单独重放，其余转人工，3.50）；不是 exactly-once；主动承认 run 没有租约、多实例重启会误判
 8. 审批防 TOCTOU：approvalObjectHash + 一个 CAS 写 gate/快照/checkpoint；resume 只用运行时标记；跨进程 14/14 写入恰 1；但 4 个 custom Skill 全只读、v3 默认 off
 9. LLM 容错：等抖动退避、Retry-After 下限、超时可重试、空响应重试、注册表切备用；在途 8、5 次熔断 30 s、429 不计、取消不计；429 79→100%、宕机 0→100%（须备用）；Number(null) 和取消计失败两个 bug
 10. 多租户：RLS 兜漏写过滤（9/9→0/9）；一次往返流水线（167→22，4 实例 +37.9%）；RLS 下 GIN 不可用 → SECURITY DEFINER 函数内收窄；默认鉴权关、lenient fail-open、RLS 不防注入
@@ -297,6 +297,7 @@ routes/chat.js handleChatRequest
 - 删原生前冻结 golden：8 套件 102 文件；52 个调度契约测试原样跑在 LangGraph 上（3.30）；删外层原生循环前同样先冻结，再加 32 个文件（3.48）
 - 2026-11-13 同一天删了 custom Skill 阶段的 V1 顺序链，最后一条不走 LangGraph 的路径（3.49）：加记录点跑全量测试和三个确定性评测，阶段进入 188 次、被拒后回落 14 次、全在测试里，按代码和默认配置回落在生产里不执行任何 Skill（没有生产流量数据）；先把链的回答逐字写进测试（agent-custom-skill-budget.test.mjs），再删；预算付不起的节点跳过，其他原因被拒不执行任何 Skill、逐个记原因
 - 这次删除的代价要主动说：不能再手动重试单个失败的 custom Skill 步骤；trajectory 少了两个用例（19 个 84 项检查 → 17 个 76 项，阈值没改）；没量性能，不能说成性能改进
+- 同一天的阶段 9 接着清理（3.50）：阶段 8 留下的、只有顺序链存下的旧 run 走得到的 custom_skill 步骤独立处理器、启动时的单步重放和 resume_from_step 动作也删了，启动恢复自己只续跑中断的图，其余转人工，恢复面板只剩「重试失败步骤」和「取消」。同样先冻结再删除（test/agent-skill-step-replay.test.mjs，冻结时 10 个测试，独立复核后 12 个）。独立复核没有高级缺陷，另外找到同一类「点了必 409」的按钮两处（失败的 web_search / arxiv_import 步骤、聊天答案里的 Retry），一并去掉；恢复评测 8 个用例不变、检查项 29 → 27，阈值没改，CI 的 Node 22 还没跑过
 - 局限：golden 只覆盖固定场景（在 Node 24 上生成，CI 的 Node 22 上通过）、两个 PG 集成套件 native 侧没冻结；阶段 7 没有跑新的压测；回退只能 git revert
 
 ### 5.5 Agent 跑到一半进程崩了怎么办？
@@ -315,8 +316,9 @@ routes/chat.js handleChatRequest
 **答题骨架**
 
 - run 是 PG 一行 + revision CAS（postgres-agent-run-store.js commitRunUpdate），同一语句返回事件列表
-- 自动续跑很窄：没有图 checkpoint 的 custom_skill 步骤（只有 2026-11-13 之前由 V1 顺序链存下的 run 里有，新的 run 不再产生）；外层只剩 custom_skills 的 guarded 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan）；v3 guarded run。主 document_rag 在途 → 转人工
-- 不是 exactly-once：重放矩阵 STEP_REPLAY_SAFETY_MATRIX + 写前意图 + 幂等键 + 在途未知一律转人工
+- 自动续跑很窄，只有两种，都是续跑整张图：外层只剩 custom_skills 的 guarded 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan）；v3 guarded run。其余中断的 run 都转人工（explainInterruptedRun 给原因），主 document_rag 在途也是。步骤不单独重放：第三种「没有图 checkpoint 的 custom_skill 步骤整步重放」只有 V1 顺序链存下的旧 run 走得到，2026-11-13 阶段 9 删除（3.50）
+- 人能做的只有两个动作：重试失败步骤（只对矩阵允许的步骤类型给出，custom_skill 不在其中）和取消
+- 不是 exactly-once：重放矩阵 STEP_REPLAY_SAFETY_MATRIX（登记哪类失败步骤能由人重试）+ 写前意图 + 幂等键 + 在途未知一律转人工
 - fencing：claimExecutionGraphResume 写 UUID claim，旧 worker 下一次写被 AGENT_GRAPH_EXECUTION_FENCED 拒；挡不住它已发出的外部调用，所以要幂等键
 - 主动承认（读代码推断、未测）：listRecoverable 只按 status 选，run 没有租约和心跳，多实例重启会误判
 - Temporal 没正式评估：粒度只需节点边界 + 审批暂停，已有 PG + RLS，ALS 上下文要穿 activity 边界
@@ -479,7 +481,7 @@ routes/chat.js handleChatRequest
 | hybrid 检索比纯稠密检索效果更好 | QASPER dev 821 题 hybrid−dense +0.006 [−0.019, +0.031] 不显著（CURRENT-TRUTH 3.1） | hybrid 显著好于单用 BM25（+0.074），和纯稠密没有显著差异，也从没显著更差 |
 | 把稀疏检索换成 BM25 后召回提升了 | hybrid 路上 BM25 对 ts_rank_cd 是 −0.0012 [−0.0122, +0.0097]，不显著也没达到非劣性下界；默认 bm25 是产品决定（3.18） | BM25 是标准、可对照的打分，默认用它是我们的选择；QASPER 上两者没有显著差异 |
 | 迁 LangGraph 提升了性能 / 外层计划后来过了压测门 | 外层计划放上去并发 1 每请求 CPU +17.6%，过不了 10% 的门（3.29）；2026-11-13 迁过去时门没有重测，进程内每次运行多 0.29 ms CPU，是用户为了只留一种运行时接受的代价（3.48）。外层图不带 checkpointer，文档循环仍是阶段内部的普通代码（V1 顺序链 2026-11-13 已删除，3.49） | Agent 现在只有 LangGraph 一种运行时；外层计划是明知压测门没过、接受约 0.3 ms 开销迁过去的，不是因为更快，持久化仍靠 run 的步骤 |
-| 进程崩了能从断点自动续跑 | 自动续跑只覆盖没有图 checkpoint 的 custom_skill 步骤（只在 2026-11-13 之前由 V1 顺序链存下的 run 里有）、外层只剩 custom_skills 的 guarded 图、v3 guarded run；最常见的主 document_rag 在途会转人工 | 只在能证明安全时自动续跑，在途未知和会写记忆的步骤一律转人工 |
+| 进程崩了能从断点自动续跑 / 只读的步骤会自动重放 | 自动续跑只覆盖两种图：外层只剩 custom_skills 的 guarded 图、v3 guarded run；步骤不单独重放，以前唯一会整步重放的「没有图 checkpoint 的 custom_skill 步骤」2026-11-13 阶段 9 删除（3.50）；最常见的主 document_rag 在途会转人工 | 只在能证明安全时自动续跑，而且只续跑整张图；其余中断的 run 交给人，人只能重试失败步骤或取消 |
 | 保证 exactly-once / 副作用不会重复执行 | 显式重试主 document_rag 会再记一次会话；Capability 幂等交给 adapter；外部写和落盘之间总有崩溃窗口 | 自动恢复路径不重放副作用；写型 Capability 在 adapter 遵守幂等键时做到效果一次 |
 | 版本号 CAS 防止两个 worker 重复执行副作用 | CAS 和 claim 只挡旧 worker 的状态写，挡不住它已经发出的外部调用 | CAS/claim 挡住旧 worker 的状态写；外部写靠幂等键，在途未知靠转人工 |
 | 我把系统拆成微服务，性能和扩展性都提升了 | 同机同进程数单体快 1.56 倍；只在一台机器上测过；compose.services.yml 只用 docker compose config 校验过、从没构建启动 | 拆分是可选部署形态，契约测试保证与单体一致；单机实测只有扩 agent 层有效，价值是按瓶颈扩容和故障隔离 |
@@ -597,7 +599,7 @@ routes/chat.js handleChatRequest
 - 节点执行：startGraphStep（带 resumeClaim 的 CAS）→ 写前意图 → 执行 → 结算 CAS
 - 审批：preflight 停靠 → interrupt({kind,nodeId,gateId:null}) → pauseExecutionGraphForApproval 一个 CAS 写 gate+快照+checkpoint+waiting_for_user
 - 批准：带 approvalObjectHash → applyExecutionGraphApprovalAction → prepareUnifiedGraphApprovalResume 对账 → Command({resume: RUNTIME_RESUME_MARKER}) → verifyCapabilityGraphApproval → 幂等键执行一次
-- 崩溃后启动：listRecoverable → 对账 checkpoint 与 steps → claimExecutionGraphResume 写 UUID → 续跑；在途未知 → markManualRecovery
+- 崩溃后启动：listRecoverable → 对账 checkpoint 与 steps → claimExecutionGraphResume 写 UUID → 续跑；在途未知、或没有图可续（步骤不单独重放）→ markManualRecovery
 - 旧 worker 回来：下一次写被 AGENT_GRAPH_EXECUTION_FENCED 拒；标出缺陷：没有 run 租约，多实例重启会误判
 
 ### 8.4 画一条租户语句在数据库里怎么被隔离（含稀疏检索）
@@ -633,8 +635,9 @@ routes/chat.js handleChatRequest
 | CURRENT-TRUTH 停在 3.30 | 新增 3.31（PDF 按页分流与 worker 池）和 3.32（租户隔离阶段 1–5） |
 | 180 秒稿、FAQ #18、故事 9（2026-11-13 改）："LangGraph 只调度两张图，外层计划长期留在原生循环" | 外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除（CURRENT-TRUTH 3.48）；压测门没有重测、没有通过，是明说接受每次运行约 0.3 ms CPU 的开销，不是性能提升 |
 | FAQ #21、CURRENT-TRUTH §2 和 §4（2026-11-13 改）："V2 是默认执行器，V1 顺序链留作整图被拒时的兜底和运维回退" | V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT` 的 `off`、`shadow` 已删除，custom Skill 只走图（CURRENT-TRUTH 3.49）；预算付不起的节点跳过，其他原因被拒时不执行任何 Skill；手动重试单个失败的 Skill 步骤没有了，trajectory 从 19 个用例变成 17 个；不是性能改进 |
+| FAQ #4、#22，CURRENT-TRUTH §2 和 §4（2026-11-13 阶段 9 之后改）："启动时自动续跑有三种情形，第三种是没有图 checkpoint 的 `custom_skill` 步骤整步重放"；"哪些步骤允许自动重放" | 两种，都是续跑整张图；步骤不单独重放，其余中断的 run 交给人（CURRENT-TRUTH 3.50）。人只能重试失败步骤或取消，哪类步骤能重试由重放矩阵登记，`custom_skill` 不能；旧链留下的 run 中断了只能取消。恢复评测 8 个用例、检查项从 29 变成 27，阈值没改 |
 
-FAQ 新增了三题（18 LangGraph 取舍、19 多租户、20 数据库往返），原来的 18、19 两道反思题顺延成 21、22；故事集新增故事 8（取消被熔断器记成失败）和故事 9（外层计划上 LangGraph 两次压测不过门）。2026-11-13 起 FAQ 18 的题目改成"外层计划压测没过门，为什么最后还是放到了 LangGraph 上"，故事 9 补了后续。同一天阶段 8 删掉 V1 顺序链之后，180 秒稿、FAQ 3、4、16、18、21 和故事 9 又各补了一处（故事 9 多了"同一天的收尾"）。
+FAQ 新增了三题（18 LangGraph 取舍、19 多租户、20 数据库往返），原来的 18、19 两道反思题顺延成 21、22；故事集新增故事 8（取消被熔断器记成失败）和故事 9（外层计划上 LangGraph 两次压测不过门）。2026-11-13 起 FAQ 18 的题目改成"外层计划压测没过门，为什么最后还是放到了 LangGraph 上"，故事 9 补了后续。同一天阶段 8 删掉 V1 顺序链之后，180 秒稿、FAQ 3、4、16、18、21 和故事 9 又各补了一处（故事 9 多了"同一天的收尾"）。阶段 9（custom Skill 步骤不再单独重放）之后，FAQ 4 改了自动续跑的情形（三种变两种）和人能做的动作，FAQ 22 改了一处措辞；180 秒稿和故事集没有动。
 
 ## 10. 练习计划
 

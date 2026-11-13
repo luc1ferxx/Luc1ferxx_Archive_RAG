@@ -14,7 +14,6 @@ import {
 } from "../rag/agent-execution-graph-checkpoint.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
-  createCustomSkillStepExecutor,
   createDocumentRagStepExecutor,
   createDefaultAgentRunStepHandlerRegistry,
   createResearchQuestionStepExecutor,
@@ -288,14 +287,16 @@ test("agent run step handler registry resolves known step handlers", () => {
     })?.id,
     "follow_up_retrieval"
   );
+  // No handler for a custom Skill step: a custom Skill runs only as a node of
+  // its execution graph.
   assert.equal(
     registry.resolve({
       step: {
         type: "custom_skill",
         kind: "tool_call",
       },
-    })?.id,
-    "custom_skill"
+    }),
+    null
   );
   assert.equal(
     registry.resolve({
@@ -442,111 +443,20 @@ test("agent run step executor resumes an approved capability step", async () => 
   );
 });
 
-test("agent run step executor resumes a persisted pending document step", async () => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
-  const calls = [];
-  const recordedReplayEvents = [];
+test("agent run step executor has no resume: an interrupted step is never run on its own", () => {
   const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeDocumentRagStep: createDocumentRagStepExecutor({
-      ragService: {
-        chat: async (docIds, question, options) => {
-          calls.push({
-            docIds,
-            options,
-            question,
-          });
-
-          return {
-            citations: [
-              {
-                docId: "doc-1",
-                title: "Policy",
-              },
-            ],
-            text: `Resumed document answer: ${question}`,
-          };
-        },
-      },
+    agentRunService: createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
     }),
-    recordStepReplayTrace: async (event) => recordedReplayEvents.push(event),
   });
 
-  await agentRunService.createRun({
-    accessScope,
-    goal: "Resume document step",
-    input: {
-      docIds: ["doc-1"],
-    },
-    runId: "run-document-resume",
-    status: AGENT_RUN_STATUSES.waitingForUser,
-  });
-  await agentRunService.updateRun({
-    accessScope,
-    runId: "run-document-resume",
-    patch: {
-      steps: [
-        {
-          id: "document-step",
-          input: {
-            docIds: ["doc-1"],
-            question: "What is annual leave?",
-          },
-          kind: "tool_call",
-          status: "pending",
-          type: "document_rag",
-        },
-      ],
-    },
-  });
-
-  const resumed = await executor.resumeStep({
-    accessScope,
-    runId: "run-document-resume",
-    stepId: "document-step",
-  });
-
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].docIds, ["doc-1"]);
-  assert.equal(calls[0].question, "What is annual leave?");
-  assert.equal(calls[0].options.includeRetrievedContexts, true);
-  assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
-  assert.equal(resumed.response.agentMode, "document");
-  assert.match(resumed.response.agentAnswer, /Resumed document answer/);
-  assert.equal(recordedReplayEvents.length, 1);
-  assert.deepEqual(
-    {
-      action: recordedReplayEvents[0].action,
-      runId: recordedReplayEvents[0].runId,
-      status: recordedReplayEvents[0].status,
-      stepId: recordedReplayEvents[0].stepId,
-      stepType: recordedReplayEvents[0].stepType,
-      traceType: recordedReplayEvents[0].traceType,
-    },
-    {
-      action: "resume_step",
-      runId: "run-document-resume",
-      status: "completed",
-      stepId: "document-step",
-      stepType: "document_rag",
-      traceType: "agent_run_step_replay",
-    }
-  );
-  assert.equal(
-    resumed.run.steps.find((step) => step.id === "document-step").status,
-    "completed"
-  );
-  assert.deepEqual(
-    resumed.run.events.map((event) => event.type),
-    [
-      "run_created",
-      "step_started",
-      "step_completed",
-      "run_completed",
-    ]
-  );
+  // An approval runs the capability step it queued, and an operator retries a
+  // failed step. An interrupted graph is continued as a whole by startup
+  // recovery; anything else interrupted goes to an operator.
+  assert.deepEqual(Object.keys(executor).sort(), [
+    "applyApprovalAction",
+    "retryStep",
+  ]);
 });
 
 test("agent run step executor retries an approved capability step", async () => {
@@ -1212,234 +1122,105 @@ test("agent run step executor retries follow_up_retrieval through the wired docu
   assert.equal(retryStep.output.citationCount, 1);
 });
 
-test("agent run step executor retries custom_skill through the wired custom handler", async () => {
+/**
+ * A custom Skill runs only as a node of its execution graph. Until ADR 0001
+ * phase 9 a `custom_skill` step without a `nodeId` (a step of the deleted V1
+ * sequential chain) was retried and resumed through a standalone handler,
+ * which ran the Skill outside any graph. Now the replay guard refuses every
+ * `custom_skill` step, at the executor and inside the run store's own
+ * mutations. What each shape did before, and does now, is pinned as literals
+ * in agent-skill-step-replay.test.mjs.
+ */
+test("agent run step executor never runs a custom_skill step, whatever its shape", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
-  const calls = [];
-  const customSkill = {
-    id: "risk_review",
-    version: "1.0.0",
-    label: "Risk Review",
-    kind: "custom",
-    budgetKey: "customSkillCalls",
-    requiresAccessScope: true,
-    match: () => false,
-    execute: async (context) => {
-      calls.push(context);
-
-      return {
-        text: `Retried custom answer: ${context.question}`,
-        citations: [
-          {
-            docId: "doc-1",
-            pageNumber: 4,
-          },
-        ],
-        abstained: false,
-      };
-    },
-  };
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: {
-        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
-      },
-    }),
-  });
-
-  await createCompletedRunWithSteps(agentRunService, {
-    goal: "Review risk.",
-    input: {
-      docIds: ["doc-1"],
-    },
-    runId: "run-custom-retry",
-    steps: [
-      {
-        id: "custom_skill:risk_review",
-        type: "custom_skill",
-        kind: "tool_call",
-        label: "Risk Review",
-        status: "failed",
-        input: {
-          docIds: ["doc-1"],
-          question: "Review risk.",
-          skillId: "risk_review",
-          skillVersion: "1.0.0",
-        },
-      },
-    ],
-  });
-
-  const retried = await executor.retryStep({
-    accessScope,
-    runId: "run-custom-retry",
-    stepId: "custom_skill:risk_review",
-  });
-  const retryStep = retried.run.steps.find(
-    (step) => step.retryOfStepId === "custom_skill:risk_review"
-  );
-
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].accessScope, accessScope);
-  assert.deepEqual(calls[0].docIds, ["doc-1"]);
-  assert.equal(calls[0].question, "Review risk.");
-  assert.equal(retried.response.agentMode, "risk_review");
-  assert.match(retried.response.agentAnswer, /Retried custom answer/);
-  assert.equal(retryStep.status, "completed");
-  assert.equal(retryStep.output.citationCount, 1);
-});
-
-test("legacy V1 custom_skill prefix still resumes without a graph checkpoint", async () => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
-  const calls = [];
-  const skill = {
-    id: "risk_review",
-    version: "1.0.0",
-    label: "Risk Review",
-    kind: "custom",
-    budgetKey: "customSkillCalls",
-    requiresAccessScope: true,
-    match: () => false,
-    execute: async (context) => {
-      calls.push(context);
-      return {
-        text: "Legacy V1 replay result.",
-        citations: [{ docId: "doc-1", pageNumber: 1 }],
-        abstained: false,
-      };
-    },
-  };
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: { get: (skillId) => skillId === skill.id ? skill : null },
-    }),
-  });
-  const runId = "legacy-v1-custom-resume";
-
-  await agentRunService.createRun({
-    accessScope,
-    goal: "Review risk.",
-    input: { docIds: ["doc-1"] },
-    runId,
-    status: AGENT_RUN_STATUSES.waitingForUser,
-  });
-  await agentRunService.completeRun({
-    accessScope,
-    runId,
-    status: AGENT_RUN_STATUSES.waitingForUser,
-    steps: [{
+  const executor = createAgentRunStepExecutor({ agentRunService });
+  const shapes = {
+    // The chain's step id happened to equal the id a graph node has today.
+    "chain-step-with-node-style-id": {
       id: "custom_skill:risk_review",
-      type: "custom_skill",
-      kind: "tool_call",
-      label: "Risk Review",
-      status: "paused",
       input: {
         docIds: ["doc-1"],
         question: "Review risk.",
         skillId: "risk_review",
         skillVersion: "1.0.0",
       },
-    }],
-  });
-
-  const resumed = await executor.resumeStep({
-    accessScope,
-    runId,
-    stepId: "custom_skill:risk_review",
-  });
-
-  assert.equal(calls.length, 1);
-  assert.equal(resumed.run.status, AGENT_RUN_STATUSES.completed);
-  assert.equal(resumed.response.agentAnswer, "Legacy V1 replay result.");
-});
-
-/**
- * The persisted contract is what the step said about itself when it ran, and a
- * deploy can land between the interruption and the replay. The registry holds
- * what the skill is now, so this is the authoritative check: re-executing a
- * skill that writes needs the approval machinery a blind step replay does not
- * have, whatever the stored record claims.
- */
-test("agent run step executor refuses to replay a skill that now declares a side effect", async () => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
-  const calls = [];
-  const writingSkill = {
-    id: "publish_report",
-    version: "2.0.0",
-    label: "Publish Report",
-    kind: "custom",
-    budgetKey: "customSkillCalls",
-    requiresAccessScope: true,
-    effects: SKILL_EFFECTS.workspaceWrite,
-    match: () => false,
-    execute: async (context) => {
-      calls.push(context);
-
-      return { abstained: false, citations: [], text: "published" };
+    },
+    "chain-step-with-plain-id": {
+      id: "custom-step",
+      input: { docIds: ["doc-1"], question: "Review risk.", skillId: "risk_review" },
+    },
+    // A stored read-only contract never made a step replayable by itself, and
+    // there is nothing left for it to make replayable.
+    "step-with-a-read-only-contract": {
+      id: "custom-step",
+      input: {
+        docIds: ["doc-1"],
+        effects: SKILL_EFFECTS.readOnly,
+        question: "Publish the review.",
+        replaySafe: true,
+        skillId: "publish_report",
+        skillVersion: "1.0.0",
+      },
+    },
+    // The guard reads the type the way the matrix and the handlers do.
+    "step-with-an-oddly-cased-type": {
+      id: "custom-step",
+      input: { docIds: ["doc-1"], question: "Review risk.", skillId: "risk_review" },
+      type: " Custom_Skill ",
     },
   };
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: {
-        get: (skillId) => (skillId === writingSkill.id ? writingSkill : null),
-      },
-    }),
-  });
+  const refused = (error) => {
+    assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
+    assert.equal(error.status, 409);
+    return true;
+  };
 
-  await createCompletedRunWithSteps(agentRunService, {
-    goal: "Publish the review.",
-    input: {
-      docIds: ["doc-1"],
-    },
-    runId: "run-custom-write-retry",
-    steps: [
-      {
-        id: "custom-step",
-        type: "custom_skill",
-        kind: "tool_call",
-        label: "Publish Report",
-        status: "failed",
-        input: {
-          docIds: ["doc-1"],
-          // The record still carries the read-only contract this skill had when
-          // the step ran. It is stale, and it must not be what decides.
-          effects: SKILL_EFFECTS.readOnly,
-          question: "Publish the review.",
-          replaySafe: true,
-          skillId: "publish_report",
-          skillVersion: "1.0.0",
+  for (const [shape, step] of Object.entries(shapes)) {
+    const runId = `run-${shape}`;
+
+    await createCompletedRunWithSteps(agentRunService, {
+      goal: "Review risk.",
+      input: { docIds: ["doc-1"] },
+      runId,
+      steps: [
+        {
+          type: "custom_skill",
+          ...step,
+          kind: "tool_call",
+          label: "Risk Review",
+          status: "failed",
         },
-      },
-    ],
-  });
+      ],
+    });
 
-  await assert.rejects(
-    () =>
-      executor.retryStep({
-        accessScope,
-        runId: "run-custom-write-retry",
-        stepId: "custom-step",
-      }),
-    (error) => {
-      assert.match(error.message, /side effect/i);
-      assert.equal(error.status, 409);
+    const before = await agentRunService.getRun({ accessScope, runId });
 
-      return true;
-    }
-  );
-
-  assert.deepEqual(calls, []);
+    await assert.rejects(
+      () => executor.retryStep({ accessScope, runId, stepId: step.id }),
+      refused,
+      shape
+    );
+    await assert.rejects(
+      () => agentRunService.retryStep({ accessScope, runId, stepId: step.id }),
+      refused,
+      shape
+    );
+    await assert.rejects(
+      () =>
+        agentRunService.updateRunStep({
+          accessScope,
+          eventType: "step_started",
+          runId,
+          status: "running",
+          stepId: step.id,
+        }),
+      refused,
+      shape
+    );
+    assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before, shape);
+  }
 });
 
 test("agent run step executor retries research_question through the wired research handler", async () => {
@@ -1517,77 +1298,6 @@ test("agent run step executor retries research_question through the wired resear
   assert.match(retried.response.agentAnswer, /Retried research answer/);
   assert.equal(retryStep.status, "completed");
   assert.equal(retryStep.output.citationCount, 1);
-});
-
-test("agent run step executor persists failed custom_skill retry state", async () => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
-  const customSkill = {
-    id: "risk_review",
-    version: "1.0.0",
-    label: "Risk Review",
-    kind: "custom",
-    budgetKey: "customSkillCalls",
-    requiresAccessScope: true,
-    match: () => false,
-    execute: async () => {
-      throw new Error("custom retry failed");
-    },
-  };
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: {
-        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
-      },
-    }),
-  });
-
-  await createCompletedRunWithSteps(agentRunService, {
-    goal: "Review risk.",
-    input: {
-      docIds: ["doc-1"],
-    },
-    runId: "run-custom-retry-fails",
-    steps: [
-      {
-        id: "custom-step",
-        type: "custom_skill",
-        kind: "tool_call",
-        label: "Risk Review",
-        status: "failed",
-        input: {
-          docIds: ["doc-1"],
-          question: "Review risk.",
-          skillId: "risk_review",
-        },
-      },
-    ],
-  });
-
-  await assert.rejects(
-    () =>
-      executor.retryStep({
-        accessScope,
-        runId: "run-custom-retry-fails",
-        stepId: "custom-step",
-      }),
-    /custom retry failed/
-  );
-
-  const failedRun = await agentRunService.getRun({
-    accessScope,
-    runId: "run-custom-retry-fails",
-  });
-  const failedRetryStep = failedRun.steps.find(
-    (step) => step.retryOfStepId === "custom-step"
-  );
-
-  assert.equal(failedRun.status, AGENT_RUN_STATUSES.failed);
-  assert.equal(failedRetryStep.status, "failed");
-  assert.equal(failedRetryStep.error.message, "custom retry failed");
 });
 
 test("agent run step executor validates document_rag retry input before queueing", async () => {
@@ -1739,52 +1449,6 @@ test("agent run step executor returns stable 409 for unsupported step types", as
       return true;
     }
   );
-});
-
-test("active guarded graph rejects standalone non-graph resume before mutation", async () => {
-  const agentRunService = createAgentRunService({
-    agentRunStore: createInMemoryAgentRunStore(),
-  });
-  const calls = [];
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeDocumentRagStep: async () => { calls.push("executed"); },
-  });
-  const runId = "guarded-non-graph-resume";
-  const goal = "Review the selected contract.";
-
-  await agentRunService.createRun({
-    accessScope,
-    goal,
-    input: { docIds: ["doc-1"] },
-    runId,
-    status: AGENT_RUN_STATUSES.running,
-  });
-  await agentRunService.updateRun({
-    accessScope,
-    runId,
-    patch: { steps: [{
-      id: "document-step",
-      type: "document_rag",
-      kind: "tool_call",
-      label: "Document RAG",
-      status: "failed",
-      input: { docIds: ["doc-1"], question: goal },
-    }] },
-  });
-  await persistGuardedGraphCheckpoint(agentRunService, { goal, runId });
-  const before = await agentRunService.getRun({ accessScope, runId });
-
-  await assert.rejects(
-    () => executor.resumeStep({ accessScope, runId, stepId: "document-step" }),
-    (error) => {
-      assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
-      assert.equal(error.status, 409);
-      return true;
-    }
-  );
-  assert.equal(calls.length, 0);
-  assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before);
 });
 
 test("active guarded graph rejects standalone non-graph retry before queuing", async () => {
@@ -1953,34 +1617,7 @@ test("agent run step executor rejects standalone retry of a graph-shaped node wi
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
-  const calls = [];
-  const customSkill = {
-    id: "risk_review",
-    version: "1.0.0",
-    label: "Risk Review",
-    kind: "custom",
-    budgetKey: "customSkillCalls",
-    requiresAccessScope: true,
-    match: () => false,
-    execute: async (context) => {
-      calls.push(context);
-
-      return {
-        text: "Risk reviewed against the upstream summary.",
-        citations: [{ docId: "doc-1", pageNumber: 4 }],
-        abstained: false,
-      };
-    },
-  };
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: {
-        get: (skillId) => (skillId === customSkill.id ? customSkill : null),
-      },
-    }),
-  });
+  const executor = createAgentRunStepExecutor({ agentRunService });
 
   await createCompletedRunWithSteps(agentRunService, {
     goal: "Review this contract for risks and key terms.",
@@ -2024,19 +1661,14 @@ test("agent run step executor rejects standalone retry of a graph-shaped node wi
       return true;
     }
   );
-  assert.equal(calls.length, 0);
   assert.deepEqual(await agentRunService.getRun({ accessScope, runId: "run-graph-node-retry" }), before);
 });
 
-test("guarded graph nodes reject generic retry and resume before any step mutation", async () => {
+test("guarded graph nodes reject a generic retry before any step mutation", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
-  const calls = [];
-  const executor = createAgentRunStepExecutor({
-    agentRunService,
-    executeCustomSkillStep: async () => { calls.push("executed"); },
-  });
+  const executor = createAgentRunStepExecutor({ agentRunService });
   const goal = "Review the selected contract.";
   const docIds = ["doc-1"];
   const graphStep = {
@@ -2068,7 +1700,9 @@ test("guarded graph nodes reject generic retry and resume before any step mutati
 
   for (const [runId, runStatus, stepStatus, includeNodeMarker] of [
     ["guarded-graph-retry", AGENT_RUN_STATUSES.completed, "failed", true],
-    ["guarded-graph-resume", AGENT_RUN_STATUSES.waitingForUser, "paused", true],
+    // A paused node of a graph that is still running: the guard answers before
+    // the retry's own status check does.
+    ["guarded-graph-paused", AGENT_RUN_STATUSES.waitingForUser, "paused", true],
     ["guarded-graph-older-step", AGENT_RUN_STATUSES.completed, "failed", false],
   ]) {
     await agentRunService.createRun({
@@ -2100,10 +1734,9 @@ test("guarded graph nodes reject generic retry and resume before any step mutati
     });
     const beforeRun = await agentRunService.getRun({ accessScope, runId });
     const beforeCheckpoint = await agentRunService.getExecutionGraphCheckpoint({ accessScope, runId });
-    const action = runStatus === AGENT_RUN_STATUSES.completed ? "retryStep" : "resumeStep";
 
     await assert.rejects(
-      () => executor[action]({ accessScope, runId, stepId: graphStep.id }),
+      () => executor.retryStep({ accessScope, runId, stepId: graphStep.id }),
       (error) => {
         assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
         assert.equal(error.status, 409);
@@ -2127,6 +1760,4 @@ test("guarded graph nodes reject generic retry and resume before any step mutati
       assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), beforeRun);
     }
   }
-
-  assert.deepEqual(calls, []);
 });

@@ -2,15 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   createAgentRunRecoveryService,
-  findAutoRecoverableStep,
+  explainInterruptedRun,
 } from "../rag/agent-run-recovery.js";
 import {
   STEP_REPLAY_SAFETY_REASON_CODES,
 } from "../rag/agent-run-step-replay-safety.js";
-import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
-import {
-  createDocumentRagStepExecutor,
-} from "../rag/agent-run-step-handlers/index.js";
 import {
   AGENT_RUN_STEP_STATUSES,
 } from "../rag/agent-run-steps.js";
@@ -124,34 +120,10 @@ test("agent run recovery leaves a memory-writing document step for manual recove
       now: () => "2026-06-18T00:00:00.000Z",
     }),
   });
-  const ragCalls = [];
-  const agentRunStepExecutor = createAgentRunStepExecutor({
-    agentRunService,
-    executeDocumentRagStep: createDocumentRagStepExecutor({
-      ragService: {
-        chat: async (docIds, question, options) => {
-          ragCalls.push({
-            docIds,
-            options,
-            question,
-          });
-
-          return {
-            citations: [
-              {
-                docId: "doc-1",
-                title: "Policy",
-              },
-            ],
-            text: "Recovered document answer.",
-          };
-        },
-      },
-    }),
-  });
+  // Startup recovery holds no step executor: it has nothing to run a step
+  // with, so the document step cannot be replayed from here.
   const recoveryService = createAgentRunRecoveryService({
     agentRunService,
-    agentRunStepExecutor,
     now: () => "2026-06-18T00:01:00.000Z",
   });
 
@@ -194,7 +166,6 @@ test("agent run recovery leaves a memory-writing document step for manual recove
   assert.equal(result.autoRecoveredCount, 0);
   assert.equal(result.manualRecoveredCount, 1);
   assert.equal(result.recoveredCount, 1);
-  assert.equal(ragCalls.length, 0);
   assert.equal(recoveredRun.status, AGENT_RUN_STATUSES.waitingForUser);
   assert.equal(recoveredRun.result.recovery.mode, "manual");
   assert.equal(recoveredRun.result.recovery.reason, "non_idempotent");
@@ -221,11 +192,6 @@ test("agent run recovery falls back to manual when auto finds an approval gate",
   });
   const recoveryService = createAgentRunRecoveryService({
     agentRunService,
-    agentRunStepExecutor: {
-      resumeStep: async () => {
-        throw new Error("Approval recovery should stay manual.");
-      },
-    },
     now: () => "2026-06-18T00:01:00.000Z",
   });
 
@@ -316,14 +282,15 @@ test("agent run recovery can be disabled on startup", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scenario F -- a graph node is a custom_skill step like any other
+// Scenario F -- a graph node's step is never replayed on its own
 // ---------------------------------------------------------------------------
 
 /**
- * Auto recovery re-runs a step without asking anyone. That is the right default
- * for a whitelisted read-only skill and the wrong one for a skill that writes,
- * and now that a graph node is persisted under the same custom_skill step type
- * as a RAG read, only the contract stored with the step tells them apart.
+ * A graph node is persisted as a `custom_skill` step. Startup used to pick one
+ * such step and re-run it on its own when its Skill declared no side effect.
+ * Since ADR 0001 phase 9 nothing does: the only automatic continuation is the
+ * whole-graph resume, and what is left here only explains, for the operator,
+ * why a run without a graph to continue was handed over.
  */
 const nodeStep = ({ effects, nodeId, skillId }) => ({
   id: `custom_skill:${nodeId}`,
@@ -338,8 +305,8 @@ const nodeStep = ({ effects, nodeId, skillId }) => ({
   type: "custom_skill",
 });
 
-test("auto recovery refuses a graph node that declared a side effect", () => {
-  const writeOnly = findAutoRecoverableStep({
+test("startup explains an interrupted run and never picks a step to replay", () => {
+  const writing = explainInterruptedRun({
     run: {
       steps: [
         nodeStep({
@@ -351,13 +318,16 @@ test("auto recovery refuses a graph node that declared a side effect", () => {
     },
   });
 
-  assert.equal(writeOnly.step, null);
-  assert.equal(writeOnly.reason, STEP_REPLAY_SAFETY_REASON_CODES.externalWrite);
-  assert.equal(writeOnly.safety.canAutoReplay, false);
-});
+  assert.deepEqual(Object.keys(writing).sort(), ["reason", "safety"]);
+  assert.equal(writing.reason, STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep);
+  assert.deepEqual(writing.safety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+    STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
+  ]);
 
-test("auto recovery still replays the read-only nodes of an interrupted graph", () => {
-  const mixed = findAutoRecoverableStep({
+  // A read-only node next to it changes nothing: before phase 9 it was picked
+  // ("safe_step_ready") and replayed on its own.
+  const mixed = explainInterruptedRun({
     run: {
       steps: [
         nodeStep({
@@ -373,11 +343,40 @@ test("auto recovery still replays the read-only nodes of an interrupted graph", 
       ],
     },
   });
+  const readOnly = explainInterruptedRun({
+    run: {
+      steps: [
+        nodeStep({
+          effects: SKILL_EFFECTS.readOnly,
+          nodeId: "risk_a",
+          skillId: "risk_review",
+        }),
+      ],
+    },
+  });
 
-  // Declaration order does not decide this: the writing node is passed over
-  // rather than being allowed to block recovery of the read-only one.
-  assert.equal(mixed.step.id, "custom_skill:risk_a");
-  assert.equal(mixed.reason, "safe_step_ready");
+  assert.equal(mixed.reason, STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep);
+  assert.equal(mixed.safety.stepId, "custom_skill:publish");
+  assert.equal(readOnly.reason, STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep);
+  assert.deepEqual(readOnly.safety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+  ]);
+
+  // A pending approval gate is the reason before any step is looked at, and a
+  // run with nothing in flight has no step to name.
+  assert.deepEqual(
+    explainInterruptedRun({
+      run: {
+        approvalGates: [{ id: "gate-1", status: "pending" }],
+        steps: [nodeStep({ effects: SKILL_EFFECTS.readOnly, nodeId: "a", skillId: "s" })],
+      },
+    }),
+    { reason: "pending_approval_gate", safety: null }
+  );
+  assert.deepEqual(explainInterruptedRun({ run: { steps: [] } }), {
+    reason: "no_safe_recoverable_step",
+    safety: null,
+  });
 });
 
 const createGraphRecoveryFixture = async ({
@@ -437,12 +436,8 @@ const createGraphRecoveryFixture = async ({
 
 test("startup auto recovery never replays a graph node as an isolated step", async () => {
   const fixture = await createGraphRecoveryFixture();
-  let stepReplays = 0;
   const recovery = createAgentRunRecoveryService({
     agentRunService: fixture.agentRunService,
-    agentRunStepExecutor: {
-      resumeStep: async () => { stepReplays += 1; },
-    },
     recordRecoveryTrace: async () => {},
   });
 
@@ -453,9 +448,12 @@ test("startup auto recovery never replays a graph node as an isolated step", asy
   });
   assert.equal(outcome.autoRecoveredCount, 0);
   assert.equal(outcome.manualRecoveredCount, 1);
-  assert.equal(stepReplays, 0);
   assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
   assert.equal(run.result.recovery.reason, "graph_resume_executor_unavailable");
+  assert.deepEqual(
+    run.events.map((event) => event.type).filter((type) => type.startsWith("step_")),
+    []
+  );
   assert.equal(run.result.__skillGraphCheckpoint, undefined);
 });
 
@@ -779,10 +777,8 @@ test("an executed guarded graph with a missing checkpoint is manual recovery", a
     type: "skill_graph_planned",
     payload: { mode: "guarded", executed: true },
   });
-  let replayed = false;
   const recovery = createAgentRunRecoveryService({
     agentRunService,
-    agentRunStepExecutor: { resumeStep: async () => { replayed = true; } },
     recordRecoveryTrace: async () => {},
   });
 
@@ -791,6 +787,5 @@ test("an executed guarded graph with a missing checkpoint is manual recovery", a
     accessScope,
     runId: "graph-missing-checkpoint",
   });
-  assert.equal(replayed, false);
   assert.equal(run.result.recovery.reason, "graph_checkpoint_missing");
 });

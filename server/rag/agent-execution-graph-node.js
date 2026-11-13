@@ -720,9 +720,9 @@ export const prepareExecutionGraphNodeLaunch = ({ context, nodeOutputs, state })
   const nodeQuestion = resolvedInputs.question ?? question;
   const nodeRetrievalPlan = resolvedInputs.retrievalPlan ?? retrievalPlan;
   const persistedInput = {
-    // Store the exact validated binding values for a cross-process replay.
-    // Access scope and approvals never enter this map; they remain runtime-
-    // owned inputs supplied afresh by the recovery handler.
+    // Store the exact validated binding values the node ran on. Access scope
+    // and approvals never enter this map; they remain runtime-owned inputs,
+    // supplied afresh by whatever continues the graph.
     boundInputs: resolvedInputs,
     docIds: nodeDocIds,
     nodeId: node.nodeId,
@@ -734,16 +734,18 @@ export const prepareExecutionGraphNodeLaunch = ({ context, nodeOutputs, state })
     skillVersion: contract.version,
     userId: userId ?? null,
     // A dependent node's upstream text is part of its input, not of its
-    // question, so a retry that only replays the question would silently run
-    // the node on different data than the original. Persist the bound value
-    // alongside the request fields the recovery handler already replays.
+    // question, so a record holding only the question would not say what
+    // data the node ran on. Persist the bound value alongside the request
+    // fields.
     ...(resolvedInputs.priorFindings === undefined
       ? {}
       : { priorFindings: resolvedInputs.priorFindings }),
-    // The node run carries this for the trace, but recovery is handed the
-    // persisted step and nothing else. Without the contract here, a node that
-    // writes is indistinguishable from a RAG read and auto-replay would
-    // re-run it unattended.
+    // The node run carries this for the trace; the persisted step carries it
+    // for whoever reads the step alone. Without the contract here, the step of
+    // a node that writes is indistinguishable from a RAG read. Graph recovery
+    // compares this whole map with what it expects before it continues a v3
+    // graph (agent-unified-graph-recovery-eligibility.js). Nothing replays a
+    // node from its step.
     ...describeSkillReplayContract(state.skill),
   };
 

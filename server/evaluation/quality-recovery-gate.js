@@ -62,6 +62,9 @@ const buildMetricChecks = ({
     thresholds.minManualRecoveryActionCount ?? 1;
   const maxManualRecoveryActionFailureCount =
     thresholds.maxManualRecoveryActionFailureCount ?? 0;
+  // The three "auto replay" thresholds read the startup recovery trace. What
+  // they count is an interrupted graph continued automatically -- startup
+  // replays nothing else -- so at least one such resume must be observed.
   const minAutoReplayAttemptCount = thresholds.minAutoReplayAttemptCount ?? 1;
   const minAutoReplaySuccessRate = thresholds.minAutoReplaySuccessRate ?? 1;
   const maxAutoReplayFailureCount = thresholds.maxAutoReplayFailureCount ?? 0;
@@ -71,7 +74,6 @@ const buildMetricChecks = ({
     thresholds.minPrimaryStepCompletedCount ?? 1;
   const minPrimaryStepFailedCount = thresholds.minPrimaryStepFailedCount ?? 0;
   const minStepRetryCount = thresholds.minStepRetryCount ?? 1;
-  const minStepResumeCount = thresholds.minStepResumeCount ?? 1;
   const maxStepReplayFailureCount = thresholds.maxStepReplayFailureCount ?? 0;
   const minTaskRecoveryScheduledCount =
     thresholds.minTaskRecoveryScheduledCount ?? 1;
@@ -169,12 +171,6 @@ const buildMetricChecks = ({
       label: "Step retry replays observed",
       minimum: minStepRetryCount,
       metric: "recoveryStepRetryCount",
-    }),
-    buildMinCheck({
-      currentValue: recovery.stepResumeCount ?? 0,
-      label: "Step resume replays observed",
-      minimum: minStepResumeCount,
-      metric: "recoveryStepResumeCount",
     }),
     buildMaxCheck({
       currentValue: recovery.stepReplayFailureCount ?? 0,

@@ -6,7 +6,7 @@
 
 ## 30 秒讲法
 
-Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 PostgreSQL 里是一行（steps、result 等是 JSON 列），每次状态变更是一条带 revision 的 CAS，同一条 SQL 返回提交后的行和完整事件列表，所以 /chat 路径上不回读。我不承诺 exactly-once，承诺的是「自动恢复路径不重放副作用」：重放安全矩阵按步骤类型登记谁能无人值守地重放，Skill 自己的声明只能收窄；写型 Capability 用 runId+节点的确定性幂等键，审批绑定输入的哈希；恢复时凡是「在途、说不清有没有写」的步骤一律转人工。v3 统一图（guarded 档，默认 off）里的审批用 LangGraph 的 interrupt + 同一线程 Command(resume)，但线程只是回执，权威是自己带 digest 的 graph checkpoint，授权永远从 run store 重读；默认生效的是 V1 的 capability_call 审批。取消用 drain 而不是 AbortSignal，因为在原始 LangGraph 上实测，把 signal 交给它会让在途节点在续跑时再跑一次（至少一次）。
+Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 PostgreSQL 里是一行（steps、result 等是 JSON 列），每次状态变更是一条带 revision 的 CAS，同一条 SQL 返回提交后的行和完整事件列表，所以 /chat 路径上不回读。我不承诺 exactly-once，承诺的是「自动恢复路径不重放副作用」：启动恢复自己只续跑中断的图（先认领，在节点边界），不单独重放任何步骤，其余中断的 run 交给人；重放安全矩阵按步骤类型登记失败的步骤能不能由人重试，Skill 自己的声明只往原因码里加原因；写型 Capability 用 runId+节点的确定性幂等键，审批绑定输入的哈希；恢复时凡是「在途、说不清有没有写」的步骤一律转人工。v3 统一图（guarded 档，默认 off）里的审批用 LangGraph 的 interrupt + 同一线程 Command(resume)，但线程只是回执，权威是自己带 digest 的 graph checkpoint，授权永远从 run store 重读；默认生效的是 V1 的 capability_call 审批。取消用 drain 而不是 AbortSignal，因为在原始 LangGraph 上实测，把 signal 交给它会让在途节点在续跑时再跑一次（至少一次）。
 
 ## 关键文件
 
@@ -15,12 +15,12 @@ Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 Postg
 | `server/rag/agent-runs.js` | run 服务层：mutateStoredRun（cursor 乐观尝试 + 重读重判；重试次数由各方法传入，claim、checkpoint、completeRun、failRun、recordRunStep 等用 DEFAULT_AGENT_RUN_MUTATION_RETRIES=32，无图守卫的 updateRun 和 V1 applyApprovalAction 用默认 0）、createAgentRunCursor、claimExecutionGraphResume / saveExecutionGraphCheckpoint / pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction / applyApprovalAction、completeRun / failRun（hasCommittedCapabilityWrite）、markManualRecovery、stripInternalRunFields（剥私有字段，事件 id 经 toPublicRunEventIds 改写成 runId:n） |
 | `server/rag/postgres-agent-run-store.js` | PG 存储：commitRunUpdate 的 revision CAS SQL（WHERE revision = $4）、buildRunEventListCte（同语句返回事件列表）、lockRunRowFirst（FOR NO KEY UPDATE 前导）、审批快照表与 SQLSTATE 22012（APPROVAL_SNAPSHOT_ROLLBACK_SQLSTATE）强制回滚、listRecoverable（只按 status 过滤） |
 | `server/rag/agent-run-state-machine.js` | 5 个状态与合法转换（AGENT_RUN_STATUS_TRANSITIONS），终态只能自环，completed/failed 仅经显式 retry 回 running（RETRYABLE_AGENT_RUN_STATUSES） |
-| `server/rag/agent-run-step-replay-safety.js` | 重放安全矩阵 STEP_REPLAY_SAFETY_MATRIX 与 buildStepReplaySafetyAssessment；Skill 声明只收窄（getDeclaredContractReasonCodes） |
-| `server/rag/agent-run-graph-replay-guard.js` | assertStandaloneGraphReplayAllowed：图节点不能当独立步骤重放，只有图终结后新建的门或步骤可走 V1 路径 |
+| `server/rag/agent-run-step-replay-safety.js` | 重放安全矩阵 STEP_REPLAY_SAFETY_MATRIX、isStepRetryAllowed（失败的步骤能不能由人重试）与 buildStepReplaySafetyAssessment（原因码）；Skill 持久化的声明只往原因码里加原因（getDeclaredContractReasonCodes）；「可自动重放」一列 2026-11-13 阶段 9 删除 |
+| `server/rag/agent-run-graph-replay-guard.js` | assertStandaloneGraphReplayAllowed：图节点不能当独立步骤重放，只有图终结后新建的门或步骤可走 V1 路径；阶段 9 起凡是 custom_skill 步骤一律拒绝，不看有没有 nodeId 或 checkpoint（生效的地方：step executor 重试前的预检、run store 的 retryStep 和 updateRunStep；图自己写节点步骤走 recordRunStep，只在 run 上有 checkpoint、步骤又不是其中节点时才问它） |
 | `server/rag/agent-execution-graph-checkpoint.js` | 图 checkpoint：sealExecutionGraphCheckpoint（sha256 digest）、buildExecutionGraphCheckpointOwner（owner 摘要）、digestExecutionGraphTypedOutput、reconcileExecutionGraphCheckpoint（unknown_in_flight_node 等原因码） |
-| `server/rag/agent-run-recovery.js` | 启动恢复 createAgentRunRecoveryService.recoverOnStartup：runAsDatabaseSystem 下跨租户扫描、逐 run 以 runWithDatabaseTenant 处理、图认领续跑 / findAutoRecoverableStep 单步自动重放 / 转人工；v3 图在认领前调 verifyLangGraphThread |
-| `server/rag/agent-run-recovery-actions.js` | 运维动作 AGENT_RUN_RECOVERY_ACTIONS：cancel / resume_from_step / retry_failed_step |
-| `server/rag/agent-run-step-executor.js` | approve/deny/retry/resume 入口；v3 图审批交给注入的 continueExecutionGraphApproval（即 agent.js 的 continueAgentExecutionGraphApproval），其余走 V1 capability_call 步骤 |
+| `server/rag/agent-run-recovery.js` | 启动恢复 createAgentRunRecoveryService.recoverOnStartup：runAsDatabaseSystem 下跨租户扫描、逐 run 以 runWithDatabaseTenant 处理、图认领续跑 / 其余转人工（explainInterruptedRun 只给原因，不重放；阶段 9 删除了 findAutoRecoverableStep 和单步自动重放）；v3 图在认领前调 verifyLangGraphThread |
+| `server/rag/agent-run-recovery-actions.js` | 运维动作 AGENT_RUN_RECOVERY_ACTIONS：cancel / retry_failed_step（resume_from_step 阶段 9 删除，现在返回 400）；buildAgentRunRecoveryState 只对矩阵允许重试的步骤类型给出 retry_failed_step |
+| `server/rag/agent-run-step-executor.js` | approve/deny/retry 入口（applyApprovalAction、retryStep；resumeStep 阶段 9 删除）；v3 图审批交给注入的 continueExecutionGraphApproval（即 agent.js 的 continueAgentExecutionGraphApproval），其余走 V1 capability_call 步骤 |
 | `server/rag/agent-run-step-lifecycle.js` | startStep / startGraphStep 开头的 throwIfRequestCancelled 安全点，图步骤带 expectedResumeClaimId |
 | `server/rag/capabilities/approval-execution-snapshot.js` | 审批对象哈希（内部函数 buildApprovalObjectHash）、createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot（私有快照重算哈希，timingSafeEqual 比较） |
 | `server/rag/capabilities/graph-approval-preflight.js` | preflightCapabilityGraphApproval / verifyCapabilityGraphApproval：续跑时按 live Capability 与当前绑定输入重算门 |
@@ -41,7 +41,7 @@ Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 Postg
 
 ## 一次请求怎么经过这里
 
-1) routes/chat.js 用 runAgentRequestWithCancellation（request-deadline.js）包住请求：只有设了 AGENT_REQUEST_TIMEOUT_MS、AGENT_CANCEL_ON_DISCONNECT 或有上游服务截止时间时才绑定 deadline/signal，否则原样执行。 2) runAgentRag 内建 createAgentRunCursor；agentRunService.createRun 调 store.createWithEvent（1 次 INSERT，CTE 同时返回行和事件）。 3) 外层计划的每个阶段节点入口过取消安全点（langgraph/execution-plan-graph.js：请求已取消就以 drain 停下；阶段 7 之前是 agent-execution-plan-runner.js 原生循环里的 throwIfRequestCancelled）；createAgentRunStepLifecycle.startStep 先过安全点，再 recordRunStep 到 mutateStoredRun：先用 cursor 快照乐观决定，再 commitRunUpdate：同一往返前导 SELECT ... FOR NO KEY UPDATE，然后 UPDATE ... WHERE revision = $4 + INSERT 事件 + run_events CTE 聚合事件，返回提交后的行；冲突、no-op 或被拒则重读重判。step_started 在会写记忆的 ragService.chat 之前落盘（写前意图）。 4) 自定义 Skill 阶段（只走图：V1 顺序链和 AGENT_SKILL_GRAPH_ROLLOUT 的 off、shadow 两档 2026-11-13 已删除，这个变量只接受未设置、空值或 guarded）：saveExecutionGraphCheckpoint 写带 digest 的 checkpoint，再 runExecutionGraphOnLangGraph：RunStoreCheckpointSaver 先 deleteThread（tombstone），bridgeRequestSignalToDrain 把 signal 接到 RunControl，invoke(durability sync)；每个节点 startGraphStep / 结算都带 resumeClaim 围栏；线程写走 mutateLangGraphCheckpointRecord + assertLangGraphCheckpointWriter；结算保存时 dropLangGraphRecord。 5) 需要审批的 Capability：V1 路径在 completeRun 时写 pending gate（事件 approval_gate_created），状态 waiting_for_user；v3 guarded 路径节点 preflight 被停靠，若后续层没有独立工作就 interrupt({kind,nodeId,gateId:null})，否则先跑完独立层再停，然后 stage 调 pauseExecutionGraphForApproval：一个 CAS 同时写 gate、私有执行快照（快照表）、phase=awaiting_approval 的 checkpoint、status=waiting_for_user（事件 graph_approval_gate_created），返回 capability_approval_required 澄清。 6) POST /agent-runs/:runId/actions/approve（routes/tasks.js，同样过 runAgentRequestWithCancellation）到 agentRunStepExecutor.applyApprovalAction：v3 走 continueAgentExecutionGraphApproval 到 applyExecutionGraphApprovalAction（校验 approvalObjectHash、快照绑定、门唯一且 pending，CAS 把 phase 改回 running、无 claim），再 prepareUnifiedGraphApprovalResume 核对线程回执，Command({resume:{[interruptId]: RUNTIME_RESUME_MARKER}})，节点从第一行重跑进 preflight，verifyCapabilityGraphApproval 后 capabilityRegistry.execute（幂等键 parts=[runId, nodeId, skillId]；writesWorkspace 时 runOutsideRequestDeadline）。V1 走 agentRunService.applyApprovalAction 后执行 capability_call 步骤（幂等键 parts=[runId, rootStepId, capabilityId]）。 7) 收尾：completeRun（图 owner 校验、活跃步骤冲突检查）；出错 failRun：已有 capability_call 完成则 retryable:false，同一 CAS 丢弃 LangGraph 线程；路由用 describeAgentRouteError / describeAgentRequestFailure 答 504/499/503。 8) 崩溃后：下一次启动时 app.js（单体/api）或 agent-service/app.js（agent 层）调 recoverOnStartup：runAsDatabaseSystem 下 listRecoverableRuns（running/waiting_for_user 全租户），逐 run runWithDatabaseTenant：有 manual 标记跳过；有图 checkpoint 时已认领跳过、v3 干净审批暂停跳过，否则 reconcileExecutionGraphCheckpoint（v3 还要 verifyLangGraphThread），再 claimExecutionGraphResume（CAS 写 UUID claim）后续跑；无图时 findAutoRecoverableStep（矩阵）后 resumeStep，或 markManualRecovery（running 改 waiting_for_user + manual_recovery_required）。 9) 计划内停机：SIGTERM 到 server.js handleShutdownSignals 再到 createGracefulShutdown：server.close + 每 50 ms closeIdleConnections，在途请求最多 SERVICE_SHUTDOWN_GRACE_MS（默认 25 s），入库 worker 并行停，再跑 app.locals.stop、span flush、resetPostgresPool，exit(0)；第二个信号或超时 exit(1)。
+1) routes/chat.js 用 runAgentRequestWithCancellation（request-deadline.js）包住请求：只有设了 AGENT_REQUEST_TIMEOUT_MS、AGENT_CANCEL_ON_DISCONNECT 或有上游服务截止时间时才绑定 deadline/signal，否则原样执行。 2) runAgentRag 内建 createAgentRunCursor；agentRunService.createRun 调 store.createWithEvent（1 次 INSERT，CTE 同时返回行和事件）。 3) 外层计划的每个阶段节点入口过取消安全点（langgraph/execution-plan-graph.js：请求已取消就以 drain 停下；阶段 7 之前是 agent-execution-plan-runner.js 原生循环里的 throwIfRequestCancelled）；createAgentRunStepLifecycle.startStep 先过安全点，再 recordRunStep 到 mutateStoredRun：先用 cursor 快照乐观决定，再 commitRunUpdate：同一往返前导 SELECT ... FOR NO KEY UPDATE，然后 UPDATE ... WHERE revision = $4 + INSERT 事件 + run_events CTE 聚合事件，返回提交后的行；冲突、no-op 或被拒则重读重判。step_started 在会写记忆的 ragService.chat 之前落盘（写前意图）。 4) 自定义 Skill 阶段（只走图：V1 顺序链和 AGENT_SKILL_GRAPH_ROLLOUT 的 off、shadow 两档 2026-11-13 已删除，这个变量只接受未设置、空值或 guarded）：saveExecutionGraphCheckpoint 写带 digest 的 checkpoint，再 runExecutionGraphOnLangGraph：RunStoreCheckpointSaver 先 deleteThread（tombstone），bridgeRequestSignalToDrain 把 signal 接到 RunControl，invoke(durability sync)；每个节点 startGraphStep / 结算都带 resumeClaim 围栏；线程写走 mutateLangGraphCheckpointRecord + assertLangGraphCheckpointWriter；结算保存时 dropLangGraphRecord。 5) 需要审批的 Capability：V1 路径在 completeRun 时写 pending gate（事件 approval_gate_created），状态 waiting_for_user；v3 guarded 路径节点 preflight 被停靠，若后续层没有独立工作就 interrupt({kind,nodeId,gateId:null})，否则先跑完独立层再停，然后 stage 调 pauseExecutionGraphForApproval：一个 CAS 同时写 gate、私有执行快照（快照表）、phase=awaiting_approval 的 checkpoint、status=waiting_for_user（事件 graph_approval_gate_created），返回 capability_approval_required 澄清。 6) POST /agent-runs/:runId/actions/approve（routes/tasks.js，同样过 runAgentRequestWithCancellation）到 agentRunStepExecutor.applyApprovalAction：v3 走 continueAgentExecutionGraphApproval 到 applyExecutionGraphApprovalAction（校验 approvalObjectHash、快照绑定、门唯一且 pending，CAS 把 phase 改回 running、无 claim），再 prepareUnifiedGraphApprovalResume 核对线程回执，Command({resume:{[interruptId]: RUNTIME_RESUME_MARKER}})，节点从第一行重跑进 preflight，verifyCapabilityGraphApproval 后 capabilityRegistry.execute（幂等键 parts=[runId, nodeId, skillId]；writesWorkspace 时 runOutsideRequestDeadline）。V1 走 agentRunService.applyApprovalAction 后执行 capability_call 步骤（幂等键 parts=[runId, rootStepId, capabilityId]）。 7) 收尾：completeRun（图 owner 校验、活跃步骤冲突检查）；出错 failRun：已有 capability_call 完成则 retryable:false，同一 CAS 丢弃 LangGraph 线程；路由用 describeAgentRouteError / describeAgentRequestFailure 答 504/499/503。 8) 崩溃后：下一次启动时 app.js（单体/api）或 agent-service/app.js（agent 层）调 recoverOnStartup：runAsDatabaseSystem 下 listRecoverableRuns（running/waiting_for_user 全租户），逐 run runWithDatabaseTenant：有 manual 标记跳过；有图 checkpoint 时已认领跳过、v3 干净审批暂停跳过，否则 reconcileExecutionGraphCheckpoint（v3 还要 verifyLangGraphThread），再 claimExecutionGraphResume（CAS 写 UUID claim）后续跑；没有图可续时不重放任何步骤，直接 markManualRecovery（running 改 waiting_for_user + manual_recovery_required），原因由 explainInterruptedRun 给出（2026-11-13 阶段 9 之前，这里是 findAutoRecoverableStep 按矩阵挑一个步骤后 resumeStep，挑不到才转人工）。 9) 计划内停机：SIGTERM 到 server.js handleShutdownSignals 再到 createGracefulShutdown：server.close + 每 50 ms closeIdleConnections，在途请求最多 SERVICE_SHUTDOWN_GRACE_MS（默认 25 s），入库 worker 并行停，再跑 app.locals.stop、span flush、resetPostgresPool，exit(0)；第二个信号或超时 exit(1)。
 
 ## 设计决策
 
@@ -85,25 +85,25 @@ CURRENT-TRUTH.md 3.15：审查发现「CAS 等锁期间并发追加的事件没�
 
 **代码**：server/rag/postgres-agent-run-store.js lockRunRowFirst / buildRunEventListCte；server/rag/agent-runs.js createAgentRunCursor
 
-### D3. 用重放安全矩阵代替 exactly-once：按步骤类型登记 autoReplaySafe / idempotency / requiredInput / 审批策略，Skill 持久化的声明只能收窄
+### D3. 用重放安全矩阵代替 exactly-once：没有步骤被单独自动重放；矩阵按步骤类型登记 replayActions（失败后能不能由人重试）/ idempotency / requiredInput / 审批策略，Skill 持久化的声明只往原因码里加原因
 
 **为什么**
 
-外部写和 step 完成落盘之间总有崩溃窗口，存储层无法证明旧 worker 写没写；所以把问题改成「哪些步骤能无人值守地重放」。只有 custom_skill（read_only_rag）可自动重放（按步骤整步重放的只有没有图 checkpoint 的 custom_skill 步骤，它们只在 2026-11-13 之前由 V1 顺序链存下的 run 里有；顺序链删除后，新的 run 里 custom Skill 步骤都是图节点，不按步骤重放，按图 checkpoint 的条件恢复）；document_rag / follow_up_retrieval / research_question 都标 memory_writing_rag：现在只有主 document_rag 真写会话和长期记忆，后两者传 memoryWrites:false，但注入的 ragService 不一定遵守，所以保守地都不自动重放；capability_call 要哈希绑定的已批准门；web_search 是不确定的外部读
+外部写和 step 完成落盘之间总有崩溃窗口，存储层无法证明旧 worker 写没写；所以不去证明「恰好一次」，而是规定中断之后谁可以再跑。现在的规则（2026-11-13 阶段 9 起，CURRENT-TRUTH.md 3.50）：没有步骤被单独自动重放。启动恢复自己只续跑中断的图（条件见 Q2），其余中断的 run 交给人；矩阵登记的是重放每类步骤会冒什么风险（原因码），以及它失败后能不能由人重试。custom_skill 的 replayActions 为空、retryable:false、幂等类别 graph_owned、原因码 graph_node_step：custom Skill 只作为图节点运行，它的步骤不单独重试，也不单独重放。document_rag / follow_up_retrieval / research_question 都标 memory_writing_rag：现在只有主 document_rag 真写会话和长期记忆，后两者传 memoryWrites:false，但注入的 ragService 不一定遵守，所以保守地都当成会写记忆，中断了转人工，失败了可以由人显式重试；capability_call 要哈希绑定的已批准门，失败了可以由人重试；web_search 是不确定的外部读、arxiv_import 是靠导入器去重的写，这两类需要审批的主步骤不能直接重试（处理器一直拒绝，要重试的是审批后排进来的 capability_call 步骤），矩阵里 replayActions 也是空的（阶段 9 的独立复核之前矩阵列着重试，恢复面板因此给过一个点了必 409 的按钮）。阶段 9 之前矩阵还有「可自动重放」一列，唯一的一项是 custom_skill（幂等类别 read_only_rag）：没有图 checkpoint 的 custom_skill 步骤在启动时整步重放。这种步骤只有已删除的 V1 顺序链写得出来（图节点的步骤一定带 nodeId，会先被回放守卫拒绝），所以这一列连同独立处理器一起删了
 
 **为什么不用主流替代方案**
 
-LangGraph/Temporal 默认的「从 checkpoint 重跑在途节点」（至少一次）；全部转人工（可用性差）；信任 Skill 自报 replaySafe（可伪造，所以未知 effects 当写处理，重放前 custom-research-steps.js 还用 live registry 的 isSideEffectingSkill 复核）
+LangGraph/Temporal 默认的「从 checkpoint 重跑在途节点」（至少一次）；全部转人工（可用性差，所以对账一致、停在节点边界的图仍然自动续跑）；信任 Skill 自报 replaySafe（可伪造，所以未知 effects 当写处理，声明只进原因码，放宽不了矩阵的结论。阶段 9 之前，单步重放一个步骤之前 custom-research-steps.js 还用 live registry 的 isSideEffectingSkill 复核一次；单步重放删除后这次复核也没有了，文件改名 research-steps.js，只剩研究子问题的重试，isSideEffectingSkill 也删了）
 
 **代价**
 
-最常见的崩溃（主 document_rag 步骤在途）会转人工，不自动恢复；显式 retry_failed_step 重试主 document_rag 会再记一次用户的交流，不是 exactly-once；失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY），以前只有 V1 顺序链的步骤支持，顺序链 2026-11-13 删除后这项能力没有了，也没有替代（CURRENT-TRUTH.md 3.49）
+最常见的崩溃（主 document_rag 步骤在途）会转人工，不自动恢复；显式 retry_failed_step 重试主 document_rag 会再记一次用户的交流，不是 exactly-once；失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY），以前只有 V1 顺序链的步骤支持，顺序链 2026-11-13 删除后这项能力没有了，也没有替代（CURRENT-TRUTH.md 3.49）；阶段 9 之后恢复面板也不再给失败的图节点「重试失败步骤」按钮（以前给，点了一定是 409），顺序链留下的旧 run 中断了只能取消、失败了不能单步重试，要得到答案只能重新提问（3.50）
 
 **证据**
 
-CURRENT-TRUTH.md 3.30：eval:recovery-observability 8/8，删除原生调度器前后屏蔽后逐字节一致（2026-11-13 删 V1 顺序链前后同样 8/8、逐字节一致，3.49）；test/agent-run-recovery.test.mjs「agent run recovery leaves a memory-writing document step for manual recovery」「auto recovery refuses a graph node that declared a side effect」
+CURRENT-TRUTH.md 3.30：eval:recovery-observability 8/8，删除原生调度器前后屏蔽后逐字节一致（2026-11-13 删 V1 顺序链前后同样 8/8、逐字节一致，3.49；阶段 9 之后仍是 8/8，检查项从 29 变成 27，报告有 51 处差异，都在随功能删掉的范围内，3.50）；test/agent-run-recovery.test.mjs「agent run recovery leaves a memory-writing document step for manual recovery」「startup explains an interrupted run and never picks a step to replay」（阶段 9 之前这里是「auto recovery refuses a graph node that declared a side effect」，那条测试随单步重放一起改掉了）；test/agent-skill-step-replay.test.mjs 把 custom_skill 步骤在启动、恢复面板和重试路由上的行为写成字面期望（冻结提交 7a2e3d99 时 10 个测试，删除提交 be353b62 的 diff 里看得到每处变化；独立复核之后加了失败的 web_search、arxiv_import 两种情形，现在 12 个）
 
-**代码**：server/rag/agent-run-step-replay-safety.js STEP_REPLAY_SAFETY_MATRIX / getDeclaredContractReasonCodes / buildStepReplaySafetyAssessment
+**代码**：server/rag/agent-run-step-replay-safety.js STEP_REPLAY_SAFETY_MATRIX / isStepRetryAllowed / getDeclaredContractReasonCodes / buildStepReplaySafetyAssessment；server/rag/agent-run-recovery.js explainInterruptedRun；server/rag/agent-run-graph-replay-guard.js assertStandaloneGraphReplayAllowed
 
 ### D4. 副作用不重复靠三件套：写前意图（step 先记 running）+ 确定性幂等键 + 在途未知一律转人工
 
@@ -308,15 +308,18 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 *L1 是什么*
 
 - 只在启动时扫描（app.js 和 agent 层的 agent-service/app.js 调 recoverOnStartup）；PG store 时默认 auto，内存 store 默认 manual
-- 结局：自动续跑；转人工（manual_recovery_required，running 改 waiting_for_user）；跳过（已被认领、v3 图干净的审批暂停）
+- 结局：自动续跑；转人工（manual_recovery_required，running 改 waiting_for_user）；跳过（已被认领、v3 图干净的审批暂停、已经带 manual_recovery_required 事件的 run）
 - V1 的待审批 run 会被打上 manual 标记（状态仍是 waiting_for_user），不是跳过
-- 自动续跑条件很窄：非图 run 只有 custom_skill 步骤能重放（带这种步骤的非图 run 只有 2026-11-13 之前由 V1 顺序链存下的；顺序链删除后，新的 run 里 custom Skill 步骤都是图节点）；图 run 要 digest 对、与 step 对账一致、无待审批、外层计划只剩 custom_skills（v1 checkpoint）或走 v3 guarded 路径（还要 rollout 仍是 guarded、LangGraph 线程核对通过），并且认领 CAS 成功。这里的「图 run」指有图 checkpoint 的 custom-Skill DAG 和 v3 图；外层计划 2026-11-13 起也由 LangGraph 调度，但那张图不带 checkpointer，不在此列
+- 自动续跑条件很窄，而且只续跑图：图 run 要 digest 对、与 step 对账一致、无待审批、外层计划只剩 custom_skills（v1 checkpoint）或走 v3 guarded 路径（还要 rollout 仍是 guarded、LangGraph 线程核对通过），并且认领 CAS 成功。这里的「图 run」指有图 checkpoint 的 custom-Skill DAG 和 v3 图；外层计划 2026-11-13 起也由 LangGraph 调度，但那张图不带 checkpointer，不在此列
+- 没有图可续的 run 一律转人工，步骤不单独重放。原因码由 explainInterruptedRun 给：有待审批项是 pending_approval_gate，否则是第一个中断步骤的第一个原因码（custom_skill 步骤是 graph_node_step），没有中断步骤是 no_safe_recoverable_step
+- 2026-11-13 阶段 9 之前还有第三种自动恢复：非图 run 里中断的 custom_skill 步骤整步重放。带这种步骤的非图 run 只有 V1 顺序链存下的；阶段 9 把这条路删了，这种旧 run 现在转人工、只能取消（CURRENT-TRUTH.md 3.50）
 - 所以最常见的崩溃（主 document_rag 在途）是转人工
+- 人在恢复面板上只有两个动作：重试失败步骤（retry_failed_step，只对矩阵允许的四类步骤给出：document_rag、follow_up_retrieval、research_question、capability_call；custom_skill、web_search、arxiv_import 不在其中）和取消（cancel）
 - 计划内停机：SIGTERM 排空在途请求（默认 25 s），worker 并行停，第二个信号或超时 exit 1
 
-代码：`server/rag/agent-run-recovery.js createAgentRunRecoveryService / findAutoRecoverableStep`；`server/rag/config.js getAgentRunRecoveryModeConfigStatus`；`server/rag/agent-service/role-server.js createGracefulShutdown`
+代码：`server/rag/agent-run-recovery.js createAgentRunRecoveryService / explainInterruptedRun`；`server/rag/agent-run-recovery-actions.js AGENT_RUN_RECOVERY_ACTIONS / buildAgentRunRecoveryState`；`server/rag/config.js getAgentRunRecoveryModeConfigStatus`；`server/rag/agent-service/role-server.js createGracefulShutdown`
 
-> ⚠ 别说「崩溃后自动从断点续跑」。安全说法：只在能证明安全时自动续跑，其余交给人；优雅停机只保 HTTP 请求，后台 agent 任务仍会被切断。
+> ⚠ 别说「崩溃后自动从断点续跑」，也别说「只读的步骤会自动重放」。安全说法：只在能证明安全时自动续跑，而且只续跑整张图，其余交给人；优雅停机只保 HTTP 请求，后台 agent 任务仍会被切断。
 
 ### Q3. 为什么用 revision CAS，不在整个处理过程里持行锁？
 
@@ -339,7 +342,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 写前意图：step_started 在会写记忆的调用之前落盘，恢复依赖它
 - 恢复时 running/paused 的步骤一律 unknown_in_flight_node 转人工，不做推断
 - 写型 Capability 带确定性幂等键（图节点 runId+nodeId+skillId），工件表唯一约束 + ON CONFLICT
-- 重放安全矩阵决定能否无人值守地重放
+- 没有步骤被无人值守地单独重放：自动的只有整图续跑；重放安全矩阵决定失败的步骤能不能由人重试
 - 例外：主 document_rag 的显式重试会再记一次会话和长期记忆
 
 代码：`server/rag/agent-execution-graph-checkpoint.js reconcileExecutionGraphCheckpoint`；`server/rag/agent-run-step-handlers/capability-steps.js createCapabilityCallStepHandler`；`server/rag/agent-run-step-replay-safety.js STEP_REPLAY_SAFETY_MATRIX`
@@ -350,16 +353,18 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 
 *L2 为什么*
 
-- 只有 custom_skill（read_only_rag）autoReplaySafe
-- 这一行现在只对旧 run 起作用：按步骤整步重放的是没有图 checkpoint 的 custom_skill 步骤，只有 2026-11-13 之前由 V1 顺序链存下的 run 里有；顺序链删除后，新的 run 里 custom Skill 步骤都是图节点，能不能续跑按图 checkpoint 的条件判断（见 Q2），单独重试被拒（409）
-- document_rag / follow_up_retrieval / research_question：memory_writing_rag，不自动重放（后两者现在不写记忆，但注入的 ragService 不一定遵守，保守处理）
-- capability_call：要 hash 绑定的已批准门；web_search：不确定的外部读；arxiv_import：靠导入器去重的写
-- 持久化在 step 上的声明只能收窄：非 read_only 当写，external_read 当非幂等，未知值当写
-- 重放前 custom-research-steps.js 用 live registry 的 isSideEffectingSkill 再查一次，伪造或过期的声明放不过
+- 现在没有：矩阵里没有「可自动重放」一列，任何步骤都不会被单独自动重放（2026-11-13 阶段 9 起）。自动的只有整图续跑，条件见 Q2
+- 矩阵现在回答的是另外两件事：失败的步骤能不能由人重试（isStepRetryAllowed 看 replayActions 里有没有 retry_failed_step），以及重放它会冒什么风险（原因码）
+- custom_skill：replayActions 为空、retryable:false、幂等类别 graph_owned、原因码 graph_node_step。custom Skill 只作为图节点运行；回放守卫凡是 custom_skill 步骤一律拒绝（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY），不看有没有 nodeId 或 checkpoint，在 step executor 重试前的预检和 run store 的 retryStep、updateRunStep 里都生效（图自己写节点步骤走 recordRunStep，不经过这条拒绝）
+- document_rag / follow_up_retrieval / research_question：memory_writing_rag，中断了转人工，失败了可以由人显式重试（后两者现在不写记忆，但注入的 ragService 不一定遵守，保守处理）
+- capability_call：要 hash 绑定的已批准门，失败了可以由人重试
+- web_search（不确定的外部读）、arxiv_import（靠导入器去重的写）：需要审批的主步骤，不能直接重试，replayActions 为空；要重试的是审批后排进来的 capability_call 步骤。矩阵允许人重试的一共四类：document_rag、follow_up_retrieval、research_question、capability_call
+- 持久化在 step 上的声明（effects、replaySafe）只往原因码里加原因：非 read_only 当写，external_read 当非幂等，未知值当写。replaySafe:true 放宽不了任何东西；unsafe_by_policy 现在只表示「这个 Skill 自己声明不能重放」
+- 阶段 9 之前这一题的答案是「只有 custom_skill（read_only_rag）autoReplaySafe」：没有图 checkpoint 的 custom_skill 步骤在启动时整步重放，重放前 custom-research-steps.js 用 live registry 的 isSideEffectingSkill 再查一次。这种步骤只有已删除的 V1 顺序链写得出来，所以这一列、独立处理器和这次复核都删了（CURRENT-TRUTH.md 3.50）
 
-代码：`server/rag/agent-run-step-replay-safety.js getDeclaredContractReasonCodes / getPolicyReasonCodes`；`server/rag/agent-run-step-handlers/custom-research-steps.js（isSideEffectingSkill 调用处）`；`server/rag/skills/skill-contract.js describeSkillReplayContract / isSideEffectingSkill`
+代码：`server/rag/agent-run-step-replay-safety.js isStepRetryAllowed / getDeclaredContractReasonCodes / getPolicyReasonCodes`；`server/rag/agent-run-graph-replay-guard.js assertStandaloneGraphReplayAllowed`；`server/rag/skills/skill-contract.js describeSkillReplayContract`
 
-> ⚠ 别说「由 Skill 声明决定」。是运行时按步骤类型登记 + 声明只收窄 + 重放前复核 live 契约。
+> ⚠ 别说「由 Skill 声明决定」，也别再说「只读的 custom_skill 步骤会自动重放」。是运行时按步骤类型登记能不能由人重试，声明只加原因；自动的只有整图续跑。
 
 ### Q6. 为什么不用 Temporal / Cadence 这种 durable execution 引擎？
 
@@ -534,6 +539,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 | 后台任务租约（代码常量） | DEFAULT_TASK_CLAIM_LEASE_MS = 60,000；心跳间隔 lease/3 | server/rag/tasks.js；server/rag/job-orchestrator.js createClaimHeartbeat | 只对任务；agent run 本身没有租约 |
 | 优雅停机窗口 | 在途请求 25 s（SERVICE_SHUTDOWN_GRACE_MS 默认），finalizer 余量 3 s，入库 worker 交回 5 s，compose stop_grace_period 30 s | AGENTS.md「Monolith shutdown」；server/server.js SHUTDOWN_FINALIZER_MARGIN_MS / INGEST_WORKER_STOP_GRACE_MS；server/rag/config.js | 只覆盖 HTTP 请求 |
 | 恢复与图回归证据 | eval:recovery-observability 8/8，删除原生调度器前后屏蔽后逐字节一致；test:pgvector 101/101；golden 8 个套件、102 个文件 | CURRENT-TRUTH.md 3.30 | golden 只代表固定场景，不是对任意图形状的证明；在 Node 24 生成，CI 的 Node 22 上通过 |
+| custom Skill 步骤不再单独重放（阶段 9）之后的恢复证据 | eval:recovery-observability 8/8，检查项 29 → 27；可恢复的 run 4 → 3，转人工 1 → 2，手动动作 3 → 2，自动恢复尝试 3 → 1（成功率仍是 1）；agent-skill-step-replay 12/12（冻结时 10 个）、agent-run-recovery 17/17、agent-run-recovery-actions 7/7、agent-run-step-executor 22/22（原 26 个）；覆盖率闸门 4,607 个测试（通过 4,600、跳过 7、失败 0） | CURRENT-TRUTH.md 3.50；docs/adr/0001-langgraph-runtime.md 阶段 9 | 独立复核修正之后、在 015f06a1 上，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；独立复核没有高级缺陷，两条中级意见都不是这次改出来的，已处理；CI 的 Node 22 还没跑过，合并进 main 之后才有。恢复评测的计数来自内存 store 上的确定性造数，自动恢复那一次由图启动续跑探针提供；去掉的两项检查随功能一起消失，阈值没改 |
 | 真实模型规划 v3 统一图 | 模型计划只被接受 3/15，12 次回落确定性图，0 次回落 V1 | CURRENT-TRUTH.md 3.17；docs/evaluation.md「统一图的真实模型规划（2026-09-27）」 | 本地 qwen2.5:7b、3 轮 15 次规划；v3 默认 off，图内审批的证据是确定性提案 |
 | 依赖故障默认 Retry-After | 5 秒 | server/rag/dependency-outage.js DEFAULT_OUTAGE_RETRY_AFTER_SECONDS | 原因自带 Retry-After 时用原因的 |
 
@@ -542,9 +548,10 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 不是 exactly-once：主 document_rag 的显式 retry_failed_step 会再记一次会话和长期记忆；Capability 的幂等性交给 adapter（capability_defined），不遵守幂等键的 adapter 没有保证。
 - 恢复只在启动时扫描（app.js 与 agent-service/app.js 各调一次 recoverOnStartup），agent run 没有租约和心跳；活着的实例之间不会接管彼此崩溃的 run，要等某个进程重启。
 - （读代码推断，未测）listRecoverable 只按状态选、不区分孤儿和别的实例正在跑的 run；多实例滚动重启时，会把其他实例上在跑的图 run 转人工或认领接管、并 fence 掉原 worker（状态安全但那次请求失败），也会给非图 run 打上误导的人工标记。
-- 自动续跑范围很窄：非图 run 只有 custom_skill 能自动重放（这种 run 只有 2026-11-13 之前由 V1 顺序链存下的，新的 run 不再产生）；图 run 要求外层计划只剩 custom_skills 或走 v3 guarded 路径（v3 默认 off）。最常见的崩溃（主 document_rag 在途）会转人工；V1 待审批的 run 重启后也会被打上 manual 标记。外层计划 2026-11-13 起也由 LangGraph 调度（阶段 7），但外层图不带 checkpointer，持久化仍是 run 的步骤，这个范围没有变。
-- 被放弃的恢复 claim 永不自动重放，在途未知的节点（包括声明只读的）一律转人工，需要运维用 cancel / resume_from_step / retry_failed_step 处理；没有运维处理量的数据可引用。
-- 失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY）。以前只有 V1 顺序链的步骤支持；顺序链 2026-11-13 删除（ADR 0001 阶段 8，CURRENT-TRUTH.md 3.49）后这项能力没有了，也没有替代。默认走图是 2026-09-25 起的事，所以默认配置下它已经七周不可用。图里只有有限 replan，而且只在模型规划器是主规划器时存在；确定性规划器下，失败的节点留下 partial 的图，没有重试。处理 custom_skill 步骤的单步重试和启动恢复处理器还留着，只对阶段 8 之前存下来的 run 有用。
+- 自动续跑范围很窄，只有两种，都是续跑整张图：外层计划只剩 custom_skills 的 guarded custom-Skill 图，和走 v3 guarded 路径的统一图（v3 默认 off）。步骤不单独重放，没有图可续的 run 一律转人工（2026-11-13 阶段 9 起，CURRENT-TRUTH.md 3.50；之前非图 run 里的 custom_skill 步骤会整步重放，那种 run 只有 V1 顺序链存下的）。最常见的崩溃（主 document_rag 在途）会转人工；V1 待审批的 run 重启后也会被打上 manual 标记。外层计划 2026-11-13 起也由 LangGraph 调度（阶段 7），但外层图不带 checkpointer，持久化仍是 run 的步骤，这个范围没有因此改变。
+- 被放弃的恢复 claim 永不自动重放，在途未知的节点（包括声明只读的）一律转人工，需要运维处理。运维动作只有两个：cancel 和 retry_failed_step（resume_from_step 阶段 9 删除）。cancel 给的是转了人工、还在等待的 run，所以转人工的 run 在恢复面板上实际只能取消；retry_failed_step 给的是已经结束（completed 或 failed）的 run 里最后一个失败步骤，而且只在矩阵允许这类步骤重试时给出，custom_skill、web_search、arxiv_import 都不在其中（聊天答案里失败步骤的 Retry 按钮按同一份清单显示）。没有运维处理量的数据可引用。
+- 失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY）。以前只有 V1 顺序链的步骤支持；顺序链 2026-11-13 删除（ADR 0001 阶段 8，CURRENT-TRUTH.md 3.49）后这项能力没有了，也没有替代。默认走图是 2026-09-25 起的事，所以默认配置下它已经七周不可用。图里只有有限 replan，而且只在模型规划器是主规划器时存在；确定性规划器下，失败的节点留下 partial 的图，没有重试。处理 custom_skill 步骤的单步重试和启动恢复处理器在阶段 8 还留着，同一天的阶段 9 也删了（3.50）：顺序链留下的旧 run 中断了转人工、只能取消，失败了不能单步重试，要得到答案只能重新提问；恢复面板不再给失败的图节点「重试失败步骤」按钮（以前给，点了一定是 409）。
+- 阶段 9 的结果只在本机 Node 24 上验证过：CI 的 Node 22 要等合并进 main 之后才有；真实浏览器里的恢复面板没有起应用看过（前端只跑了组件测试）；真实 PostgreSQL 上的旧链 run 没有验证过（postgres-agent-run-store 的测试用的是假的 pg 客户端，本机和 CI 的数据库里也没有这种存量 run）。「这些代码只有旧 run 走得到」是从代码的调用关系读出来的，没有线上数据。
 - 取消不是立即生效：要等在途节点到安全点；写型 Capability 开始后一定跑完；数据库语句不读 signal；检索层不随调用方断开而停止。截止时间（AGENT_REQUEST_TIMEOUT_MS）和断开取消（AGENT_CANCEL_ON_DISCONNECT）默认都关。
 - v3 非主节点（follow-up、Web、custom Skill）遇到依赖故障仍答 409 AGENT_UNIFIED_GRAPH_PARTIAL；v3 审批续跑中的依赖故障转人工。
 - 优雅停机只覆盖 HTTP 请求，进程内的后台 agent 任务仍被切断，留给启动恢复。
@@ -607,6 +614,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
   - 原以为：跳过（已被认领、干净的审批暂停）
   - 实际：只有 v3 图的干净审批暂停被跳过；V1 待审批 run 在 auto 模式下返回 pending_approval_gate 并被打 manual 标记（状态仍 waiting_for_user）；v3 自动续跑还要求 rollout 仍是 guarded、线程核对通过
   - 依据：server/rag/agent-run-recovery.js findAutoRecoverableStep 首先返回 pending_approval_gate，随后 markManualRecovery；test/agent-run-recovery.test.mjs 断言 manualRecoveredCount 1、reason pending_approval_gate；isCleanGraphApprovalPause 只在 unifiedGraphPath 下判断
+  - 2026-11-13 更新（阶段 9）：结论不变，函数名变了。findAutoRecoverableStep 已删除；现在是 explainInterruptedRun 先看待审批项、给出 pending_approval_gate，recoverOnStartup 随后 markManualRecovery。它只给原因，不再挑步骤重放
 - **requestFlow 第 8 步**
   - 原以为：reconcileExecutionGraphCheckpoint + verifyLangGraphThread → claimExecutionGraphResume
   - 实际：verifyLangGraphThread 只对 v3 统一图（v2 checkpoint）调用，v1 custom-Skill checkpoint 直接视为线程 ok
@@ -639,6 +647,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
   - 原以为：缺少幂等键与运维动作所在文件
   - 实际：新增 server/rag/capabilities/artifacts.js（buildCapabilityArtifactIdempotencyKey）和 server/rag/agent-run-recovery-actions.js（AGENT_RUN_RECOVERY_ACTIONS）
   - 依据：grep 到 export const buildCapabilityArtifactIdempotencyKey 与 AGENT_RUN_RECOVERY_ACTIONS = { cancel, resume_from_step, retry_failed_step }
+  - 2026-11-13 更新（阶段 9）：resume_from_step 已删除，现在是 AGENT_RUN_RECOVERY_ACTIONS = { cancel, retry_failed_step }；上面的依据到阶段 9 之前成立
 - **staleInExistingDocs CURRENT-TRUTH 第 4 节条目**
   - 原以为：上下文丢失回落 owner……已过时
   - 实际：改为部分过时：strict 和角色拆分已实现但可选，默认 lenient 仍回落 owner 路径

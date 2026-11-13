@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +10,7 @@ import {
   withEnvironmentOverrides,
 } from "./agent-eval-harness.js";
 import { runAgentRag } from "../rag/agent.js";
-import { CUSTOM_SKILL_IDS, createSkillRegistry } from "../rag/skills/registry.js";
-import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
+import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 import {
   buildRecoveryObservabilityCases,
 } from "./recovery-observability-cases.js";
@@ -22,10 +22,7 @@ import {
   createAgentRunRecoveryActionService,
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
-import {
-  createCustomSkillStepExecutor,
-  createDocumentRagStepExecutor,
-} from "../rag/agent-run-step-handlers/index.js";
+import { createDocumentRagStepExecutor } from "../rag/agent-run-step-handlers/index.js";
 import { createJobOrchestrator, TASK_ACTIONS } from "../rag/job-orchestrator.js";
 import {
   AGENT_RUN_STEP_STATUSES,
@@ -80,29 +77,6 @@ const createProductionFixtureRunService = () =>
     }),
   });
 
-// Auto recovery must be exercised with an actually read-only operation. The
-// document RAG chat path writes session/long memory and is intentionally not
-// an auto-replay fixture anymore.
-const RECOVERY_READ_ONLY_SKILL_ID = "recovery_read_only_probe";
-const recoveryReadOnlySkill = {
-  id: RECOVERY_READ_ONLY_SKILL_ID,
-  version: "1.0.0",
-  label: "Recovery read-only probe",
-  kind: "custom",
-  budgetKey: "customSkillCalls",
-  requiresAccessScope: true,
-  effects: SKILL_EFFECTS.readOnly,
-  idempotency: SKILL_IDEMPOTENCY.readOnlyRag,
-  replaySafe: true,
-  retryable: true,
-  match: () => false,
-  execute: async () => ({
-    abstained: false,
-    citations: [{ docId: "doc-1", title: "Policy" }],
-    text: "Recovered read-only answer.",
-  }),
-};
-
 const createProductionFixtureDocumentExecutor = ({
   agentRunService,
   replayEvents,
@@ -110,10 +84,6 @@ const createProductionFixtureDocumentExecutor = ({
 } = {}) =>
   createAgentRunStepExecutor({
     agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: createSkillRegistry([recoveryReadOnlySkill]),
-    }),
     executeDocumentRagStep: createDocumentRagStepExecutor({
       ragService: {
         chat: async () => ({
@@ -136,7 +106,6 @@ const createManualRecoveryRun = async ({
   runId,
   status = AGENT_RUN_STEP_STATUSES.paused,
   stepId,
-  type = "document_rag",
 } = {}) => {
   await agentRunService.createRun({
     accessScope: productionFixtureAccessScope,
@@ -163,10 +132,9 @@ const createManualRecoveryRun = async ({
           input: {
             docIds: ["doc-1"],
             question: "What changed?",
-            ...(type === "custom_skill" ? { skillId: RECOVERY_READ_ONLY_SKILL_ID } : {}),
           },
           status,
-          type,
+          type: "document_rag",
         },
       ],
     },
@@ -256,43 +224,42 @@ const buildProductionLifecycleEvents = async () => {
   });
 };
 
+// Startup recovery replays no step on its own. Two interrupted runs that have
+// no graph to continue -- a custom Skill step in the shape the deleted V1
+// chain stored (no `nodeId`, no checkpoint) and a web search -- must both be
+// handed to an operator. The automatic side of startup recovery, continuing an
+// interrupted graph, is exercised by buildProductionGraphStartupResumeEvents.
+// Assertions fail the eval before any event is returned.
 const buildProductionStartupRecoveryEvents = async () => {
   const agentRunService = createProductionFixtureRunService();
   const recoveryEvents = [];
-  const replayEvents = [];
-  const agentRunStepExecutor = createProductionFixtureDocumentExecutor({
-    agentRunService,
-    replayEvents,
-  });
 
-  for (const runId of ["auto-custom-1", "auto-custom-2"]) {
-    await agentRunService.createRun({
-      accessScope: productionFixtureAccessScope,
-      goal: "Recover a read-only custom step.",
-      input: {
-        docIds: ["doc-1"],
-      },
-      runId,
-    });
-    await agentRunService.updateRun({
-      accessScope: productionFixtureAccessScope,
-      runId,
-      patch: {
-        steps: [
-          {
-            id: `${runId}:step`,
-            input: {
-              docIds: ["doc-1"],
-              question: "What changed?",
-              skillId: RECOVERY_READ_ONLY_SKILL_ID,
-            },
-            status: AGENT_RUN_STEP_STATUSES.running,
-            type: "custom_skill",
+  await agentRunService.createRun({
+    accessScope: productionFixtureAccessScope,
+    goal: "An interrupted custom Skill step with no graph.",
+    input: {
+      docIds: ["doc-1"],
+    },
+    runId: "manual-stored-skill-step",
+  });
+  await agentRunService.updateRun({
+    accessScope: productionFixtureAccessScope,
+    runId: "manual-stored-skill-step",
+    patch: {
+      steps: [
+        {
+          id: "manual-stored-skill-step:step",
+          input: {
+            docIds: ["doc-1"],
+            question: "What changed?",
+            skillId: "recovery_stored_skill",
           },
-        ],
-      },
-    });
-  }
+          status: AGENT_RUN_STEP_STATUSES.running,
+          type: "custom_skill",
+        },
+      ],
+    },
+  });
 
   await agentRunService.createRun({
     accessScope: productionFixtureAccessScope,
@@ -318,16 +285,46 @@ const buildProductionStartupRecoveryEvents = async () => {
 
   const recoveryService = createAgentRunRecoveryService({
     agentRunService,
-    agentRunStepExecutor,
     now: productionFixtureNow,
     recordRecoveryTrace: async (event) => recoveryEvents.push(event),
   });
 
-  await recoveryService.recoverOnStartup({
+  const recovery = await recoveryService.recoverOnStartup({
     mode: "auto",
   });
+  const runs = await Promise.all(
+    ["manual-stored-skill-step", "manual-web-search"].map((runId) =>
+      agentRunService.getRun({ accessScope: productionFixtureAccessScope, runId })
+    )
+  );
 
-  return [...recoveryEvents, ...replayEvents];
+  assert.equal(recovery.autoRecoveredCount, 0);
+  assert.equal(recovery.failedCount, 0);
+  assert.equal(recovery.manualRecoveredCount, 2);
+  assert.deepEqual(
+    runs.map((run) => [
+      run.status,
+      run.result.recovery.reason,
+      run.steps[0].status,
+      run.events.map((event) => event.type),
+    ]),
+    [
+      [
+        AGENT_RUN_STATUSES.waitingForUser,
+        "graph_node_step",
+        AGENT_RUN_STEP_STATUSES.running,
+        ["run_created", "manual_recovery_required"],
+      ],
+      [
+        AGENT_RUN_STATUSES.waitingForUser,
+        "requires_approval",
+        AGENT_RUN_STEP_STATUSES.running,
+        ["run_created", "manual_recovery_required"],
+      ],
+    ]
+  );
+
+  return recoveryEvents;
 };
 
 const buildProductionManualActionEvents = async () => {
@@ -345,12 +342,6 @@ const buildProductionManualActionEvents = async () => {
     recordRecoveryTrace: async (event) => recoveryEvents.push(event),
   });
 
-  await createManualRecoveryRun({
-    agentRunService,
-    runId: "manual-resume",
-    stepId: "manual-resume-step",
-    type: "custom_skill",
-  });
   await createManualRecoveryRun({
     agentRunService,
     runId: "manual-cancel",
@@ -384,11 +375,6 @@ const buildProductionManualActionEvents = async () => {
     ],
   });
 
-  await actionService.applyRecoveryAction({
-    accessScope: productionFixtureAccessScope,
-    action: "resume_from_step",
-    runId: "manual-resume",
-  });
   await actionService.applyRecoveryAction({
     accessScope: productionFixtureAccessScope,
     action: "retry_failed_step",
@@ -600,9 +586,9 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     traceType: "agent_run_recovery",
     eventType: "startup_recovery_completed",
     recoverableRunCount: 3,
-    manualRecoveryCount: 1,
-    autoReplayAttemptCount: 2,
-    autoReplaySuccessCount: 2,
+    manualRecoveryCount: 2,
+    autoReplayAttemptCount: 1,
+    autoReplaySuccessCount: 1,
     autoReplayFailureCount: 0,
   },
   {
@@ -636,12 +622,6 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
   {
     traceType: "agent_run_recovery",
     eventType: "manual_recovery_action",
-    action: "resume_from_step",
-    status: "completed",
-  },
-  {
-    traceType: "agent_run_recovery",
-    eventType: "manual_recovery_action",
     action: "retry_failed_step",
     status: "completed",
   },
@@ -649,11 +629,6 @@ export const buildRecoveryObservabilityFixtureEvents = () => [
     traceType: "agent_run_recovery",
     eventType: "manual_recovery_action",
     action: "cancel",
-    status: "completed",
-  },
-  {
-    traceType: "agent_run_step_replay",
-    action: "resume_step",
     status: "completed",
   },
   {
@@ -765,7 +740,7 @@ export const buildRecoveryObservabilityEvaluationReport = ({
       runId: runId ?? toRunId(createdAt),
       createdAt,
       status,
-      version: "1.1.0",
+      version: "1.2.0",
       metrics,
     },
     recovery: observability.recovery,
@@ -803,7 +778,6 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     `- Primary step completed: \`${recovery.primaryStepCompletedCount ?? 0}\``,
     `- Primary step failed: \`${recovery.primaryStepFailedCount ?? 0}\``,
     `- Step retry count: \`${recovery.stepRetryCount ?? 0}\``,
-    `- Step resume count: \`${recovery.stepResumeCount ?? 0}\``,
     `- Step replay failures: \`${recovery.stepReplayFailureCount ?? 0}\``,
     `- Task recovery scheduled: \`${recovery.taskRecoveryScheduledCount ?? 0}\``,
     `- Task recovery resume actions: \`${

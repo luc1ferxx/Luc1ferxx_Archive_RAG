@@ -205,7 +205,6 @@ const createRecoveryStats = () => ({
   primaryStepCompletedCount: 0,
   primaryStepFailedCount: 0,
   stepRetryCount: 0,
-  stepResumeCount: 0,
   stepReplayFailureCount: 0,
   plannerFallbackCount: 0,
   actionCounts: {},
@@ -660,15 +659,15 @@ const addStepLifecycleEvent = (recovery, event = {}) => {
   }
 };
 
+// The one step-level replay left is an operator's retry of a failed step. A
+// `resume_step` event was written until ADR 0001 phase 9 (a step replayed on
+// its own at startup or from the recovery panel); a stored one still counts as
+// an event, and as a failure when it failed, but has no counter of its own.
 const addStepReplayEvent = (recovery, event = {}) => {
   recovery.eventCount += 1;
 
   if (event.action === "retry_step") {
     recovery.stepRetryCount += 1;
-  }
-
-  if (event.action === "resume_step") {
-    recovery.stepResumeCount += 1;
   }
 
   if (event.status === "failed" || event.error) {
@@ -1185,7 +1184,6 @@ export const formatObservabilityReport = (report) => {
     `  primary step completed: ${report.recovery.primaryStepCompletedCount}`,
     `  primary step failed: ${report.recovery.primaryStepFailedCount}`,
     `  step retry count: ${report.recovery.stepRetryCount}`,
-    `  step resume count: ${report.recovery.stepResumeCount}`,
     `  step replay failures: ${report.recovery.stepReplayFailureCount}`,
     `  planner fallback count: ${report.recovery.plannerFallbackCount}`,
     `  task recovery scheduled: ${report.recovery.taskRecoveryScheduledCount}`,

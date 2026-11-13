@@ -522,7 +522,6 @@ test("agent run completion cannot regress terminal step lifecycle from a stale s
     step: completedStep,
   });
 
-  assert.equal(replaySafety.canAutoReplay, false);
   assert.equal(replaySafety.replayRequiresApproval, true);
 });
 

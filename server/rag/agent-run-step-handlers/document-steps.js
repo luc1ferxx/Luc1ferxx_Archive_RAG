@@ -230,7 +230,6 @@ export const createDocumentRagStepExecutor = ({ ragService } = {}) => async ({
           ? { memoryWrites: false }
           : {}),
       }),
-    failureMessage: "Document RAG execution failed.",
     getCitations: getDocumentRagResultCitations,
     input,
     run,

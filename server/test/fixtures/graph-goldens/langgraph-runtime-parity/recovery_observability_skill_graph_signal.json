@@ -2,53 +2,16 @@
   "outcome": {
     "events": [
       {
-        "autoReplayAttemptCount": 2,
+        "autoReplayAttemptCount": 0,
         "autoReplayFailureCount": 0,
-        "autoReplaySuccessCount": 2,
+        "autoReplaySuccessCount": 0,
         "eventType": "startup_recovery_completed",
-        "manualRecoveryCount": 1,
+        "manualRecoveryCount": 2,
         "mode": "auto",
         "reason": "server_startup_recovery",
-        "recoverableRunCount": 3,
-        "recoveredCount": 3,
+        "recoverableRunCount": 2,
+        "recoveredCount": 2,
         "skippedCount": 0,
-        "timestamp": "<time>",
-        "traceType": "agent_run_recovery"
-      },
-      {
-        "action": "resume_step",
-        "error": null,
-        "retryOfStepId": "",
-        "runId": "auto-custom-1",
-        "runStatus": "completed",
-        "status": "completed",
-        "stepId": "auto-custom-1:step",
-        "stepKind": "tool_call",
-        "stepType": "custom_skill",
-        "timestamp": "<time>",
-        "traceType": "agent_run_step_replay"
-      },
-      {
-        "action": "resume_step",
-        "error": null,
-        "retryOfStepId": "",
-        "runId": "auto-custom-2",
-        "runStatus": "completed",
-        "status": "completed",
-        "stepId": "auto-custom-2:step",
-        "stepKind": "tool_call",
-        "stepType": "custom_skill",
-        "timestamp": "<time>",
-        "traceType": "agent_run_step_replay"
-      },
-      {
-        "action": "resume_from_step",
-        "error": null,
-        "eventType": "manual_recovery_action",
-        "runId": "manual-resume",
-        "runStatus": "completed",
-        "status": "completed",
-        "stepId": "manual-resume-step",
         "timestamp": "<time>",
         "traceType": "agent_run_recovery"
       },
@@ -73,19 +36,6 @@
         "stepId": null,
         "timestamp": "<time>",
         "traceType": "agent_run_recovery"
-      },
-      {
-        "action": "resume_step",
-        "error": null,
-        "retryOfStepId": "",
-        "runId": "manual-resume",
-        "runStatus": "completed",
-        "status": "completed",
-        "stepId": "manual-resume-step",
-        "stepKind": "tool_call",
-        "stepType": "custom_skill",
-        "timestamp": "<time>",
-        "traceType": "agent_run_step_replay"
       },
       {
         "action": "retry_step",
@@ -565,21 +515,21 @@
           "checks": [
             {
               "category": "coverage",
-              "detail": "recoverableRunCount=4",
+              "detail": "recoverableRunCount=3",
               "id": "recoverable_runs_recorded",
               "label": "Recoverable runs were recorded",
               "passed": true
             },
             {
               "category": "coverage",
-              "detail": "manualRecoveryCount=1",
+              "detail": "manualRecoveryCount=2",
               "id": "manual_recovery_required",
               "label": "Manual recovery requirement was recorded",
               "passed": true
             },
             {
               "category": "replay",
-              "detail": "autoReplayAttemptCount=3",
+              "detail": "autoReplayAttemptCount=1",
               "id": "auto_recovery_attempted",
               "label": "Auto recovery attempt was recorded",
               "passed": true
@@ -599,16 +549,16 @@
               "passed": true
             }
           ],
-          "description": "A startup recovery summary should expose manual recovery and safe auto replay coverage.",
+          "description": "A startup recovery summary should show runs handed to an operator and an interrupted graph continued automatically. Startup replays no step on its own.",
           "failedCheckCount": 0,
           "id": "startup_recovery_summary",
           "label": "Startup recovery summary",
           "passed": true,
           "response": {
-            "autoReplayAttemptCount": 3,
+            "autoReplayAttemptCount": 1,
             "autoReplaySuccessRate": 1,
-            "manualRecoveryCount": 1,
-            "recoverableRunCount": 4
+            "manualRecoveryCount": 2,
+            "recoverableRunCount": 3
           }
         },
         {
@@ -655,16 +605,9 @@
           "checks": [
             {
               "category": "manual_recovery",
-              "detail": "manualRecoveryActionCount=3",
+              "detail": "manualRecoveryActionCount=2",
               "id": "manual_actions_recorded",
               "label": "Manual recovery actions were recorded",
-              "passed": true
-            },
-            {
-              "category": "manual_recovery",
-              "detail": "resume_from_step=1",
-              "id": "resume_after_partial_step_recorded",
-              "label": "Resume after partial step was recorded",
               "passed": true
             },
             {
@@ -697,10 +640,9 @@
           "response": {
             "actionCounts": {
               "cancel": 1,
-              "resume_from_step": 1,
               "retry_failed_step": 1
             },
-            "manualRecoveryActionCount": 3,
+            "manualRecoveryActionCount": 2,
             "manualRecoveryActionFailureCount": 0
           }
         },
@@ -715,27 +657,19 @@
             },
             {
               "category": "replay",
-              "detail": "stepResumeCount=3",
-              "id": "resume_step_recorded",
-              "label": "Resume step replay was recorded",
-              "passed": true
-            },
-            {
-              "category": "replay",
               "detail": "stepReplayFailureCount=0",
               "id": "step_replay_failures_zero",
               "label": "Step replay failures stayed at zero",
               "passed": true
             }
           ],
-          "description": "Step-level replay events should cover resume and retry paths with no replay failures.",
+          "description": "An operator's retry of a failed step should be recorded, with no replay failures. It is the only step-level replay there is.",
           "failedCheckCount": 0,
           "id": "step_replay_actions",
           "label": "Step replay actions",
           "passed": true,
           "response": {
             "stepReplayFailureCount": 0,
-            "stepResumeCount": 3,
             "stepRetryCount": 1
           }
         },
@@ -896,7 +830,7 @@
         }
       ],
       "observability": {
-        "eventCount": 37,
+        "eventCount": 33,
         "llmops": {
           "alertCounts": {},
           "alertEventCount": 0,
@@ -980,17 +914,16 @@
         "recovery": {
           "actionCounts": {
             "cancel": 1,
-            "resume_from_step": 1,
             "retry_failed_step": 1
           },
-          "autoReplayAttemptCount": 3,
+          "autoReplayAttemptCount": 1,
           "autoReplayFailureCount": 0,
-          "autoReplaySuccessCount": 3,
+          "autoReplaySuccessCount": 1,
           "autoReplaySuccessRate": 1,
-          "eventCount": 26,
-          "manualRecoveryActionCount": 3,
+          "eventCount": 22,
+          "manualRecoveryActionCount": 2,
           "manualRecoveryActionFailureCount": 0,
-          "manualRecoveryCount": 1,
+          "manualRecoveryCount": 2,
           "plannerFallbackCount": 0,
           "primaryStepCompletedCount": 1,
           "primaryStepFailedCount": 1,
@@ -1000,7 +933,7 @@
             "step_started": 2
           },
           "primaryStepStartedCount": 2,
-          "recoverableRunCount": 4,
+          "recoverableRunCount": 3,
           "skillGraphAutoRecoveryCompletedCount": 1,
           "skillGraphAutoRecoveryFailureCount": 0,
           "skillGraphCompletedNodeNotRerunCount": 1,
@@ -1023,7 +956,6 @@
           },
           "stepLifecycleEventCount": 8,
           "stepReplayFailureCount": 0,
-          "stepResumeCount": 3,
           "stepRetryCount": 1,
           "taskRecoveryActionCounts": {
             "confirm": 1
@@ -1038,17 +970,16 @@
       "recovery": {
         "actionCounts": {
           "cancel": 1,
-          "resume_from_step": 1,
           "retry_failed_step": 1
         },
-        "autoReplayAttemptCount": 3,
+        "autoReplayAttemptCount": 1,
         "autoReplayFailureCount": 0,
-        "autoReplaySuccessCount": 3,
+        "autoReplaySuccessCount": 1,
         "autoReplaySuccessRate": 1,
-        "eventCount": 26,
-        "manualRecoveryActionCount": 3,
+        "eventCount": 22,
+        "manualRecoveryActionCount": 2,
         "manualRecoveryActionFailureCount": 0,
-        "manualRecoveryCount": 1,
+        "manualRecoveryCount": 2,
         "plannerFallbackCount": 0,
         "primaryStepCompletedCount": 1,
         "primaryStepFailedCount": 1,
@@ -1058,7 +989,7 @@
           "step_started": 2
         },
         "primaryStepStartedCount": 2,
-        "recoverableRunCount": 4,
+        "recoverableRunCount": 3,
         "skillGraphAutoRecoveryCompletedCount": 1,
         "skillGraphAutoRecoveryFailureCount": 0,
         "skillGraphCompletedNodeNotRerunCount": 1,
@@ -1081,7 +1012,6 @@
         },
         "stepLifecycleEventCount": 8,
         "stepReplayFailureCount": 0,
-        "stepResumeCount": 3,
         "stepRetryCount": 1,
         "taskRecoveryActionCounts": {
           "confirm": 1
@@ -1104,11 +1034,11 @@
               "passedCheckCount": 2
             },
             "manual_recovery": {
-              "checkCount": 5,
+              "checkCount": 4,
               "failedCheckCount": 0,
               "label": "Manual recovery",
               "passRate": 1,
-              "passedCheckCount": 5
+              "passedCheckCount": 4
             },
             "planner": {
               "checkCount": 1,
@@ -1125,11 +1055,11 @@
               "passedCheckCount": 3
             },
             "replay": {
-              "checkCount": 6,
+              "checkCount": 5,
               "failedCheckCount": 0,
               "label": "Replay",
               "passRate": 1,
-              "passedCheckCount": 6
+              "passedCheckCount": 5
             },
             "skill_graph": {
               "checkCount": 10,
@@ -1146,17 +1076,17 @@
               "passedCheckCount": 2
             }
           },
-          "checkCount": 29,
+          "checkCount": 27,
           "checkPassRate": 1,
           "failedCaseCount": 0,
           "failedCheckCount": 0,
           "overallPassRate": 1,
           "passedCaseCount": 8,
-          "passedCheckCount": 29
+          "passedCheckCount": 27
         },
         "runId": "langgraph-runtime-parity",
         "status": "pass",
-        "version": "1.1.0"
+        "version": "1.2.0"
       }
     }
   },
@@ -1165,7 +1095,7 @@
       "events": [
         {
           "createdAt": "<time>",
-          "eventId": "auto-custom-1:1",
+          "eventId": "manual-stored-skill-step:1",
           "payload": {
             "status": "running"
           },
@@ -1173,221 +1103,56 @@
         },
         {
           "createdAt": "<time>",
-          "eventId": "auto-custom-1:2",
+          "eventId": "manual-stored-skill-step:2",
           "payload": {
+            "mode": "manual",
             "originalStatus": "running",
-            "reason": "server_startup_recovery",
-            "stepId": "auto-custom-1:step",
-            "stepType": "custom_skill"
+            "reason": "graph_node_step",
+            "requestedMode": "auto",
+            "status": "waiting_for_user",
+            "stepId": null,
+            "stepType": null
           },
-          "type": "auto_recovery_started"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-1:3",
-          "payload": {
-            "status": "running",
-            "stepId": "auto-custom-1:step"
-          },
-          "type": "step_started"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-1:4",
-          "payload": {
-            "status": "completed",
-            "stepId": "auto-custom-1:step"
-          },
-          "type": "step_completed"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-1:5",
-          "payload": {
-            "status": "completed"
-          },
-          "type": "run_completed"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-1:6",
-          "payload": {
-            "status": "completed",
-            "stepId": "auto-custom-1:step",
-            "stepType": "custom_skill"
-          },
-          "type": "auto_recovery_completed"
+          "type": "manual_recovery_required"
         }
       ],
       "result": {
-        "agentMode": "recovery_read_only_probe",
-        "answer": "Recovered read-only answer.",
-        "citationCount": 1,
-        "ragAbstained": false,
         "recovery": {
-          "mode": "auto",
+          "mode": "manual",
           "originalStatus": "running",
-          "reason": "server_startup_recovery",
+          "reason": "graph_node_step",
           "recoveredAt": "<time>",
-          "stepId": "auto-custom-1:step",
-          "stepType": "custom_skill"
-        },
-        "status": 200
+          "requestedMode": "auto"
+        }
       },
-      "status": "completed",
+      "status": "waiting_for_user",
       "steps": [
         {
           "approvalGateId": "",
           "attempt": 1,
           "capabilityId": "",
           "capabilityVersion": "",
-          "completedAt": "<time>",
-          "createdAt": "<time>",
+          "completedAt": "",
+          "createdAt": "",
           "decision": "",
           "detail": null,
           "error": null,
-          "id": "auto-custom-1:step",
+          "id": "manual-stored-skill-step:step",
           "input": {
             "docIds": [
               "doc-1"
             ],
-            "priorFindings": null,
             "question": "What changed?",
-            "retrievalPlan": null,
-            "sessionId": null,
-            "skillId": "recovery_read_only_probe",
-            "skillVersion": null,
-            "userId": null
+            "skillId": "recovery_stored_skill"
           },
           "kind": "tool_call",
           "label": "custom_skill",
-          "output": {
-            "abstained": false,
-            "citationCount": 1,
-            "text": "Recovered read-only answer."
-          },
+          "output": null,
           "parentStepId": "",
           "pausedAt": "",
           "retryOfStepId": "",
           "startedAt": "",
-          "status": "completed",
-          "summary": "",
-          "traceStepId": "",
-          "type": "custom_skill",
-          "updatedAt": "<time>"
-        }
-      ]
-    },
-    {
-      "events": [
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:1",
-          "payload": {
-            "status": "running"
-          },
-          "type": "run_created"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:2",
-          "payload": {
-            "originalStatus": "running",
-            "reason": "server_startup_recovery",
-            "stepId": "auto-custom-2:step",
-            "stepType": "custom_skill"
-          },
-          "type": "auto_recovery_started"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:3",
-          "payload": {
-            "status": "running",
-            "stepId": "auto-custom-2:step"
-          },
-          "type": "step_started"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:4",
-          "payload": {
-            "status": "completed",
-            "stepId": "auto-custom-2:step"
-          },
-          "type": "step_completed"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:5",
-          "payload": {
-            "status": "completed"
-          },
-          "type": "run_completed"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "auto-custom-2:6",
-          "payload": {
-            "status": "completed",
-            "stepId": "auto-custom-2:step",
-            "stepType": "custom_skill"
-          },
-          "type": "auto_recovery_completed"
-        }
-      ],
-      "result": {
-        "agentMode": "recovery_read_only_probe",
-        "answer": "Recovered read-only answer.",
-        "citationCount": 1,
-        "ragAbstained": false,
-        "recovery": {
-          "mode": "auto",
-          "originalStatus": "running",
-          "reason": "server_startup_recovery",
-          "recoveredAt": "<time>",
-          "stepId": "auto-custom-2:step",
-          "stepType": "custom_skill"
-        },
-        "status": 200
-      },
-      "status": "completed",
-      "steps": [
-        {
-          "approvalGateId": "",
-          "attempt": 1,
-          "capabilityId": "",
-          "capabilityVersion": "",
-          "completedAt": "<time>",
-          "createdAt": "<time>",
-          "decision": "",
-          "detail": null,
-          "error": null,
-          "id": "auto-custom-2:step",
-          "input": {
-            "docIds": [
-              "doc-1"
-            ],
-            "priorFindings": null,
-            "question": "What changed?",
-            "retrievalPlan": null,
-            "sessionId": null,
-            "skillId": "recovery_read_only_probe",
-            "skillVersion": null,
-            "userId": null
-          },
-          "kind": "tool_call",
-          "label": "custom_skill",
-          "output": {
-            "abstained": false,
-            "citationCount": 1,
-            "text": "Recovered read-only answer."
-          },
-          "parentStepId": "",
-          "pausedAt": "",
-          "retryOfStepId": "",
-          "startedAt": "",
-          "status": "completed",
+          "status": "running",
           "summary": "",
           "traceStepId": "",
           "type": "custom_skill",
@@ -1456,106 +1221,6 @@
           "summary": "",
           "traceStepId": "",
           "type": "web_search",
-          "updatedAt": "<time>"
-        }
-      ]
-    },
-    {
-      "events": [
-        {
-          "createdAt": "<time>",
-          "eventId": "manual-resume:1",
-          "payload": {
-            "status": "running"
-          },
-          "type": "run_created"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "manual-resume:2",
-          "payload": {
-            "reason": "recovery_observability_eval_fixture"
-          },
-          "type": "manual_recovery_required"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "manual-resume:3",
-          "payload": {
-            "status": "running",
-            "stepId": "manual-resume-step"
-          },
-          "type": "step_started"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "manual-resume:4",
-          "payload": {
-            "status": "completed",
-            "stepId": "manual-resume-step"
-          },
-          "type": "step_completed"
-        },
-        {
-          "createdAt": "<time>",
-          "eventId": "manual-resume:5",
-          "payload": {
-            "status": "completed"
-          },
-          "type": "run_completed"
-        }
-      ],
-      "result": {
-        "agentMode": "recovery_read_only_probe",
-        "answer": "Recovered read-only answer.",
-        "citationCount": 1,
-        "ragAbstained": false,
-        "recovery": {
-          "mode": "manual",
-          "reason": "recovery_observability_eval_fixture"
-        },
-        "status": 200
-      },
-      "status": "completed",
-      "steps": [
-        {
-          "approvalGateId": "",
-          "attempt": 1,
-          "capabilityId": "",
-          "capabilityVersion": "",
-          "completedAt": "<time>",
-          "createdAt": "<time>",
-          "decision": "",
-          "detail": null,
-          "error": null,
-          "id": "manual-resume-step",
-          "input": {
-            "docIds": [
-              "doc-1"
-            ],
-            "priorFindings": null,
-            "question": "What changed?",
-            "retrievalPlan": null,
-            "sessionId": null,
-            "skillId": "recovery_read_only_probe",
-            "skillVersion": null,
-            "userId": null
-          },
-          "kind": "tool_call",
-          "label": "custom_skill",
-          "output": {
-            "abstained": false,
-            "citationCount": 1,
-            "text": "Recovered read-only answer."
-          },
-          "parentStepId": "",
-          "pausedAt": "",
-          "retryOfStepId": "",
-          "startedAt": "",
-          "status": "completed",
-          "summary": "",
-          "traceStepId": "",
-          "type": "custom_skill",
           "updatedAt": "<time>"
         }
       ]

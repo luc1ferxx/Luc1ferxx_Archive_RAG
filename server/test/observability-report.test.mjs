@@ -643,7 +643,11 @@ test("observability report aggregates recovery and replay metrics", () => {
   assert.equal(report.recovery.primaryStepCompletedCount, 1);
   assert.equal(report.recovery.primaryStepFailedCount, 1);
   assert.equal(report.recovery.stepRetryCount, 1);
-  assert.equal(report.recovery.stepResumeCount, 1);
+  // `resume_from_step` and `resume_step` are no longer written (ADR 0001
+  // phase 9). Stored ones, like the two above, still count: the action under
+  // its own name, the failed replay as a replay failure. There is no resume
+  // counter.
+  assert.equal("stepResumeCount" in report.recovery, false);
   assert.equal(report.recovery.stepReplayFailureCount, 1);
   assert.equal(report.recovery.plannerFallbackCount, 1);
   assert.deepEqual(report.recovery.actionCounts, {

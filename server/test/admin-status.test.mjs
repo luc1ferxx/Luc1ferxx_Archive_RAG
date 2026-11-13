@@ -39,7 +39,7 @@ test("admin status aggregates compact deployment health quality and runtime coun
               recovery: {
                 actions: [
                   {
-                    type: "resume_from_step",
+                    type: "retry_failed_step",
                   },
                 ],
                 required: true,

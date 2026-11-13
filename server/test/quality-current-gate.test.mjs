@@ -122,10 +122,10 @@ const buildReport = (spec) => {
     spec.id === "recovery"
       ? {
           recoverableRunCount: 3,
-          manualRecoveryCount: 1,
-          manualRecoveryActionCount: 3,
+          manualRecoveryCount: 2,
+          manualRecoveryActionCount: 2,
           manualRecoveryActionFailureCount: 0,
-          autoReplayAttemptCount: 2,
+          autoReplayAttemptCount: 1,
           autoReplaySuccessRate: 1,
           autoReplayFailureCount: 0,
           primaryStepStartedCount: 2,
@@ -137,12 +137,10 @@ const buildReport = (spec) => {
             step_failed: 1,
           },
           actionCounts: {
-            resume_from_step: 1,
             retry_failed_step: 1,
             cancel: 1,
           },
           stepRetryCount: 1,
-          stepResumeCount: 3,
           stepReplayFailureCount: 0,
           taskRecoveryScheduledCount: 1,
           taskRecoveryResumeActionCount: 1,

@@ -27,13 +27,13 @@
 | `server/evaluation/run-llm-resilience-eval.mjs` | startFaultInjectingServer：本地假 OpenAI 服务，RESILIENCE_SCENARIOS 共 8 个场景，故障序列由种子固定 |
 | `server/evaluation/run-prompt-injection-eval.mjs、prompt-injection-cases.js` | 红队：PROMPT_INJECTION_CASES 现有 15 个攻击用例（主测量用的 13 个 + 第一次基线后加的 2 个 evasion 用例，单独对比）加 PROMPT_INJECTION_CONTROLS 4 个对照组，分 rag 和 agent 两个出口，用金丝雀字符串或被篡改的事实判定攻击是否成功；另用 JUDGE_INJECTION_PROBES 测 claim judge 在注入下的表现 |
 | `server/evaluation/eval-evidence.js、eval-evidence-validation.js` | resolveEvaluationGitState、attachEvaluationEvidence 给报告盖证据信封；getEvaluationEvidenceFailureReason 产出稳定的 reason code |
-| `server/evaluation/quality-current-gate.js、quality-current-suite-manifest.js、quality-current-suite-validator.js` | PR 门 quality:current：同 SHA、干净工作区、24h（DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS）、manifest（CURRENT_QUALITY_SUITE_MANIFEST_VERSION 1.16.0；2026-11-13 删掉两个 trajectory 用例时从 1.15.0 升上来）钉死 case/check id 和响应投影、钉死的 baseline |
+| `server/evaluation/quality-current-gate.js、quality-current-suite-manifest.js、quality-current-suite-validator.js` | PR 门 quality:current：同 SHA、干净工作区、24h（DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS）、manifest（CURRENT_QUALITY_SUITE_MANIFEST_VERSION 1.17.0；2026-11-13 删掉两个 trajectory 用例时从 1.15.0 升到 1.16.0，同一天阶段 9 去掉恢复评测的两项检查时升到 1.17.0）钉死 case/check id 和响应投影、钉死的 baseline |
 | `server/evaluation/release-evidence-gate.js、eval-evidence-policy.js` | release:gate：完整报告集（RELEASE_EVIDENCE_REPORT_SPECS）；buildPromptLineageCheck、buildRobustLineageCheck、buildReadinessSourceCheck、buildGateWorktreeCheck |
 | `server/evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR 门唯一接受的确定性回归基线（2026-10-29 默认 topK 改为 10 时取代 v1，指标和用例与 v1 相同） |
 | `server/evaluation/run-llm-judge.mjs、run-claim-judge-eval.mjs` | LLM 评审：measureJudgeAgreement 对人工标签算一致率和 Cohen's kappa 的框架（还没在真实数据上跑）；claim judge 在构造的对照集（CLAIM_JUDGE_CONTRAST_SET、CLAIM_JUDGE_HELD_OUT_SET）上做校准 |
 | `.github/workflows/quality-gate.yml、real-model-eval.yml、release-evidence.yml、planner-real-gate.yml、robust-eval-suite.yml` | PR 三个并行 job；每周一用 Ollama 跑真实模型（不需要 key）；每周一（或手动）跑发布证据（需要 OPENAI_API_KEY）；真实规划器门（需要 key）；robust suite 手动诊断 |
 | `server/test/run.test.mjs、coverage-gate.mjs、coverage-policy.mjs、ci-workflow.test.mjs` | 测试文件自动发现（collectTestFiles），每个文件一个子进程；CI 只跑一遍 coverage:gate；ci-workflow.test.mjs 钉死 workflow 和两处发现逻辑一致，并断言 quality-gate.yml 里不出现 OPENAI_API_KEY |
-| `server/test/langgraph-support/graph-goldens.mjs、test/fixtures/graph-goldens/` | 删除原生调度器前冻结的 golden，8 个套件、102 个文件、约 5.3 MB；2026-11-13 删外层计划的原生循环前又冻结了 32 个文件（CURRENT-TRUTH §3.48）；同一天删 V1 顺序链时，这些文件里删了 2 个（custom_skill_retry、skill_graph_shadow_comparison 两个用例的）、改写了 1 个（统一图用例的 V1 对照从 4 次变 2 次），其余没动（§3.49）；只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败 |
+| `server/test/langgraph-support/graph-goldens.mjs、test/fixtures/graph-goldens/` | 删除原生调度器前冻结的 golden，8 个套件、102 个文件、约 5.3 MB；2026-11-13 删外层计划的原生循环前又冻结了 32 个文件（CURRENT-TRUTH §3.48）；同一天删 V1 顺序链时，这些文件里删了 2 个（custom_skill_retry、skill_graph_shadow_comparison 两个用例的）、改写了 1 个（统一图用例的 V1 对照从 4 次变 2 次），其余没动（§3.49）；阶段 9 又改写了 1 个（langgraph-runtime-parity 的 recovery_observability_skill_graph_signal.json：恢复评测去掉了造数，事件从 37 条变成 33 条，其中 17 条图事件逐字节未变，§3.50）；只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败 |
 
 ## 一次请求怎么经过这里
 
@@ -41,7 +41,7 @@ A. 一次 PR（.github/workflows/quality-gate.yml 的 quality-gate job，带 pgv
 1) npm run eval:synthetic -- evaluation/synthetic-corpus-near-duplicate.json --latest-name latest-quality --openai-provider deterministic：run-synthetic-eval.mjs 先用 configureOpenAIProvider 换成替身（toDeterministicEmbedding，64 维哈希词频；回答也是确定性替身），再 ingestDocument → chat() → evaluateSyntheticCaseResponse（内部调 evaluateClaimSupport、evaluateSyntheticComparisonExpectation）→ attachEvaluationEvidence 盖信封：resolveEvaluationGitState 取 commitSha/dirty，另有语料 contentHash、configHash、promptTemplates。
 2) eval:trajectory：runTrajectoryEvaluation 先用 withEnvironmentOverrides 把 AGENT_UNIFIED_GRAPH_ROLLOUT 固定为 off（并关掉经验记忆和长期记忆），再逐个跑 case（runTrajectoryCaseSafely）：buildScopedRagService 脚本化 chat，真实 runAgentRag，buildCheck 断言 trace、预算和作用域。
 3) eval:planner --provider mock：runPlannerEvaluation → configureOpenAIProvider(createMockPlannerProvider())。
-4) eval:recovery-observability、eval:feedback。
+4) eval:recovery-observability（8 个用例、27 项检查；2026-11-13 阶段 9 之前是 29 项，去掉的两项随单步 resume 一起删除）、eval:feedback。
 5) quality:current（check-current-quality.mjs）：resolveEvaluationGitState → readCurrentQualityInputs → buildCurrentQualityGateReport，其中 getGateWorktreeReason 检查门禁自身的 checkout；validateCurrentQualitySuiteReport 对照 manifest；getEvaluationEvidenceFailureReason 逐份检查 SHA、dirty、未来时间戳、24h、configHash、语料、provider、profile、modelRoute、semanticCache；baseline 必须是 quality-near-duplicate-deterministic-v2。全部通过才公开 metrics，否则标 unverified。最后上传 artifacts。
 
 B. 离线效果评测（本地 Ollama，或每周的 real-model-eval.yml，后者用 local 向量库、不连数据库）：
@@ -207,7 +207,7 @@ Agent 编排的正确性是确定性契约，应该每个 PR 都跑，并且不�
 
 **代价**
 
-只证明编排契约，不证明模型规划能力；每个 case/check id 和响应投影都钉在 manifest 里，加、删用例或改名都要升版本（2026-11-13 删掉两个用例，1.15.0 → 1.16.0）
+只证明编排契约，不证明模型规划能力；每个 case/check id 和响应投影都钉在 manifest 里，加、删用例或改名都要升版本（2026-11-13 删掉两个用例，1.15.0 → 1.16.0；同一天阶段 9 去掉恢复评测的两项检查，1.16.0 → 1.17.0）
 
 **证据**
 
@@ -227,7 +227,7 @@ eval:trajectory 17/17、76 项检查（CURRENT-TRUTH §3.49；2026-11-13 之前�
 
 **代价**
 
-不是密码学 attestation，evidence.command 是声明字段；manifest 有 2064 行（2026-11-13 删掉两个 trajectory 用例之前是 2215 行），维护成本高
+不是密码学 attestation，evidence.command 是声明字段；manifest 有 2062 行（2026-11-13 删掉两个 trajectory 用例之前是 2215 行，之后 2064 行；同一天阶段 9 去掉恢复评测的两项检查后 2062 行），维护成本高
 
 **证据**
 
@@ -425,7 +425,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - 断言大多落在运行时内部状态：拒答、页级引用、多文档数值归属、accessScope、预算、审批续跑
 - LangSmith 在项目里被强制禁止：追踪变量为 "true" 就拒绝启动，因为 LangChain 的 tracer 会把问题、prompt、文档正文发给第三方
 - 证据谱系要接自己的 prompt registry（setHash）和语料哈希
-- 代价：manifest 2064 行（2026-11-13 之前 2215 行）、每改一个用例都要升版本（现 1.16.0）、mulberry32 在 9 个文件里各一份、配对 bootstrap 至少 5 份独立实现
+- 代价：manifest 2062 行（2026-11-13 之前 2215 行）、每改一个用例或检查项都要升版本（现 1.17.0）、mulberry32 在 9 个文件里各一份、配对 bootstrap 至少 5 份独立实现
 
 代码：`server/evaluation/quality-current-suite-manifest.js CURRENT_QUALITY_SUITE_MANIFEST_VERSION`；`server/evaluation/eval-evidence.js attachEvaluationEvidence`；`server/rag/langgraph/langsmith-guard.js LANGSMITH_TRACING_VARIABLES`
 
@@ -465,6 +465,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - 脚本化 ragService 加真实 runAgentRag，证明的是编排契约：Skill 选择、补检索、预算、作用域、审批
 - 模型能力单独测：planner real 通过 24/30、LLM 规划降级 2/25（8%）；动态组合 2/5；统一图规划被接受 3/15
 - recovery 评测用的是同一个内存 store，不证明 OS 重启和 PG 持久化；PG 跨进程由集成测试证明
+- recovery 评测现在是 8 个用例、27 项检查（2026-11-13 阶段 9 之前 29 项）。启动恢复的造数是两个没有图可续的中断 run（一个旧链形状的 custom_skill 步骤、一个 web search），构建函数先断言两个都转了人工、步骤和事件没有被动过，再产出事件；「自动恢复尝试过、成功率 100%、失败 0」三项检查只由图启动续跑探针（skill_graph_startup_resume 用的同一次运行）喂数，因为启动恢复不再重放别的东西（CURRENT-TRUTH §3.50）
 - manifest 钉死 case/check id 和响应投影
 
 代码：`server/evaluation/trajectory/run.js runTrajectoryEvaluation`；`server/evaluation/agent-eval-harness.js buildScopedRagService`；`server/evaluation/planner/run.js runPlannerEvaluation`
@@ -504,6 +505,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - 自动发现，每个文件一个子进程，进程级状态不会串；CI 只跑一遍 coverage:gate
 - 删除前把 native 一侧冻结成 golden：8 个套件、102 个文件；2026-11-13 删外层计划的原生循环前用同一办法再冻结 32 个文件（§3.48）
 - 同一天删 custom Skill 阶段的 V1 顺序链也是先冻结再删除，冻结的是测试里的字面期望：顺序链在几种预算下的回答逐字写进 test/agent-custom-skill-budget.test.mjs，删除提交改掉其中变了的期望。trajectory 删了两个用例（19 个 84 项检查 → 17 个 76 项），golden 删 2 个、改写 1 个（§3.49）
+- 阶段 9（同一天）删 custom_skill 步骤的单独重放用的还是这个办法：冻结提交把这种步骤在启动、恢复面板和重试路由上的行为写成 10 个测试的字面期望（test/agent-skill-step-replay.test.mjs），删除提交改掉其中变了的期望。恢复评测 8 个用例不变、检查项 29 → 27，golden 改写 1 个（§3.50）
 - 只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败，必须写明行为变化再重跑
 - 52 个调度契约测试直接跑在 LangGraph 执行器上，断言一条没改
 
@@ -590,7 +592,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 | claim judge 构造对照集 | 错误接受 0/54（对照集 0/42 + 留出集 0/12）；合同题 3/21→14/21 被回答且全对 | docs/evaluation.md「Claim 评审：校准与端到端」；CURRENT-TRUTH.md §4「校验器」「Agent 路径的答题率」 | 对照集由 verify:quality 的合同构造，标签由构造保证、不是人工标注；评审模型 qwen2.5:7b，端到端合同题里作答和评审是同一个 7B 模型；QASPER train 上只开评审时不可答题被回答 0/9→2/9 |
 | 后端测试与覆盖率 | 3,250 个测试：3,235 通过、15 跳过、0 失败，全局行覆盖 90.46% | CURRENT-TRUTH.md §3.30 | 覆盖率门禁的最低线是全局行 78、分支 65、函数 80（test/coverage-policy.mjs GLOBAL_GATE） |
 | 真实模型 CI 首次运行 | verify 18/18；QASPER 候选召回 0.655；约 63 分钟 | CURRENT-TRUTH.md §3.14「真实模型 CI」 | 阻断下限是 0.6；10 题 F1 0.164 只作报告 |
-| 统计和门禁的代码常量 | BOOTSTRAP_RESAMPLES=2000、BOOTSTRAP_SEED=1729；pairedRecallDeltas 默认 4000 次、seed 1；WRONG_ANSWER_COST=3、UNANSWERABLE_PRIOR=0.115；DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS=24；CURRENT_QUALITY_SUITE_MANIFEST_VERSION=1.16.0（2026-11-13 之前 1.15.0） | run-retrieval-comparison.mjs、run-qasper-retrieval-eval.mjs、run-abstention-gate-analysis.mjs、quality-current-gate.js、quality-current-suite-manifest.js | 各脚本的重采样次数和种子不统一 |
+| 统计和门禁的代码常量 | BOOTSTRAP_RESAMPLES=2000、BOOTSTRAP_SEED=1729；pairedRecallDeltas 默认 4000 次、seed 1；WRONG_ANSWER_COST=3、UNANSWERABLE_PRIOR=0.115；DEFAULT_CURRENT_QUALITY_MAX_AGE_HOURS=24；CURRENT_QUALITY_SUITE_MANIFEST_VERSION=1.17.0（2026-11-13 之前 1.15.0；同一天阶段 8 之后 1.16.0，阶段 9 之后 1.17.0） | run-retrieval-comparison.mjs、run-qasper-retrieval-eval.mjs、run-abstention-gate-analysis.mjs、quality-current-gate.js、quality-current-suite-manifest.js | 各脚本的重采样次数和种子不统一 |
 | QASPER dev 转换后的题量 | 916 题：821 可答、95 不可答；89 道证据只在图表里，跳过 | docs/evaluation.md「QASPER：外部标注的检索和答案评测」 | 答案评测的主要实验抽 200 题（seed 1，139 篇论文），其中不可答 20 道 |
 
 ## 要主动说出口的边界
@@ -604,14 +606,15 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 - 答案层的置信区间由 runner 之外的脚本算（runner 不打 CI）；回放代理（各组共用同一次模型抽样）是一次性脚本，不在仓库里，别人难以复现。
 - 合成评测的判分复用生产的 evaluateClaimSupport，和被测系统有共同盲点。
 - 轨迹、planner-mock、recovery 评测都是 mock，只证明编排契约；recovery 评测不证明 OS 重启和 PG 持久化。
-- 轨迹评测 2026-11-13 少了两个用例（custom_skill_retry、skill_graph_shadow_comparison），随 V1 顺序链删除，没有新增用例来替代：手动重试失败的 Skill 步骤这项能力本身没有了，shadow 对照也没有了。「图运行的步骤拒绝单独重试」由 agent-run-step-executor、agent-execution-graph-checkpoint 的单元测试钉住，预算不够和整图被拒时一次请求的回答由 test/agent-custom-skill-budget.test.mjs 钉住，都不在轨迹评测里。
+- 轨迹评测 2026-11-13 少了两个用例（custom_skill_retry、skill_graph_shadow_comparison），随 V1 顺序链删除，没有新增用例来替代：手动重试失败的 Skill 步骤这项能力本身没有了，shadow 对照也没有了。「图运行的步骤拒绝单独重试」由 agent-run-step-executor、agent-execution-graph-checkpoint 的单元测试钉住（阶段 9 起还有 test/agent-skill-step-replay.test.mjs 的 12 个测试），预算不够和整图被拒时一次请求的回答由 test/agent-custom-skill-budget.test.mjs 钉住，都不在轨迹评测里。
+- 恢复评测 2026-11-13（阶段 9）少了两项检查：resume_after_partial_step_recorded 和 resume_step_recorded，29 项变成 27 项，8 个用例不变。它们随功能一起消失（恢复动作 resume_from_step 和单步 resume 都删了），阈值没改，没有新增检查来替代；报告版本 1.1.0 → 1.2.0，不再有 stepResumeCount；发布门去掉 recoveryStepResumeCount ≥ 1。autoReplay* 这组计数的名字没改，含义变成「自动续跑中断的图」，现在只由图启动续跑探针喂数。报告里的实际数值随造数一起变了：可恢复的 run 4 → 3，转人工 1 → 2，手动动作 3 → 2，自动恢复尝试 3 → 1（成功率仍是 1）。被问到「是不是删检查让评测通过」时照这个说（CURRENT-TRUTH §3.50）。
 - eval:judge 没在真实标注数据上跑过；claim judge 只在构造的对照集上校准过，端到端时评审和作答是同一个 7B 模型。
 - 提示注入用例是自建的，筛查是对着这些用例写的，测量偏乐观；刻意改写 3/3 成功；没测过 BIPIA/AgentDojo。
 - QASPER 主评测从 JSON 文本导入，不经过 PDF 解析；证据只取第一位标注者；token F1 惩罚长答案，不能和排行榜比。
 - robust 门里的 rerank NDCG 提升是在伪 embedding 加启发式重排上测的；真实 embedding 下启发式重排没有带来提升。
 - 真实模型 CI（real-model-eval.yml）用 VECTOR_STORE_PROVIDER=local、不连数据库，不覆盖 pgvector / PostgreSQL BM25 路径。
 - golden 只覆盖固定场景；在 Node 24 上生成，CI 的 Node 22 上通过。
-- 统计代码重复：mulberry32 PRNG 在 9 个文件里各一份，配对 bootstrap 至少 5 份独立实现；manifest 有 2064 行（2026-11-13 之前 2215 行），维护成本高。
+- 统计代码重复：mulberry32 PRNG 在 9 个文件里各一份，配对 bootstrap 至少 5 份独立实现；manifest 有 2062 行（2026-11-13 之前 2215 行），维护成本高。
 
 ## 只能当推理讲的内容
 

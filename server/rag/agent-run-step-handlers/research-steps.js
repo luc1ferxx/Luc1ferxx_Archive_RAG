@@ -1,9 +1,4 @@
 import { AGENT_RUN_STEP_STATUSES } from "../agent-run-steps.js";
-import {
-  createCustomSkillRegistry,
-  executeAgentSkill,
-} from "../skills/registry.js";
-import { isSideEffectingSkill } from "../skills/skill-contract.js";
 import { runRetriableStep } from "./retriable-step-runner.js";
 import {
   buildAgentTraceFromRunSteps,
@@ -17,51 +12,10 @@ import {
   toArray,
 } from "./shared.js";
 
-const getCustomSkillInput = ({ run = {}, step = {} } = {}) => {
-  const stepInput = normalizeRecord(getStepInput(step), {});
-  const detail = normalizeRecord(step.detail, {});
-  const runInput = normalizeRecord(run.input, {});
-  const stepDocIds = normalizeTextList(stepInput.docIds);
-  const runDocIds = normalizeTextList(runInput.docIds);
-  const detailQuestion =
-    normalizeText(detail.question) ||
-    normalizeText(detail.originalQuestion) ||
-    normalizeText(detail.riskQuestion) ||
-    normalizeText(detail.summaryQuestion) ||
-    normalizeText(detail.timelineQuestion) ||
-    normalizeText(detail.compareQuestion);
-  const question =
-    normalizeText(stepInput.question) ||
-    normalizeText(run.goal) ||
-    detailQuestion;
-  const retrievalPlan =
-    normalizeRecord(stepInput.retrievalPlan, null) ??
-    normalizeRecord(detail.retrievalPlan, null) ??
-    null;
-  const sessionId =
-    normalizeText(stepInput.sessionId) || normalizeText(runInput.sessionId);
-  const userId =
-    normalizeText(stepInput.userId) || normalizeText(runInput.userId);
-  // Only ever set by the graph runner for a node bound to an upstream output.
-  // A step of the V1 sequential chain (deleted in ADR 0001 phase 8; such
-  // steps exist only in runs stored before that) folded earlier answers into
-  // its question instead, so this stays null there and the retry is unchanged.
-  const priorFindings = normalizeText(stepInput.priorFindings) || null;
-
-  return {
-    docIds: stepDocIds.length > 0 ? stepDocIds : runDocIds,
-    priorFindings,
-    question,
-    retrievalPlan,
-    sessionId: sessionId || null,
-    skillId: normalizeText(stepInput.skillId) || normalizeText(detail.skillId),
-    skillVersion:
-      normalizeText(stepInput.skillVersion) ||
-      normalizeText(detail.skillVersion) ||
-      null,
-    userId: userId || null,
-  };
-};
+// The retry of one research question (a research brief's sub-question), run by
+// an operator after the step failed. There is no handler for a `custom_skill`
+// step here any more: a custom Skill runs only as a node of its execution
+// graph.
 
 const getResearchQuestionInput = ({ run = {}, step = {} } = {}) => {
   const stepInput = normalizeRecord(getStepInput(step), {});
@@ -96,20 +50,6 @@ const getResearchQuestionInput = ({ run = {}, step = {} } = {}) => {
     sessionId: sessionId || null,
     userId: userId || null,
   };
-};
-
-const assertValidCustomSkillInput = (input = {}) => {
-  if (!input.skillId) {
-    fail("custom_skill retry requires a skillId input.");
-  }
-
-  if (!input.question) {
-    fail("custom_skill retry requires a question input.");
-  }
-
-  if (!toArray(input.docIds).length) {
-    fail("custom_skill retry requires at least one document id.");
-  }
 };
 
 const assertValidResearchQuestionInput = (input = {}) => {
@@ -256,108 +196,6 @@ const buildSkillResumeResponse = ({
   };
 };
 
-export const createCustomSkillStepExecutor = ({
-  ragService,
-  skillRegistry,
-} = {}) => {
-  const registry = skillRegistry ?? createCustomSkillRegistry();
-
-  return async ({
-    accessScope = {},
-    agentRunService,
-    run,
-    step,
-  } = {}) => {
-    if (!ragService) {
-      fail("Custom skill retry requires a RAG service.", 500);
-    }
-
-    if (!step?.id) {
-      fail("Agent run step is missing a resumable step id.");
-    }
-
-    const input = getCustomSkillInput({
-      run,
-      step,
-    });
-    assertValidCustomSkillInput(input);
-
-    const skill = registry.get?.(input.skillId) ?? null;
-
-    if (!skill || skill.kind !== "custom") {
-      fail("custom_skill retry only supports whitelisted custom skills.");
-    }
-
-    // Resolved from the registry, not from the step: the persisted contract is
-    // what the skill declared when it ran, and a deploy can land between the
-    // interruption and the replay. Re-executing a skill that writes needs the
-    // approval machinery this path does not have, so it is refused here rather
-    // than repeated silently.
-    if (isSideEffectingSkill(skill)) {
-      fail(
-        `custom_skill retry refused: ${skill.id} declares a side effect and cannot be replayed without approval.`
-      );
-    }
-
-    return runRetriableStep({
-      accessScope,
-      agentMode: input.skillId,
-      agentRunService,
-      buildCompletedPatch: ({ citations, input: stepInput, result }) => ({
-        input: stepInput,
-        output: {
-          abstained: Boolean(result.abstained),
-          citationCount: citations.length,
-          text: getSkillResultText(result, `${skill.label} completed.`),
-        },
-      }),
-      buildFailedPatch: ({ error, input: stepInput }) => ({
-        error: buildErrorPayload(error, "Custom skill execution failed."),
-        input: stepInput,
-      }),
-      buildObservation: ({ citations }) => ({
-        citationCount: citations.length,
-        skillId: skill.id,
-        skillVersion: skill.version,
-        status: AGENT_RUN_STEP_STATUSES.completed,
-        stepId: step.id,
-      }),
-      buildResponse: ({ input: stepInput, result, run: runAfterStep }) =>
-        buildSkillResumeResponse({
-          agentMode: skill.id,
-          input: stepInput,
-          mcpAnswer: "Web search not used: custom skill retry completed.",
-          run: runAfterStep,
-          skill,
-          skillResult: result,
-          step,
-        }),
-      buildStartedPatch: ({ input: stepInput }) => ({
-        input: stepInput,
-      }),
-      execute: async ({ input: stepInput }) =>
-        executeAgentSkill(skill, {
-          accessScope,
-          docIds: stepInput.docIds,
-          ...(stepInput.priorFindings ? { priorFindings: stepInput.priorFindings } : {}),
-          question: stepInput.question,
-          ragService,
-          retrievalPlan: stepInput.retrievalPlan,
-          sessionId: stepInput.sessionId,
-          userId: stepInput.userId,
-        }),
-      failureMessage: "Custom skill execution failed.",
-      getCitations: getSkillResultCitations,
-      getFailedResultError: (result) =>
-        result?.error ?? new Error("Custom skill execution failed."),
-      input,
-      isFailedResult: (result) => !result?.ok,
-      run,
-      step,
-    });
-  };
-};
-
 const buildResearchQuestionBrief = ({
   input = {},
   result = {},
@@ -466,46 +304,12 @@ export const createResearchQuestionStepExecutor = ({ ragService } = {}) => async
         sessionId: stepInput.sessionId,
         userId: stepInput.userId,
       }),
-    failureMessage: "Research question execution failed.",
     getCitations: getSkillResultCitations,
     input,
     run,
     step,
   });
 };
-
-export const createCustomSkillStepHandler = ({
-  executeCustomSkillStep,
-} = {}) => ({
-  id: "custom_skill",
-  label: "Custom Skill",
-  canHandle: ({ step } = {}) => getStepType(step) === "custom_skill",
-  prepareRetry({ run = {}, step = {} } = {}) {
-    if (typeof executeCustomSkillStep !== "function") {
-      fail(
-        "custom_skill retry is not wired yet. Provide a custom skill step handler before retrying this step."
-      );
-    }
-
-    assertValidCustomSkillInput(
-      getCustomSkillInput({
-        run,
-        step,
-      })
-    );
-
-    return {};
-  },
-  async execute(context = {}) {
-    if (typeof executeCustomSkillStep !== "function") {
-      fail(
-        "custom_skill retry is not wired yet. Provide a custom skill step handler before retrying this step."
-      );
-    }
-
-    return executeCustomSkillStep(context);
-  },
-});
 
 export const createResearchQuestionStepHandler = ({
   executeResearchQuestionStep,
