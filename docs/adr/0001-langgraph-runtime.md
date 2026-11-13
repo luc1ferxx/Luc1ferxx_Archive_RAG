@@ -703,7 +703,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ### 保留什么
 
 - 确定性图 `createDeterministicExecutionGraph`：它规划的就是顺序链当年跑的那些 Skill、同样的顺序，现在是唯一的回落。它和链不等价：有节点没跑成时，后面依赖它的节点也不跑（见“用户看到的差别”和“失去”）。
-- 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器（`agent-run-step-handlers/custom-research-steps.js`）。新的 run 不再产生这种不带 `nodeId` 的步骤，处理器只对阶段 8 之前存下来的 run 有用。要不要删，没有在这一阶段决定。留着它意味着三件事：
+- 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器（`agent-run-step-handlers/custom-research-steps.js`）。新的 run 不再产生这种不带 `nodeId` 的步骤，处理器只对阶段 8 之前存下来的 run 有用。要不要删，没有在这一阶段决定（**阶段 9 删除了，下面三条随之解决，见“阶段 9 结果”**）。留着它意味着三件事：
   - 它是剩下的唯一一条不经 LangGraph、也不经授权目录执行 custom Skill 的路径，只有旧 run 走得到。
   - 回放矩阵仍然把 `custom_skill` 标成可以自动重放、可以重试，所以恢复接口和界面对图 run 里失败的 Skill 节点仍然给出“重试失败步骤”，点了一定是 409。图成为默认之后就是这样，这次没有改。
   - `eval:recovery-observability` 和发布门里“步骤级自动重放”“手动 resume”两项信号，用的是手写的、不带 `nodeId` 的 `custom_skill` 步骤。现在的代码不再产生这种步骤，这两项信号证明的只是旧 run 还能恢复。
@@ -729,7 +729,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 升级时已存的 run
 
-- 顺序链留下的 run（`off`、`shadow` 或回落时创建的）：它们的 `custom_skill` 步骤没有 `nodeId`，没有图 checkpoint。启动恢复和单步重试仍然用保留下来的处理器处理它们，行为不变。
+- 顺序链留下的 run（`off`、`shadow` 或回落时创建的）：它们的 `custom_skill` 步骤没有 `nodeId`，没有图 checkpoint。启动恢复和单步重试仍然用保留下来的处理器处理它们，行为不变。（阶段 9 起不再如此：处理器删除，这些步骤转人工或不可重试。）
 - 历史事件里的 `fallback: "v1"` 和 `mode: "shadow"`：报告照旧读取和统计；回放守卫只认 `mode: "guarded"`、`fallback: null`、`executed: true` 的事件，和以前一样。
 - 图运行的 run：没有变化。
 - 一种没有验证的情形：顺序链创建、停在审批门上的 run，升级之后再被批准并重新进入。重新进入时 custom Skill 阶段会按图重新规划，而确定性图的节点 step id（`custom_skill:<skillId>`）和链当年写下的 step id 相同；按代码读下来，节点启动会因为同名 step 已经存在而以 `AGENT_GRAPH_EXECUTION_FENCED` 失败，请求报错、run 留在原状态，需要重新发起请求。这条路径没有端到端跑过。只有升级那一刻恰好有这样的 run（环境里设过 `off` 或 `shadow`）才会遇到。
@@ -784,6 +784,118 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 受修正影响的单文件套件：`agent-custom-skill-budget` 8/8、`agent-custom-skill-stage` 24/24、`agent-execution-graph-checkpoint` 32/32。
 - 不接数据库的全量：4,426 个测试，4,398 通过、28 跳过、0 失败。
 
+## 阶段 9 结果：custom Skill 步骤不再单独重放（2026-11-13）
+
+### 决定
+
+阶段 8 把“只有旧 run 才走得到的重试和恢复代码”留了下来，并问了用户要不要删。用户的回答是“接着清理”。这一阶段删掉它们，规则变成四条：
+
+1. custom Skill 只作为图节点运行。`custom_skill` 步骤不能单独重试，启动时也不单独重放。
+2. 启动恢复在 `auto` 模式下自己只做一件事：续跑中断的图（要先领到 claim）。其余中断的 run 都交给人。
+3. 人在恢复面板上能做的只有两件事：重试失败步骤（`retry_failed_step`）和取消（`cancel`）。`resume_from_step` 不再是一个动作。
+4. “重试失败步骤”只在回放矩阵允许这类步骤重试时才给出。
+
+### 为什么这些代码只有旧 run 走得到
+
+- 独立处理器只接不带 `nodeId` 的 `custom_skill` 步骤：带 `nodeId` 的会先被回放守卫拒绝（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。图节点写步骤时一定带 `nodeId`（`agent-execution-graph-node.js` 的 `persistedInput`），所以不带的只有已删除的顺序链写得出来。
+- 回放矩阵里“可自动重放”的步骤类型只有 `custom_skill` 一个。启动恢复的单步重放分支和恢复面板的 `resume_from_step` 都只在矩阵允许时才调用 `resumeStep`，所以它们的入口也只有旧链的步骤。
+- `resumeStep` 自己不看类型：它能恢复任何有处理器的步骤（原来有一条测试用它恢复一个 pending 的 `document_rag` 步骤）。但除了上面两处，没有别的调用方，路由上也没有。
+
+这是从代码读出来的，没有线上数据。
+
+### 行为的变化
+
+冻结提交 7a2e3d99 用真实的 run store、step executor、启动恢复和恢复动作服务，把下面每种情形当时的行为写成字面期望（`server/test/agent-skill-step-replay.test.mjs`，10 个测试）；删除提交 be353b62 对这个文件的改动就是下表“现在”一列。“旧链形状的步骤”指不带 `nodeId`、run 上没有图 checkpoint 的 `custom_skill` 步骤。
+
+| 情形 | 之前 | 现在 |
+| --- | --- | --- |
+| 启动恢复（auto），旧链形状的步骤中断 | 单独重跑这个 Skill，run 以它一个的答案完成 | 交给人：`waiting_for_user`，原因 `graph_node_step`，步骤原样不动，只能取消 |
+| 启动恢复（auto），图节点的步骤中断、run 上没有 checkpoint | 每次启动都尝试单独重放，被守卫拒绝，记一条 `auto_recovery_failed`；run 一直是 `running`，不进恢复列表 | 第一次启动交给人，之后的启动不再动它 |
+| 恢复面板，等待人工的 run 里有旧链形状的 paused 步骤 | 给出 “Resume step”，点了就单独跑这个 Skill | 只有 “Cancel”；`resume_from_step` 返回 400 |
+| 恢复面板，失败的旧链形状的步骤 | 给出 “Retry failed step”，点了就单独跑这个 Skill | 不给，run 不进恢复列表；重试路由返回 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY` |
+| 恢复面板，失败的图节点步骤 | 给出 “Retry failed step”，点了一定是 409 | 不给 |
+| 失败的 `document_rag` 步骤 | 可以手动重试 | 不变 |
+| 中断的 `web_search` 步骤 | 交给人，原因 `requires_approval` | 不变 |
+
+第二行和第五行是顺带修掉的两处：前者是一个没人接手的死循环（每次启动失败一次，run 永远停在 `running`），后者是阶段 8 复核记下的“点了必 409 的按钮”。
+
+### 删了什么
+
+- `createCustomSkillStepExecutor`、`createCustomSkillStepHandler` 和它们的输入解析（`agent-run-step-handlers/custom-research-steps.js`，文件改名为 `research-steps.js`，里面只剩研究子问题的重试）；`app-services.js` 里的接线。
+- `agentRunStepExecutor.resumeStep`。step executor 现在只有 `applyApprovalAction` 和 `retryStep`。
+- 启动恢复里的单步重放：`runAutoRecovery`、`findAutoRecoverableStep`、`safeAutoRecoveryStepTypes` 和 `agentRunStepExecutor` 两个参数、恢复记录里的 `stepId` / `stepType`。启动恢复服务不再持有 step executor。
+- 恢复动作 `resume_from_step`。
+- 回放矩阵里的“可自动重放”一列（`autoReplaySafe`、`getAutoReplaySafeStepTypes`、`isAutoReplaySafeStepType`）、评估结果里的 `canAutoReplay` / `configuredAutoReplaySafe`，以及没有策略再用的两个幂等类别（`read_only_rag`、`read_only_deterministic`）。恢复接口、admin 的恢复扫描和前端跟着去掉 `canAutoReplay`。
+- 前端：“Resume step” 按钮和提示语，“Auto replay allowed / blocked” 一行（改成直接显示原因码），trace 详情里的 “Chain mode” 一行（服务端早已不写这个字段）。
+- 评测：见“评测套件的改动”。
+- 测试：见“证据”。
+
+### 改了什么
+
+- 回放矩阵（`agent-run-step-replay-safety.js`）：`custom_skill` 的 `replayActions` 为空、`retryable: false`，幂等类别 `graph_owned`，原因码 `graph_node_step`。新增 `isStepRetryAllowed(stepType)`，恢复面板给不给“重试失败步骤”读它；没有策略的类型（如 v3 的 `graph_node`）没有处理器，同样不给。
+- 回放守卫（`agent-run-graph-replay-guard.js`）：凡是 `custom_skill` 步骤一律拒绝，不再看有没有 `nodeId`。原来靠 checkpoint 里的节点 id 去认“没带 `nodeId` 的图节点”的那段分支因此走不到，删了。守卫在 step executor 的预检和 run store 的 CAS 里都生效，所以直接调 `agentRunService.retryStep` / `updateRunStep` 也改不了这类步骤。
+- 启动恢复（`agent-run-recovery.js`）：没有图可续的 run 直接交给人，原因由 `explainInterruptedRun` 给出（有待审批项是 `pending_approval_gate`，否则是第一个中断步骤的第一个原因码，没有中断步骤是 `no_safe_recoverable_step`）。对非 `custom_skill` 的步骤，原因和以前一样。
+- 步骤持久化的 Skill 契约（`effects`、`replaySafe`）继续进原因码，只是不再决定“能不能自动重放”。`unsafe_by_policy` 现在只表示“这个 Skill 自己声明不能重放”。
+
+### 保留什么
+
+- 外层计划步骤（`document_rag`、`follow_up_retrieval`、`research_question`、`web_search`、`arxiv_import`、`capability_call`）的手动重试，以及审批放行后执行 capability 步骤。它们不是 custom Skill，当前的 run 用得到。
+- 启动恢复 trace 和发布门里 `autoReplay*` 这组名字。名字没改（存量 trace、报告和前端都读它），含义变成“自动续跑中断的图”，因为启动恢复不再重放别的东西。前端这一项的标签从 “Auto replay” 改成 “Auto recovery”。
+- connector 清单自己的 `replaySafety.autoReplaySafe`。那是另一套 schema，声明为 `true` 会被拒绝，和步骤矩阵无关。
+- 报告里图回落的两个计数和 `graph_fallback_after_execution_zero`。它们是“必须为 0”的守卫。
+- 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支。阶段 8 的遗留清单曾把它们算作“旧链专属”，这次读下来不是：没执行图的那一支服务于所有不含 custom Skill 的请求，以及整图被拒的请求，所以没有动。
+
+### 评测套件的改动
+
+和阶段 8 一样，这不属于为了“通过”而放宽门槛：去掉的是随功能一起消失的检查。
+
+- `eval:recovery-observability`：8 个场景不变，检查项 29 → 27。去掉 `resume_after_partial_step_recorded`（要求出现过一次手动 `resume_from_step`）和 `resume_step_recorded`（要求出现过一次单步 resume）。报告版本 1.1.0 → 1.2.0，报告里不再有 `stepResumeCount`。
+- 启动恢复的造数：原来是两个旧链形状的步骤被自动重放、一个 web search 转人工；现在是一个旧链形状的步骤和一个 web search，构建函数先断言两个都转了人工、步骤和事件没有被动过，再产出事件。手动动作的造数去掉了 `resume_from_step` 那一个 run。
+- “自动恢复尝试过、成功率 100%、失败 0” 这三项检查原来由旧链形状的步骤喂数，现在只由图启动续跑探针（`skill_graph_startup_resume` 用的同一次运行）喂数：实际数值是可恢复的 run 4 → 3、转人工 1 → 2、手动动作 3 → 2、自动恢复尝试 3 → 1（成功率仍是 1）。
+- 发布门（`quality-recovery-gate.js`）：去掉 `recoveryStepResumeCount ≥ 1`。其余阈值没动。
+- `quality-current-suite-manifest.js`：删去这两个检查项，版本 1.16.0 → 1.17.0。
+- 三个 trajectory 场景文件里早已不用的两行 import 一并删掉（阶段 8 删 `custom_skill_retry` 时留下的）；trajectory 的场景和检查项没有变化。
+
+### 失去的
+
+- 旧链留下的 run 的单步恢复和单步重试（见上表前四行）。这些 run 只有在设过 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`、或者整图被拒回落到链的时候才会产生。
+- `resumeStep` 这项通用能力（恢复一个 pending 的、有处理器的步骤）。它没有别的调用方。
+- 存量 trace 里的 `resume_step` / `resume_from_step` 事件不再有单独的计数。报告仍把它们计入事件总数，失败的计入重放失败数，手动动作按动作名进 `actionCounts`。
+
+### 升级时已存的 run
+
+- 旧链的 run：中断的转人工、只能取消；失败的不能单步重试。要得到答案，重新提问。
+- 存量恢复记录里可能有 `reason: "safe_step_ready"` 和 `stepId`（旧的自动重放写的）：接口照原样返回，前端照原样显示。
+- 图运行的 run：整图恢复没有变化。区别只在恢复面板：失败的 Skill 节点不再有重试按钮；没有 checkpoint 的中断节点现在会进恢复列表。
+- 没有数据迁移，run 和 checkpoint 的格式没有变。
+
+### 怎样恢复
+
+`git revert` 删除提交 be353b62。冻结提交可以保留（revert 之后它的期望要一起回到冻结时的样子，revert 会带回去）。
+
+### 证据
+
+（以下是独立复核之前、在 be353b62 上的结果，本机 Node 24.21.0。）
+
+- 提交：冻结 7a2e3d99，删除 be353b62。
+- 三个确定性 agent 评测，改动前（a26eecd7）和改动后各在一个干净的 worktree 里跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：
+  - `eval:planner -- --provider mock`（7/7）：逐字节一致。
+  - `eval:trajectory`（17/17，76 项检查）：17 个场景全部逐字节一致。
+  - `eval:recovery-observability`（8/8）：有 51 处差异，都在上面“评测套件的改动”列出的范围内（版本、检查项 29 → 27、四个计数、去掉的造数和它们的事件）。
+- 全量：
+  - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（与 CI 的 `server-tests` 同一条命令，干净 worktree）：4,604 个测试，4,597 通过、7 跳过、0 失败；全局行覆盖 92.52%，覆盖率门和目标都通过。阶段 8 是 4,598 个：冻结文件加 10 个，另外净减 4 个。
+  - 不接数据库：4,432 个测试，4,404 通过、28 跳过、0 失败。
+  - `quality:current` 按 CI 的 `quality-gate` 步骤运行（干净 worktree、一次性 PostgreSQL + pgvector、五项确定性评测都由该提交生成）：通过，八项检查全部 `pass`。
+  - 前端（`vitest run`）：27 个文件、238 个测试全部通过。
+- 单文件套件：`agent-skill-step-replay` 10/10、`agent-run-recovery` 17/17、`agent-run-recovery-actions` 7/7、`agent-run-step-executor` 22/22（原 26：四个旧链处理器的测试并成一个“任何形状的 `custom_skill` 步骤都被拒绝”，去掉两个 `resumeStep` 的测试，加一个“executor 没有 resume”）、`agent-run-step-replay-safety` 8/8、`recovery-observability-eval` 9/9、`postgres-agent-run-store` 29/29、`langgraph-runtime-parity` 5/5。
+- golden：改写 1 个（`langgraph-runtime-parity/recovery_observability_skill_graph_signal.json`）。逐项比对过：报告里变的只有上面列的那些字段，事件从 37 条变成 33 条（少的是被删造数的事件），其中 17 条图事件逐字节未变。其余 golden 未动。
+- 代码量（be353b62 相对 a26eecd7，含冻结提交）：`server/rag` +168 −623 行；`server/evaluation` +82 −137 行；测试（不含 fixture）+1,201 −841 行，其中冻结文件 654 行；fixture +57 −394 行；前端 +24 −49 行。
+- 没有验证的：
+  - CI 的 Node 22（本机只有 Node 20 和 24）。合并进 main 之后才有。
+  - 真实浏览器里的恢复面板。前端只跑了组件测试，没有起应用看。
+  - 真实 PostgreSQL 上的旧链 run。`postgres-agent-run-store` 用的是假的 pg 客户端；本机和 CI 的数据库里也没有这种存量 run。
+  - `server/.env` 按规则没有读。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
@@ -825,6 +937,9 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow` 已删除，变量只接受未设置、空值、空白或 `guarded`，其他值拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。
   - 恢复顺序链的唯一办法是 `git revert` 阶段 8 的删除提交，见“阶段 8 结果”。图 checkpoint 的格式没有变，没有数据要处理。
   - 剩下的运维开关只有 `AGENT_UNIFIED_GRAPH_ROLLOUT`（默认 `off`，v3 图不执行）和三个 planner 开关。
+- 阶段 9 起：没有不经图执行 custom Skill 的恢复路径。
+  - `custom_skill` 步骤的独立处理器、单步 resume、启动时的单步重放和 `resume_from_step` 动作已删除。没有对应的环境变量，所以没有启动拒绝要加。
+  - 恢复它们的唯一办法是 `git revert` 阶段 9 的删除提交，见“阶段 9 结果”。run 和 checkpoint 的格式没有变，没有数据要处理。
 - 数据（阶段 4、5 的规则，revert 阶段 6 之后同样适用）：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。阶段 4、5 时两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。阶段 6 删掉了“交给 native 接管”这一方向的用例，revert 会把它们一起恢复；“native 留下的 run 由 LangGraph 接管”这一方向仍由删掉线程后续跑、恢复的用例钉住（见“阶段 6 结果”的“升级时在途的 run”）。
 
 ## 明确不做
