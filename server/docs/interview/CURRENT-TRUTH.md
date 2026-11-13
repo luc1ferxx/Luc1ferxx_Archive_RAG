@@ -393,7 +393,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 三个确定性 agent 评测在删除前（e11ced91）和删除后各跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：planner-mock（7/7）和 recovery-observability（8/8）逐字节一致；trajectory 从 19/19（84 项检查）变成 17/17（76 项），两边共有的 17 个用例里 16 个逐字节一致，第 17 个（`unified_graph_evidence_gated_skill_hand_off`）只差上面说的 V1 对照。
   - `agent-runtime-removed` 19 个测试（原 15 个），`agent-custom-skill-stage` 24 个测试。
   - 按 CI 步骤跑的 `quality:current`（提交 9c3c3de8，干净 worktree、一次性 PostgreSQL + pgvector）：通过，八项检查全部 `pass`；复核修正之后在 341ad5f3 上重跑，同样通过。
-  - 写这一节时还没做的：合并。CI 的 Node 22 待合并后验证。
+  - 合并和 CI：合并提交 7fbf8974（2026-11-13，已推送）。main 上的 CI（Quality Gate 运行 43517749419）三个任务全部通过，其中 `server-tests` 在 Node 22.23.4 上：4,598 个测试，4,590 通过、8 跳过、0 失败，全局行覆盖 92.53%。
 - **没有验证的**：
   - 真实模型下的答案质量。链和图把第一个 Skill 的结论交给第二个 Skill 的方式不同（链拼进问题，图用类型化输入）。但默认路径七周以来一直是图，所以这不是这次带来的新变化。
   - 没有生产流量数据。"回落在生产里不会执行任何 Skill"是从代码、默认配置和上面的计数推出来的。

@@ -509,7 +509,7 @@ golden 只覆盖固定场景，不能证明任意图形状都等价；golden 在
 
 代码：`server/test/run.test.mjs collectTestFiles`；`server/test/langgraph-support/graph-goldens.mjs isUpdatingGraphGoldens / assertMatchesGraphGolden`
 
-> ⚠ 说「golden 证明完全等价」。它只覆盖固定场景；golden 在 Node 24 上生成，CI 的 Node 22 上也通过，但这不改变它只覆盖固定场景。删 V1 顺序链更不是等价替换：阶段核实不了文档时答案从两段结论变成弃答（/chat 走不到），预算不够时答案不变但记录不同；这次的结果在本机 Node 24 上测，CI 的 Node 22 待合并后验证。
+> ⚠ 说「golden 证明完全等价」。它只覆盖固定场景；golden 在 Node 24 上生成，CI 的 Node 22 上也通过，但这不改变它只覆盖固定场景。删 V1 顺序链更不是等价替换：阶段核实不了文档时答案从两段结论变成弃答（/chat 走不到），预算不够时答案不变但记录不同；这次的结果在本机 Node 24 上测，合并进 main 之后 CI 的 Node 22 上也通过（合并提交 7fbf8974，4,598 个测试、0 失败）。
 
 ### Q14. 你的置信区间可信吗？有什么统计上的问题？（追问「显著」）
 
