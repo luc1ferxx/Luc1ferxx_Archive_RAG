@@ -151,11 +151,13 @@ custom Skill DAG 与 guarded v3 统一图一律由 LangGraph.js 调度：按 sup
 | 情形 | 发生什么 |
 | --- | --- |
 | 预算付不起全部选中的 Skill | 确定性图在规划时不按调用预算拒绝。图照常执行，执行器在每个 node 启动时预留预算，付不起的 node 记为跳过（`budget_limit` trace、node run 和 Skill observation 里都有记录）。被跳过的 node 没有结果，也不出现在 `agentSkills` 里。模型提议的图仍然按预算整张校验 |
-| 确定性图因为别的原因不合法（选中的 Skill 不在本次请求的授权目录里、超过规模上限） | 不执行任何 Skill。每个选中的 Skill 得到一条失败结果（`AGENT_SKILL_GRAPH_REJECTED`，写明校验器的 reason code），trace 里有一条 `skill_graph_rejected`，请求继续往下走 |
+| 确定性图因为别的原因不合法（选中的 Skill 不在本次请求的授权目录里、超过规模上限） | 不执行任何 Skill。每个选中的 Skill 得到一条失败结果（`AGENT_SKILL_GRAPH_REJECTED`，写明校验器的 reason code），trace 里有一条 `skill_graph_rejected`（run 里存成 `decision` 类、`skipped` 的步骤），请求继续往下走 |
 | 意图没选 custom Skill，模型的提议又不可用 | 返回空结果。不会把整个授权目录跑一遍作为替代 |
 
 - 一旦有 node 花掉预算并写入 step，就不会再用另一套 plan 重跑：那会重复计费，并可能重复已发生的副作用。
-- 默认配置下后两种情形在 `/chat` 上基本走不到：每个意图最多选 2 个 custom Skill，调用预算正好 2 次；`/chat` 进 agent 之前已经用同一个 `getDocument` 查询核实过每个文档；四个 custom Skill 都声明了类型契约。
+- 默认配置下前两种情形在 `/chat` 上基本走不到：每个意图最多选 2 个 custom Skill，调用预算正好 2 次；`/chat` 进 agent 之前已经用同一个 `getDocument` 查询核实过每个文档；四个 custom Skill 都声明了类型契约。第三种在模型规划器下会发生，此时本来就没有选中的 Skill，返回空结果。
+- 确定性图不等于当年的顺序链：后一个 node 绑定前一个 node 的结果，所以依赖它；前一个失败或被跳过时，后一个也被跳过（执行器对依赖没完成的 node 一律跳过，不管 `failurePolicy`）。链会照样用原问题跑后一个 Skill。图成为默认以来一直是这个表现。
+- 没有 Skill 产出时，选中两个 Skill 的请求以“证据不足”弃答；只选中一个 Skill 的请求回答固定的一句 “The custom skill could not complete the request.”。
 - 一个 custom Skill 如果没有声明类型契约（`effects`、`inputSchema`、`outputSchema`、`requiresAccessScope`、必填且带范围的 `docIds`），就不在授权目录里，不会运行。
 - `AGENT_SKILL_GRAPH_ROLLOUT` 不再选择任何东西：未设置或 `guarded` 照常启动，`off`、`shadow` 和其他任何取值让进程拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。图事件里的 `mode` 仍然写 `guarded`，`fallback` 总是 `null`。
 
@@ -193,7 +195,7 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 ### 当前限制
 
 - 真实 `/chat` 的 custom skill 阶段只走 typed DAG，没有回到 V1 chain 的开关。本地 `server/.env` 里若仍写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程会拒绝启动，要先删掉这一行。
-- 失败的 custom Skill 步骤不能单独重试：图运行的 step 拒绝单步重试（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。模型规划器是主规划器时有一次有界 replan；确定性规划器下，失败的 node 留下 partial 的图。以前只有 V1 chain 的 step 支持单独重试。
+- 失败的 custom Skill 步骤不能单独重试：图运行的 step 拒绝单步重试（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。模型规划器是主规划器时有一次有界 replan；确定性规划器下，失败的 node 留下 partial 的图。以前只有 V1 chain 的 step 支持单独重试。恢复接口和界面目前仍然会对这样的 step 给出“重试失败步骤”，点了返回 409；处理 `custom_skill` 单步重试和启动重放的处理器还留着，只对 2026-11-13 之前由 V1 chain 存下的 run 有用。
 - 当前注册的四个 custom skill 全部继承 `custom-skill-contract.js` 的 `effects: readOnly`，没有任何 skill 声明写操作。上面的副作用防护守的是 contract 已经允许、但尚无实例的边界，不是在修一个线上缺陷。
 - `maxReplans` 初始为 `1`；指纹机制保证即使上调也不会形成等价循环，但更高的值尚未做灰度验证。
 - Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。

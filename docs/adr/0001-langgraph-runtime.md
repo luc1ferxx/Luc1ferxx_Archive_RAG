@@ -657,7 +657,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ### 被拒之后怎么办
 
 - **预算付不起全部选中的 Skill。** 确定性图在规划时不再按调用预算整张拒绝（`createAgentExecutionGraphResult` 里校验确定性图时不传 `budgetRemaining`，一行）。图照常执行，执行器本来就在每个节点启动时预留预算，付不起的节点记为跳过。顺序链当年是按 Skill 逐个扣预算，效果相同。模型提议的图仍然按预算整张校验：它自己决定了要规划什么，只执行预算碰巧够得着的那一部分不是它的提议。
-- **其他原因被拒。** 不执行任何 Skill。每个选中的 Skill 得到一条失败结果，写明校验器给的原因（错误码 `AGENT_SKILL_GRAPH_REJECTED`）；trace 里有一条 `skill_graph_rejected` 步骤说明这个阶段为什么什么都没做；请求继续往下走。
+- **其他原因被拒。** 不执行任何 Skill。每个选中的 Skill 得到一条失败结果，写明校验器给的原因（错误码 `AGENT_SKILL_GRAPH_REJECTED`）；trace 里有一条 `skill_graph_rejected` 步骤说明这个阶段为什么什么都没做（run 里存成一条 `decision` 类、`skipped` 的步骤）；请求继续往下走。
+- **没有 Skill 产出时请求怎么回答。** 选中两个 Skill 的请求（`skill_chain`）走最终核查，以“证据不足”弃答。只选中一个 Skill 的请求不走最终核查，回答是固定的一句 “The custom skill could not complete the request.”，`ragAnswer` 为空。这两种回答都是原有的，不是这次新加的。
 - **没选 Skill、提议又不可用。** 返回空结果，和以前一样；永远不会把整个授权目录都跑一遍作为替代。
 - 图事件里的 `mode` 仍然写 `guarded`，`fallback` 仍然存在、从此总是 `null`：已存的 run、回放守卫和报告都读这两个字段。
 
@@ -671,8 +672,11 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 预算 1 次 | 不变：第一个 Skill 的答案、1 条引用、同样的 trace 步骤类型 | 被跳过的 Skill 没有结果，不再出现在 `agentSkills` 里（链把它列为 failed）；预算提示多了“needed 1”；图事件从“被拒、回落 v1”变成“已执行、partial” |
 | 预算 0 次 | 不变：“证据不足”的弃答 | 预算提示从 2 条变 1 条（第二个节点是因为它依赖的节点没跑而跳过，没有单独提示）；`agentSkills` 为空 |
 | 阶段无法核实文档（假 RAG 服务没有 `getDocument`） | **变了**：从链跑出的两段答案变成弃答 | 两个 Skill 列为 failed，trace 多一条 `skill_graph_rejected`，没有 `custom_skill` 步骤 |
+| 第一个 Skill 失败 | 默认路径不变：第二个 Skill 不运行，弃答。只有 `off` 下的链不同：它照样跑第二个 Skill 并用它的结果回答 | 不变（第二个节点 `skipped: dependency_failed`） |
 
-- 最后一行在 `/chat` 上走不到（见上表）。受影响的是直接调用 `runAgentRag`、又不提供文档查询的调用方，仓库里只有测试。
+- “无法核实文档”一行在 `/chat` 上走不到（见上表）。受影响的是直接调用 `runAgentRag`、又不提供文档查询的调用方，仓库里只有测试。
+- “第一个 Skill 失败”一行是独立复核指出的（冻结提交没有钉住它，删除之后才补进测试）。确定性图里后一个节点绑定前一个节点的结果，所以依赖它；执行器对依赖失败或被跳过的节点一律跳过，不管 `failurePolicy`。链没有这种依赖，前一个失败后照样用原问题跑后一个。图成为默认（2026-09-25）之后默认路径一直是前一种表现，这次没有改它；改掉的是“设成 `off` 就能得到后一种”这条路。在删除之前的提交 e11ced91 上实测：`off` 下链调用了两次 Skill、以第二个 Skill 的结果回答；默认配置下图调用一次、弃答。
+- 同一组请求在只选中一个 Skill 时的结果也钉在同一个测试文件里：预算 0 次时回答不变（固定的那一句），记录的差别和两个 Skill 时相同；无法核实文档时回答从链跑出的结果变成固定的那一句。
 - 运行上限（token、费用、时间）用完的情形，删除之前的表现随时机在两种形态之间变化：规划时已经用完，是“被拒、回落、每个 Skill 一条提示”；规划之后才用完，是“图执行、节点在启动时跳过”。现在只剩后一种。
 
 ### 拒绝已删除的取值
@@ -698,8 +702,11 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 保留什么
 
-- 确定性图 `createDeterministicExecutionGraph`：它就是顺序链的图版本，现在是唯一的回落。
-- 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器（`agent-run-step-handlers/custom-research-steps.js`）。新的 run 不再产生这种不带 `nodeId` 的步骤，处理器只对阶段 8 之前存下来的 run 有用。要不要删，没有在这一阶段决定。
+- 确定性图 `createDeterministicExecutionGraph`：它规划的就是顺序链当年跑的那些 Skill、同样的顺序，现在是唯一的回落。它和链不等价：有节点没跑成时，后面依赖它的节点也不跑（见“用户看到的差别”和“失去”）。
+- 单步重试和启动恢复里处理 `custom_skill` 步骤的处理器（`agent-run-step-handlers/custom-research-steps.js`）。新的 run 不再产生这种不带 `nodeId` 的步骤，处理器只对阶段 8 之前存下来的 run 有用。要不要删，没有在这一阶段决定。留着它意味着三件事：
+  - 它是剩下的唯一一条不经 LangGraph、也不经授权目录执行 custom Skill 的路径，只有旧 run 走得到。
+  - 回放矩阵仍然把 `custom_skill` 标成可以自动重放、可以重试，所以恢复接口和界面对图 run 里失败的 Skill 节点仍然给出“重试失败步骤”，点了一定是 409。图成为默认之后就是这样，这次没有改。
+  - `eval:recovery-observability` 和发布门里“步骤级自动重放”“手动 resume”两项信号，用的是手写的、不带 `nodeId` 的 `custom_skill` 步骤。现在的代码不再产生这种步骤，这两项信号证明的只是旧 run 还能恢复。
 - 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支。图没执行的那一支现在只在“被拒、没有 Skill 运行”和“根本没有 custom Skill”时走到。
 - 场景 id、标签和描述里的 “guarded” 字样（如 `skill_graph_guarded_execution`）：`guarded` 是唯一还接受的取值，也是每个图事件记录的 mode，阶段 6 冻结的 golden 里也是这些字样。
 
@@ -718,12 +725,14 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **`shadow` 对照**：让顺序链回答、同时旁路规划一张图来比较。规划器自己的 shadow（`AGENT_PLANNER_ROLLOUT=shadow`，确定性图为主、模型在旁边规划）不受影响。
 - **链和 DAG 的并排对照**：统一图场景里 V1 外层计划原来在两种 custom Skill 执行方式下各跑一遍，数字相同；现在只有 DAG 一种。
 - **没有类型契约的 custom Skill**：以前靠顺序链照跑，现在不会运行，trace 里写 `no legal execution graph (unregistered_capability)`。注册时不拒绝这样的 Skill，是运行时才报。仓库里的四个 custom Skill 都有契约。
+- **前一个 Skill 失败后照样跑后一个**：只有链这样做。图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现；能用 `off` 换回链的表现，这一点现在没有了。
 
 ### 升级时已存的 run
 
 - 顺序链留下的 run（`off`、`shadow` 或回落时创建的）：它们的 `custom_skill` 步骤没有 `nodeId`，没有图 checkpoint。启动恢复和单步重试仍然用保留下来的处理器处理它们，行为不变。
 - 历史事件里的 `fallback: "v1"` 和 `mode: "shadow"`：报告照旧读取和统计；回放守卫只认 `mode: "guarded"`、`fallback: null`、`executed: true` 的事件，和以前一样。
 - 图运行的 run：没有变化。
+- 一种没有验证的情形：顺序链创建、停在审批门上的 run，升级之后再被批准并重新进入。重新进入时 custom Skill 阶段会按图重新规划，而确定性图的节点 step id（`custom_skill:<skillId>`）和链当年写下的 step id 相同；按代码读下来，节点启动会因为同名 step 已经存在而以 `AGENT_GRAPH_EXECUTION_FENCED` 失败，请求报错、run 留在原状态，需要重新发起请求。这条路径没有端到端跑过。只有升级那一刻恰好有这样的 run（环境里设过 `off` 或 `shadow`）才会遇到。
 
 ### 怎样恢复
 
@@ -731,6 +740,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 没有数据要处理：图 checkpoint 的格式没有变。
 
 ### 证据
+
+（以下是复核之前、在 9c3c3de8 上的结果。复核修正之后重跑的结果在“独立复核”小节末尾。）
 
 - 提交：冻结 2c1c6c06，删除 3b3a8719，清单版本 9c3c3de8（`quality-current-suite-manifest.js` 1.15.0 → 1.16.0；删场景时就该一起升，补在了后一个提交里）。下面的结果都在 9c3c3de8 上，本机 Node 24.21.0。
 - 三个确定性 agent 评测，改动前（e11ced91）和改动后各在一个干净的 worktree 里跑一次，屏蔽 UUID、时间戳、时长和 git 状态后比较：
@@ -748,6 +759,30 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 真实模型下的答案质量。顺序链和图告诉第二个 Skill 上游结果的方式不同，但默认路径七周以来就是图，这不是新变化。
   - 真实流量。这里没有线上数据，“默认配置下生产里走不到”是从代码和默认配置推出来的，加上上面的记录点统计。
   - `server/.env` 按规则没有读。里面如果有 `AGENT_SKILL_GRAPH_ROLLOUT=off`、`shadow` 或拼错的值，`node server.js` 现在拒绝启动。
+
+### 独立复核（2026-11-13）
+
+冻结、删除、清单版本三个提交（e11ced91..9c3c3de8）和当时的文档交给一个只读的独立复核（不运行测试和评测）。结论是没有高、中级缺陷，默认配置下经 `/chat` 的请求没有哪一种比改动前更差；七条低级意见处理如下。
+
+- **确定性图不是“链的图版本”**（处理了说法，没有改行为）。第一个 Skill 失败时，图跳过依赖它的第二个节点，链会照样跑第二个。这不是这次改出来的（默认路径一直如此），但代码注释和本节原来写的是“它就是顺序链的图版本”“`continue` 就是链的做法”，说过头了。现在注释和文档都写明差别，“失去”里加了一条，`agent-custom-skill-budget` 加了一个测试把它钉住，并在 e11ced91 上实测了链当时的表现。
+- **预算跳过的确定性图会走进 replan 循环**（没有改，记录在案）。模型规划器开着、调用预算又被调低时，图在规划时不再被拒，于是执行之后会问一次 replanner，再因为预算不够而放弃，白花一次模型调用；选中三个以上 Skill、预算只够一个时，一个只去掉未执行节点的补丁还可能被接受，图事件就以 `completed` 结束、被跳过的 Skill 从 `graph.nodeIds` 里消失。默认配置走不到（每个意图最多两个 Skill、预算两次；运行上限用完时所有预算键归零，不会调用 replanner）。replanner 判断“还有没有预算”时看的是所有预算键而不是这张图用的那几个，这是原有的宽松，正常路径上也会白问一次。
+- **恢复接口和界面仍然给图 run 里失败的 Skill 节点提供“重试失败步骤”，而它一定返回 409**（没有改，写进了“保留什么”）。
+- **恢复评测和发布门里的步骤级信号只对旧 run 有意义**（没有改，写进了“保留什么”）。
+- **`docs/agent-rag.md` 把“默认配置下基本走不到”说成了表里的后两行**，其实是前两行；第三行（没选 Skill、提议不可用）在模型规划器下会发生。已改。
+- **遗留**：七处检查点的注释只提两个已删除的开关，补上第三个；`authorized-catalog.js` 说目录是“custom Skill 运行的唯一途径”，改成“请求运行 custom Skill 的唯一途径”，并写明旧 run 的单步处理器是例外；一个评测脚本和两个测试文件还在给阶段传已经不存在的 `mode: "guarded"`，删掉。前端 trace 详情里的 “Chain mode” 一行没有动：它只在旧 trace 带这个字段时显示。
+- **测试缺口**：`skill_graph_rejected` 归为 `decision` 没有测试钉住，现在钉在 `agent-custom-skill-budget` 里；预算跳过的测试原来只从预算提示推断跳过原因，现在直接断言节点的 `reason`（`budget_exhausted`、`dependency_skipped`）；只选中一个 Skill 的请求走另一条收尾分支（固定的一句而不是弃答），原来没有覆盖，加了两个测试，本节“弃答”的说法也限定到了两个 Skill 的请求；阶段测试里“在加载执行器之前拒绝”的说法在那个测试里观察不到，改成它实际断言的内容（不读写 checkpoint、不规划、不执行）。没有做的一条：图被整张拒绝现在意味着“选中的 Skill 没有运行”，报告里没有单独的计数，只能从“规划数减执行数”看出来。
+
+复核没能验证的：需要执行才能确认的部分（它只读代码，加上四个纯函数的探针）；`server/.env`；上面“升级时已存的 run”里那条重新进入的路径。
+
+另外在核对预算规则时发现一处与这次改动无关的旧问题，没有改：`AGENT_PLANNER_ROLLOUT=deterministic` 或 `shadow` 时，custom Skill 图的规划记录总是写成“fallback”，原因是 “DAG planner response must contain a non-empty nodes array.”。包了一层灰度信息的确定性规划器被当成主规划器，拿到的是脱敏后的上下文，里面没有选中的 Skill，先产出一张空图，再回落到真正的确定性图。执行结果是对的，记录不对。e11ced91 上同样如此。
+
+修正之后重跑（复核修正提交，本机 Node 24.21.0）：
+
+- `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（341ad5f3 的干净 worktree）：4,598 个测试，4,591 通过、7 跳过、0 失败；全局行覆盖 92.55%，五组覆盖率门和目标都通过。比复核之前多 3 个测试（`agent-custom-skill-budget` 从 5 个变成 8 个）。PostgreSQL 集成套件（其中 `agent-execution-graph-postgres.integration` 去掉了两处无效参数）都在里面，没有跳过。
+- `quality:current` 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
+- 三个确定性 agent 评测与 e11ced91 的比较：和复核之前相同（planner-mock、recovery-observability 逐字节一致；trajectory 17 个共有场景里 16 个一致，另一个只差 V1 对照）。
+- 受修正影响的单文件套件：`agent-custom-skill-budget` 8/8、`agent-custom-skill-stage` 24/24、`agent-execution-graph-checkpoint` 32/32。
+- 不接数据库的全量：4,426 个测试，4,398 通过、28 跳过、0 失败。
 
 ## 后果
 
