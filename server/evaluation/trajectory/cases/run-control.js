@@ -1,6 +1,5 @@
 import { runAgentRag } from "../../../rag/agent.js";
 import { createAgentRunStepExecutor } from "../../../rag/agent-run-step-executor.js";
-import { createCustomSkillStepExecutor } from "../../../rag/agent-run-step-handlers/index.js";
 import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
@@ -31,14 +30,9 @@ import {
 } from "../../chat-response-contract.js";
 import {
   buildScopedRagService,
-  buildSource,
   createEvalTelemetry,
-  withEnvironmentOverrides,
 } from "../../agent-eval-harness.js";
-import {
-  AGENT_SKILL_IDS,
-  CUSTOM_SKILL_IDS,
-} from "../../../rag/skills/registry.js";
+import { AGENT_SKILL_IDS } from "../../../rag/skills/registry.js";
 import {
   DEFAULT_ACCESS_SCOPE,
   buildTrajectoryCheck as buildCheck,
@@ -268,178 +262,6 @@ export const createApprovalResumeCase = () => ({
             resumedStepCompletedIndex,
             resumedStepStartedIndex,
           },
-        }),
-      ],
-    });
-  },
-});
-
-
-export const createCustomSkillRetryCase = () => ({
-  id: "custom_skill_retry",
-  label: "Custom skill retry",
-  description:
-    "With graph rollout off, a failed V1 custom skill step should persist input/output/error and retry from the failed step.",
-  run: async () => {
-    const telemetry = createEvalTelemetry();
-    const citation = buildSource({
-      docId: "risk-1",
-      fileName: "risk-policy.pdf",
-      pageNumber: 4,
-      excerpt:
-        "Security exceptions require written approval before production deployment.",
-    });
-    const agentRunService = createAgentRunService({
-      agentRunStore: createInMemoryAgentRunStore(),
-    });
-    const ragService = buildScopedRagService({
-      sameScope,
-      documents: [
-        {
-          docId: "risk-1",
-          fileName: "risk-policy.pdf",
-        },
-      ],
-      telemetry,
-      chat: async ({ callIndex, question }) => {
-        if (callIndex === 1) {
-          throw new Error("Transient custom skill failure.");
-        }
-
-        return {
-          text:
-            "Risk Review\n- Risk: Security exceptions require written approval before production deployment. [Source 1]",
-          citations: [citation],
-          abstained: false,
-          resolvedQuery: question,
-          memoryApplied: false,
-        };
-      },
-    });
-    const agentRunStepExecutor = createAgentRunStepExecutor({
-      agentRunService,
-      executeCustomSkillStep: createCustomSkillStepExecutor({
-        ragService,
-      }),
-    });
-    const initialResponse = await withEnvironmentOverrides({ AGENT_SKILL_GRAPH_ROLLOUT: "off" }, () => runAgentRag({
-      accessScope: DEFAULT_ACCESS_SCOPE,
-      agentRunService,
-      docIds: ["risk-1"],
-      question: "Review this policy for risks and gaps.",
-      ragService,
-      sessionId: "trajectory-session",
-      userId: DEFAULT_ACCESS_SCOPE.userId,
-      webChatService: async () => ({
-        text: "web should not run",
-      }),
-    }));
-    const initialBody = getChatResponseBody(initialResponse);
-    const initialRun = await agentRunService.getRun({
-      accessScope: DEFAULT_ACCESS_SCOPE,
-      runId: initialBody.agentRunId,
-    });
-    const failedStep = (initialRun?.steps ?? []).find(
-      (step) => step.type === "custom_skill" && step.status === "failed"
-    );
-    let retryResult = null;
-    let retryError = null;
-
-    if (failedStep?.id) {
-      try {
-        retryResult = await agentRunStepExecutor.retryStep({
-          accessScope: DEFAULT_ACCESS_SCOPE,
-          runId: initialBody.agentRunId,
-          stepId: failedStep.id,
-        });
-      } catch (error) {
-        retryError = error instanceof Error ? error.message : String(error);
-      }
-    }
-
-    const retryStep = (retryResult?.run?.steps ?? []).find(
-      (step) => step.retryOfStepId === failedStep?.id
-    );
-    const retryResponse = retryResult
-      ? {
-          status: 200,
-          body: retryResult.response,
-        }
-      : initialResponse;
-
-    return finishCase({
-      id: "custom_skill_retry",
-      label: "Custom skill retry",
-      description:
-        "With graph rollout off, a failed V1 custom skill step should persist input/output/error and retry from the failed step.",
-      observed: {
-        chatCallCount: telemetry.chatCalls.length,
-        failedStep: {
-          errorMessage: failedStep?.error?.message ?? null,
-          hasQuestion: Boolean(failedStep?.input?.question),
-          skillId: failedStep?.input?.skillId ?? null,
-          status: failedStep?.status ?? null,
-        },
-        retry: {
-          attempt: retryStep?.attempt ?? null,
-          citationCount: retryStep?.output?.citationCount ?? null,
-          retryError,
-          retryOfOriginalStep:
-            Boolean(failedStep?.id) &&
-            retryStep?.retryOfStepId === failedStep.id,
-          runStatus: retryResult?.run?.status ?? null,
-          sameRun:
-            Boolean(initialBody.agentRunId) &&
-            retryResult?.response?.agentRunId === initialBody.agentRunId,
-          stepStatus: retryStep?.status ?? null,
-        },
-      },
-      response: retryResponse,
-      telemetry,
-      checks: [
-        buildCheck({
-          id: "failed_custom_step_persisted_input",
-          label: "Failed custom skill step persisted retry input and error",
-          category: "retry",
-          passed:
-            failedStep?.input?.skillId === CUSTOM_SKILL_IDS.riskReview &&
-            Boolean(failedStep?.input?.question) &&
-            /Transient custom skill failure/.test(
-              failedStep?.error?.message ?? ""
-            ),
-          detail: failedStep ?? null,
-        }),
-        buildCheck({
-          id: "retry_completed_same_run",
-          label: "Retry completed on the same agent run",
-          category: "retry",
-          passed:
-            !retryError &&
-            retryResult?.run?.status === AGENT_RUN_STATUSES.completed &&
-            retryResult?.response?.agentRunId === initialBody.agentRunId,
-          detail: {
-            retryError,
-            retryRunId: retryResult?.response?.agentRunId ?? null,
-            initialRunId: initialBody.agentRunId,
-            runStatus: retryResult?.run?.status ?? null,
-          },
-        }),
-        buildCheck({
-          id: "retry_step_completed",
-          label: "Retried step completed with output detail",
-          category: "retry",
-          passed:
-            retryStep?.status === "completed" &&
-            retryStep?.output?.citationCount === 1 &&
-            retryStep?.attempt === 2,
-          detail: retryStep ?? null,
-        }),
-        buildCheck({
-          id: "custom_skill_was_retried_once",
-          label: "Custom skill execution retried exactly once",
-          category: "retry",
-          passed: telemetry.chatCalls.length === 2,
-          detail: telemetry.chatCalls.map((call) => call.question),
         }),
       ],
     });

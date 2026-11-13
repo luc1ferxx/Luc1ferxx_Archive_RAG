@@ -35,7 +35,7 @@ flowchart LR
 ### 关键规则
 
 - Planner 只在已注册 intent、skill、capability 和 step schema 里选择。
-- 在 custom skill 的 V2 DAG 模式下，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 顺序链只在整张图被拒、尚无节点执行时兜底，或由运维显式设为 `off`。
+- 在 custom skill 阶段，模型看到的是 runtime 从已注册、显式 typed contract、已核验 `accessScope` / `docIds` 构造的原子 Skill catalog，不受 V1 复合 intent/chain 限死。例如上游只选了 `compare_documents` intent，DAG planner 仍可在授权候选中规划 `compare_documents -> risk_review`；没有选中文档或文档无法按 scope 核验时不会扩大候选范围。V1 顺序链已删除（ADR 0001 阶段 8）：整张图被拒时不执行任何 Skill，逐个记录原因，见下文“图排不出来时”。
 - Planner 不决定权限、`docIds`、审批、secret、预算、并发和重试上限；这些由 runtime 拥有。custom skill 的 typed DAG 也一样：模型只产出节点和依赖，validator 整体接受或整体拒绝，非法图不会部分执行；runner 在执行前、把真实或恢复的输出交给下游前再次校验 typed contract。当前 typed 输出仍是 `text` / `citations` / `abstained` 的答案封套，不是已做语义验证的差异或风险对象。
 - 文档读取、skill 执行、task 和 agent run 都携带 `accessScope`。
 - Working memory 是 run-scoped，只记录本轮 queries、claims、gaps 和 loop counters。
@@ -97,13 +97,16 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 
 V1 使用 intent / `match()` 选择上述固定 chain。V2 的模型候选则由 `server/rag/skills/authorized-catalog.js` 从同一个已注册 custom Skill 集合独立构造：每个候选须显式声明 `inputSchema`、`outputSchema`、`effects` 和 scoped `docIds` 输入；runtime 先用 `ragService.getDocument(docId, accessScope)` 核验请求中的每份文档。缺少文档、scope 或无法核验时返回空 catalog，不会借普通 QA 请求授权整套 Skill。V1 推导出的安全默认 contract 不会自动变成模型可调用的 V2 候选。因此上游 Intent 即使只选了 `compare_documents`，guarded DAG planner 也能在获授权的原子候选中提出 `compare_documents -> risk_review`；V1 原有选择和确定性回退仍只使用 V1 已选 Skill。
 
-## Custom skill 执行：V1 chain 与 V2 typed DAG
+## Custom skill 执行：typed DAG
 
-Custom skill 阶段内部有两条执行路径，由 `AGENT_SKILL_GRAPH_ROLLOUT` 选择。两条路径共用同一个 stage、同一种 `custom_skill` step、同一个 run store 和同一份 replay safety matrix；execution plan 仍然只有一个 `custom_skills` 阶段，`/chat` 响应结构不变。切换入口集中在 `server/rag/agent-custom-skill-stage.js`，由 `server/rag/agent-execution-plan-runner.js` 调用。
+Custom skill 阶段只有一个执行器：typed DAG，由 LangGraph 调度。execution plan 只有一个 `custom_skills` 阶段，产生 `custom_skill` step，用同一个 run store 和同一份 replay safety matrix，`/chat` 响应结构不变。入口是 `server/rag/agent-custom-skill-stage.js`，由 `server/rag/agent-execution-plan-runner.js` 调用。
 
-### V1：顺序 skill chain
+### 已删除：V1 顺序 skill chain（2026-11-13）
 
-`server/rag/agent-custom-skill-runner.js` 按 planner 选定的白名单 chain 顺序执行，step id 是 `custom_skill:<skillId>`。它的数据接口是拼接文本：`buildChainedSkillQuestion()` 把前面 skill 的回答拼进下一个 skill 的 question。这条路径保持原样，没有被删除也没有被改写。
+- 它是这个阶段最早的形态：按选定的顺序一个接一个执行 Skill，step id 是 `custom_skill:<skillId>`，把前面 Skill 的回答拼进下一个 Skill 的 question（`buildChainedSkillQuestion()`）。
+- DAG 成为默认（2026-09-25）之后它还有三个入口：`AGENT_SKILL_GRAPH_ROLLOUT=off`、`shadow`（链出答案、旁路规划一张图做比对），以及默认配置下整张图在任何 node 执行前被拒时的回落。
+- ADR 0001 阶段 8 把它连同 `off`、`shadow` 两个取值一起删除（用户的决定）。依据、对比和失去的能力见 [ADR 0001](adr/0001-langgraph-runtime.md) 的“阶段 8 结果”。
+- 它做的事现在由图承担：确定性图就是“选中的 Skill 按顺序连起来”，见下文“图排不出来时”。
 
 ### V2：typed DAG
 
@@ -141,19 +144,26 @@ custom Skill DAG 与 guarded v3 统一图一律由 LangGraph.js 调度：按 sup
 
 触发条件限定为 `insufficient_evidence`、`retryable_failure`、`output_schema_failure`、`missing_input`、`unmet_success_criterion`。Replanner 只返回 graph patch，不执行任何工具；patch 必须重新过同一个 validator，不能扩大 scope、白名单或预算。已完成的 node 默认不重跑（`completed` 和上一轮 `reused` 都算既成事实）；如果有写副作用的 node 已尝试但失败，不能证明写入未落地，因此本轮不自动 replan，避免整图第二次运行时重做该 node。指纹集合会拒绝重复等价的 plan，`DEFAULT_MAX_REPLANS` 为 `1`。无进展或预算耗尽时返回 `abstain`，交由上游走 clarification 或 evidence-limited answer，而不是继续重试。Replan 的拒绝原因同样有稳定 code：`replan_not_triggered`、`replan_limit_reached`、`replan_budget_exhausted`、`replan_no_progress`、`replan_duplicate_plan`、`replan_invalid_patch`、`replan_adapter_failed`、`replan_completed_node_retired`、`replan_side_effect_node_failed`、`replan_side_effect_node_retired`。
 
-### 执行器开关
+### 图排不出来时
 
-| 模式 | 谁出答案 | Graph 行为 |
-| --- | --- | --- |
-| `guarded`（默认） | V2 DAG | 真正执行；只有在 graph 整体被拒、尚无任何 node 执行时才回落 V1。 |
-| `off` | V1 chain | 不规划，不记录。运维回退用；无法识别的取值也落到这里。 |
-| `shadow` | V1 chain | 在 V1 花预算之前抓取预算快照，规划并校验一张 graph 只做比对；shadow 路径出错会被记录成 error，不会影响真实请求。 |
+规划分两层：模型提议的图先过校验，不合法就整张换成确定性图（把意图选中的 Skill 按顺序连起来，每个把结果作为 typed `priorFindings` 交给下一个）。之后没有第三层，也没有别的执行器可以回落。
 
-`guarded` 之所以只在"整体被拒"时回落，是因为一旦有 node 花掉预算并写入 step，再用另一套 plan 重跑整条链会重复计费、并可能重复已发生的副作用。因此 V1 chain、复合 intent 和 deterministic fallback 仍保留：V1 chain 是整图被拒时唯一安全的兜底，也是 `off` 回退的落点。
+| 情形 | 发生什么 |
+| --- | --- |
+| 预算付不起全部选中的 Skill | 确定性图在规划时不按调用预算拒绝。图照常执行，执行器在每个 node 启动时预留预算，付不起的 node 记为跳过（`budget_limit` trace、node run 和 Skill observation 里都有记录）。被跳过的 node 没有结果，也不出现在 `agentSkills` 里。模型提议的图仍然按预算整张校验 |
+| 确定性图因为别的原因不合法（选中的 Skill 不在本次请求的授权目录里、超过规模上限） | 不执行任何 Skill。每个选中的 Skill 得到一条失败结果（`AGENT_SKILL_GRAPH_REJECTED`，写明校验器的 reason code），trace 里有一条 `skill_graph_rejected`（run 里存成 `decision` 类、`skipped` 的步骤），请求继续往下走 |
+| 意图没选 custom Skill，模型的提议又不可用 | 返回空结果。不会把整个授权目录跑一遍作为替代 |
 
-**执行器与规划器是两个开关。** `AGENT_SKILL_GRAPH_ROLLOUT` 只决定 custom skill 阶段用哪个执行器；DAG 由谁规划跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败（格式错误、越界、校验不过）时先退回 deterministic graph，确定性图也被整体拒绝时才回落 V1 chain。执行器默认值改为 `guarded` 的依据是执行语义的证据（全量测试、trajectory、recovery、PostgreSQL 跨进程恢复），而不是 LLM 规划质量；`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到，这不影响执行器的默认值。
+- 一旦有 node 花掉预算并写入 step，就不会再用另一套 plan 重跑：那会重复计费，并可能重复已发生的副作用。
+- 默认配置下前两种情形在 `/chat` 上基本走不到：每个意图最多选 2 个 custom Skill，调用预算正好 2 次；`/chat` 进 agent 之前已经用同一个 `getDocument` 查询核实过每个文档；四个 custom Skill 都声明了类型契约。第三种在模型规划器下会发生，此时本来就没有选中的 Skill，返回空结果。
+- 确定性图不等于当年的顺序链：后一个 node 绑定前一个 node 的结果，所以依赖它；前一个失败或被跳过时，后一个也被跳过（执行器对依赖没完成的 node 一律跳过，不管 `failurePolicy`）。链会照样用原问题跑后一个 Skill。图成为默认以来一直是这个表现。
+- 没有 Skill 产出时，选中两个 Skill 的请求以“证据不足”弃答；只选中一个 Skill 的请求回答固定的一句 “The custom skill could not complete the request.”。
+- 一个 custom Skill 如果没有声明类型契约（`effects`、`inputSchema`、`outputSchema`、`requiresAccessScope`、必填且带范围的 `docIds`），就不在授权目录里，不会运行。
+- `AGENT_SKILL_GRAPH_ROLLOUT` 不再选择任何东西：未设置或 `guarded` 照常启动，`off`、`shadow` 和其他任何取值让进程拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。图事件里的 `mode` 仍然写 `guarded`，`fallback` 总是 `null`。
 
-**行为变化：** 默认 `guarded` 下，执行规划器能看到已授权的原子 Skill 候选，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段（这正是 `planner_dynamic_skill_graph` 验证的动态选择）；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
+**规划器的开关还在。** DAG 由谁规划跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败（格式错误、越界、校验不过）时退回 deterministic graph。`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到。
+
+**动态选择：** 执行规划器能看到已授权的原子 Skill 候选，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段（这正是 `planner_dynamic_skill_graph` 验证的动态选择）；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
 
 DAG planner 复用既有 execution planner 灰度位（`AGENT_EXECUTION_PLANNER` / `AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 或 shadow 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
 
@@ -163,7 +173,7 @@ Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录�
 
 Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run-step-replay-safety.js` 的既有 policy。两处补充：
 
-- **持久化声明收窄（无 registry 的一侧）。** Step type 是粗粒度分类，同一个 `custom_skill` 既可能是只读 RAG 检索，也可能是 contract 允许的写操作。执行时 skill 的 replay contract（`effects`、`idempotency`、`replaySafe`）会随 step input 持久化，recovery 只拿得到持久化的 step，所以这是 skill 自身声明唯一能影响"是否可无人值守重放"的通道。该声明只能收窄不能放宽：可以撤回 auto-replay，不能授予；contract 出现之前写下的 step 没有声明，结论与今天完全一致；无法识别的 `effects` 按写操作处理——读不懂的值不是安全的证据。V1 chain 和 V2 graph 都持久化同一份声明。Graph node 绑定的上游输入 `priorFindings` 也随 step input 持久化，retry 用原来的那份数据重放；V1 chain step 把上游输出折进了 question，因此没有这个字段，retry 行为不变。
+- **持久化声明收窄（无 registry 的一侧）。** Step type 是粗粒度分类，同一个 `custom_skill` 既可能是只读 RAG 检索，也可能是 contract 允许的写操作。执行时 skill 的 replay contract（`effects`、`idempotency`、`replaySafe`）会随 step input 持久化，recovery 只拿得到持久化的 step，所以这是 skill 自身声明唯一能影响"是否可无人值守重放"的通道。该声明只能收窄不能放宽：可以撤回 auto-replay，不能授予；contract 出现之前写下的 step 没有声明，结论与今天完全一致；无法识别的 `effects` 按写操作处理——读不懂的值不是安全的证据。Graph node 持久化这份声明（已删除的 V1 chain 当年写下的 step 也带同一份）。Graph node 绑定的上游输入 `priorFindings` 也随 step input 持久化，恢复时用原来的那份数据重放；阶段 8 之前存下来的 V1 chain step 把上游输出折进了 question，因此没有这个字段，对它们的重试行为不变。
 - **实时 contract 复核（有 registry 的一侧）。** `server/rag/agent-run-step-handlers/custom-research-steps.js` 在 resume 时从 registry 重新解析 skill：持久化的 contract 是它当时的声明，中断和重放之间可能发生一次部署。声明了副作用的 skill 在这条没有审批机制的路径上被拒绝，而不是被静默重跑。
 
 外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`。replay matrix 对这三类 step 禁止启动自动重放，旧的无 replay metadata 记录也按 step type fail-closed。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
@@ -184,12 +194,13 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 
 ### 当前限制
 
-- 默认 `guarded`：真实 `/chat` 的 custom skill 阶段走 typed DAG。设为 `off` 可回到 V1 chain；本地 `server/.env` 里若仍写着 `off`，会覆盖这个默认值。
+- 真实 `/chat` 的 custom skill 阶段只走 typed DAG，没有回到 V1 chain 的开关。本地 `server/.env` 里若仍写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程会拒绝启动，要先删掉这一行。
+- 失败的 custom Skill 步骤不能单独重试：图运行的 step 拒绝单步重试（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。模型规划器是主规划器时有一次有界 replan；确定性规划器下，失败的 node 留下 partial 的图。以前只有 V1 chain 的 step 支持单独重试。恢复接口和界面目前仍然会对这样的 step 给出“重试失败步骤”，点了返回 409；处理 `custom_skill` 单步重试和启动重放的处理器还留着，只对 2026-11-13 之前由 V1 chain 存下的 run 有用。
 - 当前注册的四个 custom skill 全部继承 `custom-skill-contract.js` 的 `effects: readOnly`，没有任何 skill 声明写操作。上面的副作用防护守的是 contract 已经允许、但尚无实例的边界，不是在修一个线上缺陷。
 - `maxReplans` 初始为 `1`；指纹机制保证即使上调也不会形成等价循环，但更高的值尚未做灰度验证。
 - Graph 只覆盖 custom skill 阶段。built-in skill、document RAG 主循环、capability 调用仍走各自既有路径和安全边界。
-- 评测有四个固定 trajectory `skill_graph` case、一个 `planner_dynamic_skill_graph` case（mock/real provider）、recovery-observability 的 replan 与 startup resume case，以及带真实 LLM planner 的 guarded HTTP runtime smoke。`rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider DAG case 和 smoke 通过；`release:gate` 另要求新鲜、同提交、干净工作树的完整证据。见 [evaluation.md](evaluation.md#skill-graph-rollout-的评测边界)。这些门禁证明规划/执行路径与合同，不直接证明模型生成的风险内容语义正确。
-- 同一 run 的 guarded checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。默认 `guarded` 不代表整条 AgentRAG 执行计划都可自动续跑。
+- 评测有三个固定 trajectory `skill_graph` case（原来四个，`skill_graph_shadow_comparison` 随 V1 chain 删除）、一个 `planner_dynamic_skill_graph` case（mock/real provider）、recovery-observability 的 replan 与 startup resume case，以及带真实 LLM planner 的 guarded HTTP runtime smoke。`rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`、real-provider DAG case 和 smoke 通过；`release:gate` 另要求新鲜、同提交、干净工作树的完整证据。见 [evaluation.md](evaluation.md#skill-graph-的评测边界)。这些门禁证明规划/执行路径与合同，不直接证明模型生成的风险内容语义正确。
+- 同一 run 的 graph checkpoint 可在严格校验后复用已完成 node；启动自动恢复只覆盖 graph-only 外层 plan，不是跨不同 `agentRunId` 的通用缓存，更不会跳过外层 document/Web/built-in/capability 阶段。custom skill 阶段走图，不代表整条 AgentRAG 执行计划都可自动续跑。
 
 ## 关键调用链
 
@@ -209,8 +220,8 @@ Node 仍然写成 `custom_skill` step，因此继续沿用 `server/rag/agent-run
 | --- | --- |
 | `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
 | `server/rag/skills/skill-contract.js` | Skill contract：`inputSchema`/`outputSchema`/`effects`/`idempotency`/`parallelSafe`/`replaySafe` 的规范化与安全默认值，以及随 step 持久化的 replay contract 切片。 |
-| `server/rag/agent-custom-skill-stage.js` | 迁移切口：按 `AGENT_SKILL_GRAPH_ROLLOUT` 在 V1 chain、shadow 规划和 guarded DAG 之间选择，对外仍返回同一个扁平 skill result 数组。 |
-| `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 V1 intent/chain 选择分离。 |
+| `server/rag/agent-custom-skill-stage.js` | Custom skill 阶段：规划 typed DAG、交给 LangGraph 执行、管理 graph checkpoint 和 replan；图被整体拒绝时把选中的 Skill 记为未执行。对外返回一个扁平 skill result 数组。 |
+| `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 intent/chain 选择分离；不在这个目录里的 custom Skill 不会运行。 |
 | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph` contract 和纯函数 validator/compiler；整体接受或整体拒绝，返回稳定 reason code。 |
 | `server/rag/agent-execution-graph-runner.js` | 与调度方式无关的两端：整图准入（`admitExecutionGraphRun`）、收尾（`finishExecutionGraphRun`），以及不调度的已结算图回放（`replayExecutionGraphRun`）。原生调度循环 `runExecutionGraph` 已在 ADR 0001 阶段 6 删除；调度器是 `server/rag/langgraph/run-execution-graph.js`（LangGraph.js：拓扑层序队列、并发上限、预算预留/退回、side-effect 串行化、审批停靠），运行时 input/output schema gate 和 node run 记录在 `agent-execution-graph-node.js`。 |
 | `server/rag/agent-execution-graph-checkpoint.js` | 私有 graph checkpoint 的摘要/owner 验证、node/step 对账和完成节点复用判定；保存在既有 agent run store，而非第二套运行时。 |
@@ -509,7 +520,7 @@ Task memory 只会作为 intent/execution planner 的 planning context 传入，
 | 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
 | 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
 | 8 | 目标完成自检 | 已加 task-level `goalCompletion` contract：统一检查 public plan steps、unresolved gaps / unsupported claims、goal deliverables、pending approval / user action、research phases 和 workflow lifecycle contract；默认 trajectory eval 覆盖从等待批准到产物创建后的完整目标生命周期。 |
-| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；执行器由 `AGENT_SKILL_GRAPH_ROLLOUT`（`guarded`/`shadow`/`off`，默认 `guarded`）选择，V1 顺序链只作为整图被拒时的兜底和运维的显式回退，组合 intent 和 deterministic planner 保留。四个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
+| 9 | Plan-and-Execute typed DAG | 已在 custom skill 阶段内部加授权原子 Skill catalog、typed skill contract、版本化 `ExecutionGraph`、纯函数 validator、运行时输入/输出 gate、拓扑 scheduler、持久化 graph checkpoint 和一次有界 replan；typed DAG 是这个阶段唯一的执行器（V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT` 的 `off`、`shadow` 已在 2026-11-13 删除，见 ADR 0001 阶段 8），组合 intent 和 deterministic planner 保留。三个 trajectory case 钉住 DAG 行为，planner eval 另有 compare-only intent 下动态组合 compare+risk 的 guarded case；real provider、runtime smoke 和 rollout/release gate 为真实模型灰度提供额外门禁。 |
 
 后续按"像工业界那样"的差距清单推进，已完成：
 

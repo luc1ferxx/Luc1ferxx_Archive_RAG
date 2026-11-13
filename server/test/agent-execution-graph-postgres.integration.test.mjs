@@ -488,7 +488,6 @@ if (workerMode === "1") {
           executeObservedSkill: tracker.executeObservedSkill,
           loadExecutionGraphCheckpoint: () =>
             service.getExecutionGraphCheckpoint({ accessScope, runId }),
-          mode: "guarded",
           plan,
           plannerAdapter: {
             createExecutionGraph: () => ({ nodes: graphNodes }),
@@ -681,7 +680,6 @@ if (workerMode === "1") {
           executeObservedSkill: tracker.executeObservedSkill,
           loadExecutionGraphCheckpoint: () =>
             service.getExecutionGraphCheckpoint({ accessScope, runId }),
-          mode: "guarded",
           plan,
           plannerAdapter: {
             createExecutionGraph: () => ({ nodes: graphNodes }),

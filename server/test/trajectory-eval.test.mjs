@@ -52,7 +52,10 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   });
 
   assert.equal(report.summary.status, "pass");
-  assert.equal(report.summary.metrics.caseCount, 19);
+  // 19 until ADR 0001 phase 8 removed the two cases that needed the
+  // sequential Skill chain: custom_skill_retry (it set the rollout to `off`)
+  // and skill_graph_shadow_comparison.
+  assert.equal(report.summary.metrics.caseCount, 17);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
@@ -61,13 +64,14 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   assert.equal(report.summary.metrics.categories.access_scope.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.budget.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.approval.failedCheckCount, 0);
-  assert.equal(report.summary.metrics.categories.retry.failedCheckCount, 0);
+  // The retry category held only custom_skill_retry's checks and went with it.
+  assert.equal(Object.hasOwn(report.summary.metrics.categories, "retry"), false);
   assert.equal(report.summary.metrics.categories.memory.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.conflict.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.planner.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.privacy.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
-  assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 18);
+  assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 14);
   assert.equal(report.summary.metrics.categories.unified_graph.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.unified_graph.checkCount, 13);
   assert.ok(
@@ -94,12 +98,11 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
         caseResult.response.traceTypes.includes("capability_approval_gate")
     )
   );
-  assert.ok(
-    report.cases.some(
-      (caseResult) =>
-        caseResult.id === "custom_skill_retry" &&
-        caseResult.response.agentMode === "risk_review"
-    )
+  assert.deepEqual(
+    report.cases
+      .map((caseResult) => caseResult.id)
+      .filter((id) => id === "custom_skill_retry" || id === "skill_graph_shadow_comparison"),
+    []
   );
   assert.ok(
     report.cases.some(
@@ -125,9 +128,8 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
         caseResult.passed
     )
   );
-  // The graph cases pin the rollout dial per case; the report must show the
-  // graph actually ran under `guarded`, only planned under `shadow`, refused
-  // the forged plan whole, and stopped replanning at the bound.
+  // The report must show the graph actually ran, refused the forged plan
+  // whole, and stopped replanning at the bound.
   const graphCase = (id) => report.cases.find((caseResult) => caseResult.id === id);
 
   assert.equal(
@@ -137,10 +139,6 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   assert.equal(
     graphCase("skill_graph_guarded_execution").response.agentMode,
     "skill_chain"
-  );
-  assert.equal(
-    graphCase("skill_graph_shadow_comparison").response.observed.graph.executed,
-    false
   );
   assert.deepEqual(
     graphCase("skill_graph_illegal_plan_rejected").response.observed.forgedNodeIdsRan,
@@ -181,18 +179,18 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
       ["risk", "skipped", "condition_not_met"],
     ]
   );
+  // The V1 outer plan on the same request, once per evidence variant. (It ran
+  // twice per variant, on the sequential chain and on the DAG, until the chain
+  // was deleted; both halves reported these same numbers.)
   assert.deepEqual(
     unifiedCase.response.observed.v1Runs.map((v1) => [
-      v1.skillGraphRollout,
       v1.documentSufficient,
       v1.customSkillCalls,
       v1.documentRagCalls,
     ]),
     [
-      ["off", true, 1, 0],
-      ["off", false, 1, 0],
-      ["guarded", true, 1, 0],
-      ["guarded", false, 1, 0],
+      [true, 1, 0],
+      [false, 1, 0],
     ]
   );
   assert.deepEqual(
@@ -289,7 +287,7 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Approval/);
   assert.match(markdown, /Follow-up/);
   assert.match(markdown, /Goal lifecycle/);
-  assert.match(markdown, /Retry/);
+  assert.doesNotMatch(markdown, /\| Retry \|/);
   assert.match(markdown, /Memory/);
   assert.match(markdown, /Conflict/);
   assert.match(markdown, /Planner/);
@@ -297,11 +295,11 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.match(markdown, /Skill graph/);
   assert.match(markdown, /Contract review skill chain/);
   assert.match(markdown, /Capability approval resume/);
-  assert.match(markdown, /Custom skill retry/);
+  assert.doesNotMatch(markdown, /Custom skill retry/);
   assert.match(markdown, /Privacy sanitization/);
   assert.match(markdown, /Agent goal lifecycle completion/);
   assert.match(markdown, /Skill graph guarded execution/);
-  assert.match(markdown, /Skill graph shadow comparison/);
+  assert.doesNotMatch(markdown, /Skill graph shadow comparison/);
   assert.match(markdown, /Skill graph illegal plan rejected/);
   assert.match(markdown, /Skill graph bounded replan/);
   assert.match(markdown, /Unified graph/);

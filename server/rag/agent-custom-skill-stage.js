@@ -1,5 +1,4 @@
 import { getRemainingBudget } from "./agent-budget.js";
-import { runCustomSkills } from "./agent-custom-skill-runner.js";
 import {
   buildExecutionGraphCheckpointOwner,
   createExecutionGraphCheckpoint,
@@ -15,45 +14,57 @@ import {
 } from "./agent-execution-graph.js";
 import { EXECUTION_GRAPH_RUN_STATUSES } from "./agent-execution-graph-runner.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
-import { runShadowPlanner, sameStringList } from "./agent-planner-shadow.js";
 import { REPLAN_DECISIONS, createReplanResult } from "./agent-replanner.js";
 import { getAgentRunStepLifecycleTarget } from "./agent-run-step-lifecycle.js";
-import { assertAgentRuntimeSupported, getAgentSkillGraphRollout } from "./config.js";
+import { assertAgentRuntimeSupported } from "./config.js";
 import { assertLangSmithTracingDisabled } from "./langgraph/langsmith-guard.js";
+import { buildFailedSkillResult } from "./skills/registry.js";
 import { setSpanAttributes, withSpan } from "./tracing.js";
 
-// The migration incision.
+// The custom_skills stage.
 //
-// The agent's execution plan still has exactly one custom_skills stage, still
-// emits custom_skill steps, and still hands the rest of the run a flat array of
-// skill results. What changes is the inside of that stage: instead of a
-// sequential chain that splices earlier answers into the next skill's question,
-// it can compile a typed DAG and let the scheduler decide what runs together.
+// The agent's execution plan has exactly one custom_skills stage, it emits
+// custom_skill steps, and it hands the rest of the run a flat array of skill
+// results. Inside, the stage plans a typed DAG over the Skills the runtime
+// authorized for this request and LangGraph schedules it
+// (langgraph/run-execution-graph.js, docs/adr/0001-langgraph-runtime.md).
 //
-// The rollout dial is the whole point of this file existing separately.
-// `off` is the V1 chain untouched, `shadow` plans a graph beside the real run
-// so the two can be compared on live traffic without risking an answer, and
-// `guarded` executes the graph with V1 kept as the fallback for the one case
-// where falling back is still safe: a graph rejected before any node ran.
+// There is no other executor. The V1 sequential chain, which ran the selected
+// Skills one after another and spliced earlier answers into the next Skill's
+// question, was this stage's first form and then its fallback for a graph
+// rejected before any node ran. ADR 0001 phase 8 deleted it, together with
+// the AGENT_SKILL_GRAPH_ROLLOUT values that selected it (`off`, `shadow`).
+// What the chain did is the graph's own business now:
 //
-// There is deliberately no fallback after partial execution. Once a node has
-// spent budget and written a step, re-running the chain would repeat that work
-// under a different plan and bill the user twice for one request.
+// - The deterministic graph plans what the chain ran: one node per selected
+//   Skill, in selection order, each handing its findings to the next as a
+//   typed input (agent-dag-planner-adapter.js). It is not rejected for the
+//   call budget when it is planned. The executor reserves the budget per node
+//   at launch and skips a node it cannot pay for, which is what the chain did
+//   per Skill, so a budget that covers one of two selected Skills still runs
+//   that one. Two things differ from the chain, and already did in every
+//   graph run before the deletion: a Skill whose predecessor failed or was
+//   skipped does not run (it depends on that node's findings; the chain ran
+//   it on the original question), and a node skipped at launch leaves no
+//   entry in the result array.
+// - A graph rejected for any other reason (a selected Skill the runtime did
+//   not authorize for this request, a limit) runs nothing. Each selected
+//   Skill is reported as not run, with the validator's reason, and the
+//   request goes on without them.
 //
-// A guarded graph is scheduled by LangGraph (langgraph/run-execution-graph.js,
-// docs/adr/0001-langgraph-runtime.md). Phase 6 deleted the native scheduler
-// and the AGENT_RUNTIME dial that picked it; planning, the checkpoint,
-// replans and recovery below did not change. The V1 chain (runV1) is a
-// separate matter: it is the whole-graph-rejection fallback and the `off`
-// opt-out.
+// There is deliberately no second attempt under another plan after partial
+// execution either. Once a node has spent budget and written a step, running
+// its Skill again would repeat that work and bill the user twice for one
+// request.
 
 const noop = () => {};
 
-export const CUSTOM_SKILL_STAGE_MODES = Object.freeze({
-  guarded: "guarded",
-  off: "off",
-  shadow: "shadow",
-});
+// Every graph event carries the mode it ran under. `guarded` is the only one
+// there is; the field stays because stored runs hold it and the replay guard,
+// recovery and the reports read it (agent-run-graph-replay-guard.js).
+export const CUSTOM_SKILL_GRAPH_MODE = "guarded";
+
+export const AGENT_SKILL_GRAPH_REJECTED_CODE = "AGENT_SKILL_GRAPH_REJECTED";
 
 const describeGraph = (graph) =>
   graph
@@ -85,6 +96,54 @@ const serializeReplan = (replan) => ({
   trigger: replan.trigger ?? null,
 });
 
+/**
+ * A graph rejected before any node ran leaves the selected Skills unrun.
+ * Nothing was charged and nothing will run in its place, so each selected
+ * Skill gets a failed result naming the validator's reason: the response lists
+ * it as not run instead of leaving it out, and one trace step says why the
+ * stage did nothing. With no Skill selected there is nothing to report.
+ */
+const reportSkillsNotRun = ({
+  addTraceStep,
+  customSkills,
+  errorCodes,
+  recordSkillResult,
+  recordSkippedSkill,
+}) => {
+  if (customSkills.length === 0) {
+    return [];
+  }
+
+  const reasonCodes = [...new Set(errorCodes)];
+  const reason = reasonCodes.length > 0
+    ? `no legal execution graph (${reasonCodes.join(", ")})`
+    : "no legal execution graph";
+  const results = customSkills.map((skill) => {
+    const error = new Error(`${skill.label} was not run: ${reason}.`);
+    error.code = AGENT_SKILL_GRAPH_REJECTED_CODE;
+
+    const result = buildFailedSkillResult(skill, error);
+
+    recordSkillResult(result);
+    recordSkippedSkill({ budget: null, phase: "primary", result, skill });
+
+    return result;
+  });
+
+  addTraceStep({
+    detail: {
+      reasonCodes,
+      skillIds: customSkills.map((skill) => skill.id),
+    },
+    label: "Skill graph rejected",
+    status: "skipped",
+    summary: `Skipped ${customSkills.map((skill) => skill.label).join(", ")}: ${reason}.`,
+    type: "skill_graph_rejected",
+  });
+
+  return results;
+};
+
 export const runCustomSkillStage = async ({
   accessScope,
   addBudgetLimitTrace = noop,
@@ -100,7 +159,6 @@ export const runCustomSkillStage = async ({
   limits = EXECUTION_GRAPH_LIMITS,
   loadExecutionGraphCheckpoint = null,
   maxConcurrency,
-  mode = getAgentSkillGraphRollout(),
   plan,
   plannerAdapter = null,
   question,
@@ -117,35 +175,14 @@ export const runCustomSkillStage = async ({
   taskMemory = null,
   userId,
 } = {}) => {
+  const mode = CUSTOM_SKILL_GRAPH_MODE;
   const graphSkills = Array.isArray(authorizedCustomSkills)
     ? authorizedCustomSkills
     : customSkills;
-  const runV1 = () =>
-    runCustomSkills({
-      accessScope,
-      addBudgetLimitTrace,
-      addTraceStep,
-      budgetState,
-      buildSkillTraceDetail,
-      customSkills,
-      docIds,
-      executeObservedSkill,
-      plan,
-      question,
-      ragService,
-      recordSkillResult,
-      recordSkippedSkill,
-      retrievalPlan,
-      sessionId,
-      stepLifecycle,
-      userId,
-    });
 
-  if (
-    mode === CUSTOM_SKILL_STAGE_MODES.off ||
-    (customSkills.length === 0 && graphSkills.length === 0)
-  ) {
-    return runV1();
+  // Nothing selected and nothing authorized: there is no graph to plan.
+  if (customSkills.length === 0 && graphSkills.length === 0) {
+    return [];
   }
 
   const effectiveLimits = { ...EXECUTION_GRAPH_LIMITS, ...limits };
@@ -173,72 +210,17 @@ export const runCustomSkillStage = async ({
       return planned;
     });
 
-  if (mode === CUSTOM_SKILL_STAGE_MODES.shadow) {
-    // Snapshot the budget before V1 spends it. A shadow plan is meant to answer
-    // "what would the graph runtime have done with this request", and validating
-    // it against the leftovers of the chain that just ran would reject every
-    // plan as over budget and make the comparison worthless.
-    const budgetRemaining = getRemainingBudget(budgetState);
-    const results = await runV1();
-    // The real answer is already finished. Everything below is comparison
-    // material, and runShadowPlanner guarantees that a bug in it surfaces as a
-    // recorded error rather than as a failed request.
-    const shadow = await runShadowPlanner({
-      compare: ({ primary, shadow: shadowResult }) =>
-        !sameStringList(
-          primary,
-          (shadowResult?.graph?.nodes ?? []).map((node) => node.skillId)
-        ),
-      describe: (shadowResult) => ({
-        errorCodes: (shadowResult?.errors ?? []).map((error) => error.code),
-        graph: describeGraph(shadowResult?.graph),
-        planner: shadowResult?.planner ?? null,
-      }),
-      execute: () => {
-        if (typeof registry?.get !== "function") {
-          throw new Error("Skill registry unavailable for shadow graph validation.");
-        }
-
-        return planGraph(budgetRemaining);
-      },
-      primary: results.map((result) => result.skillId),
-      shadowPlannerAdapter: plannerAdapter ?? { id: "deterministic_dag" },
-    });
-
-    try {
-      await recordExecutionGraph({
-        ...shadow,
-        executed: false,
-        fallback: null,
-        mode,
-        nodeRuns: [],
-        replans: [],
-      });
-    } catch {
-      // Shadow is observational: a failed event write must not turn an
-      // already-completed V1 answer into an error. Keep the loss visible in
-      // the request trace without exposing storage details or source text.
-      addTraceStep({
-        type: "skill_graph_shadow_observation",
-        label: "Shadow graph observation",
-        status: "failed",
-        summary: "Shadow graph event could not be persisted.",
-      });
-    }
-
-    return results;
-  }
-
   // Refused before anything durable exists: a request that cannot run on
   // LangGraph must not leave a graph checkpoint for recovery to resume. The
   // executor checks again at its own entry. A removed AGENT_RUNTIME or
-  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, which no
-  // longer exists: running the graph on LangGraph instead would ignore it
-  // silently.
+  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, and a removed
+  // AGENT_SKILL_GRAPH_ROLLOUT value (`off`, `shadow`) asked for the sequential
+  // chain; neither exists any more, and running the graph on LangGraph instead
+  // would ignore the request silently.
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();
   // Imported on first use. That keeps the graph executor and compiler out of
-  // a process that never runs a guarded graph; LangGraph itself is loaded by
+  // a process that never runs a custom-Skill graph; LangGraph itself is loaded by
   // then in any process that answers agent requests, because the outer plan
   // that reached this stage runs on it (ADR 0001 phase 7). The api edge of a
   // split deployment runs no agent and loads neither.
@@ -383,13 +365,15 @@ export const runCustomSkillStage = async ({
     : await planGraph(getRemainingBudget(budgetState));
 
   if (!planned.graph) {
-    // Rejected as a whole, which means nothing has run and nothing has been
-    // charged. This is the only moment where handing the request back to the
-    // V1 chain is safe, and it is why V1 has to stay until the gates close.
+    // Rejected as a whole: nothing has run and nothing has been charged, and
+    // nothing runs in the graph's place. `fallback` stays in the event (the
+    // replay guard and the reports read it) and is always null.
+    const errorCodes = (planned.errors ?? []).map((error) => error.code);
+
     await recordExecutionGraph({
-      errorCodes: (planned.errors ?? []).map((error) => error.code),
+      errorCodes,
       executed: false,
-      fallback: "v1",
+      fallback: null,
       graph: null,
       mode,
       nodeRuns: [],
@@ -398,7 +382,13 @@ export const runCustomSkillStage = async ({
       status: EXECUTION_GRAPH_RUN_STATUSES.rejected,
     });
 
-    return runV1();
+    return reportSkillsNotRun({
+      addTraceStep,
+      customSkills,
+      errorCodes,
+      recordSkillResult,
+      recordSkippedSkill,
+    });
   }
 
   if (!checkpoint && saveExecutionGraphCheckpoint) {

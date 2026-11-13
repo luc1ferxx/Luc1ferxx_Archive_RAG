@@ -10,10 +10,7 @@ import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/lang
 
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { resumeAgentExecutionGraphRun } from "../rag/agent.js";
-import {
-  CUSTOM_SKILL_STAGE_MODES,
-  runCustomSkillStage,
-} from "../rag/agent-custom-skill-stage.js";
+import { runCustomSkillStage } from "../rag/agent-custom-skill-stage.js";
 import {
   EXECUTION_GRAPH_FAILURE_POLICIES,
   createExecutionGraph,
@@ -458,7 +455,6 @@ const runStageScenario = async ({ scenario }) => {
         loadExecutionGraphCheckpoint: () =>
           agentRunService.getExecutionGraphCheckpoint({ accessScope, runCursor, runId: RUN_ID }),
         maxConcurrency,
-        mode: CUSTOM_SKILL_STAGE_MODES.guarded,
         plan: { mode: SKILL_CHAIN_MODE },
         plannerAdapter: { createExecutionGraph: () => ({ nodes }), id: "parity_planner" },
         question: QUESTION,
@@ -720,7 +716,6 @@ test("the stage schedules on LangGraph, and the settling save leaves only the nu
     },
     loadExecutionGraphCheckpoint: () =>
       agentRunService.getExecutionGraphCheckpoint({ accessScope, runCursor, runId: RUN_ID }),
-    mode: CUSTOM_SKILL_STAGE_MODES.guarded,
     plan: { mode: SKILL_CHAIN_MODE },
     plannerAdapter: {
       createExecutionGraph: () => ({
@@ -1699,7 +1694,6 @@ const runStartupRecoveryScenario = async ({ dropThreadAfterCrash = false } = {})
       executeObservedSkill: tracker.executeObservedSkill,
       loadExecutionGraphCheckpoint: () =>
         agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID }),
-      mode: CUSTOM_SKILL_STAGE_MODES.guarded,
       plan: { mode: SKILL_CHAIN_MODE },
       plannerAdapter: {
         createExecutionGraph: () => ({
@@ -3148,7 +3142,6 @@ const startFencedStage = async ({ onCheckpointSaved = async () => {}, skills }) 
       executeObservedSkill: tracker.executeObservedSkill,
       loadExecutionGraphCheckpoint: () =>
         agentRunService.getExecutionGraphCheckpoint({ accessScope, runId: RUN_ID }),
-      mode: CUSTOM_SKILL_STAGE_MODES.guarded,
       plan: { mode: SKILL_CHAIN_MODE },
       plannerAdapter: {
         createExecutionGraph: () => ({

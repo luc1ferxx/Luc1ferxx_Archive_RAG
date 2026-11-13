@@ -10,8 +10,9 @@ import { assertMatchesGraphGolden } from "./langgraph-support/graph-goldens.mjs"
 
 // Phase-2 acceptance evidence for the LangGraph runtime (docs/adr/0001-
 // langgraph-runtime.md), kept after phase 6 deleted the native scheduler: the
-// evaluation cases that exercise the custom-Skill DAG -- the four skill_graph
-// trajectory cases, the planner's dynamic-skill-graph case on its mock
+// evaluation cases that exercise the custom-Skill DAG -- the three skill_graph
+// trajectory cases (four until phase 8 removed the shadow comparison with the
+// sequential chain), the planner's dynamic-skill-graph case on its mock
 // provider, and the recovery-observability replan and startup-resume signal
 // -- run through the evaluations' own runners and must come out exactly as
 // they did on the native scheduler: every check (with its detail), the whole
@@ -71,7 +72,6 @@ const {
   createSkillGraphBoundedReplanCase,
   createSkillGraphGuardedExecutionCase,
   createSkillGraphIllegalPlanCase,
-  createSkillGraphShadowComparisonCase,
 } = await import("../evaluation/trajectory/cases/skill-graph.js");
 const { runPlannerEvaluation } = await import("../evaluation/planner/run.js");
 const { createDefaultPlannerCases } = await import("../evaluation/planner/cases/index.js");
@@ -279,12 +279,9 @@ const EVALUATION_CASES = [
     langGraphInvocations: [invocation(CONTRACT_NODE_IDS)],
     run: () => runTrajectoryCase(createSkillGraphGuardedExecutionCase),
   },
-  {
-    // The V1 chain answers; the shadow graph is planned, never executed.
-    id: "skill_graph_shadow_comparison",
-    langGraphInvocations: [],
-    run: () => runTrajectoryCase(createSkillGraphShadowComparisonCase),
-  },
+  // skill_graph_shadow_comparison (the V1 chain answers; a graph is planned
+  // beside it and never executed) left with the chain in ADR 0001 phase 8,
+  // fixture included: there is no shadow mode to run it under.
   {
     // The forged graph is rejected whole before admission reaches an
     // executor; only the deterministic fallback graph is scheduled.

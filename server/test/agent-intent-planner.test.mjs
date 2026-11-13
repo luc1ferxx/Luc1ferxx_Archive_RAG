@@ -240,6 +240,9 @@ test("runAgentRag uses the injected intent planner before selecting skills", asy
         text:
           "The services agreement renews every 12 months unless either party gives 30 days notice. [Source 1]",
       }),
+      // The custom-Skill stage plans only over documents this lookup verifies.
+      getDocument: (docId) =>
+        docId === "contract-1" ? { docId, fileName: "services-agreement.pdf" } : null,
       listDocuments: () => [
         {
           docId: "contract-1",
@@ -259,6 +262,8 @@ test("runAgentRag uses the injected intent planner before selecting skills", asy
   assert.deepEqual(getSelectedSkillIds(response), [
     CUSTOM_SKILL_IDS.summarizeContract,
   ]);
+  // The one Skill the injected intent selected ran and answered.
+  assert.match(response.body.agentAnswer, /renews every 12 months/u);
   assert.equal(getIntentPlanner(response).selectedPlannerId, "llm");
   assert.equal(
     getIntentPlanner(response).selectedIntentId,

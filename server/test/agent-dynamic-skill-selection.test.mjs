@@ -79,7 +79,11 @@ const makeRagService = (queries) => ({
   },
 });
 
-test("guarded graph composes compare and risk despite a compare-only intent", async () => {
+// AGENT_SKILL_GRAPH_ROLLOUT selects nothing any more (`guarded` is the one
+// value left; anything else refuses the run). These tests still set it, so a
+// removed value left in a developer's shell does not fail them for a reason
+// that has nothing to do with what they check.
+test("the graph composes compare and risk despite a compare-only intent", async () => {
   const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
   process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
   const queries = [];
@@ -202,9 +206,16 @@ test("ordinary document QA does not execute the entire catalog when DAG planning
       runId: response.body.agentRunId,
     });
     const graphEvent = run.events.find((event) => event.type === "skill_graph_planned");
+    // The rejected graph is recorded and nothing runs in its place: the
+    // intent selected no custom Skill, so there is none to report either.
     assert.equal(graphEvent?.payload?.executed, false);
-    assert.equal(graphEvent?.payload?.fallback, "v1");
+    assert.equal(graphEvent?.payload?.status, "rejected");
+    assert.equal(graphEvent?.payload?.fallback, null);
     assert.deepEqual(graphEvent?.payload?.nodeRuns, []);
+    assert.equal(
+      response.body.agentTrace.some((step) => step.type === "skill_graph_rejected"),
+      false
+    );
   } finally {
     if (previousMode === undefined) {
       delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;

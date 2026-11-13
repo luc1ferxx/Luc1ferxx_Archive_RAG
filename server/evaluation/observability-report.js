@@ -681,7 +681,9 @@ const addStepReplayEvent = (recovery, event = {}) => {
 // executed at all, whether the stage fell back to the V1 chain, whether that
 // fallback ever happened after a node had already run (it must not -- that
 // would repeat charged work), and how much settled work a replan reused rather
-// than re-executed.
+// than re-executed. The chain was deleted in ADR 0001 phase 8: an event
+// written since then never records a fallback, and the two fallback counts
+// only ever move for runs stored before it.
 const addSkillGraphEvent = (recovery, event = {}) => {
   const payload = getEventPayload(event);
   const nodeRuns = Array.isArray(payload.nodeRuns) ? payload.nodeRuns : [];

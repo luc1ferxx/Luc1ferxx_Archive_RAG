@@ -4,9 +4,11 @@ import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.
 // (id/version/label/budgetKey/requiresAccessScope/match/execute) stay owned by
 // skills/registry.js; this module only adds the planning-and-scheduling
 // metadata the ExecutionGraph needs, plus the redacted descriptor the V2
-// planner is allowed to see. Skills that predate the typed contract keep
-// working through inferSkillContractDefaults, which supplies the conservative
-// values (read-only, not parallel-safe, free-text question in / text out).
+// planner is allowed to see. A Skill that does not declare them gets the
+// conservative values from inferSkillContractDefaults (read-only, not
+// parallel-safe, free-text question in / text out). That is enough for a
+// built-in Skill; the agent's custom-Skill catalog (authorized-catalog.js)
+// admits only Skills that declare the contract themselves.
 
 export const SKILL_EFFECTS = Object.freeze({
   externalRead: "external_read",
@@ -101,7 +103,7 @@ const normalizeSchema = (schema, fallback) => {
 /**
  * Fills the typed-contract fields for a skill that may or may not declare them.
  * Legacy skills get the safe defaults: read-only effects, no parallelism, and
- * the free-text question/text schema the V1 chain already used.
+ * the free-text question/text schema the V1 chain used.
  */
 export const inferSkillContractDefaults = (skill = {}) => {
   const effects = VALID_EFFECTS.has(skill.effects ?? skill.sideEffect)

@@ -29,7 +29,6 @@ import {
   buildScopedRagService,
   buildSource,
   createEvalTelemetry,
-  withEnvironmentOverrides,
 } from "../../agent-eval-harness.js";
 import {
   DEFAULT_ACCESS_SCOPE,
@@ -38,17 +37,21 @@ import {
   sameTrajectoryScope as sameScope,
 } from "../checks.js";
 
-// The custom skill stage has two execution paths behind one rollout dial, and
-// the /chat response is deliberately identical for both. That is the point of
-// the migration -- and it is also why a passing trajectory report on the
-// default `off` setting says nothing about the graph. These cases pin the dial
-// per case, then read the `skill_graph_planned` run event, which is the only
-// place the two paths are distinguishable from the outside.
+// The custom skill stage runs a typed DAG, and the /chat response keeps the
+// contract it had when a sequential chain ran the Skills (the V1 chain, deleted
+// in ADR 0001 phase 8 with the AGENT_SKILL_GRAPH_ROLLOUT values `off` and
+// `shadow` that selected it). The response alone therefore says little about
+// the graph, so these cases read the `skill_graph_planned` run event.
+//
+// The case ids and descriptions still say "guarded": it is the one value the
+// variable accepts, the mode every graph event records, and the wording the
+// frozen goldens of these cases hold. The cases no longer set the variable.
 //
 // Each case also records the one artefact the response cannot show: which
-// question the second skill actually received. The V1 chain splices earlier
-// answers into it under one header; the graph hands them over as a typed
-// priorFindings input, and the skill renders that under a different header.
+// question the second skill actually received. The graph hands the first
+// skill's findings over as a typed priorFindings input, and the skill renders
+// that under its own header; the chain used to splice earlier answers into a
+// rewritten question ("Previous skill outputs"), which must never appear.
 
 const SKILL_GRAPH_EVENT_TYPE = "skill_graph_planned";
 const CUSTOM_SKILL_STEP_TYPE = "custom_skill";
@@ -184,28 +187,25 @@ const createContractRagService = ({ abstainOnCall = null, telemetry }) => {
 const runContractReview = ({
   agentBudget = null,
   agentRunService,
-  mode,
   plannerAdapter = null,
   ragService,
   replanAdapter = null,
 }) =>
-  withEnvironmentOverrides({ AGENT_SKILL_GRAPH_ROLLOUT: mode }, () =>
-    runAgentRag({
-      accessScope: DEFAULT_ACCESS_SCOPE,
-      ...(agentBudget ? { agentBudget } : {}),
-      agentRunService,
-      ...(plannerAdapter ? { dagPlannerAdapter: plannerAdapter } : {}),
-      docIds: [DOC_ID],
-      question: QUESTION,
-      ragService,
-      ...(replanAdapter ? { replanAdapter } : {}),
-      sessionId: "trajectory-session",
-      userId: DEFAULT_ACCESS_SCOPE.userId,
-      webChatService: async () => ({
-        text: "web should not run",
-      }),
-    })
-  );
+  runAgentRag({
+    accessScope: DEFAULT_ACCESS_SCOPE,
+    ...(agentBudget ? { agentBudget } : {}),
+    agentRunService,
+    ...(plannerAdapter ? { dagPlannerAdapter: plannerAdapter } : {}),
+    docIds: [DOC_ID],
+    question: QUESTION,
+    ragService,
+    ...(replanAdapter ? { replanAdapter } : {}),
+    sessionId: "trajectory-session",
+    userId: DEFAULT_ACCESS_SCOPE.userId,
+    webChatService: async () => ({
+      text: "web should not run",
+    }),
+  });
 
 const loadGraphRecord = async ({ agentRunService, response }) => {
   const body = getChatResponseBody(response);
@@ -291,7 +291,6 @@ export const createSkillGraphGuardedExecutionCase = () => ({
     const ragService = createContractRagService({ telemetry });
     const response = await runContractReview({
       agentRunService,
-      mode: "guarded",
       ragService,
     });
     const body = getChatResponseBody(response);
@@ -403,108 +402,6 @@ export const createSkillGraphGuardedExecutionCase = () => ({
   },
 });
 
-export const createSkillGraphShadowComparisonCase = () => ({
-  id: "skill_graph_shadow_comparison",
-  label: "Skill graph shadow comparison",
-  description:
-    "Under AGENT_SKILL_GRAPH_ROLLOUT=shadow the V1 chain still answers while a graph is planned, validated, and compared beside it without executing.",
-  run: async () => {
-    const telemetry = createEvalTelemetry();
-    const agentRunService = createAgentRunService({
-      agentRunStore: createInMemoryAgentRunStore(),
-    });
-    const ragService = createContractRagService({ telemetry });
-    const response = await runContractReview({
-      agentRunService,
-      mode: "shadow",
-      ragService,
-    });
-    const body = getChatResponseBody(response);
-    const record = await loadGraphRecord({ agentRunService, response });
-    const graph = describeGraph(record.graph);
-    const questions = describeQuestions(telemetry);
-    const replayContracts = describeReplayContracts(record.customSkillSteps);
-    const traceStepIds = customSkillTraceStepIds(response);
-    const shadow = {
-      diverged: record.graph?.diverged ?? null,
-      error: record.graph?.error ?? null,
-      nodeRunCount: (record.graph?.nodeRuns ?? []).length,
-      replanCount: (record.graph?.replans ?? []).length,
-      requestedPlannerId: record.graph?.requestedPlannerId ?? null,
-    };
-
-    return finishCase({
-      id: "skill_graph_shadow_comparison",
-      label: "Skill graph shadow comparison",
-      description:
-        "Under AGENT_SKILL_GRAPH_ROLLOUT=shadow the V1 chain still answers while a graph is planned, validated, and compared beside it without executing.",
-      observed: {
-        eventCount: record.eventCount,
-        graph,
-        questions,
-        replayContracts,
-        shadow,
-        traceStepIds,
-      },
-      response,
-      telemetry,
-      checks: [
-        buildCheck({
-          id: "shadow_answers_from_v1_chain",
-          label: "The V1 chain produced the answer with its spliced question and step ids",
-          category: "skill_graph",
-          passed:
-            body.agentMode === "skill_chain" &&
-            questions.length === 2 &&
-            questions[1].chained === true &&
-            questions.every((question) => question.typedUpstream === false) &&
-            sameList(traceStepIds, EXPECTED_NODE_IDS.map(buildNodeStepId)) &&
-            replayContracts.every((contract) => contract.hasPriorFindings === false),
-          detail: { agentMode: body.agentMode, questions, replayContracts, traceStepIds },
-        }),
-        buildCheck({
-          id: "shadow_graph_planned_without_execution",
-          label: "A graph was planned and validated beside the run but no node executed",
-          category: "skill_graph",
-          passed:
-            record.eventCount === 1 &&
-            graph.executed === false &&
-            graph.mode === "shadow" &&
-            graph.fallback === null &&
-            shadow.nodeRunCount === 0 &&
-            shadow.replanCount === 0 &&
-            sameList(graph.nodeIds, EXPECTED_NODE_IDS) &&
-            graph.status === "selected" &&
-            shadow.error === null,
-          detail: { eventCount: record.eventCount, graph, shadow },
-        }),
-        buildCheck({
-          id: "shadow_comparison_recorded",
-          label: "The shadow record says whether the graph diverged from the chain that answered",
-          category: "skill_graph",
-          passed:
-            shadow.diverged === false &&
-            shadow.requestedPlannerId === DAG_PLANNER_IDS.deterministic &&
-            graph.selectedPlannerId === DAG_PLANNER_IDS.deterministic,
-          detail: { graph, shadow },
-        }),
-        buildCheck({
-          id: "shadow_budget_charged_once",
-          label: "Shadow planning did not spend skill budget or retrieval calls",
-          category: "skill_graph",
-          passed:
-            getBudget(response)?.used?.customSkillCalls === 2 &&
-            telemetry.chatCalls.length === 2,
-          detail: {
-            budgetUsed: getBudget(response)?.used ?? null,
-            chatCallCount: telemetry.chatCalls.length,
-          },
-        }),
-      ],
-    });
-  },
-});
-
 /**
  * A planner that asks for exactly what the validator exists to refuse: a
  * pre-approved node, a skill that is not registered, and a document the
@@ -561,7 +458,6 @@ export const createSkillGraphIllegalPlanCase = () => ({
     const ragService = createContractRagService({ telemetry });
     const response = await runContractReview({
       agentRunService,
-      mode: "guarded",
       plannerAdapter: createForgedPlannerAdapter({ contexts: plannerContexts }),
       ragService,
     });
@@ -721,7 +617,6 @@ export const createSkillGraphBoundedReplanCase = () => ({
       // replanner only proposes.
       agentBudget: { maxCustomSkillCalls: 3 },
       agentRunService,
-      mode: "guarded",
       ragService,
       replanAdapter: createRetryPatchAdapter({ contexts: replanContexts }),
     });

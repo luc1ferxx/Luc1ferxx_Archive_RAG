@@ -61,6 +61,9 @@ const DECISION_TRACE_TYPES = new Set([
   "clarification_gate",
   "execution_planner",
   "finalizer",
+  // The custom-Skill stage's graph was rejected before any node ran, so the
+  // selected Skills were not run (agent-custom-skill-stage.js).
+  "skill_graph_rejected",
   "synthesis",
 ]);
 

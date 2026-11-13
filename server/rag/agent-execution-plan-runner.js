@@ -163,7 +163,6 @@ export const createAgentExecutionPlanStages = ({
   selectedSkills = [],
   sessionId,
   saveExecutionGraphCheckpoint = null,
-  skillGraphMode,
   stepLifecycle,
   taskMemory = null,
   userId,
@@ -291,9 +290,8 @@ export const createAgentExecutionPlanStages = ({
     },
 
     [AGENT_EXECUTION_STEP_IDS.customSkills]: async () => {
-      // Still one stage, still custom_skill steps, still a flat result array.
-      // Everything the rollout dial changes happens inside runCustomSkillStage,
-      // so this call site does not learn whether a chain or a graph ran.
+      // One stage, custom_skill steps, a flat result array. How the Skills
+      // are planned and scheduled as a graph is runCustomSkillStage's business.
       state.customSkillResults = await runCustomSkillStage({
         accessScope,
         addBudgetLimitTrace,
@@ -324,7 +322,6 @@ export const createAgentExecutionPlanStages = ({
         stepLifecycle,
         taskMemory,
         userId,
-        ...(skillGraphMode ? { mode: skillGraphMode } : {}),
       });
 
       const outage = findWholeStageOutage(state.customSkillResults);

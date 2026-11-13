@@ -544,6 +544,90 @@ test("createAgentExecutionGraphResult falls back when the planner exceeds the no
   );
 });
 
+// The call budget. A model's graph is checked against it whole: it chose what
+// to plan, and running whichever part the budget reaches is not what it
+// proposed. The deterministic graph is not checked at plan time: it is the
+// selected Skills in order, and the executor enforces the budget per node at
+// launch, as the deleted sequential chain did per Skill. A request whose
+// budget covers one of two selected Skills therefore still has a legal graph.
+test("a proposal over the call budget is rejected whole and replaced by the deterministic graph", async () => {
+  const plannerAdapter = stubAdapter("llm_dag", () => ({
+    nodes: [
+      ragNode({ nodeId: "compare", skillId: "compare_documents" }),
+      ragNode({ nodeId: "risk", skillId: "risk_review" }),
+    ],
+  }));
+
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({ budgetRemaining: { customSkillCalls: 1 }, plannerAdapter })
+  );
+
+  assert.equal(result.planner.fallback, true);
+  assert.equal(result.planner.selectedPlannerId, DAG_PLANNER_IDS.deterministic);
+  assert.deepEqual(codesOf(result), [EXECUTION_GRAPH_REASON_CODES.budgetExceeded]);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.skillId),
+    ["compare_documents", "risk_review"]
+  );
+});
+
+test("a proposal within the call budget is accepted as proposed", async () => {
+  const plannerAdapter = stubAdapter("llm_dag", () => ({
+    nodes: [ragNode({ nodeId: "risk", skillId: "risk_review" })],
+  }));
+
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({ budgetRemaining: { customSkillCalls: 1 }, plannerAdapter })
+  );
+
+  assert.equal(result.planner.fallback, false);
+  assert.equal(result.planner.selectedPlannerId, "llm_dag");
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.nodeId),
+    ["risk"]
+  );
+});
+
+test("the deterministic graph is planned whatever the call budget, down to none", async () => {
+  for (const customSkillCalls of [1, 0]) {
+    const result = await createAgentExecutionGraphResult(
+      baseOptions({ budgetRemaining: { customSkillCalls } })
+    );
+
+    assert.equal(result.planner.status, "selected", String(customSkillCalls));
+    assert.equal(result.planner.fallback, false, String(customSkillCalls));
+    assert.deepEqual(result.errors, [], String(customSkillCalls));
+    assert.deepEqual(
+      result.graph.nodes.map((node) => node.skillId),
+      ["compare_documents", "risk_review"],
+      String(customSkillCalls)
+    );
+  }
+});
+
+// The budget is the one check the deterministic graph is spared. Every other
+// rule still rejects it, and then there is no graph at all.
+test("the deterministic graph is still rejected for a selected Skill the request does not authorize", async () => {
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({
+      budgetRemaining: { customSkillCalls: 2 },
+      fallbackSelectedSkills: [compareSkill(), riskSkill()],
+      selectedSkills: [],
+    })
+  );
+
+  assert.equal(result.graph, null);
+  assert.equal(result.planner.status, "rejected");
+  assert.deepEqual(
+    result.errors.map((error) => error.code),
+    [
+      EXECUTION_GRAPH_REASON_CODES.unregisteredCapability,
+      EXECUTION_GRAPH_REASON_CODES.unregisteredCapability,
+    ]
+  );
+});
+
 test("createAgentExecutionGraphResult reports every reason code, not just the first", async () => {
   const plannerAdapter = stubAdapter("llm_dag", () => ({
     nodes: [

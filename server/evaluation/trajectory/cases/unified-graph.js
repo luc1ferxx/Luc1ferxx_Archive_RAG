@@ -31,10 +31,10 @@ import { describeUnifiedPlannerDecisions } from "./unified-graph-planner.js";
 // A risk-review request. The graph answers from the selected documents first,
 // runs the risk_review Skill only when that answer passes its own evidence
 // check (a validated `when` edge), and hands the Skill the verified answer as
-// its typed priorFindings input. V1 on the same request (both the chain and
-// the V2 typed DAG for custom Skills) plans custom_skills without
-// document_rag, so its Skill runs unconditionally and never sees a document
-// answer. Both evidence variants run on both paths.
+// its typed priorFindings input. V1 on the same request (whose custom-Skill
+// stage is the V2 typed DAG) plans custom_skills without document_rag, so its
+// Skill runs unconditionally and never sees a document answer. Both evidence
+// variants run on both paths.
 //
 // What this does and does not show. The mock Skill answer does not depend on
 // the upstream section (the Skill contract treats it as context, never
@@ -220,7 +220,6 @@ const runVendorQuestion = async ({
   mode,
   planner = null,
   plannerId = PROPOSAL_ID,
-  skillGraphRollout = "guarded",
 }) => {
   const telemetry = createEvalTelemetry();
   const webCalls = [];
@@ -229,10 +228,7 @@ const runVendorQuestion = async ({
     agentRunStore: createInMemoryAgentRunStore(),
   });
   const response = await withEnvironmentOverrides(
-    {
-      AGENT_SKILL_GRAPH_ROLLOUT: skillGraphRollout,
-      AGENT_UNIFIED_GRAPH_ROLLOUT: mode,
-    },
+    { AGENT_UNIFIED_GRAPH_ROLLOUT: mode },
     () =>
       runAgentRag({
         accessScope: DEFAULT_ACCESS_SCOPE,
@@ -370,7 +366,7 @@ const describeCheckpoint = (outcome) => {
   };
 };
 
-const describeV1Run = ({ documentSufficient, outcome, skillGraphRollout }) => {
+const describeV1Run = ({ documentSufficient, outcome }) => {
   const calls = riskCalls(outcome);
   const plannedStepIds =
     eventsOf(outcome.run, "execution_planned")[0]?.payload?.planner?.stepIds ?? [];
@@ -385,7 +381,6 @@ const describeV1Run = ({ documentSufficient, outcome, skillGraphRollout }) => {
     riskCallCount: calls.length,
     riskCallsWithUpstreamSection: calls.filter((call) => UPSTREAM_PATTERN.test(call.question))
       .length,
-    skillGraphRollout,
     unifiedEventCount: eventsOf(outcome.run, UNIFIED_GRAPH_RUN_EVENTS.planned).length,
   };
 };
@@ -416,16 +411,16 @@ export const createUnifiedGraphEvidenceGatedSkillCase = ({ planner = null } = {}
     });
     const roles = describeRoles(sufficient);
     const insufficientRoles = describeRoles(insufficient);
+    // The V1 outer plan on the same request. Until ADR 0001 phase 8 this ran
+    // four times, with the custom-Skill stage on the sequential chain and on
+    // the V2 DAG; the chain is deleted, and the stage is always the DAG.
     const v1Runs = [];
 
-    for (const skillGraphRollout of ["off", "guarded"]) {
-      for (const documentSufficient of [true, false]) {
-        v1Runs.push(describeV1Run({
-          documentSufficient,
-          outcome: await runVendorQuestion({ documentSufficient, mode: "off", skillGraphRollout }),
-          skillGraphRollout,
-        }));
-      }
+    for (const documentSufficient of [true, false]) {
+      v1Runs.push(describeV1Run({
+        documentSufficient,
+        outcome: await runVendorQuestion({ documentSufficient, mode: "off" }),
+      }));
     }
 
     const refusedHandOff = await runVendorQuestion({
@@ -589,10 +584,10 @@ export const createUnifiedGraphEvidenceGatedSkillCase = ({ planner = null } = {}
         }),
         buildCheck({
           id: "v1_same_request_runs_skill_first_and_unconditionally",
-          label: "V1 on the same request, chain and V2 DAG, both evidence variants: the Skill runs every time, with no document answer and no upstream section",
+          label: "V1 on the same request, both evidence variants: the Skill runs every time, with no document answer and no upstream section",
           category: "unified_graph",
           passed:
-            v1Runs.length === 4 &&
+            v1Runs.length === 2 &&
             v1Runs.every((v1) =>
               v1.unifiedEventCount === 0 &&
               v1.customSkillCalls === 1 &&

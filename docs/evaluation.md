@@ -35,7 +35,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run eval:planner` | 用 mock LLM provider 评测 execution planner、validator、fallback 和 guarded 原子 Skill DAG 组合；`-- --provider real` 会让 DAG case 调用真实 LLM planner 并生成 real-provider 报告。 |
 | `cd server && npm run eval:recovery-observability` | 生成 recovery/replay observability report，覆盖 manual recovery、auto replay、step retry/resume、planner fallback、guarded replan signal，以及 checkpoint + 重建服务实例的 graph-only startup resume；真实 PostgreSQL 跨进程验证另见 `bash scripts/run-pgvector-integration.sh`。 |
 | `cd server && npm run planner:gate -- --provider real` | 强制检查 real planner report、unexpected fallback rate 和 mock/real planner 分歧。 |
-| `cd server && npm run rollout:readiness` | 汇总 real planner gate、纯 LLM runtime target、`AGENT_SKILL_GRAPH_ROLLOUT=guarded`、real-provider 动态 DAG case、guarded runtime smoke、trajectory/recovery gate、fallback rate 和 mock/real divergence；只报告纯 LLM 规划的 readiness，不改任何开关。 |
+| `cd server && npm run rollout:readiness` | 汇总 real planner gate、纯 LLM runtime target、`AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`、real-provider 动态 DAG case、guarded runtime smoke、trajectory/recovery gate、fallback rate 和 mock/real divergence；只报告纯 LLM 规划的 readiness，不改任何开关。 |
 | `cd server && npm run runtime:smoke` | 用真实后端 HTTP、真实 LLM planner 和 PostgreSQL smoke `/health` + 两次 `/chat`；同时要求两次都由真实 LLM 规划并执行 guarded custom-Skill DAG、无 fallback，并检查 experience memory 只作为 planning hint。 |
 | `cd server && npm run verify:quality` | 用真实 embedding + chat 模型验证零基础设施档案下的检索、页码引文、对比取值归属、弃答和跨进程持久化。见 “DocCompare quality verification”。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
@@ -61,7 +61,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest-quality.*` | PR current gate 专用 deterministic near-duplicate synthetic 报告；不会覆盖 robust/release 使用的 `latest.*`。 |
 | `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
 | `evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。2026-10-29 默认 topK 从 6 改为 10 时取代了 v1（regression profile key 含 `retrievalTopK`）：两者的 metrics 和 cases 逐项相同，只差 `config.retrievalTopK`；v1 留作历史，见“候选数 topK 6 → 8 / 10”。 |
-| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`71/71` checks passed，包含 goal lifecycle completion 和四个钉住 `AGENT_SKILL_GRAPH_ROLLOUT` 的 skill graph case。 |
+| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`76/76` checks passed（2026-11-13 之前是 19 个 case、84 项 check，随 V1 chain 删掉了 `custom_skill_retry` 和 `skill_graph_shadow_comparison`），包含 goal lifecycle completion 和三个 skill graph case。 |
 | `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback、planner observability，以及 compare-only Intent 下由授权原子 catalog 规划 `compare_documents -> risk_review` 的 guarded case；real provider 调用真实 LLM DAG planner，分别写 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：既有恢复统计与 guarded replan signal，加上从持久化 checkpoint 经新服务实例启动恢复的 `skill_graph_startup_resume` 生产路径检查；当前 `8/8` cases、`29/29` checks。 |
 | `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，要求纯 LLM planner、guarded Skill graph、real-provider DAG case、guarded runtime smoke、trajectory/recovery gate，以及零 unexpected fallback / mock-real divergence；衡量纯 LLM 规划，不是执行器默认值（`guarded`）的门禁。 |
@@ -324,42 +324,42 @@ Synthetic / feedback 报告从 1.9.0 manifest 起带一个 `summary.retrieval` �
 
 ```bash
 cd server
-AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run rollout:readiness
-AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run rollout:readiness -- --json
+npm run rollout:readiness
+npm run rollout:readiness -- --json
 ```
 
-`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
+`rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`（这是它唯一还接受的取值；其他取值下进程拒绝启动，报告里这一项不通过），生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
 
-## Skill graph rollout 的评测边界
+## Skill graph 的评测边界
 
-`AGENT_SKILL_GRAPH_ROLLOUT` 的默认值是 `guarded`，所以默认 trajectory case 里凡是进入 custom skill 阶段的请求都由 typed DAG 执行；四个 `skill_graph` case 仍各自钉住 `shadow` 或 `guarded`，`custom_skill_retry` 钉住 `off` 以保留 V1 单步重试的覆盖。固定评测覆盖三层：trajectory 的执行语义、planner eval 的独立原子 Skill 选择、runtime smoke 的真实 HTTP + LLM 路径。它们仍只证明 custom Skill 阶段内的 typed DAG；外层 document/Web/built-in/capability 不是同一张图，schema gate 也不等于差异/风险内容的语义真值校验。
+custom Skill 阶段只由 typed DAG 执行（V1 chain 和 `AGENT_SKILL_GRAPH_ROLLOUT` 的 `off`、`shadow` 已在 2026-11-13 删除，见 ADR 0001 阶段 8），所以 trajectory case 里凡是进入 custom skill 阶段的请求都走 DAG。固定评测覆盖三层：trajectory 的执行语义、planner eval 的独立原子 Skill 选择、runtime smoke 的真实 HTTP + LLM 路径。它们仍只证明 custom Skill 阶段内的 typed DAG；外层 document/Web/built-in/capability 不是同一张图，schema gate 也不等于差异/风险内容的语义真值校验。
 
-Trajectory eval 的四个 `skill_graph` case 用 `withEnvironmentOverrides` 在各自运行期间钉住灰度位，跑完即还原；同一份报告还保留默认 `off` 路径的既有 case：
+Trajectory eval 有三个 `skill_graph` case。它们不再设置这个变量；id 和描述里的 “guarded” 保留，因为它是变量唯一还接受的取值，也是每个图事件记录的 `mode`。
 
-| Case | 钉住的模式 | 证明什么 |
+| Case | 条件 | 证明什么 |
 | --- | --- | --- |
-| `skill_graph_guarded_execution` | `guarded` | `skill_graph_planned` 事件 `executed: true`；node 是原子 skill id 而不是复合 chain id；risk node `dependsOn` summary 并以 typed `priorFindings` 读取上游输出（第二次检索的问题带 "Upstream findings" 而不是 V1 的 "Previous skill outputs"）；每个 node step 持久化了只读 replay contract；`/chat` 响应与 V1 逐字段一致且没有 `graph` / `nodeRuns` / `replans` 字段。 |
-| `skill_graph_shadow_comparison` | `shadow` | 答案由 V1 chain 产出（拼接问题、V1 step id、step input 无 `priorFindings`）；graph 只规划校验、`executed: false`、`nodeRuns` 为空；`diverged: false` 被记录；预算只扣一次。 |
-| `skill_graph_illegal_plan_rejected` | `guarded` + 注入的 LLM planner | planner 交出同时带伪造 `approval`、未注册 skill 和越权 `scope.docIds` 的图；整图被拒，三个 reason code 全部记录，伪造 node 没有任何一个执行；deterministic graph 在授权范围内作答；planner 拿到的上下文只有白名单视图，不含 `accessScope` / userId / workspaceId。 |
-| `skill_graph_bounded_replan` | `guarded` + 注入的 replanner，`maxCustomSkillCalls: 3` | 第一次 risk review 空手而归触发 `insufficient_evidence`；一次 patch 被应用，只有新增 node 执行，已完成的两个 node 状态为 `reused` 且不再计费；第二次尝试在 `replan_limit_reached` 处 abstain；replanner 拿到的上下文只有状态和白名单，没有证据文本和调用者身份。 |
+| `skill_graph_guarded_execution` | 默认规划器 | `skill_graph_planned` 事件 `executed: true`；node 是原子 skill id 而不是复合 chain id；risk node `dependsOn` summary 并以 typed `priorFindings` 读取上游输出（第二次检索的问题带 "Upstream findings"，不带已删除的 V1 chain 的 "Previous skill outputs"）；每个 node step 持久化了只读 replay contract；`/chat` 响应保持 skill-chain 合同，没有 `graph` / `nodeRuns` / `replans` 字段。 |
+| `skill_graph_illegal_plan_rejected` | 注入的 LLM planner | planner 交出同时带伪造 `approval`、未注册 skill 和越权 `scope.docIds` 的图；整图被拒，三个 reason code 全部记录，伪造 node 没有任何一个执行；deterministic graph 在授权范围内作答；planner 拿到的上下文只有白名单视图，不含 `accessScope` / userId / workspaceId。 |
+| `skill_graph_bounded_replan` | 注入的 replanner，`maxCustomSkillCalls: 3` | 第一次 risk review 空手而归触发 `insufficient_evidence`；一次 patch 被应用，只有新增 node 执行，已完成的两个 node 状态为 `reused` 且不再计费；第二次尝试在 `replan_limit_reached` 处 abstain；replanner 拿到的上下文只有状态和白名单，没有证据文本和调用者身份。 |
 
-四个 trajectory case 的 id、check id、response 投影，以及 `planner_dynamic_skill_graph` 的同类合同，都钉在 `quality-current-suite-manifest.js`，`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。`planner_dynamic_skill_graph` 在 mock/real provider 下都跑 guarded：Intent 固定为 compare-only，但 graph 必须组合 compare+risk；real provider 才调用真实 LLM DAG planner。这验证了 Skill 选择不再依赖硬编码复合 Intent，同时检查授权文档范围和最终 observability。
+随 V1 chain 一起删除的两个 case：
+
+- `skill_graph_shadow_comparison`：`shadow` 下由链出答案、图只规划比对。`shadow` 模式不存在了。
+- `custom_skill_retry`：把开关钉在 `off`，让链的一个 step 失败，再从 run 里单独重试它。图运行的 step 拒绝单步重试（`AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`），这一点由 `agent-run-step-executor`、`agent-execution-graph-checkpoint` 的单元测试钉住；失败 node 的持久化记录由 `agent-primary-run-persistence` 钉住。
+
+默认 suite 因此从 19 个 case、84 项 check 变成 17 个、76 项，`retry` 分类随之消失。其余 case 的 check 一条没动，没有新增 case，没有改任何阈值。预算不够或图被整体拒绝时一次请求的回答，由 `test/agent-custom-skill-budget.test.mjs` 逐字钉住，不在 trajectory 里。
+
+三个 trajectory case 的 id、check id、response 投影，以及 `planner_dynamic_skill_graph` 的同类合同，都钉在 `quality-current-suite-manifest.js`（1.16.0），`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。`planner_dynamic_skill_graph` 在 mock/real provider 下都跑：Intent 固定为 compare-only，但 graph 必须组合 compare+risk；real provider 才调用真实 LLM DAG planner。这验证了 Skill 选择不再依赖硬编码复合 Intent，同时检查授权文档范围和最终 observability。
 
 Recovery 与仍需区分的证据：
 
 - `eval:recovery-observability` 的 `skill_graph_signal` 从一次 guarded `runAgentRag` 的 `skill_graph_planned` 事件统计 replan 内复用与执行后 fallback。新增的 `skill_graph_startup_resume` 不复用这组计数冒充重启证据：它向内存 store 写入部分 graph checkpoint，重建 run/recovery 服务实例，调用生产启动恢复 API 并检查同一 run 完成、已完成写节点只执行一次、待执行节点只执行一次、CAS 只领取一次、第二次扫描不再领取且没有部分执行后回落 V1。这验证续跑协议和调用链，不证明操作系统进程重启或 PostgreSQL 跨进程持久化。该评测仍只覆盖外层 plan 恰为 `custom_skills`、无待审批且 checkpoint/step 对账成功的 guarded run；unknown in-flight 或混合外层 plan 转 manual，已被领取的 run 由其他 worker 跳过，不会自动二次执行。
 - `agent-execution-graph-postgres.integration.test.mjs` 是独立的数据库集成测试：父进程将部分 graph 和已完成写节点落到 PostgreSQL，子 Node 进程重新加载服务并运行启动恢复，然后用数据库 effect 计数证明写节点未重放、后续节点只执行一次。`bash scripts/run-pgvector-integration.sh` 会在临时数据库上运行它；`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 会运行整套后端测试且不跳过数据库用例。此测试不代替真实 LLM 与 clean-SHA 的 release 门禁。
-- `rollout:readiness` 现在要求运行环境已显式设为 `guarded`、real-provider 动态 DAG case 通过、guarded runtime smoke 的两次 HTTP 运行都由 LLM 规划并执行且无 fallback，此外还要求 trajectory/recovery 和原有 planner gate。`release:gate` 再对完整报告集校验新鲜度、clean worktree、同一目标提交及报告合同。这组门禁衡量的是纯 LLM 规划能否零降级、零分歧；执行器默认值 `guarded` 的依据是执行语义证据（全量测试、trajectory、recovery、PostgreSQL 跨进程恢复），不以它为前提。
+- `rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`、real-provider 动态 DAG case 通过、guarded runtime smoke 的两次 HTTP 运行都由 LLM 规划并执行且无 fallback，此外还要求 trajectory/recovery 和原有 planner gate。`release:gate` 再对完整报告集校验新鲜度、clean worktree、同一目标提交及报告合同。这组门禁衡量的是纯 LLM 规划能否零降级、零分歧；typed DAG 成为默认执行器（2026-09-25）和唯一执行器（2026-11-13）的依据是执行语义证据（全量测试、trajectory、recovery、PostgreSQL 跨进程恢复），不以它为前提。
+- `eval:recovery-observability` 和发布门里“步骤级自动重放”“手动 resume”两项信号，用的是手写的、不带 `nodeId` 的 `custom_skill` 步骤。这种步骤只有已删除的 V1 chain 会产生：现在的 run 里每个 custom Skill 步骤都是图节点，走整图恢复。所以这两项信号证明的是 2026-11-13 之前存下来的 run 还能恢复，不是新 run 的行为。
 - Mock planner、注入的 trajectory planner 和 deterministic recovery fixture 是稳定接线回归；只有 `eval:planner -- --provider real` 的动态 case 与 `runtime:smoke` 检查真实 LLM 的 DAG 规划。它们不衡量真实文档上的语义差异/风险质量。
 
-需要确认 V1 回退路径时，可以整份用 `off` 复跑：
-
-```bash
-cd server
-AGENT_SKILL_GRAPH_ROLLOUT=off npm run eval:trajectory
-```
-
-这只是额外的本地实验，不代替上述 real-provider 和 release 门禁；注意 `server/.env` 里的取值会覆盖代码默认值。`latest-trajectory.*` 是 gitignore 的本地产物，跑完后若要恢复默认报告，应在默认配置下重跑。
+没有 V1 回退路径可以复跑：`AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow` 下，每个走到外层计划的 case 以 `AGENT_SKILL_GRAPH_ROLLOUT_REMOVED` 的 `case_error` 失败，报告不会被当成 V1 的证据。`latest-trajectory.*` 是 gitignore 的本地产物。
 
 ## Runtime smoke
 
@@ -368,7 +368,7 @@ cd server
 AGENT_PLANNER_ROLLOUT=llm AGENT_INTENT_PLANNER=llm AGENT_EXECUTION_PLANNER=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
 ```
 
-`runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。`off` 不能通过该 smoke；默认 `guarded` 可以，但 `server/.env` 里写着 `off` 时要显式覆盖。
+`runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。`server/.env` 里如果写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程拒绝启动，要先删掉这一行。
 
 Smoke 断言：
 

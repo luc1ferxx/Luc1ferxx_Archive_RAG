@@ -11,7 +11,6 @@ import {
   getAgentExecutionPlanner,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
-  getAgentSkillGraphRollout,
 } from "../rag/config.js";
 import {
   attachEvaluationEvidence,
@@ -42,7 +41,20 @@ const REQUIRED_DAG_CHECK_IDS = Object.freeze([
   "dag_kept_document_scope",
 ]);
 
-export const buildSkillGraphRuntimeGate = ({ mode = getAgentSkillGraphRollout() } = {}) => {
+// AGENT_SKILL_GRAPH_ROLLOUT selects nothing since ADR 0001 phase 8: custom
+// Skills always run as a typed graph, and `guarded` is the only value left
+// (rag/config.js assertAgentRuntimeSupported). The gate still reads the
+// variable: a process holding any other value refuses to start, so a report
+// built in such an environment must not read as ready.
+const readSkillGraphRolloutVariable = () => {
+  const rawValue = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+
+  return typeof rawValue !== "string" || rawValue.trim() === ""
+    ? "guarded"
+    : rawValue.trim().toLowerCase();
+};
+
+export const buildSkillGraphRuntimeGate = ({ mode = readSkillGraphRolloutVariable() } = {}) => {
   const currentMode = String(mode ?? "").trim().toLowerCase();
   const status = currentMode === "guarded" ? "pass" : "fail";
 
@@ -330,7 +342,7 @@ export const buildRolloutReadinessReport = ({
   recoveryPayload = null,
   runId = null,
   runtimeSmokePayload = null,
-  skillGraphRollout = getAgentSkillGraphRollout(),
+  skillGraphRollout = readSkillGraphRolloutVariable(),
   trajectoryPayload = null,
 } = {}) => {
   const plannerProviderGate = buildRequiredPlannerProviderGate({

@@ -43,8 +43,9 @@ const getCustomSkillInput = ({ run = {}, step = {} } = {}) => {
   const userId =
     normalizeText(stepInput.userId) || normalizeText(runInput.userId);
   // Only ever set by the graph runner for a node bound to an upstream output.
-  // A V1 chain step folds earlier answers into its question instead, so this
-  // stays null there and the retry is unchanged.
+  // A step of the V1 sequential chain (deleted in ADR 0001 phase 8; such
+  // steps exist only in runs stored before that) folded earlier answers into
+  // its question instead, so this stays null there and the retry is unchanged.
   const priorFindings = normalizeText(stepInput.priorFindings) || null;
 
   return {

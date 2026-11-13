@@ -132,7 +132,6 @@ export const buildProductionGraphStartupResumeEvents = async () => {
       executeObservedSkill: tracker.executeObservedSkill,
       loadExecutionGraphCheckpoint: () =>
         firstService.getExecutionGraphCheckpoint({ accessScope, runId }),
-      mode: "guarded",
       plan,
       plannerAdapter: {
         createExecutionGraph: () => ({ nodes: graphNodes }),
