@@ -556,7 +556,6 @@ const createHarness = async ({ effects = SKILL_EFFECTS.readOnly } = {}) => {
       executeObservedSkill: tracker.executeObservedSkill,
       expectedGraphResumeClaimId,
       loadExecutionGraphCheckpoint: load,
-      mode: "guarded",
       plan,
       plannerAdapter: {
         createExecutionGraph: () => ({ nodes: graphNodes }),

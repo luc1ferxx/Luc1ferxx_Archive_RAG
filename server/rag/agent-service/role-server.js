@@ -352,8 +352,9 @@ export const startServiceRole = async ({
   shutdownFinalizers = [],
   signals = process,
 }) => {
-  // A removed AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value (native, or
-  // anything but langgraph) refuses the start before anything is built
+  // A removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME or
+  // AGENT_SKILL_GRAPH_ROLLOUT value (native, off, shadow, or anything but the
+  // one value each still accepts) refuses the start before anything is built
   // (rag/config.js). server.js checks it before the role dispatch too; this
   // covers a caller that starts a role directly (the load bench's split
   // topology), against the environment the role is handed.

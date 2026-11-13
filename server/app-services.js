@@ -296,12 +296,12 @@ export const buildChatResponse = async ({
 };
 
 export const createAppServices = (options = {}, { uploadsDirectory }) => {
-  // A removed AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value (native above
-  // all) refuses to build the services, so every in-process app -- the
-  // monolith, the agent tier, an evaluation runner that calls createApp --
-  // fails before it serves anything instead of running LangGraph regardless
-  // (ADR 0001 phases 6 and 7; server.js and startServiceRole check earlier
-  // still).
+  // A removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME or
+  // AGENT_SKILL_GRAPH_ROLLOUT value (native, off and shadow above all) refuses
+  // to build the services, so every in-process app -- the monolith, the agent
+  // tier, an evaluation runner that calls createApp -- fails before it serves
+  // anything instead of running LangGraph regardless (ADR 0001 phases 6, 7
+  // and 8; server.js and startServiceRole check earlier still).
   assertAgentRuntimeSupported();
   // RAG_ANSWER_TEMPERATURE, RAG_ANSWER_MAX_TOKENS and RAG_LLM_MAX_TOKENS_FIELD:
   // a wrong value refuses the start rather than failing every answer call,

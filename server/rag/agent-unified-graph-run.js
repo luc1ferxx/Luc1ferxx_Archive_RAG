@@ -330,9 +330,10 @@ const identity = async (response) => response;
 // Every entry that runs the graph on LangGraph (a fresh request, an approval
 // continuation, a startup resume) refuses LangSmith tracing before anything
 // else happens, as the ADR requires of every outer entry, and refuses a
-// removed AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value (native above all),
-// which asked for a scheduler that no longer exists; the stage and the
-// executor refuse again on their own path.
+// removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME or AGENT_SKILL_GRAPH_ROLLOUT
+// value (native, off and shadow above all), which asked for a scheduler or a
+// Skill chain that no longer exists; the stage and the executor refuse again
+// on their own path.
 const assertRuntimeEntryAllowed = () => {
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();

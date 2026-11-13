@@ -12,27 +12,35 @@ import { AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE } from "../rag/config.js";
 
 // What a /chat-shaped run answers when the custom-Skill stage cannot simply run
 // every Skill the intent selected: the call budget covers only some of them,
-// covers none, or the selected documents cannot be verified for the caller.
+// covers none, the selected documents cannot be verified for the caller, or
+// the first Skill fails.
 //
-// The request is the contract review, which selects two Skills (summarize the
-// contract, then review its risks). Everything is the shipped default: the
-// default registry and planners, an in-memory run store, and a RAG stub whose
-// getDocument is the lookup /chat itself runs before the agent starts.
+// The main request is the contract review, which selects two Skills (summarize
+// the contract, then review its risks); the last tests use a request that
+// selects one. Everything is the shipped default: the default registry and
+// planners, an in-memory run store, and a RAG stub whose getDocument is the
+// lookup /chat itself runs before the agent starts.
 //
-// The V1 sequential chain used to answer three of these cases (ADR 0001 phase
-// 8 deleted it). The commit before the deletion pinned what the chain
-// answered, in this file; where an expectation below differs from that, the
-// comment on the test says how.
+// The V1 sequential chain used to answer several of these cases (ADR 0001
+// phase 8 deleted it). The commit before the deletion pinned what the chain
+// answered for the budget and document cases, in this file; where an
+// expectation below differs from what the chain answered, the comment on the
+// test says how.
 
 const ACCESS_SCOPE = { userId: "alice", workspaceId: "workspace-a" };
 const DOC_ID = "contract-1";
 const QUESTION = "Review this contract for risks and key terms.";
+// Selects one Skill (risk_review) instead of the two-Skill chain.
+const ONE_SKILL_QUESTION = "Review the selected policy for risks, gaps, and exceptions.";
 const SUMMARY = "Contract Summary\n- Parties: Acme and Beta signed a services agreement. [Source 1]";
 const RISKS = "Risk Review\n- Risk: Late notice creates renewal risk. [Source 1]";
 const RISK_PROMPT = /^Perform a concise citation-backed risk review/u;
 const ABSTENTION = "I do not have enough citation-backed evidence to answer reliably.";
+// What a single-Skill request answers when its Skill produced nothing: there
+// is no chain to finalize, so no abstention sentence either.
+const NO_SKILL_RESULT = "The custom skill could not complete the request.";
 
-const createRagService = ({ withDocumentLookup = true } = {}) => {
+const createRagService = ({ failFirstCall = false, withDocumentLookup = true } = {}) => {
   const questions = [];
   const documents = [{ docId: DOC_ID, fileName: "services-agreement.pdf" }];
   const inScope = (scope) =>
@@ -43,6 +51,10 @@ const createRagService = ({ withDocumentLookup = true } = {}) => {
     service: {
       chat: async (_docIds, question) => {
         questions.push(question);
+
+        if (failFirstCall && questions.length === 1) {
+          throw new Error("The first Skill's retrieval failed.");
+        }
 
         return {
           abstained: false,
@@ -81,11 +93,13 @@ const describeUpstream = (question) =>
 
 const runContractReview = async ({
   agentBudget = null,
+  failFirstCall = false,
+  question = QUESTION,
   rag = null,
   skillGraphRollout = null,
   withDocumentLookup = true,
 } = {}) => {
-  rag ??= createRagService({ withDocumentLookup });
+  rag ??= createRagService({ failFirstCall, withDocumentLookup });
 
   const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
   const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
@@ -104,7 +118,7 @@ const runContractReview = async ({
       ...(agentBudget ? { agentBudget } : {}),
       agentRunService,
       docIds: [DOC_ID],
-      question: QUESTION,
+      question,
       ragService: rag.service,
       sessionId: "budget-session",
       userId: ACCESS_SCOPE.userId,
@@ -131,6 +145,7 @@ const runContractReview = async ({
     answer: {
       agentAnswer: response.body.agentAnswer,
       agentMode: response.body.agentMode,
+      ragAbstained: response.body.ragAbstained,
       ragAnswer: response.body.ragAnswer,
       sourceCount: response.body.ragSources.length,
       status: response.status,
@@ -147,10 +162,17 @@ const runContractReview = async ({
         errorCodes: payload.errorCodes,
         executed: payload.executed,
         fallback: payload.fallback,
-        nodeRuns: payload.nodeRuns.map((nodeRun) => `${nodeRun.nodeId}:${nodeRun.status}`),
+        // "<node>:<status>", plus ":<reason>" for a node that was skipped.
+        nodeRuns: payload.nodeRuns.map((nodeRun) =>
+          [nodeRun.nodeId, nodeRun.status, nodeRun.reason].filter(Boolean).join(":")
+        ),
         plannerStatus: payload.planner.status,
         status: payload.status,
       })),
+      // How the run stores the "graph rejected" trace step: "<kind>:<status>".
+      rejectionSteps: run.steps
+        .filter((step) => step.type === "skill_graph_rejected")
+        .map((step) => `${step.kind}:${step.status}`),
       skipNotes: response.body.agentTrace
         .filter((step) => step.status === "skipped")
         .map((step) => step.summary),
@@ -164,6 +186,7 @@ const runContractReview = async ({
 const BOTH_SKILLS_ANSWER = {
   agentAnswer: `${SUMMARY}\n\n${RISKS.replace("[Source 1]", "[Source 2]")}`,
   agentMode: "skill_chain",
+  ragAbstained: false,
   ragAnswer: `${SUMMARY}\n\n${RISKS.replace("[Source 1]", "[Source 2]")}`,
   sourceCount: 2,
   status: 200,
@@ -198,6 +221,7 @@ test("the default budget pays for both selected Skills: the graph runs them, the
           status: "completed",
         },
       ],
+      rejectionSteps: [],
       skipNotes: [],
     },
     skillCalls: ["first", "second: typed input"],
@@ -237,6 +261,7 @@ test("AGENT_SKILL_GRAPH_ROLLOUT=off and shadow, which selected the sequential ch
 const ABSTAINED_ANSWER = {
   agentAnswer: ABSTENTION,
   agentMode: "skill_chain",
+  ragAbstained: true,
   ragAnswer: ABSTENTION,
   sourceCount: 0,
   status: 200,
@@ -259,6 +284,7 @@ test("a budget of one call for two selected Skills: the first runs, the second i
     answer: {
       agentAnswer: SUMMARY,
       agentMode: "skill_chain",
+      ragAbstained: false,
       ragAnswer: SUMMARY,
       sourceCount: 1,
       status: 200,
@@ -282,11 +308,12 @@ test("a budget of one call for two selected Skills: the first runs, the second i
           errorCodes: [],
           executed: true,
           fallback: null,
-          nodeRuns: ["summarize_contract:completed", "risk_review:skipped"],
+          nodeRuns: ["summarize_contract:completed", "risk_review:skipped:budget_exhausted"],
           plannerStatus: "selected",
           status: "partial",
         },
       ],
+      rejectionSteps: [],
       skipNotes: ["Skipped Risk Review: custom skill budget exhausted (1/1, needed 1)."],
     },
     skillCalls: ["first"],
@@ -324,11 +351,15 @@ test("a budget of no calls: no Skill runs and the run abstains", async () => {
           errorCodes: [],
           executed: true,
           fallback: null,
-          nodeRuns: ["summarize_contract:skipped", "risk_review:skipped"],
+          nodeRuns: [
+            "summarize_contract:skipped:budget_exhausted",
+            "risk_review:skipped:dependency_skipped",
+          ],
           plannerStatus: "selected",
           status: "partial",
         },
       ],
+      rejectionSteps: [],
       skipNotes: ["Skipped Summarize Contract: custom skill budget exhausted (0/0, needed 1)."],
     },
     skillCalls: [],
@@ -373,9 +404,146 @@ test("documents the stage cannot verify for the caller: no Skill runs, and the r
           status: "rejected",
         },
       ],
+      // Stored as a decision not to run, like a budget_limit step.
+      rejectionSteps: ["decision:skipped"],
       skipNotes: [
         "Skipped Summarize Contract, Risk Review: no legal execution graph (unregistered_capability).",
       ],
+    },
+    skillCalls: [],
+  });
+});
+
+// The second Skill is planned on the first one's findings, so it depends on
+// that node, and the executor skips a node whose dependency failed. The run
+// abstains. This is what every graph run has done since the graph became the
+// default (2026-09-25); the deletion of the chain did not change it. The chain
+// itself behaved differently: it ran the second Skill anyway, on the original
+// question, and answered with that Skill's findings. That behaviour went with
+// the chain.
+test("the first of two Skills fails: the second, which depends on its findings, does not run", async () => {
+  const outcome = await runContractReview({ failFirstCall: true });
+
+  assert.deepStrictEqual(outcome, {
+    answer: {
+      ...ABSTAINED_ANSWER,
+      traceTypes: [
+        "plan:completed",
+        "query_planner:completed",
+        "skill_chain:completed",
+        "custom_skill:failed",
+        "synthesis:completed",
+        "self_check:failed",
+        "gap_analysis:completed",
+        "answer_finalizer:completed",
+      ],
+    },
+    record: {
+      agentSkills: ["summarize_contract:failed"],
+      customSkillCallsUsed: 1,
+      customSteps: ["custom_skill:summarize_contract:failed"],
+      graph: [
+        {
+          errorCodes: [],
+          executed: true,
+          fallback: null,
+          nodeRuns: ["summarize_contract:failed", "risk_review:skipped:dependency_failed"],
+          plannerStatus: "selected",
+          status: "partial",
+        },
+      ],
+      rejectionSteps: [],
+      skipNotes: [],
+    },
+    skillCalls: ["first"],
+  });
+});
+
+// A request that selects one Skill is not a chain, and its answer when the
+// Skill produced nothing is a fixed sentence, not the abstention: nothing is
+// finalized or verified. The chain answered these two cases the same way for
+// the budget (it listed the Skill as failed and worded the note without the
+// reservation) and differently for the documents (it ran the Skill and
+// answered with its findings).
+test("one selected Skill and no call budget: the fixed sentence, no abstention", async () => {
+  const outcome = await runContractReview({
+    agentBudget: { maxCustomSkillCalls: 0 },
+    question: ONE_SKILL_QUESTION,
+  });
+
+  assert.deepStrictEqual(outcome, {
+    answer: {
+      agentAnswer: NO_SKILL_RESULT,
+      agentMode: "risk_review",
+      ragAbstained: null,
+      ragAnswer: "",
+      sourceCount: 0,
+      status: 200,
+      traceTypes: [
+        "plan:completed",
+        "query_planner:completed",
+        "budget_limit:skipped",
+        "synthesis:completed",
+      ],
+    },
+    record: {
+      agentSkills: [],
+      customSkillCallsUsed: 0,
+      customSteps: [],
+      graph: [
+        {
+          errorCodes: [],
+          executed: true,
+          fallback: null,
+          nodeRuns: ["risk_review:skipped:budget_exhausted"],
+          plannerStatus: "selected",
+          status: "partial",
+        },
+      ],
+      rejectionSteps: [],
+      skipNotes: ["Skipped Risk Review: custom skill budget exhausted (0/0, needed 1)."],
+    },
+    skillCalls: [],
+  });
+});
+
+test("one selected Skill and documents the stage cannot verify: the fixed sentence, and the trace says the Skill was not run", async () => {
+  const outcome = await runContractReview({
+    question: ONE_SKILL_QUESTION,
+    withDocumentLookup: false,
+  });
+
+  assert.deepStrictEqual(outcome, {
+    answer: {
+      agentAnswer: NO_SKILL_RESULT,
+      agentMode: "risk_review",
+      ragAbstained: null,
+      ragAnswer: "",
+      sourceCount: 0,
+      status: 200,
+      traceTypes: [
+        "plan:completed",
+        "query_planner:completed",
+        "skill_graph_rejected:skipped",
+        "synthesis:completed",
+      ],
+    },
+    record: {
+      agentSkills: ["risk_review:failed"],
+      customSkillCallsUsed: 0,
+      customSteps: [],
+      graph: [
+        {
+          errorCodes: ["unregistered_capability"],
+          executed: false,
+          fallback: null,
+          nodeRuns: [],
+          plannerStatus: "rejected",
+          status: "rejected",
+        },
+      ],
+      rejectionSteps: ["decision:skipped"],
+      skipNotes: ["Skipped Risk Review: no legal execution graph (unregistered_capability)."],
     },
     skillCalls: [],
   });

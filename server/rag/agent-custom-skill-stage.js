@@ -36,13 +36,17 @@ import { setSpanAttributes, withSpan } from "./tracing.js";
 // the AGENT_SKILL_GRAPH_ROLLOUT values that selected it (`off`, `shadow`).
 // What the chain did is the graph's own business now:
 //
-// - The deterministic graph is the chain as a graph: one node per selected
+// - The deterministic graph plans what the chain ran: one node per selected
 //   Skill, in selection order, each handing its findings to the next as a
 //   typed input (agent-dag-planner-adapter.js). It is not rejected for the
 //   call budget when it is planned. The executor reserves the budget per node
 //   at launch and skips a node it cannot pay for, which is what the chain did
 //   per Skill, so a budget that covers one of two selected Skills still runs
-//   that one.
+//   that one. Two things differ from the chain, and already did in every
+//   graph run before the deletion: a Skill whose predecessor failed or was
+//   skipped does not run (it depends on that node's findings; the chain ran
+//   it on the original question), and a node skipped at launch leaves no
+//   entry in the result array.
 // - A graph rejected for any other reason (a selected Skill the runtime did
 //   not authorize for this request, a limit) runs nothing. Each selected
 //   Skill is reported as not run, with the validator's reason, and the

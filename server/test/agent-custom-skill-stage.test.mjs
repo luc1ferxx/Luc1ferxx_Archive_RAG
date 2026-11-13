@@ -229,9 +229,9 @@ test("the stage runs the graph with the rollout variable unset or set to guarded
 });
 
 // `off` and `shadow` selected the sequential chain. The stage does not quietly
-// run the graph for an operator who asked for the chain: it refuses before the
-// executor is loaded, before a checkpoint is read or written, and before any
-// Skill runs. (A typo used to resolve to `off`; it refuses too.)
+// run the graph for an operator who asked for the chain: it refuses before a
+// checkpoint is read or written, before a graph is planned or recorded, and
+// before any Skill runs. (A typo used to resolve to `off`; it refuses too.)
 test("the stage refuses a removed rollout value before anything durable exists", async () => {
   for (const value of ["off", "shadow", " OFF ", "gaurded"]) {
     const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
@@ -245,6 +245,13 @@ test("the stage refuses a removed rollout value before anything durable exists",
           loadExecutionGraphCheckpoint: async () => {
             touched.push("load");
             return null;
+          },
+          plannerAdapter: {
+            createExecutionGraph: () => {
+              touched.push("plan");
+              return { nodes: [readOnlyNode({ nodeId: "compare", skillId: "compare_documents" })] };
+            },
+            id: "should_not_plan",
           },
           saveExecutionGraphCheckpoint: async () => {
             touched.push("save");
@@ -509,7 +516,10 @@ const describeRecord = (record) => ({
   errorCodes: record.errorCodes,
   executed: record.executed,
   fallback: record.fallback,
-  nodeRuns: record.nodeRuns.map((nodeRun) => `${nodeRun.nodeId}:${nodeRun.status}`),
+  // "<node>:<status>", plus ":<reason>" for a node that was skipped.
+  nodeRuns: record.nodeRuns.map((nodeRun) =>
+    [nodeRun.nodeId, nodeRun.status, nodeRun.reason].filter(Boolean).join(":")
+  ),
   plannerFallback: record.planner.fallback,
   plannerFallbackReasonCodes: record.planner.fallbackReasonCodes,
   plannerStatus: record.planner.status,
@@ -567,7 +577,7 @@ test("one call for two selected Skills: the deterministic graph runs the first a
       errorCodes: [],
       executed: true,
       fallback: null,
-      nodeRuns: ["compare_documents:completed", "risk_review:skipped"],
+      nodeRuns: ["compare_documents:completed", "risk_review:skipped:budget_exhausted"],
       plannerFallback: true,
       plannerFallbackReasonCodes: [EXECUTION_GRAPH_REASON_CODES.budgetExceeded],
       plannerStatus: "fallback",
@@ -649,7 +659,10 @@ test("no call left: the deterministic graph launches nothing and the stage retur
       errorCodes: [],
       executed: true,
       fallback: null,
-      nodeRuns: ["compare_documents:skipped", "risk_review:skipped"],
+      nodeRuns: [
+        "compare_documents:skipped:budget_exhausted",
+        "risk_review:skipped:dependency_skipped",
+      ],
       plannerFallback: false,
       plannerFallbackReasonCodes: [],
       plannerStatus: "selected",

@@ -259,8 +259,18 @@ const buildNodeId = (skillId, index, usedNodeIds) => {
 /**
  * The deterministic graph: one node per selected skill, in selection order,
  * each one handing its findings to the next through a typed priorFindings
- * binding. It is what the deleted V1 sequential chain did, as a graph (the
- * chain passed earlier answers on inside a rewritten question string).
+ * binding. It plans what the deleted V1 sequential chain ran (the chain passed
+ * earlier answers on inside a rewritten question string).
+ *
+ * It is not the chain when something does not run. A node bound to an earlier
+ * node's findings depends on it, and the executor skips a node whose
+ * dependency failed or was skipped (agent-execution-graph-node.js
+ * decideExecutionGraphNode), whatever its failure policy. The chain ran the
+ * next Skill anyway, on the original question. With the four shipped Skills,
+ * which all accept priorFindings, a first Skill that fails therefore leaves
+ * the second unrun. That has been the behaviour of every graph run since the
+ * graph became the default (2026-09-25), not something the deletion of the
+ * chain changed; test/agent-custom-skill-budget.test.mjs pins it.
  *
  * This stays a chain rather than a fan-out on purpose. It is the fallback that
  * runs when the V2 planner is unavailable or produced something illegal, and a
@@ -292,8 +302,8 @@ export const createDeterministicExecutionGraph = ({ selectedSkills = [] } = {}) 
 
     nodes.push({
       dependsOn: acceptsPriorFindings ? [previousNodeId] : [],
-      // `continue` is what the V1 chain did: one failing skill did not cancel
-      // the skills selected after it.
+      // `continue` keeps a failing node from aborting the nodes that do not
+      // depend on it. It does not rescue a node that does: see above.
       failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
       inputBindings,
       nodeId,
