@@ -754,8 +754,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 单文件套件：`agent-custom-skill-stage` 24/24、`agent-custom-skill-budget` 5/5、`agent-dag-planner-adapter` 40/40、`agent-runtime-removed` 19/19（其中一条真实执行 `node server.js`，在三个变量的已删除取值下都以非零退出）、`agent-execution-plan-runner` 13/13、`langgraph-runtime-parity` 5/5（原 6，少了 shadow 场景）、`langgraph-execution-plan-graph` 25/25（原 26，少了 `custom_skill_retry`）、`langgraph-unified-graph` 25/25。
 - golden：删除 2 个文件；改写 1 个（`langgraph-unified-graph/trajectory-unified-graph-evidence-gated-skill-hand-off.json`，只有 V1 对照的 4 → 2 次和检查项标签，原因写在 `test/langgraph-unified-graph.test.mjs` 的注释里）；其余阶段 6、7 冻结的 fixture 逐字节未变。
 - 代码量（3b3a8719 相对冻结提交）：`server/rag` +217 −404 行；`server/evaluation` +70 −497 行；测试（不含 fixture）+878 −582 行，fixture −1,956 行。冻结提交另加 386 行测试。
+- CI 的 Node 22：写这一节时还没跑（本机只有 Node 20 和 24）。合并进 main 之后，合并提交 7fbf8974 的 Quality Gate 运行（43517749419，2026-11-13）三个任务全部通过，其中 `server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,598 个测试，4,590 通过、8 跳过、0 失败，全局行覆盖 92.53%。
 - 没有验证的：
-  - CI 的 Node 22：本机只有 Node 20 和 24，合并进 main 之后由 CI 验证。
   - 真实模型下的答案质量。顺序链和图告诉第二个 Skill 上游结果的方式不同，但默认路径七周以来就是图，这不是新变化。
   - 真实流量。这里没有线上数据，“默认配置下生产里走不到”是从代码和默认配置推出来的，加上上面的记录点统计。
   - `server/.env` 按规则没有读。里面如果有 `AGENT_SKILL_GRAPH_ROLLOUT=off`、`shadow` 或拼错的值，`node server.js` 现在拒绝启动。
