@@ -908,7 +908,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - golden：改写 1 个（`langgraph-runtime-parity/recovery_observability_skill_graph_signal.json`）。逐项比对过：报告里变的只有上面列的那些字段，事件从 37 条变成 33 条（少的是被删造数的事件），其中 17 条图事件逐字节未变。其余 golden 未动。
 - 代码量（be353b62 相对 a26eecd7，含冻结提交）：`server/rag` +168 −623 行；`server/evaluation` +82 −137 行；测试（不含 fixture）+1,201 −841 行，其中冻结文件 654 行；fixture +57 −394 行；前端 +24 −49 行。
 - 没有验证的：
-  - CI 的 Node 22（本机只有 Node 20 和 24）。合并进 main 之后才有。
+  - CI 的 Node 22（本机只有 Node 20 和 24）。写这一节时还没跑；合并之后的结果在“独立复核”小节末尾。
   - 真实浏览器里的恢复面板。前端只跑了组件测试，没有起应用看。
   - 真实 PostgreSQL 上的旧链 run。`postgres-agent-run-store` 用的是假的 pg 客户端；本机和 CI 的数据库里也没有这种存量 run。
   - `server/.env` 按规则没有读。
@@ -947,7 +947,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 前端（`vitest run`）：28 个文件、243 个测试全部通过（多一个文件 `workbenchFormatters.test.js`，4 个测试；`RenderQA` 多 1 个）；`vite build` 通过。
 - 单文件套件：`agent-skill-step-replay` 12/12、`agent-run-step-replay-safety` 9/9、`agent-run-step-executor` 22/22、`agent-run-recovery` 17/17、`agent-run-recovery-actions` 7/7、`postgres-agent-run-store` 29/29。另外用 Node 20.20.2 跑了受影响的 17 个服务端测试文件：340 个测试全部通过（CI 用的是 Node 22，本机没有）。
 - 代码量（015f06a1 相对 a26eecd7）：`server/rag` +205 −672 行；`server/evaluation` +82 −137 行；测试（不含 fixture）+1,320 −860 行，其中冻结文件 684 行；fixture +58 −395 行；前端 +189 −54 行。
-- 仍然没有验证的：CI 的 Node 22（合并进 main 之后才有）；真实浏览器里的恢复面板和聊天答案里的 Retry 按钮（只跑了组件测试）；真实 PostgreSQL 上的旧链 run。
+- CI 的 Node 22：合并进 main 之后，合并提交 db3ed97b 的 Quality Gate 运行（43529876304，2026-11-13）三个任务全部通过，其中 `server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,607 个测试，4,599 通过、8 跳过、0 失败，全局行覆盖 92.52%；`quality-gate` 里 trajectory 17/17、planner 7/7、recovery-observability 8/8（27 项检查），`quality:current` 通过；`frontend-checks` 28 个文件、243 个测试通过并完成构建。
+- 仍然没有验证的：真实浏览器里的恢复面板和聊天答案里的 Retry 按钮（只跑了组件测试）；真实 PostgreSQL 上的旧链 run。
 
 ## 后果
 
