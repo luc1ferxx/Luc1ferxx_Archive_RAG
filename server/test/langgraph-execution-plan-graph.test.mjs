@@ -294,17 +294,18 @@ const runTrajectoryCase = async (createCase) => {
 // one proves about the outer plan on LangGraph. `planned: false` marks a case
 // whose request never reaches the plan (a pre-execution clarification, an
 // import approval asked before execution, a goal driven through tasks): it
-// must make no plan-graph invocation. `customSkillGraph: true` marks a case
-// whose custom-Skill stage runs a guarded DAG, which must be scheduled on
-// LangGraph; every other case makes no executor invocation. Every case's
-// outcome, agent events and runs must equal the golden.
+// must make no plan-graph invocation. `customSkillGraph: [...]` marks a case
+// whose custom-Skill stage runs a guarded DAG and lists the nodes its one
+// executor invocation must schedule; every other case makes no executor
+// invocation. Every case's outcome, agent events and runs must equal the
+// golden.
 const TRAJECTORY_CASES = [
   ["document_follow_up_retrieval", createFollowUpCase, "document QA with a follow-up retrieval"],
   [
     "skill_chain_contract_review",
     createSkillChainCase,
     "the custom-Skill stage",
-    { customSkillGraph: true },
+    { customSkillGraph: ["summarize_contract", "risk_review"] },
   ],
   [
     "comparison_requires_clarification",
@@ -316,7 +317,7 @@ const TRAJECTORY_CASES = [
     "custom_skill_access_scope",
     createAccessScopeCase,
     "access scope through the custom stage",
-    { customSkillGraph: true },
+    { customSkillGraph: ["risk_review"] },
   ],
   ["budget_exhaustion_clarification", createBudgetCase, "budget exhaustion in the document loop"],
   [
@@ -335,7 +336,7 @@ const TRAJECTORY_CASES = [
     "multi_doc_conflict",
     createMultiDocConflictCase,
     "a multi-document conflict",
-    { customSkillGraph: true },
+    { customSkillGraph: ["compare_documents"] },
   ],
   ["planner_fallback", createPlannerFallbackCase, "the planner fallback"],
   [
@@ -356,7 +357,7 @@ for (const [
   caseId,
   createCase,
   proves,
-  { customSkillGraph = false, planned = true } = {},
+  { customSkillGraph = null, planned = true } = {},
 ] of TRAJECTORY_CASES) {
   test(`${caseId} equals the native loop's golden (${proves})`, async () => {
     const run = await runScenario(() => runTrajectoryCase(createCase));
@@ -376,11 +377,16 @@ for (const [
       assert.deepStrictEqual(run.scheduledShapes, []);
     }
 
-    if (customSkillGraph) {
-      assert.ok(run.graphInvocations.length > 0, "the custom-Skill DAG was scheduled on LangGraph");
-    } else {
-      assert.deepStrictEqual(run.graphInvocations, []);
-    }
+    // The custom-Skill DAG's executor invocations, which the goldens do not
+    // hold: the nodes of the one graph the case schedules, none reused, no
+    // run to bind to. The loop's pass and the graph's pass recorded exactly
+    // these at commit 3313b40b.
+    assert.deepStrictEqual(
+      run.graphInvocations,
+      customSkillGraph
+        ? [{ boundToRun: false, nodeIds: customSkillGraph, reusedNodeIds: [] }]
+        : []
+    );
   });
 }
 

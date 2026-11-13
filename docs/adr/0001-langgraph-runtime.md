@@ -414,7 +414,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - `agent-custom-skill-stage.js` 和 `agent-unified-graph-stage.js`：
   - 删掉 native 分支、`runtime` 参数，以及导出的 `CUSTOM_SKILL_GRAPH_RUNTIMES` / `UNIFIED_GRAPH_RUNTIMES`。
   - 图一律交给 `runExecutionGraphOnLangGraph`。
-  - 执行器仍按需动态导入：在 `agent.js` 之后再加载 LangGraph 实测多 174 ms，api 边缘层和 rollout 为 `off` 的进程不必承担。
+  - 执行器仍按需动态导入：在 `agent.js` 之后再加载 LangGraph 实测多 174 ms，api 边缘层和 rollout 为 `off` 的进程不必承担。（阶段 7 之后外层计划也在 LangGraph 上，rollout 为 `off` 的进程同样加载 LangGraph，见阶段 7 的代价。）
   - v3 stage 现在总会检查 lifecycle target 的 runId 等于 `agentRunId`。原来的默认 runtime 下本来就检查。
 - `rag/config.js` 的 `getAgentRuntime()`，以及依赖它的所有分支：
   - `agent-run-recovery.js`：线程核对（`verifyLangGraphThread`）总是执行。
@@ -538,7 +538,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 进程内（2026-11-13，删除之前在同一进程里交替 7 轮、每轮 400 次文档问答，Node 24.21.0，内存 run store、桩 ragService）：每次 `runAgentRag` 的 CPU 中位数 0.605 ms（原生循环）对 0.894 ms（LangGraph），多 0.29 ms；墙钟 0.506 对 0.701 ms。与阶段 5 的 0.28 ms 一致。
 - 压测没有重跑。阶段 5 的数字仍是唯一的端到端测量：pgvector、模型 0 ms、并发 1，每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）。阶段 7 之前写的压测报告里，`/chat` 的每请求 CPU 比同一提交现在测出来的低约 1 ms。
 - 真实模型下一次文档问答约 2.4 s，其中 99.5% 是答案模型（见 `docs/evaluation.md`“默认配置的答案漏斗、延迟和 token”），这 0.3 ms 看不出来。受影响的是 0 ms 假模型下的单进程吞吐上限。
-- 回答 agent 请求的进程在第一个请求时加载 `@langchain/*`（阶段 6 实测一次性约 174 ms）。split 部署的 api 边缘层、ingest worker、检索层和模型网关仍然不加载。
+- 回答 agent 请求的进程在第一个请求时加载 `@langchain/*`。2026-11-13 实测（Node 24.21.0，`agent.js` 之后导入图模块，GC 后的 RSS）：一次性约 115 ms，RSS 82 → 143 MB。默认配置下 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core（约 70 ms，RSS 到 122 MB），所以阶段 7 实际多出的是 LangGraph 本身：约 50 ms、约 21 MB；规划器全用确定性实现的部署才承担全部的 115 ms 和约 60 MB。split 部署的 api 边缘层、ingest worker、检索层和模型网关仍然不加载。
 
 ### 删了什么
 
@@ -558,7 +558,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 行为变化：阶段 7 之前，`AGENT_OUTER_PLAN_RUNTIME` 拼错的值静默落到 native。现在没有 native 可落，拼错即拒绝启动。`server/.env` 里如果显式写了 `AGENT_OUTER_PLAN_RUNTIME=native`，要删掉这一行。
 - 检查位置：阶段 6 的全部位置（`server.js`、`startServiceRole`、`createAppServices`、custom-Skill stage、v3 的三个入口与 stage、执行器），再加外层计划的入口 `runAgentExecutionPlanOnLangGraph`（在校验计划、建任何阶段之前）。
 - 检查范围因此变宽：阶段 6 时“不调度图的请求不检查”，因为它们在两种 runtime 下走同一份代码。现在每个走到外层计划的请求都调度图，所以不建 app、直接调 `runAgentRag` 的 eval runner 在环境里有任一已删除取值时，文档问答也以对应的 `*_REMOVED` 失败（trajectory 报告里是一条 `case_error`）。
-- LangSmith：外层计划的入口本来就在建图之前拒绝 LangSmith 追踪变量。阶段 7 之前，普通文档问答走原生循环、不建图，在这种变量下照常回答；现在每个走到外层计划的请求都被拒绝（`/chat/stream` 在 run 创建之前给出 `error`、`done` 两帧，`/chat` 在规划之后把 run 置为 failed，错误码 `LANGSMITH_TRACING_ENABLED`）。`server.js` 启动时本来就拒绝这种变量，受影响的只有绕过启动检查的进程内调用方。规划器的模型调用在这种变量下仍走直接路径、不拒绝（阶段 5 的理由不变）。
+- LangSmith：外层计划的入口本来就在建图之前拒绝 LangSmith 追踪变量。阶段 7 之前，普通文档问答走原生循环、不建图，在这种变量下照常回答；现在两条路由的拒绝范围不同：`/chat/stream` 拒绝所有流式请求，检查在 run 创建之前，给出 `error`、`done` 两帧，走不到外层计划的请求（例如规划前就要求澄清的）也一样；`/chat` 拒绝每个走到外层计划的请求，在规划之后把 run 置为 failed，错误码 `LANGSMITH_TRACING_ENABLED`，走不到外层计划的仍然回 200。`server.js` 启动时本来就拒绝这种变量，受影响的只有绕过启动检查的进程内调用方，以及启动后环境被改动的进程。规划器的模型调用在这种变量下仍走直接路径、不拒绝（阶段 5 的理由不变）。
 - `test/agent-runtime-removed.test.mjs`（15 个测试，原 9 个）对两个变量各跑一遍：取值、`startServiceRole`、真实执行 `node server.js`、`createAppServices`、执行器；新增外层计划入口在读计划之前拒绝，以及 eval runner 的文档问答、custom-Skill DAG、v3 统一图三类用例在任一变量为 `native` 时得到 `case_error`。
 
 ### 等价保护怎么保住
@@ -601,9 +601,21 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 全量结果（本机 Node 24.21.0，删除之后）：
   - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector（`scripts/run-pgvector-integration.sh` 起的集群，与 CI 的 `server-tests` 同一条命令）：4,585 个测试，4,578 通过、7 跳过、0 失败；全局行覆盖 92.58%，五组覆盖率门和目标都通过。跳过的 7 个需要 Redis、读副本或旧版本 checkout，与改动无关。PostgreSQL 集成套件（`agent-execution-graph-postgres.integration`、`agent-unified-graph-postgres.integration`、`langgraph-checkpointer-postgres.integration` 等）都在其中，没有跳过。
   - 不接数据库再跑一次：4,413 个测试，4,385 通过、28 跳过、0 失败。这种跑法下覆盖率清单会报 `tenant-encryption-maintenance.js` 缺失，因为唯一导入它的集成套件被跳过了；这是本机没有数据库时的既有现象，不是这次改动带来的。
-  - `quality:current`：见提交后的记录（删除提交上、干净工作区、一次性 PostgreSQL、五项确定性评测都由该提交生成）。
-  - CI（Node 22）上的 golden 比较：新增的 32 个 fixture 在 Node 24 上生成，推送后由 CI 验证。
+  - `quality:current`：在删除提交 95ce9c2d 上按 CI 的 `quality-gate` 步骤运行（干净的独立 worktree、一次性 PostgreSQL + pgvector、五项确定性评测都由该提交生成），通过，`gate-worktree`、`quality-synthetic`、`feedback`、`trajectory`、`planner-mock`、`recovery`、`quality-baseline`、`quality-metrics` 八项检查全部 `pass`。
+  - Node 版本：新增的 32 个 fixture 在 Node 24.21.0 上生成；对照 golden 的五个套件（`langgraph-execution-plan-graph`、`langgraph-chat-stream`、`langgraph-routes`、`agent-run-chat-statement-count`、`langgraph-runtime-parity`，共 58 个测试）在本机的 Node 20.20.2 下同样全部通过，fixture 里没有绝对路径、端口、主机名或 Node 版本相关的报错文本。CI 用的 Node 22 在推送后验证。
 - 代码量（删除提交相对冻结提交 3313b40b）：生产代码（`server/rag`、`server/routes`）+204 −235 行，净减 31 行，其中大半是注释改写，真正删掉的是原生循环、选择调度器的函数、`getAgentOuterPlanRuntime()` 和路由的 native 分支；测试 +1,186 −1,330 行，净减 144 行（每个场景少了第二趟）。冻结提交另加 32 个 golden 文件，约 1.1 MB，golden 总量约 6.4 MB。这次换来的不是代码量，而是只有一个调度器、一条流式路径、少一个要测两遍的开关。
+
+### 独立复核（2026-11-13）
+
+冻结和删除两个提交（b8e4d2ed..95ce9c2d）交给一个只读的独立复核。结论是没有高、中级缺陷；五条低级意见的处理如下，修正都在删除提交之后的同一分支上。
+
+- LangSmith 的拒绝范围写窄了：`streamAgentRun` 在 run 创建之前检查，所以 `/chat/stream` 拒绝的是所有流式请求，不只是走到外层计划的；`/chat` 对走不到外层计划的请求仍然回答。行为没有改（`server.js` 本来就拒绝带这种变量启动），改的是上面“拒绝已删除的取值”小节和 `AGENTS.md` 里的说法。
+- 测试转换时少了一项比较：两趟对照时，三个 custom-Skill DAG 用例的执行器调用记录（`boundToRun`、`nodeIds`、`reusedNodeIds`）要求两边 `deepStrictEqual`，单趟之后只剩“非空”。现在改成字面量期望。取值在冻结提交 3313b40b 上重新跑过：原生一趟和 LangGraph 一趟记录的都是这组值。
+- 七处检查点的注释只提 `AGENT_RUNTIME`，补上 `AGENT_OUTER_PLAN_RUNTIME`。两处“rollout 关着的进程不加载 LangGraph”的注释在阶段 7 之后不成立，改为：按需导入仍然让不跑 guarded 图的进程不加载图执行器和编译器，LangGraph 本身已由外层计划加载。
+- `rag/config.js` 把进程内的 0.3 ms 和压测的 5.68 → 6.68 ms 写成了一句因果，现在分开写；`docs/agent-rag.md` 补上压测的数字。
+- 没有做的一条：LangGraph 在第一个 agent 请求里加载（run 已创建、截止时间已开始计时），没有在启动后预热。复核用加载钩子测得 `routes/chat.js` 之后导入图模块 141 ms、720 个模块（其中 437 个来自 `@langchain/*`），与上面“代价”里的约 115 ms 是同一量级的两次测量。每个进程只付一次，没有东西因此出错；要消掉它，可以让承载 agent tier 的角色在 listen 之后后台导入 `rag/langgraph/execution-plan-graph.js`。
+
+复核没能验证的两项：`server/.env` 按规则没有读（里面如果有 `AGENT_OUTER_PLAN_RUNTIME=native` 或拼错的值，`node server.js` 现在拒绝启动）；Node 22 上新 golden 的比较，等 CI。
 
 ## 后果
 

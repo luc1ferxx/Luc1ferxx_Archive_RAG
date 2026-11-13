@@ -225,8 +225,9 @@ export const runExecutionGraphOnLangGraph = async ({
   assertLangSmithTracingDisabled();
   // Every graph is scheduled here, whoever called (a route, a task, startup
   // recovery, an evaluation runner calling runAgentRag directly): a removed
-  // AGENT_RUNTIME value asked for the native scheduler, and running LangGraph
-  // instead would ignore it silently (ADR 0001 phase 6).
+  // AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value asked for a native
+  // scheduler, and running LangGraph instead would ignore it silently (ADR
+  // 0001 phases 6 and 7).
   assertAgentRuntimeSupported();
 
   const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({

@@ -585,11 +585,12 @@ export const getAgentSkillGraphRollout = () => {
 //   (agent-execution-plan-runner.js) and which /chat/stream branch answers:
 //   the native loop (the default until phase 7) or the LangGraph Pregel graph
 //   (rag/langgraph/execution-plan-graph.js). The load tests of phases 3 and 5
-//   kept the loop, because the graph costs about 0.3 ms of CPU per run in
-//   process (5.68 -> 6.68 ms of CPU per /chat at concurrency 1 with a 0 ms
-//   model, +17.6%, over the 10% gate). Phase 7 deleted the loop anyway, on the
-//   owner's decision that one runtime is worth that cost: against a real
-//   model's seconds per answer it does not show.
+//   kept the loop: over HTTP at concurrency 1 with a 0 ms model, a /chat on
+//   the graph cost 5.68 -> 6.68 ms of CPU (+17.6%, over the 10% gate). Phase 7
+//   deleted the loop anyway, on the owner's decision that one runtime is
+//   worth that cost; the gate was not re-run. Measured in process that day,
+//   one run costs 0.605 -> 0.894 ms of CPU on the graph (about +0.3 ms),
+//   which does not show against a real model's seconds per answer.
 //
 // Nothing reads either variable to decide anything. Both are still checked:
 // when a process starts (server.js, and startServiceRole in
