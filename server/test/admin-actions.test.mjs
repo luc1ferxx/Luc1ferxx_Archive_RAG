@@ -65,11 +65,10 @@ test("admin recovery-scan action returns compact recovery state only", async () 
               recovery: {
                 actions: [
                   {
-                    label: "Resume document RAG",
-                    reason: "safe_step_ready",
+                    label: "Document RAG",
+                    reason: "failed_step_ready",
                     safety: {
-                      canAutoReplay: true,
-                      reasonCodes: [],
+                      reasonCodes: ["non_idempotent"],
                       steps: [
                         {
                           input: {
@@ -80,7 +79,7 @@ test("admin recovery-scan action returns compact recovery state only", async () 
                     },
                     stepId: "step-1",
                     stepType: "document_rag",
-                    type: "resume_from_step",
+                    type: "retry_failed_step",
                   },
                   {
                     label: "Cancel run",
@@ -88,9 +87,8 @@ test("admin recovery-scan action returns compact recovery state only", async () 
                     type: "cancel",
                   },
                 ],
-                reason: "safe_step_ready",
+                reason: "failed_step_ready",
                 replaySafety: {
-                  canAutoReplay: true,
                   reasonCodes: ["requires_approval"],
                   steps: [
                     {
@@ -131,7 +129,14 @@ test("admin recovery-scan action returns compact recovery state only", async () 
   assert.equal(result.result.actionCount, 2);
   assert.deepEqual(result.result.actionsByType, {
     cancel: 1,
-    resume_from_step: 1,
+    retry_failed_step: 1,
+  });
+  assert.deepEqual(result.result.runs[0].recovery.actions[0].safety, {
+    reasonCodes: ["non_idempotent"],
+  });
+  assert.deepEqual(result.result.runs[0].recovery.replaySafety, {
+    reasonCodes: ["requires_approval"],
+    stepCount: 1,
   });
   assert.equal(result.result.runs[0].runId, "run-1");
   assert.equal(result.result.runs[0].recovery.replaySafety.stepCount, 1);

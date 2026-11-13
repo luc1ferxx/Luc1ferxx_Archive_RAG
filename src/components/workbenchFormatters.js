@@ -1,9 +1,11 @@
 export const formatTaskStatus = (status) =>
   String(status ?? "pending").replace(/_/g, " ");
 
+// The two things an operator can do with a run from the recovery panel.
+// (There is no "resume step": the server never runs a step on its own, and it
+// continues an interrupted graph by itself at startup.)
 const RECOVERY_ACTION_LABELS = {
   cancel: "Cancel",
-  resume_from_step: "Resume step",
   retry_failed_step: "Retry failed step",
 };
 
@@ -16,10 +18,6 @@ export const getRecoveryActionSuccessMessage = (action) => {
     return "Agent run canceled.";
   }
 
-  if (action === "resume_from_step") {
-    return "Agent run resumed.";
-  }
-
   return "Agent run recovery action completed.";
 };
 
@@ -28,18 +26,7 @@ export const getRecoveryReplaySafetyItems = (recovery) =>
     ? recovery.replaySafety.steps
     : [];
 
-export const formatReplaySafetyDecision = (safety = {}) => {
-  if (safety.canAutoReplay === true) {
-    return "Auto replay allowed";
-  }
-
-  if (safety.canAutoReplay === false) {
-    return "Auto replay blocked";
-  }
-
-  return "Auto replay not reported";
-};
-
+// What replaying a step would risk or lack, as the server's reason codes.
 export const formatReplaySafetyReasonCodes = (safety = {}) => {
   const reasonCodes = Array.isArray(safety.reasonCodes)
     ? safety.reasonCodes.filter(Boolean)
@@ -48,13 +35,4 @@ export const formatReplaySafetyReasonCodes = (safety = {}) => {
   return reasonCodes.length > 0
     ? reasonCodes.join(", ")
     : "No reason codes reported";
-};
-
-export const formatReplaySafetyCodeLine = (safety = {}) => {
-  const decision = formatReplaySafetyDecision(safety);
-  const reasonCodes = formatReplaySafetyReasonCodes(safety);
-
-  return reasonCodes === "No reason codes reported"
-    ? decision
-    : `${decision}: ${reasonCodes}`;
 };

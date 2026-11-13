@@ -37,7 +37,7 @@ test("admin permissions define the required RBAC contract surface", () => {
   );
   assert.equal(getPermissionForAdminAction("unknown-action"), null);
   assert.equal(
-    getPermissionForAgentRunRecoveryAction("resume_from_step"),
+    getPermissionForAgentRunRecoveryAction("retry_failed_step"),
     ADMIN_PERMISSION_IDS.agentRunsRecoveryAction
   );
   assert.equal(

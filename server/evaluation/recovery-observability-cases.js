@@ -41,7 +41,7 @@ const buildStartupCoverageCase = (recovery = {}) => ({
     }),
   ],
   description:
-    "A startup recovery summary should expose manual recovery and safe auto replay coverage.",
+    "A startup recovery summary should show runs handed to an operator and an interrupted graph continued automatically. Startup replays no step on its own.",
   id: "startup_recovery_summary",
   label: "Startup recovery summary",
   response: {
@@ -105,13 +105,6 @@ const buildManualRecoveryCase = (recovery = {}) => ({
     }),
     buildCheck({
       category: "manual_recovery",
-      id: "resume_after_partial_step_recorded",
-      label: "Resume after partial step was recorded",
-      passed: (recovery.actionCounts?.resume_from_step ?? 0) >= 1,
-      detail: `resume_from_step=${recovery.actionCounts?.resume_from_step ?? 0}`,
-    }),
-    buildCheck({
-      category: "manual_recovery",
       id: "retry_after_failed_step_recorded",
       label: "Retry after failed step was recorded",
       passed: (recovery.actionCounts?.retry_failed_step ?? 0) >= 1,
@@ -157,13 +150,6 @@ const buildStepReplayCase = (recovery = {}) => ({
     }),
     buildCheck({
       category: "replay",
-      id: "resume_step_recorded",
-      label: "Resume step replay was recorded",
-      passed: (recovery.stepResumeCount ?? 0) >= 1,
-      detail: `stepResumeCount=${recovery.stepResumeCount ?? 0}`,
-    }),
-    buildCheck({
-      category: "replay",
       id: "step_replay_failures_zero",
       label: "Step replay failures stayed at zero",
       passed: (recovery.stepReplayFailureCount ?? 0) === 0,
@@ -171,12 +157,11 @@ const buildStepReplayCase = (recovery = {}) => ({
     }),
   ],
   description:
-    "Step-level replay events should cover resume and retry paths with no replay failures.",
+    "An operator's retry of a failed step should be recorded, with no replay failures. It is the only step-level replay there is.",
   id: "step_replay_actions",
   label: "Step replay actions",
   response: {
     stepReplayFailureCount: recovery.stepReplayFailureCount ?? 0,
-    stepResumeCount: recovery.stepResumeCount ?? 0,
     stepRetryCount: recovery.stepRetryCount ?? 0,
   },
 });

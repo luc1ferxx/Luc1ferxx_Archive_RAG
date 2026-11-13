@@ -23,8 +23,6 @@ import PdfUploader from "./PdfUploader";
 import QualityGuardPanel from "./QualityGuardPanel";
 import {
   formatRecoveryActionLabel,
-  formatReplaySafetyCodeLine,
-  formatReplaySafetyDecision,
   formatReplaySafetyReasonCodes,
   formatTaskStatus,
   getRecoveryReplaySafetyItems,
@@ -115,16 +113,14 @@ const RecoveryFactRow = ({ label, value }) => {
 };
 
 const ReplaySafetyItem = ({ safety }) => {
-  const reasonText = formatReplaySafetyReasonCodes(safety);
   const reasonDetails = Array.isArray(safety.reasons) ? safety.reasons : [];
 
   return (
     <div className="archive-recovery-safety-item">
       <div className="archive-recovery-safety-head">
         <span>{safety.stepType ?? "step"}</span>
-        <strong>{formatReplaySafetyDecision(safety)}</strong>
+        <strong>{formatReplaySafetyReasonCodes(safety)}</strong>
       </div>
-      <p>{reasonText}</p>
       {safety.summary ? <p>{safety.summary}</p> : null}
       {reasonDetails.length > 0 ? (
         <div className="archive-recovery-reason-list">
@@ -147,7 +143,7 @@ const RecoveryActionSafety = ({ action }) => {
   return (
     <div className="archive-recovery-action-safety">
       <span>{formatRecoveryActionLabel(action.type)}</span>
-      <strong>{formatReplaySafetyCodeLine(action.safety)}</strong>
+      <strong>{formatReplaySafetyReasonCodes(action.safety)}</strong>
     </div>
   );
 };
@@ -195,7 +191,7 @@ const RecoveryQueuePanel = ({
                 <RecoveryFactRow label={t("sidebar.step")} value={run.recovery?.stepId} />
                 <RecoveryFactRow
                   label={t("sidebar.replay")}
-                  value={formatReplaySafetyDecision(replaySafety)}
+                  value={formatReplaySafetyReasonCodes(replaySafety)}
                 />
               </div>
               {replaySafetyItems.length > 0 ? (
@@ -204,7 +200,7 @@ const RecoveryQueuePanel = ({
                     <ReplaySafetyItem
                       key={
                         safety.stepId ??
-                        `${safety.stepType}-${formatReplaySafetyCodeLine(safety)}`
+                        `${safety.stepType}-${formatReplaySafetyReasonCodes(safety)}`
                       }
                       safety={safety}
                     />

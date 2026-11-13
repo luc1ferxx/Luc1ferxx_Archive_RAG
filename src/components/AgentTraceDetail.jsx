@@ -537,7 +537,6 @@ const AgentTraceDetail = ({ step }) => {
               label: "Selected docs",
               value: formatDetailValue(detail.selectedDocumentCount),
             },
-            { label: "Chain mode", value: formatDetailValue(detail.chainMode) },
           ]}
         />
         <TraceRetrievalQueries

@@ -6,10 +6,7 @@ import {
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
-import {
-  createCustomSkillStepExecutor,
-  createDocumentRagStepExecutor,
-} from "../rag/agent-run-step-handlers/index.js";
+import { createDocumentRagStepExecutor } from "../rag/agent-run-step-handlers/index.js";
 import {
   getStepReplaySafetyPolicy,
   listStepReplaySafetyPolicies,
@@ -20,19 +17,17 @@ import {
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
-import { createSkillRegistry } from "../rag/skills/registry.js";
-import {
-  SKILL_EFFECTS,
-  SKILL_IDEMPOTENCY,
-} from "../rag/skills/skill-contract.js";
 
 // What happens to one `custom_skill` step when something tries to run it on
 // its own, outside its execution graph: at startup, from the recovery panel,
 // and from the step retry route. Every expectation below is a literal, on
 // purpose. This file was first written against the code as it stood after
-// ADR 0001 phase 8 (the V1 sequential chain deleted, its step handlers kept),
-// so the change that removes those handlers shows, line by line, what it
-// changed.
+// ADR 0001 phase 8 (the V1 sequential chain deleted, its step handlers kept);
+// the commit after it (phase 9) removed those handlers, and its diff of this
+// file shows, line by line, what that changed.
+//
+// The rule since phase 9: a custom Skill runs only as a node of its execution
+// graph. Nothing runs, resumes or retries a `custom_skill` step on its own.
 //
 // Two step shapes matter:
 //   - a "chain-shaped" step: no `nodeId` in its input and no graph checkpoint
@@ -48,42 +43,19 @@ const accessScope = Object.freeze({
 const now = () => "2026-11-13T00:00:00.000Z";
 const SKILL_ID = "replay_read_only_probe";
 
+// The step executor no longer takes a Skill registry or a custom Skill
+// executor, so there is no Skill for these tests to count calls of. That a
+// step did not run is asserted from what the run store holds: its status, its
+// steps and its events.
 const createHarness = () => {
-  const skillCalls = [];
   const documentCalls = [];
   const recoveryTraces = [];
   const replayTraces = [];
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore({ now }),
   });
-  const skill = {
-    budgetKey: "customSkillCalls",
-    effects: SKILL_EFFECTS.readOnly,
-    execute: async ({ question }) => {
-      skillCalls.push(question);
-
-      return {
-        abstained: false,
-        citations: [{ docId: "doc-1", title: "Policy" }],
-        text: "Replayed skill answer.",
-      };
-    },
-    id: SKILL_ID,
-    idempotency: SKILL_IDEMPOTENCY.readOnlyRag,
-    kind: "custom",
-    label: "Replay probe",
-    match: () => false,
-    replaySafe: true,
-    requiresAccessScope: true,
-    retryable: true,
-    version: "1.0.0",
-  };
   const agentRunStepExecutor = createAgentRunStepExecutor({
     agentRunService,
-    executeCustomSkillStep: createCustomSkillStepExecutor({
-      ragService: {},
-      skillRegistry: createSkillRegistry([skill]),
-    }),
     executeDocumentRagStep: createDocumentRagStepExecutor({
       ragService: {
         chat: async (docIds, question) => {
@@ -101,7 +73,6 @@ const createHarness = () => {
   });
   const recoveryService = createAgentRunRecoveryService({
     agentRunService,
-    agentRunStepExecutor,
     now,
     recordRecoveryTrace: async (event) => recoveryTraces.push(event),
   });
@@ -121,7 +92,6 @@ const createHarness = () => {
     recoveryService,
     recoveryTraces,
     replayTraces,
-    skillCalls,
   };
 };
 
@@ -209,24 +179,28 @@ const listedActions = async ({ actionService, runId }) => {
 
 test("the replay matrix: what it says about a custom_skill step", () => {
   assert.deepEqual(getStepReplaySafetyPolicy("custom_skill"), {
-    autoReplaySafe: true,
-    idempotency: "read_only_rag",
-    optionalInput: ["retrievalPlan", "sessionId", "skillVersion", "userId"],
-    replayActions: ["resume_from_step", "retry_failed_step"],
+    idempotency: "graph_owned",
+    optionalInput: [],
+    replayActions: [],
     replayApprovalPolicy: "none",
     replayRequiresApproval: false,
-    requiredInput: ["docIds", "question", "skillId"],
-    retryable: true,
+    requiredInput: [],
+    retryable: false,
     stepType: "custom_skill",
     summary:
-      "Whitelisted custom skills replay through the registered custom skill runner with persisted scope and retrieval input.",
+      "A custom Skill runs only as a node of its execution graph. Its step is never replayed on its own: an interrupted graph is continued by whole-graph recovery, and a failed node is not retried.",
   });
-  // The step types startup may replay on their own.
+  // The step types startup may replay on their own: none. The column is gone
+  // from the matrix.
   assert.deepEqual(
     listStepReplaySafetyPolicies()
       .filter((policy) => policy.autoReplaySafe)
       .map((policy) => policy.stepType),
-    ["custom_skill"]
+    []
+  );
+  assert.deepEqual(
+    listStepReplaySafetyPolicies().filter((policy) => "autoReplaySafe" in policy),
+    []
   );
   // The step types an operator may retry by hand after they failed.
   assert.deepEqual(
@@ -236,7 +210,6 @@ test("the replay matrix: what it says about a custom_skill step", () => {
     [
       "arxiv_import",
       "capability_call",
-      "custom_skill",
       "document_rag",
       "follow_up_retrieval",
       "research_question",
@@ -263,25 +236,26 @@ test("startup, auto mode: an interrupted chain-shaped custom_skill step", async 
       failedCount: result.failedCount,
       manualRecoveredCount: result.manualRecoveredCount,
     },
-    { autoRecoveredCount: 1, failedCount: 0, manualRecoveredCount: 0 }
+    { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 1 }
   );
-  // The Skill ran on its own, outside any graph, and its answer became the
-  // run's answer.
-  assert.deepEqual(harness.skillCalls, ["What changed?"]);
-  assert.equal(run.status, "completed");
-  assert.equal(run.steps[0].status, "completed");
-  assert.equal(run.result.answer, "Replayed skill answer.");
-  assert.deepEqual(eventTypes(run), [
-    "run_created",
-    "auto_recovery_started",
-    "step_started",
-    "step_completed",
-    "run_completed",
-    "auto_recovery_completed",
-  ]);
+  // The step is not run. The run waits for an operator, who can cancel it.
+  assert.equal(run.status, "waiting_for_user");
+  assert.equal(run.steps[0].status, "running");
+  assert.deepEqual(run.result.recovery, {
+    mode: "manual",
+    originalStatus: "running",
+    reason: "graph_node_step",
+    recoveredAt: "2026-11-13T00:00:00.000Z",
+    requestedMode: "auto",
+  });
+  assert.deepEqual(eventTypes(run), ["run_created", "manual_recovery_required"]);
+  assert.deepEqual(harness.replayTraces, []);
   assert.deepEqual(
-    harness.replayTraces.map((trace) => [trace.action, trace.stepType, trace.status]),
-    [["resume_step", "custom_skill", "completed"]]
+    await listedActions({
+      actionService: harness.actionService,
+      runId: "run-chain-interrupted",
+    }),
+    ["cancel"]
   );
   assert.deepEqual(
     harness.recoveryTraces.map((trace) => ({
@@ -292,9 +266,9 @@ test("startup, auto mode: an interrupted chain-shaped custom_skill step", async 
     })),
     [
       {
-        autoReplayAttemptCount: 1,
-        autoReplaySuccessCount: 1,
-        manualRecoveryCount: 0,
+        autoReplayAttemptCount: 0,
+        autoReplaySuccessCount: 0,
+        manualRecoveryCount: 1,
         recoverableRunCount: 1,
       },
     ]
@@ -321,36 +295,33 @@ test("startup, auto mode: an interrupted graph-node step whose run has no checkp
   const second = await harness.recoveryService.recoverOnStartup({ mode: "auto" });
   const afterSecond = await harness.getRun("run-node-interrupted");
 
-  // Startup tries to replay the node on its own, the replay guard refuses, and
-  // nothing hands the run to an operator: it stays `running`, is not listed
-  // for recovery, and the same failed attempt repeats at every startup.
-  assert.deepEqual(harness.skillCalls, []);
+  // Before phase 9 startup tried to replay the node on its own, the replay
+  // guard refused, and nothing handed the run to an operator: it stayed
+  // `running`, unlisted, and the same failed attempt repeated at every
+  // startup. Now the first startup hands it to an operator and the second
+  // leaves it alone.
   assert.deepEqual(
     [first, second].map((result) => ({
       autoRecoveredCount: result.autoRecoveredCount,
       failedCount: result.failedCount,
       manualRecoveredCount: result.manualRecoveredCount,
+      skippedCount: result.skippedCount,
     })),
     [
-      { autoRecoveredCount: 0, failedCount: 1, manualRecoveredCount: 0 },
-      { autoRecoveredCount: 0, failedCount: 1, manualRecoveredCount: 0 },
+      { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 1, skippedCount: 0 },
+      { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 0, skippedCount: 1 },
     ]
   );
-  assert.equal(afterFirst.status, "running");
-  assert.equal(afterSecond.status, "running");
-  assert.deepEqual(eventTypes(afterSecond), [
-    "run_created",
-    "auto_recovery_started",
-    "auto_recovery_failed",
-    "auto_recovery_started",
-    "auto_recovery_failed",
-  ]);
-  assert.equal(
+  assert.equal(afterFirst.status, "waiting_for_user");
+  assert.equal(afterFirst.result.recovery.reason, "graph_node_step");
+  assert.equal(afterSecond.status, "waiting_for_user");
+  assert.deepEqual(eventTypes(afterSecond), ["run_created", "manual_recovery_required"]);
+  assert.deepEqual(
     await listedActions({
       actionService: harness.actionService,
       runId: "run-node-interrupted",
     }),
-    null
+    ["cancel"]
   );
 });
 
@@ -403,7 +374,7 @@ test("recovery panel: a run waiting for an operator with a chain-shaped custom_s
 
   assert.deepEqual(
     listed.recovery.actions.map((action) => action.type),
-    ["resume_from_step", "cancel"]
+    ["cancel"]
   );
   assert.deepEqual(
     {
@@ -414,12 +385,9 @@ test("recovery panel: a run waiting for an operator with a chain-shaped custom_s
     },
     {
       reason: "server_startup_recovery",
-      reasonCodes: [],
-      runLevelKeys: ["canAutoReplay", "reasonCodes", "steps"],
+      reasonCodes: ["graph_node_step"],
+      runLevelKeys: ["reasonCodes", "steps"],
       stepKeys: [
-        "autoReplaySafe",
-        "canAutoReplay",
-        "configuredAutoReplaySafe",
         "idempotency",
         "kind",
         "label",
@@ -437,24 +405,25 @@ test("recovery panel: a run waiting for an operator with a chain-shaped custom_s
     }
   );
 
-  const resumed = await harness.actionService.applyRecoveryAction({
-    accessScope,
-    action: "resume_from_step",
-    runId: "run-chain-manual",
-  });
+  const resumed = await rejection(
+    harness.actionService.applyRecoveryAction({
+      accessScope,
+      action: "resume_from_step",
+      runId: "run-chain-manual",
+    })
+  );
+  const run = await harness.getRun("run-chain-manual");
 
-  // "Resume step" ran the Skill on its own and completed the run with it.
-  assert.deepEqual(harness.skillCalls, ["What changed?"]);
-  assert.equal(resumed.run.status, "completed");
-  assert.equal(resumed.response.agentAnswer, "Replayed skill answer.");
-  assert.deepEqual(
-    harness.replayTraces.map((trace) => [trace.action, trace.stepType, trace.status]),
-    [["resume_step", "custom_skill", "completed"]]
-  );
-  assert.deepEqual(
-    harness.recoveryTraces.map((trace) => [trace.eventType, trace.action, trace.status]),
-    [["manual_recovery_action", "resume_from_step", "completed"]]
-  );
+  // There is no "Resume step" any more: the name is not an action.
+  assert.deepEqual(resumed, {
+    code: null,
+    message: "Unsupported agent run recovery action: resume_from_step",
+    status: 400,
+  });
+  assert.equal(run.status, "waiting_for_user");
+  assert.equal(run.steps[0].status, "paused");
+  assert.deepEqual(harness.replayTraces, []);
+  assert.deepEqual(harness.recoveryTraces, []);
 });
 
 test("recovery panel: a failed chain-shaped custom_skill step", async () => {
@@ -466,32 +435,32 @@ test("recovery panel: a failed chain-shaped custom_skill step", async () => {
     steps: [skillStep({ id: "chain-step", status: AGENT_RUN_STEP_STATUSES.failed })],
   });
 
-  assert.deepEqual(
+  // Nothing is offered, so the run is not listed for recovery at all.
+  assert.equal(
     await listedActions({ actionService: harness.actionService, runId: "run-chain-failed" }),
-    ["retry_failed_step"]
+    null
   );
 
-  const retried = await harness.actionService.applyRecoveryAction({
-    accessScope,
-    action: "retry_failed_step",
-    runId: "run-chain-failed",
-  });
+  const retried = await rejection(
+    harness.actionService.applyRecoveryAction({
+      accessScope,
+      action: "retry_failed_step",
+      runId: "run-chain-failed",
+    })
+  );
   const run = await harness.getRun("run-chain-failed");
 
-  // "Retry failed step" ran the Skill on its own, as a new step.
-  assert.deepEqual(harness.skillCalls, ["What changed?"]);
-  assert.equal(retried.run.status, "completed");
+  assert.deepEqual(retried, {
+    code: null,
+    message: "Agent run has no failed step to retry.",
+    status: 409,
+  });
+  assert.equal(run.status, "failed");
   assert.deepEqual(
     run.steps.map((step) => [step.id, step.status]),
-    [
-      ["chain-step", "failed"],
-      ["chain-step:retry:2", "completed"],
-    ]
+    [["chain-step", "failed"]]
   );
-  assert.deepEqual(
-    harness.replayTraces.map((trace) => [trace.action, trace.stepType, trace.status]),
-    [["retry_step", "custom_skill", "completed"]]
-  );
+  assert.deepEqual(harness.replayTraces, []);
 });
 
 test("step retry route: a failed chain-shaped custom_skill step", async () => {
@@ -513,9 +482,16 @@ test("step retry route: a failed chain-shaped custom_skill step", async () => {
   );
   const run = await harness.getRun("run-chain-failed-direct");
 
-  assert.equal(outcome, null);
-  assert.deepEqual(harness.skillCalls, ["What changed?"]);
-  assert.equal(run.status, "completed");
+  // Refused by the replay guard, like the step of a graph node.
+  assert.deepEqual(outcome, {
+    code: "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY",
+    message:
+      "Guarded ExecutionGraph runs cannot be replayed as standalone steps; use whole-graph recovery.",
+    status: 409,
+  });
+  assert.equal(run.status, "failed");
+  assert.deepEqual(run.steps.map((step) => step.id), ["chain-step"]);
+  assert.deepEqual(harness.replayTraces, []);
 });
 
 test("recovery panel and step retry route: a failed graph-node step", async () => {
@@ -533,13 +509,13 @@ test("recovery panel and step retry route: a failed graph-node step", async () =
     ],
   });
 
-  // The panel offers a retry for the failed node ...
-  assert.deepEqual(
+  // The panel no longer offers a retry for the failed node (it was always
+  // refused); the run is not listed for recovery.
+  assert.equal(
     await listedActions({ actionService: harness.actionService, runId: "run-node-failed" }),
-    ["retry_failed_step"]
+    null
   );
 
-  // ... and taking it is always refused.
   const fromPanel = await rejection(
     harness.actionService.applyRecoveryAction({
       accessScope,
@@ -562,9 +538,12 @@ test("recovery panel and step retry route: a failed graph-node step", async () =
     status: 409,
   };
 
-  assert.deepEqual(fromPanel, refused);
+  assert.deepEqual(fromPanel, {
+    code: null,
+    message: "Agent run has no failed step to retry.",
+    status: 409,
+  });
   assert.deepEqual(fromRoute, refused);
-  assert.deepEqual(harness.skillCalls, []);
   assert.equal(run.status, "failed");
   assert.deepEqual(run.steps.map((step) => step.id), ["custom_skill:probe"]);
 });
@@ -601,7 +580,6 @@ test("recovery panel: a failed document step is still retried by hand", async ()
   });
 
   assert.deepEqual(harness.documentCalls, ["What changed?"]);
-  assert.deepEqual(harness.skillCalls, []);
   assert.equal(retried.run.status, "completed");
   assert.equal(retried.response.agentAnswer, "Retried document answer.");
   assert.deepEqual(
@@ -642,8 +620,8 @@ test("recovery actions: the action names the service accepts", async () => {
     },
     resume_from_step: {
       code: null,
-      message: "Agent run has no safe step to resume.",
-      status: 409,
+      message: "Unsupported agent run recovery action: resume_from_step",
+      status: 400,
     },
     retry_failed_step: {
       code: null,

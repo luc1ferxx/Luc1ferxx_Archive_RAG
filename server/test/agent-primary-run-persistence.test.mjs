@@ -92,7 +92,6 @@ const assertMemoryWritingRagStep = (step) => {
   assert.equal(step.input.idempotency, SKILL_IDEMPOTENCY.adapterDefined);
   assert.equal(step.input.replaySafe, false);
   const safety = buildStepReplaySafetyAssessment({ step });
-  assert.equal(safety.canAutoReplay, false);
   assert.deepEqual(safety.reasonCodes, [
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
     STEP_REPLAY_SAFETY_REASON_CODES.externalWrite,
@@ -375,10 +374,16 @@ test("primary custom skill persists durable input, output, and stable id", async
     [[true, "completed", null]]
   );
 
+  // The node's step is never replayed on its own. (Before ADR 0001 phase 9
+  // this assessment said the step could be auto-replayed, although the replay
+  // guard refused a graph node whenever anything tried.)
   const safety = buildStepReplaySafetyAssessment({
     step: customStep,
   });
-  assert.equal(safety.canAutoReplay, true);
+  assert.deepEqual(safety.reasonCodes, [
+    STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+  ]);
+  assert.deepEqual(safety.policy.replayActions, []);
 });
 
 test("custom skill failed Result persists structured error message", async () => {
@@ -488,7 +493,7 @@ test("research brief persists lifecycle-backed research question steps", async (
   assert.ok(eventTypes.indexOf("step_failed") < eventTypes.indexOf("run_completed"));
 });
 
-test("approved web search persists a non-auto-replay-safe tool step", async () => {
+test("approved web search persists a tool step that needs approval to replay", async () => {
   const agentRunService = createRunService();
   const webQuestion = "Search the web for the current launch date.";
   const response = await runAgentRag({
@@ -535,7 +540,6 @@ test("approved web search persists a non-auto-replay-safe tool step", async () =
   assert.equal(webStep.input.question, webQuestion);
   assert.equal(webStep.output.citationCount, 1);
   assert.equal(countSteps(run, "web_search:primary"), 1);
-  assert.equal(safety.canAutoReplay, false);
   assert.ok(safety.reasonCodes.includes("requires_approval"));
 });
 
@@ -720,6 +724,5 @@ test("approved arxiv import persists sanitized topic and stable step id", async 
   assert.equal(arxivStep.input.maxResults, imports[0].maxResults);
   assert.equal(arxivStep.output.importedCount, 1);
   assert.equal(countSteps(run, "arxiv_import:primary"), 1);
-  assert.equal(safety.canAutoReplay, false);
   assert.ok(safety.reasonCodes.includes("external_write"));
 });

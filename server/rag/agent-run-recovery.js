@@ -3,10 +3,7 @@ import {
   AGENT_RUN_STEP_KINDS,
   AGENT_RUN_STEP_STATUSES,
 } from "./agent-run-steps.js";
-import {
-  buildStepReplaySafetyAssessment,
-  getAutoReplaySafeStepTypes,
-} from "./agent-run-step-replay-safety.js";
+import { buildStepReplaySafetyAssessment } from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
 import { normalizeText } from "../lib/normalize-text.js";
@@ -30,17 +27,14 @@ const AUTO_RECOVERY_STARTED_EVENT = "auto_recovery_started";
 const AUTO_RECOVERY_COMPLETED_EVENT = "auto_recovery_completed";
 const AUTO_RECOVERY_FAILED_EVENT = "auto_recovery_failed";
 
-export const DEFAULT_AUTO_RECOVERY_STEP_TYPES = Object.freeze(
-  getAutoReplaySafeStepTypes()
-);
-
-export const AUTO_RECOVERY_STEP_STATUS_VALUES = Object.freeze([
+// A step in one of these statuses was still in flight when its run stopped.
+export const INTERRUPTED_STEP_STATUS_VALUES = Object.freeze([
   AGENT_RUN_STEP_STATUSES.paused,
   AGENT_RUN_STEP_STATUSES.pending,
   AGENT_RUN_STEP_STATUSES.running,
 ]);
 
-const AUTO_RECOVERY_STEP_STATUSES = new Set(AUTO_RECOVERY_STEP_STATUS_VALUES);
+const INTERRUPTED_STEP_STATUSES = new Set(INTERRUPTED_STEP_STATUS_VALUES);
 
 const hasManualRecoveryEvent = (run = {}) =>
   toArray(run.events).some((event) => event.type === MANUAL_RECOVERY_EVENT);
@@ -52,7 +46,7 @@ const hasPendingApprovalGate = (run = {}) =>
   toArray(run.steps).some(
     (step) =>
       step.kind === AGENT_RUN_STEP_KINDS.approvalGate &&
-      AUTO_RECOVERY_STEP_STATUSES.has(step.status)
+      INTERRUPTED_STEP_STATUSES.has(step.status)
   );
 
 const hasExecutedGuardedGraph = (run = {}) =>
@@ -149,45 +143,34 @@ const isCleanGraphApprovalPause = ({ checkpoint, run } = {}) => {
     !toArray(run?.steps).some(
       (step) =>
         step.type === "graph_node" &&
-        AUTO_RECOVERY_STEP_STATUSES.has(step.status)
+        INTERRUPTED_STEP_STATUSES.has(step.status)
     );
 };
 
-export const findAutoRecoverableStep = ({
-  run = {},
-  safeStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
-} = {}) => {
+// Why a run that has no graph to continue needs an operator: its pending
+// approval gate, or what replaying its first interrupted step would risk.
+// Nothing here is replayed. The only automatic continuation is the whole-graph
+// resume in recoverOnStartup; until ADR 0001 phase 9 this function also picked
+// a step startup could replay on its own, and the only step type that
+// qualified was the `custom_skill` step of the deleted V1 sequential chain.
+export const explainInterruptedRun = ({ run = {} } = {}) => {
   if (hasPendingApprovalGate(run)) {
     return {
       reason: "pending_approval_gate",
       safety: null,
-      step: null,
     };
   }
 
-  const assessments = toArray(run.steps)
-    .filter((runStep) => AUTO_RECOVERY_STEP_STATUSES.has(runStep.status))
-    .map((runStep) =>
-      buildStepReplaySafetyAssessment({
-        autoReplayStepTypes: safeStepTypes,
-        run,
-        step: runStep,
-      })
-    );
-  const safeAssessment =
-    assessments.find((assessment) => assessment.canAutoReplay) ?? null;
-  const blockedAssessment =
-    assessments.find((assessment) => assessment.reasonCodes.length > 0) ?? null;
-  const step = safeAssessment
-    ? toArray(run.steps).find((runStep) => runStep.id === safeAssessment.stepId)
+  const interruptedStep = toArray(run.steps).find((runStep) =>
+    INTERRUPTED_STEP_STATUSES.has(runStep.status)
+  );
+  const safety = interruptedStep
+    ? buildStepReplaySafetyAssessment({ run, step: interruptedStep })
     : null;
 
   return {
-    reason: safeAssessment
-      ? "safe_step_ready"
-      : blockedAssessment?.reasonCodes[0] ?? "no_safe_recoverable_step",
-    safety: safeAssessment ?? blockedAssessment,
-    step: step ?? null,
+    reason: safety?.reasonCodes[0] ?? "no_safe_recoverable_step",
+    safety,
   };
 };
 
@@ -200,7 +183,6 @@ const buildRecoveryPatch = ({
   requestedMode = mode,
   reason,
   run,
-  step,
 } = {}) => {
   const recovery = {
     mode,
@@ -211,11 +193,6 @@ const buildRecoveryPatch = ({
 
   if (requestedMode && requestedMode !== mode) {
     recovery.requestedMode = requestedMode;
-  }
-
-  if (step?.id) {
-    recovery.stepId = step.id;
-    recovery.stepType = step.type ?? null;
   }
 
   return {
@@ -231,16 +208,17 @@ const buildRecoveryPatch = ({
   };
 };
 
+// Startup recovery. In `auto` mode it does one thing by itself: continue an
+// interrupted execution graph, under a claim. Every other interrupted run is
+// handed to an operator (manual recovery), and in `manual` mode every run is.
 export const createAgentRunRecoveryService = ({
   agentRunService,
-  agentRunStepExecutor,
   // This callback must continue the persisted graph directly: the custom_skills
   // stage for a v1 checkpoint, the whole guarded v3 request for a v2 one.
   // Calling runAgentRag here would regenerate the outer plan and repeat work.
   resumeExecutionGraph = null,
   now = () => new Date().toISOString(),
   recordRecoveryTrace = recordRagTrace,
-  safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
 } = {}) => ({
   async recoverOnStartup({
     mode = "manual",
@@ -295,7 +273,6 @@ export const createAgentRunRecoveryService = ({
       fallbackReason,
       requestedMode,
       run,
-      step,
     } = {}) => {
       const recoveryPatch = buildRecoveryPatch({
         mode: "manual",
@@ -303,7 +280,6 @@ export const createAgentRunRecoveryService = ({
         reason: fallbackReason,
         requestedMode,
         run,
-        step,
       });
       if (typeof agentRunService.markManualRecovery !== "function") {
         throw new Error("Atomic manual recovery is unavailable for agent runs.");
@@ -330,74 +306,6 @@ export const createAgentRunRecoveryService = ({
           runId: run.runId,
         })) ?? mutation.run
       );
-    };
-
-    const runAutoRecovery = async ({ accessScope = {}, run, step } = {}) => {
-      const recoveryPatch = buildRecoveryPatch({
-        mode: "auto",
-        now,
-        reason,
-        requestedMode: "auto",
-        run,
-        step,
-      });
-
-      await agentRunService.updateRun({
-        accessScope,
-        runId: run.runId,
-        patch: recoveryPatch,
-      });
-      await agentRunService.appendRunEvent?.({
-        accessScope,
-        runId: run.runId,
-        type: AUTO_RECOVERY_STARTED_EVENT,
-        payload: {
-          originalStatus: run.status,
-          reason,
-          stepId: step.id,
-          stepType: step.type,
-        },
-      });
-
-      try {
-        const result = await agentRunStepExecutor.resumeStep({
-          accessScope,
-          runId: run.runId,
-          stepId: step.id,
-        });
-
-        await agentRunService.appendRunEvent?.({
-          accessScope,
-          runId: run.runId,
-          type: AUTO_RECOVERY_COMPLETED_EVENT,
-          payload: {
-            status: result.run?.status ?? null,
-            stepId: step.id,
-            stepType: step.type,
-          },
-        });
-
-        autoRecoveredCount += 1;
-        recovered.push(
-          (await agentRunService.getRun?.({
-            accessScope,
-            runId: run.runId,
-          })) ?? result.run
-        );
-      } catch (error) {
-        await agentRunService.appendRunEvent?.({
-          accessScope,
-          runId: run.runId,
-          type: AUTO_RECOVERY_FAILED_EVENT,
-          payload: {
-            error: serializeError(error, "Auto recovery failed."),
-            status: error?.status ?? 500,
-            stepId: step.id,
-            stepType: step.type,
-          },
-        });
-        failedCount += 1;
-      }
     };
 
     const runAutoGraphRecovery = async ({
@@ -651,28 +559,13 @@ export const createAgentRunRecoveryService = ({
             return;
           }
 
-          const autoCandidate = findAutoRecoverableStep({
-            run,
-            safeStepTypes: safeAutoRecoveryStepTypes,
-          });
-
-          if (autoCandidate.step && agentRunStepExecutor?.resumeStep) {
-            await runAutoRecovery({
-              accessScope,
-              run,
-              step: autoCandidate.step,
-            });
-            return;
-          }
-
+          // No graph to continue: no step is replayed on its own, so the run
+          // goes to an operator with the reason its interrupted step gives.
           await markManualRecovery({
             accessScope,
-            fallbackReason: agentRunStepExecutor?.resumeStep
-              ? autoCandidate.reason
-              : "auto_recovery_executor_unavailable",
+            fallbackReason: explainInterruptedRun({ run }).reason,
             requestedMode: "auto",
             run,
-            step: autoCandidate.step,
           });
           return;
         }
@@ -696,6 +589,9 @@ export const createAgentRunRecoveryService = ({
       recoveredCount: recovered.length,
       manualRecoveryCount: manualRecoveredCount,
       skippedCount,
+      // The field names are older than what they count. An "auto replay" is
+      // an interrupted graph continued automatically: startup replays nothing
+      // else (ADR 0001 phase 9).
       autoReplayAttemptCount: autoRecoveredCount + failedCount,
       autoReplaySuccessCount: autoRecoveredCount,
       autoReplayFailureCount: failedCount,

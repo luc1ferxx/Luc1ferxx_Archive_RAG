@@ -18,10 +18,12 @@ const accessScope = {
   workspaceId: "workspace-a",
 };
 
+// A run handed to an operator with an interrupted custom Skill step: the step
+// of a graph node, which nothing replays on its own.
 const createManualRecoveryRun = async (agentRunService) => {
   await agentRunService.createRun({
     accessScope,
-    goal: "Resume read-only custom answer",
+    goal: "Interrupted custom answer",
     runId: "run-manual",
   });
   await agentRunService.updateRun({
@@ -61,7 +63,7 @@ const createManualRecoveryRun = async (agentRunService) => {
   });
 };
 
-test("agent run recovery actions list safe resume and retry operations", async () => {
+test("agent run recovery actions list cancel and retry operations", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
@@ -103,17 +105,17 @@ test("agent run recovery actions list safe resume and retry operations", async (
     result.runs
       .find((run) => run.runId === "run-manual")
       .recovery.actions.map((action) => action.type),
-    ["resume_from_step", "cancel"]
-  );
-  assert.equal(
-    result.runs.find((run) => run.runId === "run-manual").recovery.actions[0]
-      .safety.canAutoReplay,
-    true
+    ["cancel"]
   );
   assert.deepEqual(
     result.runs.find((run) => run.runId === "run-manual").recovery.replaySafety
       .steps[0].reasonCodes,
-    []
+    [STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep]
+  );
+  assert.equal(
+    "canAutoReplay" in
+      result.runs.find((run) => run.runId === "run-manual").recovery.replaySafety,
+    false
   );
   assert.deepEqual(
     result.runs
@@ -255,7 +257,6 @@ test("agent run recovery actions expose blocked replay safety reasons", async ()
     STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
     STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
   ]);
-  assert.equal(run.recovery.replaySafety.steps[0].canAutoReplay, false);
   assert.deepEqual(
     missingInputRun.recovery.actions.map((action) => action.type),
     ["cancel"]
@@ -269,22 +270,40 @@ test("agent run recovery actions expose blocked replay safety reasons", async ()
   ]);
 });
 
-test("agent run recovery actions execute through the step executor", async () => {
+test("agent run recovery actions execute a retry through the step executor", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
   const calls = [];
 
-  await createManualRecoveryRun(agentRunService);
+  await agentRunService.createRun({
+    accessScope,
+    goal: "Retry failed document answer",
+    runId: "run-failed",
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    runId: "run-failed",
+    status: AGENT_RUN_STATUSES.failed,
+    steps: [
+      {
+        id: "step-failed",
+        type: "document_rag",
+        kind: "tool_call",
+        label: "Document RAG",
+        status: "failed",
+      },
+    ],
+  });
 
   const actionService = createAgentRunRecoveryActionService({
     agentRunService,
     agentRunStepExecutor: {
-      resumeStep: async ({ runId, stepId }) => {
+      retryStep: async ({ runId, stepId }) => {
         calls.push({
           runId,
           stepId,
-          type: "resume",
+          type: "retry",
         });
 
         return {
@@ -298,21 +317,73 @@ test("agent run recovery actions execute through the step executor", async () =>
   });
   const result = await actionService.applyRecoveryAction({
     accessScope,
-    action: "resume_from_step",
-    runId: "run-manual",
+    action: "retry_failed_step",
+    runId: "run-failed",
   });
 
-  assert.equal(result.run.runId, "run-manual");
+  assert.equal(result.run.runId, "run-failed");
   assert.deepEqual(calls, [
     {
-      runId: "run-manual",
-      stepId: "step-custom",
-      type: "resume",
+      runId: "run-failed",
+      stepId: "step-failed",
+      type: "retry",
     },
   ]);
 });
 
-test("agent run recovery actions reject approval gate resume", async () => {
+test("agent run recovery actions have no resume action", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+
+  await createManualRecoveryRun(agentRunService);
+
+  const calls = [];
+  const actionService = createAgentRunRecoveryActionService({
+    agentRunService,
+    agentRunStepExecutor: {
+      // Whatever an executor offers, the service never asks it to resume.
+      resumeStep: async () => {
+        calls.push("resume");
+      },
+      retryStep: async () => {
+        calls.push("retry");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      actionService.applyRecoveryAction({
+        accessScope,
+        action: "resume_from_step",
+        runId: "run-manual",
+      }),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.match(error.message, /Unsupported agent run recovery action: resume_from_step/);
+      return true;
+    }
+  );
+  // The interrupted custom Skill step is not a failed step, and would not be
+  // retryable if it were.
+  await assert.rejects(
+    () =>
+      actionService.applyRecoveryAction({
+        accessScope,
+        action: "retry_failed_step",
+        runId: "run-manual",
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /no failed step to retry/);
+      return true;
+    }
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("agent run recovery actions offer only cancel for a run waiting on an approval gate", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
@@ -357,25 +428,18 @@ test("agent run recovery actions reject approval gate resume", async () => {
 
   const actionService = createAgentRunRecoveryActionService({
     agentRunService,
-    agentRunStepExecutor: {
-      resumeStep: async () => {
-        throw new Error("approval gates must not resume directly");
-      },
-    },
+    agentRunStepExecutor: {},
   });
+  const { runs } = await actionService.listRecoveryRuns({ accessScope });
 
-  await assert.rejects(
-    () =>
-      actionService.applyRecoveryAction({
-        accessScope,
-        action: "resume_from_step",
-        runId: "run-approval",
-      }),
-    (error) => {
-      assert.equal(error.status, 409);
-      assert.match(error.message, /no safe step to resume/);
-      return true;
-    }
+  // The gate is decided through the approval route, not from recovery.
+  assert.deepEqual(
+    runs.map((run) => [
+      run.runId,
+      run.recovery.reason,
+      run.recovery.actions.map((action) => action.type),
+    ]),
+    [["run-approval", "pending_approval_gate", ["cancel"]]]
   );
 });
 

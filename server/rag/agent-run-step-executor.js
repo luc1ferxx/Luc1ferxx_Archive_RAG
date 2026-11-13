@@ -1,5 +1,4 @@
 import { AGENT_RUN_STEP_KINDS } from "./agent-run-steps.js";
-import { AGENT_RUN_STATUSES } from "./agent-runs.js";
 import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
 import { isUnifiedGraphAwaitingApproval } from "./agent-unified-graph-run.js";
@@ -31,12 +30,6 @@ const findApprovalGate = ({ gateId = "", run } = {}) => {
         normalizeText(gate.stepId) === normalizedGateId)
   );
 };
-
-const findApprovedGateForStep = ({ run, step } = {}) =>
-  findApprovalGate({
-    gateId: step?.approvalGateId,
-    run,
-  });
 
 const findCapabilityStepForGate = ({ gate, run } = {}) =>
   (run?.steps ?? []).find(
@@ -81,6 +74,11 @@ const assertStandaloneReplayAllowed = async ({
   });
 };
 
+// Runs one persisted step outside a request: the capability step an approval
+// queued, and a failed step an operator retries. It never runs a custom Skill
+// (a custom Skill runs only as a node of its execution graph, and the replay
+// guard refuses its step) and it never resumes an interrupted step; an
+// interrupted graph is continued as a whole by startup recovery.
 export const createAgentRunStepExecutor = ({
   agentRunService,
   capabilityRegistry,
@@ -88,13 +86,11 @@ export const createAgentRunStepExecutor = ({
   // (agent.js continueAgentExecutionGraphApproval). Without it a graph gate
   // cannot be decided here.
   continueExecutionGraphApproval = null,
-  executeCustomSkillStep,
   executeDocumentRagStep,
   executeResearchQuestionStep,
   now = () => new Date().toISOString(),
   recordStepReplayTrace = recordRagTrace,
   stepHandlerRegistry = createDefaultAgentRunStepHandlerRegistry({
-    executeCustomSkillStep,
     executeDocumentRagStep,
     executeResearchQuestionStep,
   }),
@@ -168,69 +164,6 @@ export const createAgentRunStepExecutor = ({
   };
 
   return {
-    async resumeStep({ accessScope = {}, runId, stepId } = {}) {
-      const existingRun = await agentRunService.getRun({
-        accessScope,
-        runId,
-      });
-      const step = findStep({
-        run: existingRun,
-        stepId,
-      });
-
-      if (!step) {
-        fail("Agent run step not found.", 404);
-      }
-
-      await assertStandaloneReplayAllowed({
-        accessScope,
-        agentRunService,
-        run: existingRun,
-        runId,
-        step,
-      });
-
-      const runningRun =
-        existingRun.status === AGENT_RUN_STATUSES.running
-          ? existingRun
-          : await agentRunService.updateRun({
-              accessScope,
-              runId,
-              patch: {
-                status: AGENT_RUN_STATUSES.running,
-              },
-            });
-
-      try {
-        const result = await executeStep({
-          accessScope,
-          gate: findApprovedGateForStep({
-            run: runningRun,
-            step,
-          }),
-          run: runningRun,
-          step,
-        });
-
-        await recordReplayTrace({
-          action: "resume_step",
-          result,
-          run: runningRun,
-          step,
-        });
-
-        return result;
-      } catch (error) {
-        await recordReplayTrace({
-          action: "resume_step",
-          error,
-          run: runningRun,
-          step,
-        });
-        throw error;
-      }
-    },
-
     async applyApprovalAction({
       accessScope = {},
       action,

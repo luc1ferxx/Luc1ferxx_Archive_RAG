@@ -20,11 +20,11 @@ const VALID_EFFECTS = new Set(Object.values(SKILL_EFFECTS));
  * Skill is rejected whole, and the stage reports the Skill as not run
  * (agent-custom-skill-stage.js).
  *
- * One path outside the catalog and outside LangGraph is left, for stored runs
- * only: the standalone retry and startup recovery of a `custom_skill` step
- * the chain wrote before phase 8
- * (agent-run-step-handlers/custom-research-steps.js). A run created now holds
- * no such step: every custom-Skill step is a graph node.
+ * Nothing else runs one either. The standalone retry and startup recovery of
+ * a `custom_skill` step, which the chain's stored steps still used, were
+ * deleted in ADR 0001 phase 9: a custom Skill runs only as a node of its
+ * execution graph, and the replay guard refuses its step
+ * (agent-run-graph-replay-guard.js).
  */
 export const listAuthorizedAtomicCustomSkills = ({
   accessScope,

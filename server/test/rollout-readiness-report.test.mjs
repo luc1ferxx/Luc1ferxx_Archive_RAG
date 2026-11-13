@@ -309,7 +309,7 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
       ...buildRecoveryObservabilityFixtureEvents(),
       {
         traceType: "agent_run_step_replay",
-        action: "resume_step",
+        action: "retry_step",
         status: "failed",
         error: {
           message: "Replay failed.",

@@ -2167,13 +2167,13 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
       recoveryBody.runs[0].recovery.actions.map((action) => action.type),
       ["cancel"]
     );
-    assert.equal(
-      recoveryBody.runs[0].recovery.replaySafety.steps[0].canAutoReplay,
-      false
-    );
     assert.deepEqual(
       recoveryBody.runs[0].recovery.replaySafety.steps[0].reasonCodes,
       [STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent]
+    );
+    assert.equal(
+      "canAutoReplay" in recoveryBody.runs[0].recovery.replaySafety.steps[0],
+      false
     );
 
     response = await fetch(
@@ -2187,7 +2187,12 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
       }
     );
 
-    assert.equal(response.status, 409);
+    // "Resume from step" is not a recovery action: no step is run on its own.
+    assert.equal(response.status, 400);
+    assert.match(
+      (await response.json()).error,
+      /Unsupported agent run recovery action: resume_from_step/
+    );
 
     response = await fetch(
       `${server.baseUrl}/agent-runs/run-recovery/recovery/actions/cancel`,
@@ -2218,7 +2223,12 @@ test("agent run recovery endpoints list and cancel manual recovery runs", async 
   }
 });
 
-test("agent run recovery API resumes a paused read-only custom step after restart", async () => {
+// A paused custom Skill step in the shape the deleted V1 sequential chain
+// stored: no `nodeId`, no graph checkpoint. Until ADR 0001 phase 9 the recovery
+// API offered "resume from step" for it and ran the Skill on its own, outside
+// any graph. A custom Skill now runs only as a node of its execution graph, so
+// the run can only be cancelled.
+test("agent run recovery API never resumes a custom Skill step after restart", async () => {
   const agentRunStore = createInMemoryAgentRunStore();
   const calls = [];
   const skillRegistry = createSkillRegistry([
@@ -2314,9 +2324,12 @@ test("agent run recovery API resumes a paused read-only custom step after restar
     assert.equal(body.runs[0].runId, "run-http-restart-resume");
     assert.deepEqual(
       body.runs[0].recovery.actions.map((action) => action.type),
-      ["resume_from_step", "cancel"]
+      ["cancel"]
     );
-    assert.equal(body.runs[0].recovery.replaySafety.canAutoReplay, true);
+    assert.deepEqual(body.runs[0].recovery.replaySafety.reasonCodes, [
+      STEP_REPLAY_SAFETY_REASON_CODES.graphNodeStep,
+    ]);
+    assert.equal("canAutoReplay" in body.runs[0].recovery.replaySafety, false);
 
     response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
       headers: {
@@ -2342,35 +2355,49 @@ test("agent run recovery API resumes a paused read-only custom step after restar
       }
     );
 
-    assert.equal(response.status, 200);
-    body = await response.json();
+    assert.equal(response.status, 400);
+    assert.match(
+      (await response.json()).error,
+      /Unsupported agent run recovery action: resume_from_step/
+    );
 
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0].docIds, ["doc-1"]);
-    assert.equal(calls[0].question, "What changed after restart?");
-    assert.equal(calls[0].accessScope.userId, recoveryAccessScope.userId);
-    assert.equal(
-      calls[0].accessScope.workspaceId,
-      recoveryAccessScope.workspaceId
+    // The step retry route refuses it too, and the Skill never ran.
+    response = await fetch(
+      `${server.baseUrl}/agent-runs/run-http-restart-resume/steps/step-custom-paused/actions/retry`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...recoveryScopeHeaders,
+        },
+        body: JSON.stringify({}),
+      }
     );
-    assert.deepEqual(calls[0].retrievalPlan, {
-      retrievalQueries: ["restart change"],
-    });
-    assert.equal(body.response.agentMode, "read_only_recovery_probe");
-    assert.equal(body.response.agentRunStatus, "completed");
-    assert.equal(body.response.agentAnswer, "Recovered after restart. [Source 1]");
-    assert.equal(body.run.status, AGENT_RUN_STATUSES.completed);
-    assert.equal(
-      body.run.steps.find((step) => step.id === "step-custom-paused").status,
-      AGENT_RUN_STEP_STATUSES.completed
-    );
+
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /cannot be replayed as standalone steps/);
+    assert.equal(calls.length, 0);
 
     response = await fetch(`${server.baseUrl}/agent-runs/recovery`, {
       headers: recoveryScopeHeaders,
     });
 
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).runs.length, 0);
+    body = await response.json();
+    assert.deepEqual(
+      body.runs.map((run) => [
+        run.runId,
+        run.status,
+        run.steps.find((step) => step.id === "step-custom-paused").status,
+      ]),
+      [
+        [
+          "run-http-restart-resume",
+          AGENT_RUN_STATUSES.waitingForUser,
+          AGENT_RUN_STEP_STATUSES.paused,
+        ],
+      ]
+    );
   } finally {
     await server.close();
   }
@@ -2546,7 +2573,6 @@ test("agent run recovery API exposes blocked approval safety after restart", asy
       STEP_REPLAY_SAFETY_REASON_CODES.requiresApproval,
       STEP_REPLAY_SAFETY_REASON_CODES.nonIdempotent,
     ]);
-    assert.equal(run.recovery.replaySafety.steps[0].canAutoReplay, false);
 
     response = await fetch(
       `${server.baseUrl}/agent-runs/run-http-restart-blocked-web/recovery/actions/resume_from_step`,
@@ -2562,8 +2588,11 @@ test("agent run recovery API exposes blocked approval safety after restart", asy
       }
     );
 
-    assert.equal(response.status, 409);
-    assert.match((await response.json()).error, /no safe step to resume/i);
+    assert.equal(response.status, 400);
+    assert.match(
+      (await response.json()).error,
+      /Unsupported agent run recovery action: resume_from_step/
+    );
   } finally {
     await server.close();
   }
@@ -3806,7 +3835,7 @@ test("admin status endpoint returns scoped compact snapshot behind auth", async 
                 recovery: {
                   actions: [
                     {
-                      type: "resume_from_step",
+                      type: "retry_failed_step",
                     },
                   ],
                   required: true,
@@ -4354,17 +4383,16 @@ test("admin actions endpoint runs controlled actions behind auth", async () => {
                 recovery: {
                   actions: [
                     {
-                      label: "Resume document RAG",
-                      reason: "safe_step_ready",
+                      label: "Document RAG",
+                      reason: "failed_step_ready",
                       stepId: "step-1",
                       stepType: "document_rag",
-                      type: "resume_from_step",
+                      type: "retry_failed_step",
                     },
                   ],
-                  reason: "safe_step_ready",
+                  reason: "failed_step_ready",
                   replaySafety: {
-                    canAutoReplay: true,
-                    reasonCodes: [],
+                    reasonCodes: ["non_idempotent"],
                     steps: [
                       {
                         input: {

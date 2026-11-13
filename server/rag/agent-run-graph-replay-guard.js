@@ -5,7 +5,6 @@ import {
   sealExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 
-const GRAPH_STEP_PREFIX = "custom_skill:";
 const V3_GRAPH_STEP_PREFIX = "agent_graph_node:";
 const TERMINAL_GRAPH_PHASES = new Set(["completed", "partial"]);
 const POST_GRAPH_STEP_EVENTS = new Set([
@@ -15,6 +14,12 @@ const POST_GRAPH_STEP_EVENTS = new Set([
   "step_failed",
 ]);
 
+// One refusal for everything this guard stops. A custom Skill step is refused
+// whatever its run looks like: a custom Skill runs only as a node of its
+// execution graph, so nothing may run, update or retry its step from outside
+// one (ADR 0001 phase 9; before it, a `custom_skill` step without a `nodeId`
+// -- a step of the deleted V1 sequential chain -- was let through to a
+// standalone handler).
 const failStandaloneGraphAction = () => {
   const error = new Error(
     "Guarded ExecutionGraph runs cannot be replayed as standalone steps; use whole-graph recovery."
@@ -41,10 +46,9 @@ const resolveOriginalStep = (run, stepId) => {
       return { id: "", markedAsGraphNode };
     }
     seen.add(currentId);
-    markedAsGraphNode ||= (
-      current.type === "custom_skill" &&
-      Boolean(normalizeText(current.input?.nodeId))
-    ) || current.type === "graph_node" || currentId.startsWith(V3_GRAPH_STEP_PREFIX);
+    markedAsGraphNode ||= current.type === "custom_skill" ||
+      current.type === "graph_node" ||
+      currentId.startsWith(V3_GRAPH_STEP_PREFIX);
 
     const parentId = normalizeText(current.retryOfStepId);
 
@@ -111,7 +115,8 @@ export const assertStandaloneGraphReplayAllowed = ({
     : { id: "", markedAsGraphNode: false };
   const checkpoint = run?.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
 
-  // The nodeId marker remains a fail-closed signal if a checkpoint was lost.
+  // The step type is the marker, so a graph node stays refused even if its
+  // run's checkpoint was lost.
   if (original.markedAsGraphNode) {
     failStandaloneGraphAction();
   }
@@ -123,30 +128,17 @@ export const assertStandaloneGraphReplayAllowed = ({
   const graphNodes = Array.isArray(checkpoint.graph?.nodes)
     ? checkpoint.graph.nodes
     : [];
-  const nodeRuns = Array.isArray(checkpoint.nodeRuns)
-    ? checkpoint.nodeRuns
-    : [];
-  const originalIsGraphNode = step?.type === "graph_node" ||
-    original.id.startsWith(V3_GRAPH_STEP_PREFIX) || (
-      step?.type === "custom_skill" &&
-      original.id.startsWith(GRAPH_STEP_PREFIX) && (
-        graphNodes.some(
-          (node) => normalizeText(node?.nodeId) === original.id.slice(GRAPH_STEP_PREFIX.length)
-        ) ||
-        nodeRuns.some(
-          (nodeRun) => normalizeText(nodeRun?.nodeId) === original.id.slice(GRAPH_STEP_PREFIX.length)
-        )
-      )
-    ) || graphNodes.some((node) => {
-      try {
-        return buildExecutionGraphNodeStepId({
-          checkpointVersion: checkpoint.version,
-          nodeId: node.nodeId,
-        }) === original.id;
-      } catch {
-        return false;
-      }
-    });
+  // A step whose type does not say so can still carry a node's step id.
+  const originalIsGraphNode = graphNodes.some((node) => {
+    try {
+      return buildExecutionGraphNodeStepId({
+        checkpointVersion: checkpoint.version,
+        nodeId: node.nodeId,
+      }) === original.id;
+    } catch {
+      return false;
+    }
+  });
 
   if (originalIsGraphNode || !isTerminalCheckpoint(checkpoint)) {
     failStandaloneGraphAction();

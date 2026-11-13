@@ -4,13 +4,13 @@ import {
 } from "./agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "./agent-run-steps.js";
 import {
-  AUTO_RECOVERY_STEP_STATUS_VALUES,
-  DEFAULT_AUTO_RECOVERY_STEP_TYPES,
+  INTERRUPTED_STEP_STATUS_VALUES,
   MANUAL_RECOVERY_EVENT,
-  findAutoRecoverableStep,
+  explainInterruptedRun,
 } from "./agent-run-recovery.js";
 import {
   buildStepReplaySafetyAssessment,
+  isStepRetryAllowed,
 } from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 import { normalizeText } from "../lib/normalize-text.js";
@@ -19,9 +19,11 @@ const normalizeAction = (value) => normalizeText(value).toLowerCase();
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
+// What an operator can do with a run from the recovery panel. There is no
+// "resume from step": a step is never replayed on its own, and an interrupted
+// graph is continued by startup recovery, not from here.
 export const AGENT_RUN_RECOVERY_ACTIONS = Object.freeze({
   cancel: "cancel",
-  resumeFromStep: "resume_from_step",
   retryFailedStep: "retry_failed_step",
 });
 
@@ -39,7 +41,7 @@ const RESUMABLE_RUN_STATUSES = new Set([
 
 const FAILED_STEP_STATUSES = new Set([AGENT_RUN_STEP_STATUSES.failed]);
 const RECOVERY_REPLAY_STEP_STATUSES = new Set([
-  ...AUTO_RECOVERY_STEP_STATUS_VALUES,
+  ...INTERRUPTED_STEP_STATUS_VALUES,
   AGENT_RUN_STEP_STATUSES.failed,
 ]);
 
@@ -55,10 +57,17 @@ const isManualRecoveryRun = (run = {}) =>
   run.status === AGENT_RUN_STATUSES.waitingForUser &&
   (hasManualRecoveryEvent(run) || getRecoveryRecord(run)?.mode === "manual");
 
-const findFailedStep = (run = {}) =>
-  [...toArray(run.steps)]
-    .reverse()
-    .find((step) => step?.id && FAILED_STEP_STATUSES.has(step.status)) ?? null;
+// The run's last failed step, when its type can be retried on its own. A
+// failed graph node cannot (a custom Skill runs only inside its graph), so it
+// is not offered: the retry would always be refused.
+const findRetryableFailedStep = (run = {}) => {
+  const failedStep =
+    [...toArray(run.steps)]
+      .reverse()
+      .find((step) => step?.id && FAILED_STEP_STATUSES.has(step.status)) ?? null;
+
+  return failedStep && isStepRetryAllowed(failedStep.type) ? failedStep : null;
+};
 
 const sortRunsByUpdatedAtDesc = (runs = []) =>
   [...runs].sort((left, right) =>
@@ -84,20 +93,14 @@ const buildStepAction = ({ reason, safety = null, step, type } = {}) => ({
   type,
 });
 
-const buildAgentRunReplaySafetyState = ({
-  run = {},
-  safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
-} = {}) => {
+// What replaying each interrupted or failed step would risk or lack.
+const buildAgentRunReplaySafetyState = ({ run = {} } = {}) => {
   const steps = toArray(run.steps)
     .filter(
       (step) => step?.id && RECOVERY_REPLAY_STEP_STATUSES.has(step.status)
     )
     .map((step) => ({
-      ...buildStepReplaySafetyAssessment({
-        autoReplayStepTypes: safeAutoRecoveryStepTypes,
-        run,
-        step,
-      }),
+      ...buildStepReplaySafetyAssessment({ run, step }),
       kind: step.kind ?? "",
       status: step.status ?? "",
     }));
@@ -106,51 +109,20 @@ const buildAgentRunReplaySafetyState = ({
   ];
 
   return {
-    canAutoReplay: steps.some(
-      (step) =>
-        step.canAutoReplay && AUTO_RECOVERY_STEP_STATUS_VALUES.includes(step.status)
-    ),
     reasonCodes,
     steps,
   };
 };
 
-export const buildAgentRunRecoveryState = ({
-  run = {},
-  safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
-} = {}) => {
+export const buildAgentRunRecoveryState = ({ run = {} } = {}) => {
   const recoveryRecord = getRecoveryRecord(run);
-  const resumeCandidate = findAutoRecoverableStep({
-    run,
-    safeStepTypes: safeAutoRecoveryStepTypes,
-  });
-  const failedStep = findFailedStep(run);
-  const replaySafety = buildAgentRunReplaySafetyState({
-    run,
-    safeAutoRecoveryStepTypes,
-  });
+  const interrupted = explainInterruptedRun({ run });
+  const failedStep = findRetryableFailedStep(run);
+  const replaySafety = buildAgentRunReplaySafetyState({ run });
   const safetyByStepId = new Map(
     replaySafety.steps.map((stepSafety) => [stepSafety.stepId, stepSafety])
   );
   const actions = [];
-
-  if (
-    isManualRecoveryRun(run) &&
-    RESUMABLE_RUN_STATUSES.has(run.status) &&
-    resumeCandidate.step
-  ) {
-    actions.push(
-      buildStepAction({
-        reason: resumeCandidate.reason,
-        safety:
-          resumeCandidate.safety ??
-          safetyByStepId.get(resumeCandidate.step.id) ??
-          null,
-        step: resumeCandidate.step,
-        type: AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep,
-      })
-    );
-  }
 
   if (isRetryableAgentRunStatus(run.status) && failedStep) {
     actions.push(
@@ -166,7 +138,7 @@ export const buildAgentRunRecoveryState = ({
   if (isManualRecoveryRun(run) && RESUMABLE_RUN_STATUSES.has(run.status)) {
     actions.push({
       label: "Cancel run",
-      reason: recoveryRecord?.reason ?? resumeCandidate.reason,
+      reason: recoveryRecord?.reason ?? interrupted.reason,
       stepId: "",
       stepType: "",
       type: AGENT_RUN_RECOVERY_ACTIONS.cancel,
@@ -177,23 +149,17 @@ export const buildAgentRunRecoveryState = ({
     actions,
     reason:
       recoveryRecord?.reason ??
-      (failedStep ? "failed_step_ready" : resumeCandidate.reason),
+      (failedStep ? "failed_step_ready" : interrupted.reason),
     required: actions.length > 0,
     requestedMode: recoveryRecord?.requestedMode ?? recoveryRecord?.mode ?? "",
     replaySafety,
-    stepId: recoveryRecord?.stepId ?? resumeCandidate.step?.id ?? failedStep?.id ?? "",
+    stepId: recoveryRecord?.stepId ?? failedStep?.id ?? "",
   };
 };
 
-export const withAgentRunRecoveryState = ({
-  run,
-  safeAutoRecoveryStepTypes,
-} = {}) => ({
+export const withAgentRunRecoveryState = ({ run } = {}) => ({
   ...run,
-  recovery: buildAgentRunRecoveryState({
-    run,
-    safeAutoRecoveryStepTypes,
-  }),
+  recovery: buildAgentRunRecoveryState({ run }),
 });
 
 export const createAgentRunRecoveryActionService = ({
@@ -201,7 +167,6 @@ export const createAgentRunRecoveryActionService = ({
   agentRunStepExecutor,
   now = () => new Date().toISOString(),
   recordRecoveryTrace = recordRagTrace,
-  safeAutoRecoveryStepTypes = DEFAULT_AUTO_RECOVERY_STEP_TYPES,
 } = {}) => {
   const listActionableRuns = async ({ accessScope = {} } = {}) => {
     const runById = new Map();
@@ -220,12 +185,7 @@ export const createAgentRunRecoveryActionService = ({
     }
 
     return sortRunsByUpdatedAtDesc([...runById.values()])
-      .map((run) =>
-        withAgentRunRecoveryState({
-          run,
-          safeAutoRecoveryStepTypes,
-        })
-      )
+      .map((run) => withAgentRunRecoveryState({ run }))
       .filter((run) => run.recovery.required);
   };
 
@@ -241,10 +201,7 @@ export const createAgentRunRecoveryActionService = ({
       throw error;
     }
 
-    return withAgentRunRecoveryState({
-      run,
-      safeAutoRecoveryStepTypes,
-    });
+    return withAgentRunRecoveryState({ run });
   };
 
   return {
@@ -314,34 +271,6 @@ export const createAgentRunRecoveryActionService = ({
               runId,
             }),
           };
-        }
-
-        if (normalizedAction === AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep) {
-          if (!agentRunStepExecutor?.resumeStep) {
-            const error = new Error("Agent run step resume is not available.");
-            error.status = 409;
-            throw error;
-          }
-
-          const resumeAction = findRecoveryAction({
-            actions: run.recovery.actions,
-            stepId,
-            type: AGENT_RUN_RECOVERY_ACTIONS.resumeFromStep,
-          });
-
-          if (!resumeAction) {
-            const error = new Error("Agent run has no safe step to resume.");
-            error.status = 409;
-            throw error;
-          }
-
-          selectedStepId = stepId || resumeAction.stepId;
-
-          return agentRunStepExecutor.resumeStep({
-            accessScope,
-            runId,
-            stepId: selectedStepId,
-          });
         }
 
         const retryAction = findRecoveryAction({
