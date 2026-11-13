@@ -617,6 +617,12 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 复核没能验证的两项：`server/.env` 按规则没有读（里面如果有 `AGENT_OUTER_PLAN_RUNTIME=native` 或拼错的值，`node server.js` 现在拒绝启动）；Node 22 上新 golden 的比较，等 CI。
 
+修正之后重跑（提交 9b74106c，即修正提交 8f51955f 加面试材料的文档提交，本机 Node 24.21.0）：
+
+- `coverage:gate` 接一次性 PostgreSQL 18 + pgvector：4,585 个测试，4,578 通过、7 跳过、0 失败；全局行覆盖 92.58%，五组覆盖率门和目标都通过。数字与删除提交上的那次相同（修正没有增减测试）。
+- `quality:current` 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
+- 受修正影响的单文件套件：`agent-runtime-removed` 15/15、`langgraph-execution-plan-graph` 26/26、`langgraph-routes` 8/8、`langgraph-chat-stream` 8/8、`service-split.e2e` 1/1。
+
 ## 后果
 
 **已认可的一处偏离（2026-10-14）。** 目标文件第 10 条写的是"`RunnableConfig.signal` 接 `request-deadline.js`"。spike 证明这样做是"至少一次"：取消后在途节点在后台跑完、写入被丢、续跑时重跑。本 ADR 改为：请求 signal 触发 `RunControl.requestDrain()`，配合节点安全点、等待在途节点、v2 checkpoint 复用。终态和错误码不变（仍走 `failRun` 的 revision CAS）。
