@@ -9,6 +9,7 @@ import AgentTraceDetail, {
 import AgentTraceOverview from "./AgentTraceOverview";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
+import { isStepRetrySupported } from "./workbenchFormatters";
 
 // English unless the app hands in its translator: the citation location is
 // the one label here that follows the locale ("Page 4" / "第 4 页").
@@ -260,8 +261,7 @@ const AgentRunControlPanel = ({
   const runId = answer.agentRunId;
   const runStatus = answer.agentRunStatus ?? "unknown";
   const pendingGates = gates.filter(isPendingGate);
-  const failedSteps = steps.filter(isFailedStep);
-  const retryableSteps = failedSteps.filter((step) => step.id);
+  const failedSteps = steps.filter(isFailedStep).filter((step) => step.id);
 
   if (!runId && steps.length === 0 && gates.length === 0) {
     return null;
@@ -319,16 +319,16 @@ const AgentRunControlPanel = ({
         turnIndex={turnIndex}
       />
 
-      {retryableSteps.length > 0 ? (
+      {failedSteps.length > 0 ? (
         <div className="archive-run-retry-panel">
           <div className="archive-source-section-label">Failed steps</div>
-          {retryableSteps.map((step) => (
+          {failedSteps.map((step) => (
             <div key={step.id} className="archive-run-retry-item">
               <div>
                 <strong>{step.label ?? step.type ?? "Step"}</strong>
                 <span>{step.error?.message ?? step.summary ?? "Step failed."}</span>
               </div>
-              {onStepRetry && runId ? (
+              {onStepRetry && runId && isStepRetrySupported(step.type) ? (
                 <button
                   type="button"
                   className="archive-run-control-button is-primary"

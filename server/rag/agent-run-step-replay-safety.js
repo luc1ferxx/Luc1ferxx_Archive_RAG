@@ -10,6 +10,11 @@ import { SKILL_EFFECTS } from "./skills/skill-contract.js";
 // types have it and what a retry may repeat. Until ADR 0001 phase 9 the matrix
 // also carried an "auto replay safe" column; its only entry was the
 // `custom_skill` step of the deleted V1 sequential chain.
+//
+// `replayActions` has to agree with the step handlers
+// (agent-run-step-handlers/): a type listed with `retry_failed_step` must have
+// a handler that can retry it. The recovery panel offers the action from this
+// matrix alone, so a type whose handler always refuses must not list it.
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -79,17 +84,20 @@ const freezePolicy = (policy) =>
   });
 
 const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
+  // An approval-capable primary step. Its handler refuses a direct retry (the
+  // step holds no hash-bound approval); what can be retried is the
+  // `capability_call` step an approval queues.
   arxiv_import: freezePolicy({
     idempotency: STEP_REPLAY_IDEMPOTENCY.dedupedWorkspaceWrite,
     optionalInput: ["maxResults", "selectionToken", "selectedArxivIds"],
-    replayActions: ["retry_failed_step"],
+    replayActions: [],
     replayRequiresApproval: true,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.capabilityPolicy,
     requiredInput: ["topic"],
-    retryable: true,
+    retryable: false,
     stepType: "arxiv_import",
     summary:
-      "Workspace-writing arXiv imports replay only from persisted sanitized topic input; importer dedupe protects repeated writes.",
+      "A workspace-writing arXiv import needs approval, so its primary step is not retried on its own. The retry goes through the hash-bound capability_call step an approval queues; importer dedupe protects repeated writes.",
   }),
   capability_call: freezePolicy({
     idempotency: STEP_REPLAY_IDEMPOTENCY.capabilityDefined,
@@ -160,17 +168,18 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
     summary:
       "Research questions use the memory-writing RAG chat path. Interrupted work goes to an operator; an explicit failed-step retry may repeat those writes.",
   }),
+  // An approval-capable primary step, like arxiv_import above.
   web_search: freezePolicy({
     idempotency: STEP_REPLAY_IDEMPOTENCY.externalReadNondeterministic,
     optionalInput: ["maxResults"],
-    replayActions: ["retry_failed_step"],
+    replayActions: [],
     replayRequiresApproval: true,
     replayApprovalPolicy: STEP_REPLAY_APPROVAL_POLICIES.capabilityPolicy,
     requiredInput: ["question"],
-    retryable: true,
+    retryable: false,
     stepType: "web_search",
     summary:
-      "Web search retry is an external read through the capability adapter; interrupted work goes to an operator.",
+      "A web search is an external read that needs approval, so its primary step is not retried on its own. The retry goes through the hash-bound capability_call step an approval queues; interrupted work goes to an operator.",
   }),
 });
 
@@ -179,11 +188,19 @@ export const getStepReplaySafetyMatrix = () => STEP_REPLAY_SAFETY_MATRIX;
 export const listStepReplaySafetyPolicies = () =>
   Object.values(STEP_REPLAY_SAFETY_MATRIX);
 
-export const getStepReplaySafetyPolicy = (stepType) =>
-  STEP_REPLAY_SAFETY_MATRIX[normalizeText(stepType).toLowerCase()] ?? null;
+// Own keys only: a step type such as "constructor" must not resolve to
+// something inherited from Object.prototype.
+export const getStepReplaySafetyPolicy = (stepType) => {
+  const key = normalizeText(stepType).toLowerCase();
 
-// The one action left for a single step. A type without a policy has no
-// handler either, so it is not retryable.
+  return Object.hasOwn(STEP_REPLAY_SAFETY_MATRIX, key)
+    ? STEP_REPLAY_SAFETY_MATRIX[key]
+    : null;
+};
+
+// The one action left for a single step: may an operator retry a failed step
+// of this type on its own. A type without a policy has no handler either, so
+// it is not retryable.
 export const isStepRetryAllowed = (stepType) =>
   Boolean(
     getStepReplaySafetyPolicy(stepType)?.replayActions.includes("retry_failed_step")

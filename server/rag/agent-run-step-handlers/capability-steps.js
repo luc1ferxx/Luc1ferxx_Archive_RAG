@@ -194,7 +194,6 @@ const executeCapabilityBackedStep = async ({
           },
         },
       }),
-    failureMessage: "Capability execution failed.",
     getCitations: getCapabilityResultCitations,
     input,
     run,

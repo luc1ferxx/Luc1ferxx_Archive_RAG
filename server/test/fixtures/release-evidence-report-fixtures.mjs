@@ -812,7 +812,7 @@ export const buildPassingCheckSuiteReport = ({
       provider,
       runId,
       status: "pass",
-      version: specId === "recovery" ? "1.1.0" : "1.0.0",
+      version: specId === "recovery" ? "1.2.0" : "1.0.0",
       metrics: buildRawMetrics(cases),
     },
     cases,

@@ -304,7 +304,6 @@ export const createResearchQuestionStepExecutor = ({ ragService } = {}) => async
         sessionId: stepInput.sessionId,
         userId: stepInput.userId,
       }),
-    failureMessage: "Research question execution failed.",
     getCitations: getSkillResultCitations,
     input,
     run,

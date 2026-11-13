@@ -791,9 +791,9 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 阶段 8 把“只有旧 run 才走得到的重试和恢复代码”留了下来，并问了用户要不要删。用户的回答是“接着清理”。这一阶段删掉它们，规则变成四条：
 
 1. custom Skill 只作为图节点运行。`custom_skill` 步骤不能单独重试，启动时也不单独重放。
-2. 启动恢复在 `auto` 模式下自己只做一件事：续跑中断的图（要先领到 claim）。其余中断的 run 都交给人。
+2. 启动恢复在 `auto` 模式下自己只做一件事：续跑中断的图（要先领到 claim）。其余中断的 run 交给人。和以前一样照旧跳过、不改状态的有三种：已经标过人工恢复的 run、已被别的 worker 领取的图、停在审批门上的 v3 图。
 3. 人在恢复面板上能做的只有两件事：重试失败步骤（`retry_failed_step`）和取消（`cancel`）。`resume_from_step` 不再是一个动作。
-4. “重试失败步骤”只在回放矩阵允许这类步骤重试时才给出。
+4. 重试按钮只在回放矩阵允许这类步骤重试时才给出，恢复面板和聊天答案里的 “Failed steps” 都一样。矩阵必须和步骤处理器一致：处理器一律拒绝的类型，矩阵不能列重试。
 
 ### 为什么这些代码只有旧 run 走得到
 
@@ -816,8 +816,17 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 恢复面板，失败的图节点步骤 | 给出 “Retry failed step”，点了一定是 409 | 不给 |
 | 失败的 `document_rag` 步骤 | 可以手动重试 | 不变 |
 | 中断的 `web_search` 步骤 | 交给人，原因 `requires_approval` | 不变 |
+| 恢复面板，失败的 `web_search` / `arxiv_import` 主步骤（独立复核发现，复核修正提交改的） | 给出 “Retry failed step”，点了一定是 409；run 已是终态、不能取消，所以一直留在恢复列表里 | 不给，run 不进恢复列表；重试路由仍是 409，报文不变 |
+| 聊天答案里的 “Failed steps”（同上，复核修正提交改的） | 每个失败步骤都有 Retry 按钮；图节点和上面两类主步骤点了一定是 409 | 失败步骤照旧列出，只有矩阵允许的类型有 Retry 按钮 |
 
-第二行和第五行是顺带修掉的两处：前者是一个没人接手的死循环（每次启动失败一次，run 永远停在 `running`），后者是阶段 8 复核记下的“点了必 409 的按钮”。
+第二行和第五行是顺带修掉的两处：前者是一个没人接手的死循环（每次启动失败一次，run 永远停在 `running`），后者是阶段 8 复核记下的“点了必 409 的按钮”。最后两行是这一阶段的独立复核找到的同一类按钮，见“独立复核”。
+
+表里没有单列、随之发生的变化（独立复核逐条对过，都不是变差）：
+
+- 最后一个失败步骤不能重试的 completed / failed run 不再进恢复列表。不只是 Skill 节点：`graph_node`、`inventory` 这类没有策略的类型，以及 `web_search`、`arxiv_import` 也一样。admin status 的 `recoveryCount` 和 `agent_runs_need_recovery` 警告跟着不再把它们算进去。这类 run 的 `recovery.reason` 从 `failed_step_ready` 变成中断原因，`recovery.stepId` 变成空串。
+- “先有一个可重试的失败步骤、后有一个不可重试的”这种 run：以前给后一个步骤一个必 409 的按钮，现在什么都不给。前一个步骤以前也不给（只看最后一个失败步骤），没有变差。
+- 混合中断的 run（一个 `document_rag` 还在 running，旁边一个 pending 的旧链步骤）：以前启动会越过前者去单独重放后者，现在第一次启动就交给人。
+- 原因码 `auto_recovery_executor_unavailable` 不再产生（生产接线里本来就走不到）。
 
 ### 删了什么
 
@@ -826,20 +835,28 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 启动恢复里的单步重放：`runAutoRecovery`、`findAutoRecoverableStep`、`safeAutoRecoveryStepTypes` 和 `agentRunStepExecutor` 两个参数、恢复记录里的 `stepId` / `stepType`。启动恢复服务不再持有 step executor。
 - 恢复动作 `resume_from_step`。
 - 回放矩阵里的“可自动重放”一列（`autoReplaySafe`、`getAutoReplaySafeStepTypes`、`isAutoReplaySafeStepType`）、评估结果里的 `canAutoReplay` / `configuredAutoReplaySafe`，以及没有策略再用的两个幂等类别（`read_only_rag`、`read_only_deterministic`）。恢复接口、admin 的恢复扫描和前端跟着去掉 `canAutoReplay`。
-- 前端：“Resume step” 按钮和提示语，“Auto replay allowed / blocked” 一行（改成直接显示原因码），trace 详情里的 “Chain mode” 一行（服务端早已不写这个字段）。
+- 前端：“Resume step” 按钮和提示语，“Auto replay allowed / blocked” 一行（改成直接显示原因码），trace 详情里的 “Chain mode” 一行。服务端从阶段 8（同一天）起不再写 `chainMode`；存量 trace 里带这个字段的，现在少显示这一行。
+- 复核修正时一并删掉的无人调用的代码：`createCustomSkillRegistry`（`skills/registry.js`）、`isSideEffectingSkill`（`skills/skill-contract.js`，只剩测试在用）、`runRetriableStep` 里“结果对象表示失败”的分支和它的三个选项（只有被删的处理器传过）。
 - 评测：见“评测套件的改动”。
 - 测试：见“证据”。
 
 ### 改了什么
 
 - 回放矩阵（`agent-run-step-replay-safety.js`）：`custom_skill` 的 `replayActions` 为空、`retryable: false`，幂等类别 `graph_owned`，原因码 `graph_node_step`。新增 `isStepRetryAllowed(stepType)`，恢复面板给不给“重试失败步骤”读它；没有策略的类型（如 v3 的 `graph_node`）没有处理器，同样不给。
-- 回放守卫（`agent-run-graph-replay-guard.js`）：凡是 `custom_skill` 步骤一律拒绝，不再看有没有 `nodeId`。原来靠 checkpoint 里的节点 id 去认“没带 `nodeId` 的图节点”的那段分支因此走不到，删了。守卫在 step executor 的预检和 run store 的 CAS 里都生效，所以直接调 `agentRunService.retryStep` / `updateRunStep` 也改不了这类步骤。
+  - 复核修正：`web_search`、`arxiv_import` 的 `replayActions` 也改成空、`retryable: false`。这两类是需要审批的主步骤，处理器一直拒绝直接重试（要重试的是审批后排进来的 `capability_call` 步骤），矩阵原来却列着重试。现在矩阵允许重试的是四类：`document_rag`、`follow_up_retrieval`、`research_question`、`capability_call`。
+  - 复核修正：按步骤类型取策略只认矩阵自己的键。原来类型是 `constructor` 这类原型属性名的步骤会取到继承来的东西；加了 `isStepRetryAllowed` 之后，这会让恢复列表对整个 scope 抛错。步骤类型都是服务端常量，只有数据损坏时才遇得到。
+- 回放守卫（`agent-run-graph-replay-guard.js`）：凡是 `custom_skill` 步骤一律拒绝，不再看有没有 `nodeId`。原来靠 checkpoint 里的节点 id 去认“没带 `nodeId` 的图节点”的那段分支因此走不到，删了。
+  - 守卫在三处无条件生效：step executor 重试前的预检，run store 的 `retryStep` 和 `updateRunStep`。所以直接调这两个方法也改不了这类步骤。
+  - 图自己写节点步骤走步骤生命周期（`recordRunStep`），那里只在 run 上有 checkpoint、而这个步骤不是 checkpoint 里的节点时才问守卫。这是必须的：没有 checkpoint 的图运行靠这条路写 `custom_skill` 步骤。所以“任何状态改写都被拒绝”不成立，成立的是“没有哪条路径能把它当成独立步骤重跑或改写”。
+  - 复核修正：守卫比较类型前先去空白、转小写，和矩阵、处理器的读法一致。
+- 前端聊天答案里的 “Failed steps”（`RenderQA.jsx`）：Retry 按钮只对矩阵允许的四类步骤显示。前端自己那份类型清单（`workbenchFormatters.js`）由 `workbenchFormatters.test.js` 直接对着服务端矩阵核对。
 - 启动恢复（`agent-run-recovery.js`）：没有图可续的 run 直接交给人，原因由 `explainInterruptedRun` 给出（有待审批项是 `pending_approval_gate`，否则是第一个中断步骤的第一个原因码，没有中断步骤是 `no_safe_recoverable_step`）。对非 `custom_skill` 的步骤，原因和以前一样。
 - 步骤持久化的 Skill 契约（`effects`、`replaySafe`）继续进原因码，只是不再决定“能不能自动重放”。`unsafe_by_policy` 现在只表示“这个 Skill 自己声明不能重放”。
 
 ### 保留什么
 
-- 外层计划步骤（`document_rag`、`follow_up_retrieval`、`research_question`、`web_search`、`arxiv_import`、`capability_call`）的手动重试，以及审批放行后执行 capability 步骤。它们不是 custom Skill，当前的 run 用得到。
+- `document_rag`、`follow_up_retrieval`、`research_question` 和审批绑定的 `capability_call` 这四类步骤的手动重试，以及审批放行后执行 capability 步骤。它们不是 custom Skill，当前的 run 用得到。`web_search`、`arxiv_import` 的处理器也保留，作用只是用它们自己的报文拒绝直接重试。
+- `rag/langgraph/tools.js`：把 Skill 包成 LangChain tool 的适配器（阶段 1 的产物）。它能在图节点之外调用 Skill，但生产路径里没有任何地方把这些 tool 交给图或 agent，只有它自己的测试在用。所以准确的说法是“接了线的路径里，custom Skill 只在图里运行”。
 - 启动恢复 trace 和发布门里 `autoReplay*` 这组名字。名字没改（存量 trace、报告和前端都读它），含义变成“自动续跑中断的图”，因为启动恢复不再重放别的东西。前端这一项的标签从 “Auto replay” 改成 “Auto recovery”。
 - connector 清单自己的 `replaySafety.autoReplaySafe`。那是另一套 schema，声明为 `true` 会被拒绝，和步骤矩阵无关。
 - 报告里图回落的两个计数和 `graph_fallback_after_execution_zero`。它们是“必须为 0”的守卫。

@@ -765,9 +765,9 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "Retry failed step" })
     ).toBeInTheDocument();
-    // No step is ever run on its own, so the panel has no resume button and
-    // no "auto replay" verdict: it shows what a replay would risk.
-    expect(screen.queryByRole("button", { name: "Resume step" })).toBeNull();
+    // No step is ever run on its own, so the panel has no "auto replay"
+    // verdict: it shows what a replay would risk. (That "resume from step" has
+    // no label of its own any more is in workbenchFormatters.test.js.)
     expect(screen.queryByText(/Auto replay/)).toBeNull();
     expect(screen.getAllByText("Run status").length).toBeGreaterThan(0);
     expect(screen.getByText("document_rag")).toBeInTheDocument();

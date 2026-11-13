@@ -1076,15 +1076,10 @@ test("postgres agent run recovery never replays a running memory-writing documen
   const restartedService = harness.createService({
     now: () => "2026-06-14T00:05:00.000Z",
   });
-  const ragCalls = [];
-  const agentRunStepExecutor = createPostgresDocumentStepExecutor({
-    agentRunService: restartedService,
-    calls: ragCalls,
-    text: "Recovered running primary step.",
-  });
+  // Startup recovery holds no step executor, so it has nothing to run the
+  // document step with. What the store holds afterwards is the evidence.
   const recoveryService = createAgentRunRecoveryService({
     agentRunService: restartedService,
-    agentRunStepExecutor,
     now: () => "2026-06-14T00:06:00.000Z",
   });
 
@@ -1111,15 +1106,14 @@ test("postgres agent run recovery never replays a running memory-writing documen
       requestedMode: "auto",
     }
   );
-  assert.equal(ragCalls.length, 0);
   assert.equal(
     recoveredRun.steps[0].status,
     AGENT_RUN_STEP_STATUSES.running
   );
-  assert.ok(
-    recoveredRun.events.some(
-      (event) => event.type === "manual_recovery_required"
-    )
+  assert.equal(recoveredRun.steps[0].output ?? null, null);
+  assert.deepEqual(
+    recoveredRun.events.map((event) => event.type),
+    ["run_created", "manual_recovery_required"]
   );
   assert.equal(
     recoveredRun.events.some((event) => event.type === "auto_recovery_started"),
@@ -1524,9 +1518,6 @@ test("postgres canceled manual recovery runs stay terminal across startup recove
   });
   const recoveryService = createAgentRunRecoveryService({
     agentRunService: restartedService,
-    agentRunStepExecutor: createPostgresDocumentStepExecutor({
-      agentRunService: restartedService,
-    }),
     now: () => "2026-06-14T00:06:00.000Z",
   });
   const startupRecovery = await recoveryService.recoverOnStartup({

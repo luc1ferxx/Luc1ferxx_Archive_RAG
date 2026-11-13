@@ -30,9 +30,22 @@ test("step replay safety matrix fixes contracts for core replay paths", () => {
     "capability_call",
   ]) {
     assert.ok(matrix[stepType], `${stepType} policy is registered`);
-    assert.equal(matrix[stepType].retryable, true);
     assert.ok(matrix[stepType].requiredInput.length > 0);
     assert.ok(matrix[stepType].idempotency);
+  }
+
+  for (const stepType of ["document_rag", "capability_call"]) {
+    assert.equal(matrix[stepType].retryable, true, stepType);
+    assert.ok(matrix[stepType].replayActions.includes("retry_failed_step"), stepType);
+  }
+
+  // An approval-capable primary step is not retried on its own: its handler
+  // refuses, and the retry goes through the capability_call step an approval
+  // queues. The matrix has to say the same, because the recovery panel offers
+  // "Retry failed step" from the matrix alone.
+  for (const stepType of ["web_search", "arxiv_import"]) {
+    assert.equal(matrix[stepType].retryable, false, stepType);
+    assert.deepEqual(matrix[stepType].replayActions, [], stepType);
   }
 
   // The matrix has no "auto replay safe" column: nothing replays a step on
@@ -89,18 +102,33 @@ test("the step types an operator may retry by hand are derived from the matrix",
       .filter(isStepRetryAllowed)
       .sort(),
     [
-      "arxiv_import",
       "capability_call",
       "document_rag",
       "follow_up_retrieval",
       "research_question",
-      "web_search",
     ]
   );
   assert.equal(isStepRetryAllowed("custom_skill"), false);
+  assert.equal(isStepRetryAllowed("web_search"), false);
+  assert.equal(isStepRetryAllowed("arxiv_import"), false);
   // A type without a policy has no handler either.
   assert.equal(isStepRetryAllowed("graph_node"), false);
   assert.equal(isStepRetryAllowed(""), false);
+});
+
+test("a step type that names an Object.prototype property has no policy", () => {
+  // The matrix is a plain object. A stored step whose type is "constructor"
+  // must not resolve to something inherited, which would make the recovery
+  // listing throw for the whole scope.
+  for (const stepType of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    assert.equal(getStepReplaySafetyPolicy(stepType), null, stepType);
+    assert.equal(isStepRetryAllowed(stepType), false, stepType);
+    assert.deepEqual(
+      buildStepReplaySafetyAssessment({ step: { id: "odd", type: stepType } }).reasonCodes,
+      [STEP_REPLAY_SAFETY_REASON_CODES.unsupportedStepType],
+      stepType
+    );
+  }
 });
 
 test("step handler registry exposes replay safety contracts", () => {
@@ -114,15 +142,41 @@ test("step handler registry exposes replay safety contracts", () => {
     getStepReplaySafetyPolicy("document_rag")
   );
   assert.equal(webHandler.replaySafety.requiredInput[0], "question");
-  // One handler per step type the matrix lets an operator retry, and none for
-  // a custom Skill step: a custom Skill runs only as a node of its graph.
+  // The matrix and the handlers have to agree, because the recovery panel
+  // offers "Retry failed step" from the matrix alone. Every type the matrix
+  // lets an operator retry has a handler ...
+  const handlerIds = handlers.map((handler) => handler.id).sort();
+  const retryableTypes = listStepReplaySafetyPolicies()
+    .map((policy) => policy.stepType)
+    .filter(isStepRetryAllowed)
+    .sort();
+
   assert.deepEqual(
-    handlers.map((handler) => handler.id).sort(),
-    listStepReplaySafetyPolicies()
-      .map((policy) => policy.stepType)
-      .filter(isStepRetryAllowed)
-      .sort()
+    retryableTypes.filter((stepType) => !handlerIds.includes(stepType)),
+    []
   );
+  // ... and the only handlers for a type the matrix does not let an operator
+  // retry are the two that exist to refuse, with their own message.
+  const refusingIds = handlerIds.filter((id) => !retryableTypes.includes(id));
+
+  assert.deepEqual(refusingIds, ["arxiv_import", "web_search"]);
+  for (const id of refusingIds) {
+    const handler = registry.resolve({ step: { id: `${id}:primary`, type: id } });
+
+    for (const method of ["prepareRetry", "execute"]) {
+      assert.throws(
+        () => handler[method]({ run: {}, step: { id: `${id}:primary`, type: id } }),
+        (error) => {
+          assert.equal(error.status, 409);
+          assert.match(error.message, /cannot be retried directly/);
+          return true;
+        },
+        `${id}.${method}`
+      );
+    }
+  }
+  // There is no handler for a custom Skill step: a custom Skill runs only as
+  // a node of its graph.
   assert.equal(
     registry.resolve({ step: { id: "custom_skill:node", type: "custom_skill" } }),
     null

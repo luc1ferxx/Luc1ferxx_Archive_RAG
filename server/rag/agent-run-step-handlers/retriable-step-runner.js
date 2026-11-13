@@ -64,11 +64,8 @@ export const runRetriableStep = async ({
   buildRunResult = buildCompletedRunResult,
   buildStartedPatch,
   execute,
-  failureMessage = "Agent run step failed.",
   getCitations = () => [],
-  getFailedResultError = () => new Error(failureMessage),
   input,
-  isFailedResult = () => false,
   run,
   step,
 } = {}) => {
@@ -101,34 +98,6 @@ export const runRetriableStep = async ({
       patch: buildStepPatch(buildFailedPatch, {
         error,
         input,
-        run,
-        step,
-      }),
-      runId: run.runId,
-      status: AGENT_RUN_STEP_STATUSES.failed,
-      stepId: step.id,
-    });
-    await completeRunAfterStepFailure({
-      accessScope,
-      agentMode,
-      agentRunService,
-      error,
-      run,
-      runAfterStep,
-      status: error.status ?? 500,
-    });
-    throw error;
-  }
-
-  if (isFailedResult(result)) {
-    const error = getFailedResultError(result);
-    const runAfterStep = await agentRunService.updateRunStep({
-      accessScope,
-      eventType: "step_failed",
-      patch: buildStepPatch(buildFailedPatch, {
-        error,
-        input,
-        result,
         run,
         step,
       }),

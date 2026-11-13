@@ -538,6 +538,79 @@ describe("RenderQA", () => {
     ).toBeInTheDocument();
   });
 
+  test("a failed step gets a Retry button only when the server can retry its type", () => {
+    const handleStepRetry = vi.fn();
+    const failedDocumentStep = {
+      error: { message: "Document step failed." },
+      id: "document_rag:primary",
+      kind: "tool_call",
+      label: "Document RAG",
+      status: "failed",
+      type: "document_rag",
+    };
+
+    render(
+      <RenderQA
+        onStepRetry={handleStepRetry}
+        conversation={[
+          {
+            question: "Review this contract for risks.",
+            answer: {
+              agentAnswer: "The run failed.",
+              agentMode: "skill_chain",
+              agentRunId: "run-failed-steps",
+              agentRunStatus: "failed",
+              agentRunSteps: [
+                failedDocumentStep,
+                {
+                  // A graph node: a custom Skill runs only inside its graph,
+                  // so the server refuses a retry of this step with 409.
+                  error: { message: "Risk review failed." },
+                  id: "custom_skill:risk_review",
+                  kind: "tool_call",
+                  label: "Risk Review",
+                  status: "failed",
+                  type: "custom_skill",
+                },
+                {
+                  // An approval-capable primary step: also refused.
+                  error: { message: "Web search failed." },
+                  id: "web_search:primary",
+                  kind: "tool_call",
+                  label: "Web Search",
+                  status: "failed",
+                  type: "web_search",
+                },
+              ],
+              ragAnswer: "",
+              ragSources: [],
+              mcpAnswer: "Web search not used.",
+            },
+          },
+        ]}
+      />
+    );
+
+    const retryPanel = document.querySelector(".archive-run-retry-panel");
+
+    // Every failed step is still listed with its error ...
+    expect(within(retryPanel).getByText("Document step failed.")).toBeInTheDocument();
+    expect(within(retryPanel).getByText("Risk review failed.")).toBeInTheDocument();
+    expect(within(retryPanel).getByText("Web search failed.")).toBeInTheDocument();
+
+    // ... and only the document step can be retried.
+    const retryButtons = within(retryPanel).getAllByRole("button", { name: "Retry" });
+
+    expect(retryButtons).toHaveLength(1);
+    fireEvent.click(retryButtons[0]);
+    expect(handleStepRetry).toHaveBeenCalledTimes(1);
+    expect(handleStepRetry).toHaveBeenCalledWith({
+      runId: "run-failed-steps",
+      step: failedDocumentStep,
+      turnIndex: 0,
+    });
+  });
+
   test("renders persisted agent run steps in the timeline", () => {
     render(
       <RenderQA

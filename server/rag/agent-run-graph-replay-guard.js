@@ -16,10 +16,13 @@ const POST_GRAPH_STEP_EVENTS = new Set([
 
 // One refusal for everything this guard stops. A custom Skill step is refused
 // whatever its run looks like: a custom Skill runs only as a node of its
-// execution graph, so nothing may run, update or retry its step from outside
-// one (ADR 0001 phase 9; before it, a `custom_skill` step without a `nodeId`
-// -- a step of the deleted V1 sequential chain -- was let through to a
-// standalone handler).
+// execution graph, so nothing may retry or update its step on its own (ADR
+// 0001 phase 9; before it, a `custom_skill` step without a `nodeId` -- a step
+// of the deleted V1 sequential chain -- was let through to a standalone
+// handler). Who asks this guard: the step executor before a retry, and the
+// run store inside `retryStep` and `updateRunStep`. A graph writes its own
+// node steps through the step lifecycle (`recordRunStep`), which asks only
+// when the run holds a checkpoint and the step is not one of its nodes.
 const failStandaloneGraphAction = () => {
   const error = new Error(
     "Guarded ExecutionGraph runs cannot be replayed as standalone steps; use whole-graph recovery."
@@ -46,8 +49,11 @@ const resolveOriginalStep = (run, stepId) => {
       return { id: "", markedAsGraphNode };
     }
     seen.add(currentId);
-    markedAsGraphNode ||= current.type === "custom_skill" ||
-      current.type === "graph_node" ||
+    // Normalized the way the replay matrix and the step handlers read a type.
+    const currentType = normalizeText(current.type).toLowerCase();
+
+    markedAsGraphNode ||= currentType === "custom_skill" ||
+      currentType === "graph_node" ||
       currentId.startsWith(V3_GRAPH_STEP_PREFIX);
 
     const parentId = normalizeText(current.retryOfStepId);

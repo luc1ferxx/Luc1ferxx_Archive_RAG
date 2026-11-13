@@ -32,7 +32,6 @@ import {
   SKILL_IDEMPOTENCY,
   describeSkillReplayContract,
   getSkillContract,
-  isSideEffectingSkill,
 } from "../rag/skills/skill-contract.js";
 import { buildFeedbackRecord } from "../feedback.js";
 import { buildFeedbackCorpusFromRecords } from "../evaluation/feedback-corpus.js";
@@ -84,7 +83,6 @@ test("document RAG declares its session-memory writes unsafe to replay", () => {
   assert.equal(contract.parallelSafe, false);
   assert.equal(contract.replaySafe, false);
   assert.equal(contract.retryable, false);
-  assert.equal(isSideEffectingSkill(skill), true);
   assert.deepEqual(describeSkillReplayContract(skill), {
     effects: SKILL_EFFECTS.workspaceWrite,
     idempotency: SKILL_IDEMPOTENCY.adapterDefined,
@@ -101,7 +99,6 @@ test("research brief declares its question-level session-memory writes unsafe to
   assert.equal(contract.parallelSafe, false);
   assert.equal(contract.replaySafe, false);
   assert.equal(contract.retryable, false);
-  assert.equal(isSideEffectingSkill(skill), true);
 });
 
 test("external and workspace built-ins declare effects before unified graph admission", () => {

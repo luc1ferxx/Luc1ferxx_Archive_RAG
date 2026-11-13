@@ -1164,6 +1164,12 @@ test("agent run step executor never runs a custom_skill step, whatever its shape
         skillVersion: "1.0.0",
       },
     },
+    // The guard reads the type the way the matrix and the handlers do.
+    "step-with-an-oddly-cased-type": {
+      id: "custom-step",
+      input: { docIds: ["doc-1"], question: "Review risk.", skillId: "risk_review" },
+      type: " Custom_Skill ",
+    },
   };
   const refused = (error) => {
     assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY");
@@ -1180,11 +1186,11 @@ test("agent run step executor never runs a custom_skill step, whatever its shape
       runId,
       steps: [
         {
+          type: "custom_skill",
           ...step,
           kind: "tool_call",
           label: "Risk Review",
           status: "failed",
-          type: "custom_skill",
         },
       ],
     });

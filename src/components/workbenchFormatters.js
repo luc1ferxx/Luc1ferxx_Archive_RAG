@@ -9,6 +9,26 @@ const RECOVERY_ACTION_LABELS = {
   retry_failed_step: "Retry failed step",
 };
 
+// The step types the server retries on their own, from its replay matrix
+// (server/rag/agent-run-step-replay-safety.js, isStepRetryAllowed;
+// workbenchFormatters.test.js holds the two lists together). Every other
+// failed step is refused there: the step of a graph node (a custom Skill runs
+// only inside its execution graph) and an approval-capable primary step (web
+// search, arXiv import). The recovery panel gets its actions from the server;
+// the chat's run panel only has the steps, so it asks here before it shows a
+// Retry button.
+const SELF_RETRYABLE_STEP_TYPES = new Set([
+  "capability_call",
+  "document_rag",
+  "follow_up_retrieval",
+  "research_question",
+]);
+
+export const listSelfRetryableStepTypes = () => [...SELF_RETRYABLE_STEP_TYPES].sort();
+
+export const isStepRetrySupported = (stepType) =>
+  SELF_RETRYABLE_STEP_TYPES.has(String(stepType ?? "").trim().toLowerCase());
+
 export const formatRecoveryActionLabel = (actionType) =>
   RECOVERY_ACTION_LABELS[actionType] ??
   String(actionType ?? "Action").replace(/_/g, " ");

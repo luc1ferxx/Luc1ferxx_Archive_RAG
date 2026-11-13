@@ -19,8 +19,8 @@
 | `GET` | `/agent-runs/recovery` | 列出当前访问范围内等待人工恢复或失败重试的 agent runs，并返回可执行 recovery actions 以及从 replay safety matrix 派生的 step safety reasons。 |
 | `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |
 | `POST` | `/agent-runs/:runId/actions/:action` | 对等待用户确认的 agent run 执行 `approve` / `deny`；approve 会恢复被暂停的 capability step，不重放整条 `/chat`。 |
-| `POST` | `/agent-runs/:runId/recovery/actions/:action` | 执行 recovery 操作：`retry_failed_step` 或 `cancel`（其他动作名返回 400；`resume_from_step` 已删除）。哪类 step 能重试由 replay safety matrix 决定，`custom_skill` step 不能。 |
-| `POST` | `/agent-runs/:runId/steps/:stepId/actions/retry` | 为单个已持久化 run step 排队 retry step，便于后续只重试失败步骤。图节点的 step（`custom_skill`、`graph_node`）返回 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`。 |
+| `POST` | `/agent-runs/:runId/recovery/actions/:action` | 执行 recovery 操作：`retry_failed_step` 或 `cancel`（其他动作名返回 400；`resume_from_step` 已删除）。哪类 step 能重试由 replay safety matrix 决定：`document_rag`、`follow_up_retrieval`、`research_question` 和审批绑定的 `capability_call` 可以；`custom_skill`（图节点）和 `web_search`、`arxiv_import`（要走审批后的 `capability_call`）不可以，面板也不给按钮。 |
+| `POST` | `/agent-runs/:runId/steps/:stepId/actions/retry` | 为单个已持久化 run step 排队 retry step，便于后续只重试失败步骤。图节点的 step（`custom_skill`、`graph_node`）返回 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`；`web_search`、`arxiv_import` 的主 step 也返回 409（不能直接重试）。 |
 | `GET` | `/capabilities` | 列出已注册 capability contract，不暴露具体执行函数。 |
 | `GET` | `/artifacts` | 列出当前访问范围内的生成结果；支持 `artifactType=report|summary|document_collection`、`status=active|archived`、`limit` 和 `offset` 过滤。 |
 | `GET` | `/artifacts/:artifactId` | 读取 scoped artifact 的安全详情；不存在和跨 scope 访问统一返回 `404`。 |

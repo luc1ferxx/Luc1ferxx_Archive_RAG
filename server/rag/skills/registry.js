@@ -191,6 +191,3 @@ export const createBuiltInSkillRegistry = () =>
 
 export const createDefaultSkillRegistry = () =>
   createSkillRegistry(createDefaultSkills());
-
-export const createCustomSkillRegistry = () =>
-  createSkillRegistry(createCustomSkills());

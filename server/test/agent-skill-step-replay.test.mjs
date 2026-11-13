@@ -202,18 +202,20 @@ test("the replay matrix: what it says about a custom_skill step", () => {
     listStepReplaySafetyPolicies().filter((policy) => "autoReplaySafe" in policy),
     []
   );
-  // The step types an operator may retry by hand after they failed.
+  // The step types for which the matrix lists the operator's retry. The
+  // recovery panel offers "Retry failed step" from this alone. `arxiv_import`
+  // and `web_search` were on the list until the review of phase 9: their
+  // handlers refuse a direct retry, so the matrix now says so too (see the
+  // failed web_search and arxiv_import tests below).
   assert.deepEqual(
     listStepReplaySafetyPolicies()
       .filter((policy) => policy.replayActions.includes("retry_failed_step"))
       .map((policy) => policy.stepType),
     [
-      "arxiv_import",
       "capability_call",
       "document_rag",
       "follow_up_retrieval",
       "research_question",
-      "web_search",
     ]
   );
 });
@@ -547,6 +549,56 @@ test("recovery panel and step retry route: a failed graph-node step", async () =
   assert.equal(run.status, "failed");
   assert.deepEqual(run.steps.map((step) => step.id), ["custom_skill:probe"]);
 });
+
+// Found by the independent review of phase 9, and the same defect as the
+// failed graph node above. A `web_search` (or `arxiv_import`) primary step
+// needs approval, and its handler has always refused a direct retry. The
+// matrix nevertheless listed the retry, so the panel offered a button that
+// always answered 409, on a run that could not be cancelled either (it is
+// already terminal) and so stayed in the recovery list for good. The matrix
+// no longer lists it.
+for (const stepType of ["web_search", "arxiv_import"]) {
+  test(`recovery panel and step retry route: a failed ${stepType} step`, async () => {
+    const harness = createHarness();
+    const runId = `run-${stepType}-failed`;
+    const stepId = `${stepType}:primary`;
+
+    await createFailedRun({
+      agentRunService: harness.agentRunService,
+      runId,
+      steps: [
+        {
+          error: { message: "The call failed." },
+          id: stepId,
+          input: { question: "Search the web.", topic: "agent recovery" },
+          status: AGENT_RUN_STEP_STATUSES.failed,
+          type: stepType,
+        },
+      ],
+    });
+
+    // Not offered, so the run is not listed for recovery.
+    assert.equal(
+      await listedActions({ actionService: harness.actionService, runId }),
+      null
+    );
+
+    const fromRoute = await rejection(
+      harness.agentRunStepExecutor.retryStep({ accessScope, runId, stepId })
+    );
+    const run = await harness.getRun(runId);
+
+    assert.deepEqual(fromRoute, {
+      code: null,
+      message:
+        "Approval-capable primary steps cannot be retried directly; retry the hash-bound capability_call step after approval.",
+      status: 409,
+    });
+    assert.equal(run.status, "failed");
+    assert.deepEqual(run.steps.map((step) => step.id), [stepId]);
+    assert.deepEqual(harness.replayTraces, []);
+  });
+}
 
 test("recovery panel: a failed document step is still retried by hand", async () => {
   const harness = createHarness();
