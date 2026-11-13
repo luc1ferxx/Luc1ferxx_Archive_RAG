@@ -70,6 +70,7 @@ const pool = createWorkerTaskPool({
     }),
   getMaxOldGenerationMb: getPdfParseWorkerMaxOldGenerationMb,
   getTimeoutMs: getPdfParseTimeoutMs,
+  memoryLimitSetting: "PDF_PARSE_WORKER_MAX_OLD_GENERATION_MB",
   stoppedError: () =>
     new PdfParsePoolError("The PDF parse pool was stopped.", { code: PDF_PARSE_POOL_STOPPED, status: 503 }),
   timeoutError: (timeoutMs) =>

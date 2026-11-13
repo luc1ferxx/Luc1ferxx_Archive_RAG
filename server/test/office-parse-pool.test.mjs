@@ -31,6 +31,8 @@ import { runOfficeParseWorkerTask } from "../rag/office-parse-worker.js";
 import { parseDocumentBytes } from "../rag/office/office-document-pages.js";
 import { writeWorkingFile } from "../rag/working-files.js";
 import { parseExposition, sampleValue } from "./metrics-exposition.mjs";
+import { MAX_OFFICE_XML_NESTING } from "../rag/office/xml-nesting.js";
+import { findProcessHeapLimitFlag } from "../rag/worker-task-pool.js";
 import {
   VARIANT_CONTENT_TYPES,
   addDoctype,
@@ -39,6 +41,8 @@ import {
   buildOle2Bytes,
   buildPptx,
   buildXlsx,
+  buildZip,
+  docxEntries,
   replacePart,
 } from "./office-fixture-builder.mjs";
 import { buildProsePdf } from "./pdf-fixture-builder.mjs";
@@ -224,6 +228,77 @@ test("a refusal on a worker is the DocumentFormatError the calling thread throws
 
     assert.ok(onWorker.error.cause, "the refusal keeps mammoth's error as its cause");
   });
+});
+
+// A Word document whose one paragraph sits inside `depth` nested smart tags
+// (w:body and w:document add two levels around them).
+const nestedDocx = (depth) =>
+  buildZip(
+    replacePart(
+      docxEntries({ blocks: [{ text: "placeholder" }] }),
+      "word/document.xml",
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${"<w:smartTag>".repeat(depth)}<w:p><w:r><w:t>deep text</w:t></w:r></w:p>${"</w:smartTag>".repeat(depth)}</w:body></w:document>`
+    )
+  );
+
+test("how deep a Word document may nest is the same on every thread", async () => {
+  // 3,000 levels overflowed the main thread's stack while a worker read them
+  // (the worker's stack is larger); the cap refuses both the same way.
+  for (const depth of [MAX_OFFICE_XML_NESTING - 10, MAX_OFFICE_XML_NESTING + 10, 3000]) {
+    await withFiles({ file: nestedDocx(depth) }, async ({ file }) => {
+      const [inProcess, oneWorker, twoWorkers] = await loadEachWay(file);
+
+      assert.deepStrictEqual(oneWorker, inProcess, `depth ${depth}`);
+      assert.deepStrictEqual(twoWorkers, inProcess, `depth ${depth}`);
+
+      if (depth < MAX_OFFICE_XML_NESTING) {
+        assert.deepEqual(
+          inProcess.result.pages.map((page) => page.text),
+          ["deep text"],
+          `depth ${depth} is read`
+        );
+      } else {
+        assert.equal(inProcess.error.code, CODES.archiveInvalid, `depth ${depth}`);
+        assert.equal(inProcess.error.status, 400);
+        assert.match(inProcess.error.message, /nests its elements more than 256 levels deep/);
+        assert.equal(inProcess.error.cause, undefined, "refused before mammoth ran");
+      }
+    });
+  }
+});
+
+test("a process heap flag that replaces the worker memory limit is found and warned about once", async () => {
+  assert.equal(findProcessHeapLimitFlag({ execArgv: [], nodeOptions: undefined }), null);
+  assert.equal(findProcessHeapLimitFlag({ execArgv: ["--max-old-space-size=512"] }), "--max-old-space-size=512");
+  assert.equal(findProcessHeapLimitFlag({ execArgv: [], nodeOptions: " --max_old_space_size=256 --trace-warnings" }), "--max_old_space_size=256");
+  assert.equal(findProcessHeapLimitFlag({ execArgv: ["--max-semi-space-size=16"], nodeOptions: "--stack-size=900" }), null);
+
+  const script = [
+    'import { runOfficeParseTask } from "./rag/office-parse-pool.js";',
+    'import { buildDocx } from "./test/office-fixture-builder.mjs";',
+    'const bytes = buildDocx({ blocks: [{ text: "Body" }] });',
+    'const formats = ["pdf", "docx", "pptx", "xlsx"];',
+    "await runOfficeParseTask(bytes, { formats }, { size: 1 });",
+    "await runOfficeParseTask(bytes, { formats }, { size: 2 });",
+    'console.log("parsed");',
+  ].join("\n");
+  const runScript = (execArgs, env) =>
+    promisify(execFile)(process.execPath, [...execArgs, "--input-type=module", "--eval", script], {
+      cwd: SERVER_DIRECTORY,
+      env: { ...process.env, ...env },
+      timeout: 30_000,
+    });
+  const warning = /RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB=64 has no effect: this process runs with --max-old-space-size=256/;
+
+  const flagged = await runScript(["--max-old-space-size=256"], { RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB: "64" });
+
+  assert.equal(flagged.stdout.trim(), "parsed");
+  assert.equal(flagged.stderr.split("\n").filter((line) => warning.test(line)).length, 1, "warned once for two pools");
+
+  const unflagged = await runScript([], { RAG_OFFICE_PARSE_WORKER_MAX_OLD_GENERATION_MB: "64" });
+
+  assert.equal(unflagged.stdout.trim(), "parsed");
+  assert.doesNotMatch(unflagged.stderr, /has no effect/);
 });
 
 test("an invalid setting read on the worker fails as it does in the calling thread", async () => {

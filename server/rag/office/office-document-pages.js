@@ -66,7 +66,11 @@ const loadOfficePages = async ({ archive, buffer, format, importPptxReader }) =>
   const maxTextChars = getOfficeMaxTextChars();
 
   if (format === "docx") {
-    const { DOCX_EXTRACTOR, extractDocxPages, getMammothVersion } = await import("./docx-loader.js");
+    const { DOCX_EXTRACTOR, assertDocxXmlNesting, extractDocxPages, getMammothVersion } = await import(
+      "./docx-loader.js"
+    );
+
+    await assertDocxXmlNesting(archive);
 
     return {
       pages: await extractDocxPages(buffer, { maxTextChars }),
