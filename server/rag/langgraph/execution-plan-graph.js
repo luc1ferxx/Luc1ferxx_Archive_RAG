@@ -610,11 +610,14 @@ export const runAgentExecutionPlanOnLangGraph = async (options = {}) => {
   // Before LangGraph or LangChain configures anything (langsmith-guard.js).
   assertLangSmithTracingDisabled();
   // A removed value (AGENT_OUTER_PLAN_RUNTIME=native above all; also
-  // AGENT_RUNTIME=native and AGENT_SKILL_GRAPH_ROLLOUT=off|shadow) asked for
-  // a loop, a scheduler or a Skill chain that no longer exists: refuse here
-  // too, so an in-process caller that builds no app (an evaluation runner)
-  // fails loudly instead of being scheduled on LangGraph against what its
-  // environment asked for.
+  // AGENT_RUNTIME=native, AGENT_SKILL_GRAPH_ROLLOUT=off|shadow and
+  // AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow) asked for a loop, a
+  // scheduler, a Skill chain or a whole-request graph that no longer exists:
+  // refuse here too, so an in-process caller that builds no app (an
+  // evaluation runner) fails loudly instead of being answered by this plan
+  // against what its environment asked for. A request answered before it
+  // reaches the plan (a clarification asked during preparation) is not
+  // refused here; a process is, at start-up.
   assertAgentRuntimeSupported();
 
   // Validation and the stages; an invalid plan throws here with nothing

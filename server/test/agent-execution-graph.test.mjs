@@ -382,6 +382,39 @@ test("validateExecutionGraph rejects an output reference to a non-dependency nod
   );
 });
 
+// The upstream node names a Skill the request is not authorized for, so its
+// outputs have no contract a binding could be checked against: the dependant
+// is refused for it as well, besides the upstream node's own refusal.
+test("validateExecutionGraph rejects an output reference to a node whose skill has no contract here", () => {
+  const graph = createExecutionGraph({
+    nodes: [
+      compareNode({ skillId: "shell_exec" }),
+      riskNode({
+        dependsOn: ["compare"],
+        inputBindings: {
+          docIds: requestField("docIds"),
+          question: requestField("question"),
+          priorFindings: nodeOutput("compare", "text"),
+        },
+      }),
+    ],
+  });
+  const result = validateExecutionGraph({ graph, ...baseContext() });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.errors.map((error) => [error.nodeId, error.code]),
+    [
+      ["compare", EXECUTION_GRAPH_REASON_CODES.unregisteredCapability],
+      ["risk", EXECUTION_GRAPH_REASON_CODES.illegalOutputReference],
+    ]
+  );
+  assert.match(
+    result.errors[1].message,
+    /^Node risk input priorFindings references node compare with no resolvable skill contract\.$/
+  );
+});
+
 test("validateExecutionGraph rejects an output field absent from the upstream outputSchema", () => {
   const graph = createExecutionGraph({
     nodes: [

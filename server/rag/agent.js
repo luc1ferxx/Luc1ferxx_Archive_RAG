@@ -434,14 +434,12 @@ const createGraphResumeError = (reason) => {
 const resumeAgentExecutionGraphRunInScope = async ({
   accessScope,
   agentRunService,
-  capabilityRegistry = null,
   checkpoint,
   ragService,
   replanAdapter = null,
   run,
   runId,
   skillRegistry,
-  webChatService = null,
 } = {}) => {
   const owner = checkpoint?.owner;
   const docIds = run?.input?.docIds;
@@ -725,7 +723,9 @@ const runAgentRagInScope = async ({
     });
 
     // A run of the removed v3 unified graph parked at its approval gate: no
-    // request can decide that gate or continue that graph any more.
+    // request can decide that gate or continue that graph any more. Refused
+    // unless the run has ended (an operator canceled it), which the re-entry
+    // below then continues as a new run.
     if (isRemovedUnifiedGraphApprovalPause(loadedGraph?.checkpoint)) {
       await refuseRemovedUnifiedGraphRun({
         accessScope,
@@ -841,10 +841,11 @@ const runAgentRagInScope = async ({
       });
     } catch (error) {
       // A graph of the removed v3 unified graph owned the whole earlier
-      // request and has settled (finalized, or failed). Its run is never
-      // re-entered: a continuation such as the user's answer to its
-      // clarification is a new request, so it gets a new run; the task memory
-      // carries the context. The settled run is left untouched.
+      // request and has settled (the run ended, or was finalized as a
+      // question). Its run is never re-entered: a continuation such as the
+      // user's answer to its clarification is a new request, so it gets a new
+      // run; the task memory carries the context. The settled run is left
+      // untouched.
       if (error?.code !== AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE) {
         throw error;
       }

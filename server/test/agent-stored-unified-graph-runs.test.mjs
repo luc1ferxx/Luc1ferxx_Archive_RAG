@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 
+import { createApp } from "../app.js";
 import { resumeAgentExecutionGraphRun, runAgentRag } from "../rag/agent.js";
+import { deterministicPlannerAdapter } from "../rag/agent-execution-plan.js";
+import { deterministicIntentPlannerAdapter } from "../rag/agent-intent-planner.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import {
   buildAgentRunRecoveryState,
@@ -25,9 +29,17 @@ import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 // run-store records written by the v3 code, one per state such a deployment
 // can still hold (test/fixtures/stored-unified-graph-runs.json; its
 // `provenance` says how they were written). Every expectation below is a
-// literal. The file was written before the removal, against the default
-// configuration (the graph switched off), so its diff in the removal's commit
-// is what changed for such a run.
+// literal.
+//
+// The file was written before the removal, against the default configuration
+// (the graph switched off), with eight states, so its diff in the removal's
+// commit is what changed for those. The independent review of the removal
+// found four states the eight did not cover (a graph claimed by an earlier
+// startup recovery; a run that failed, or was canceled, with its graph still
+// in its running phase; a graph that finished partial before its run was
+// failed) and two rules that left such runs stuck. Those states were added,
+// written by the same pre-removal code, together with the fix; what the
+// runtime did with them before the fix is in the ADR's review record.
 
 const fixture = JSON.parse(
   readFileSync(new URL("./fixtures/stored-unified-graph-runs.json", import.meta.url), "utf8")
@@ -48,10 +60,11 @@ const ENV = Object.freeze({
   RAG_LONG_MEMORY_ENABLED: "false",
 });
 
-const withEnv = async (callback) => {
-  const previous = Object.fromEntries(Object.keys(ENV).map((key) => [key, process.env[key]]));
+const withEnv = async (callback, extra = {}) => {
+  const pinned = { ...ENV, ...extra };
+  const previous = Object.fromEntries(Object.keys(pinned).map((key) => [key, process.env[key]]));
 
-  for (const [key, value] of Object.entries(ENV)) {
+  for (const [key, value] of Object.entries(pinned)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -111,10 +124,11 @@ const seed = async (...states) => {
 
 const readStored = (store, state) => store.get({ accessScope, runId: runIdOf(state) });
 
-// The services, wired as app-services.js wires them.
+// The step executor and startup recovery, put together by hand with what
+// these tests need. The last test goes through the built app instead.
 const createStepExecutor = ({ agentRunService }) => createAgentRunStepExecutor({ agentRunService });
 
-const recoverOnStartup = ({ agentRunService, ragService, resumed }) =>
+const recoverOnStartup = ({ agentRunService, mode = "auto", ragService, resumed }) =>
   createAgentRunRecoveryService({
     agentRunService,
     recordRecoveryTrace: async () => {},
@@ -128,7 +142,7 @@ const recoverOnStartup = ({ agentRunService, ragService, resumed }) =>
         skillRegistry: createDefaultSkillRegistry(),
       });
     },
-  }).recoverOnStartup({ mode: "auto" });
+  }).recoverOnStartup({ mode });
 
 const reenter = ({ agentRunService, capabilityApprovals, ragService, state }) =>
   runAgentRag({
@@ -165,6 +179,7 @@ const describeStored = (run) => {
 
   return {
     checkpoint: `${checkpoint.version}/${checkpoint.phase}`,
+    claimed: Boolean(checkpoint.resumeClaim),
     finalization: checkpoint.finalization !== undefined,
     gates: run.approvalGates.map((gate) => `${gate.type}:${gate.status}`),
     graph: checkpoint.graph.version,
@@ -183,7 +198,7 @@ const describeAfter = (run) => ({
   status: run.status,
 });
 
-test("the stored runs: eight states of a v3 graph, as the run store holds them", async () => {
+test("the stored runs: twelve states of a v3 graph, as the run store holds them", async () => {
   const { store } = await seed(...STATES);
   const stored = {};
 
@@ -197,6 +212,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
   assert.deepEqual(stored, {
     parked_at_approval_gate: {
       checkpoint: "v2/awaiting_approval",
+      claimed: false,
       finalization: false,
       gates: ["graph_capability_approval:pending"],
       graph: "v3",
@@ -205,6 +221,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     approved_before_capability_step: {
       checkpoint: "v2/running",
+      claimed: false,
       finalization: false,
       gates: ["graph_capability_approval:approved"],
       graph: "v3",
@@ -213,6 +230,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     capability_step_in_flight: {
       checkpoint: "v2/running",
+      claimed: false,
       finalization: false,
       gates: ["graph_capability_approval:approved"],
       graph: "v3",
@@ -221,6 +239,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     interrupted_at_node_boundary: {
       checkpoint: "v2/running",
+      claimed: false,
       finalization: false,
       gates: [],
       graph: "v3",
@@ -229,6 +248,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     receipt_written_run_not_completed: {
       checkpoint: "v2/completed",
+      claimed: false,
       finalization: true,
       gates: [],
       graph: "v3",
@@ -237,6 +257,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     finalized_as_clarification: {
       checkpoint: "v2/completed",
+      claimed: false,
       finalization: true,
       gates: ["clarification_gate:needs_input"],
       graph: "v3",
@@ -245,6 +266,7 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     completed: {
       checkpoint: "v2/completed",
+      claimed: false,
       finalization: true,
       gates: [],
       graph: "v3",
@@ -253,11 +275,54 @@ test("the stored runs: eight states of a v3 graph, as the run store holds them",
     },
     failed_partial: {
       checkpoint: "v2/partial",
+      claimed: false,
       finalization: false,
       gates: [],
       graph: "v3",
       graphNodeSteps: ["completed", "completed", "failed"],
       status: "failed",
+    },
+    // An earlier startup recovery claimed the graph and died before it
+    // settled anything.
+    claimed_by_startup_recovery: {
+      checkpoint: "v2/running",
+      claimed: true,
+      finalization: false,
+      gates: [],
+      graph: "v3",
+      graphNodeSteps: ["completed"],
+      status: "running",
+    },
+    // A dependency outage failed the run from inside the graph: the run
+    // ended, its graph never left the running phase.
+    failed_on_outage_inside_graph: {
+      checkpoint: "v2/running",
+      claimed: false,
+      finalization: false,
+      gates: [],
+      graph: "v3",
+      graphNodeSteps: ["failed"],
+      status: "failed",
+    },
+    // The client left while the graph ran.
+    canceled_inside_graph: {
+      checkpoint: "v2/running",
+      claimed: false,
+      finalization: false,
+      gates: [],
+      graph: "v3",
+      graphNodeSteps: ["completed"],
+      status: "canceled",
+    },
+    // The graph finished partial; the process died before the run was failed.
+    partial_before_run_failed: {
+      checkpoint: "v2/partial",
+      claimed: false,
+      finalization: false,
+      gates: [],
+      graph: "v3",
+      graphNodeSteps: ["completed", "completed", "failed"],
+      status: "running",
     },
   });
 });
@@ -280,7 +345,7 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
       manualRecoveredCount: outcome.manualRecoveredCount,
       skippedCount: outcome.skippedCount,
     },
-    { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 5, skippedCount: 1 }
+    { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 7, skippedCount: 1 }
   );
   assert.deepEqual(resumed, []);
   assert.equal(ragService.calls.length, 0);
@@ -318,6 +383,22 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
     finalized_as_clarification: { gates: ["needs_input"], recovery: null, status: "waiting_for_user" },
     completed: { gates: [], recovery: null, status: "completed" },
     failed_partial: { gates: [], recovery: null, status: "failed" },
+    // Claimed by an earlier recovery: no process of this version can own that
+    // claim, so the run is handed over under it instead of being left alone
+    // as a claimed custom-Skill graph is.
+    claimed_by_startup_recovery: {
+      gates: [],
+      recovery: "manual:unified_graph_removed",
+      status: "waiting_for_user",
+    },
+    // Ended: startup recovery does not look at a run that has ended.
+    failed_on_outage_inside_graph: { gates: [], recovery: null, status: "failed" },
+    canceled_inside_graph: { gates: [], recovery: null, status: "canceled" },
+    partial_before_run_failed: {
+      gates: [],
+      recovery: "manual:unified_graph_removed",
+      status: "waiting_for_user",
+    },
   });
 
   // A second startup changes nothing more.
@@ -325,6 +406,81 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
 
   assert.equal(again.manualRecoveredCount + again.autoRecoveredCount, 0);
   assert.deepEqual(resumed, []);
+});
+
+// AGENT_RUN_RECOVERY_MODE=manual hands every interrupted or waiting run to an
+// operator, whatever it is; the stored graph runs are no exception, the
+// claimed one included.
+test("startup recovery in manual mode lists every unended stored graph run, also a claimed one", async () => {
+  const { agentRunService, store } = await seed(...STATES);
+  const ragService = createRagService();
+  const resumed = [];
+  const outcome = await withEnv(() =>
+    recoverOnStartup({ agentRunService, mode: "manual", ragService, resumed })
+  );
+  const after = {};
+
+  for (const state of STATES) {
+    after[state] = describeAfter(await readStored(store, state));
+  }
+
+  assert.deepEqual(
+    {
+      autoRecoveredCount: outcome.autoRecoveredCount,
+      failedCount: outcome.failedCount,
+      manualRecoveredCount: outcome.manualRecoveredCount,
+      skippedCount: outcome.skippedCount,
+    },
+    { autoRecoveredCount: 0, failedCount: 0, manualRecoveredCount: 8, skippedCount: 0 }
+  );
+  assert.deepEqual(resumed, []);
+  assert.equal(ragService.calls.length, 0);
+
+  const listed = (gates) => ({
+    gates,
+    recovery: "manual:server_startup_recovery",
+    status: "waiting_for_user",
+  });
+
+  assert.deepEqual(after, {
+    parked_at_approval_gate: listed(["pending"]),
+    approved_before_capability_step: listed(["approved"]),
+    capability_step_in_flight: listed(["approved"]),
+    interrupted_at_node_boundary: listed([]),
+    receipt_written_run_not_completed: listed([]),
+    // Listed like every waiting run in this mode; it is still a question for
+    // the user (continued below).
+    finalized_as_clarification: listed(["needs_input"]),
+    completed: { gates: [], recovery: null, status: "completed" },
+    failed_partial: { gates: [], recovery: null, status: "failed" },
+    claimed_by_startup_recovery: listed([]),
+    failed_on_outage_inside_graph: { gates: [], recovery: null, status: "failed" },
+    canceled_inside_graph: { gates: [], recovery: null, status: "canceled" },
+    partial_before_run_failed: listed([]),
+  });
+
+  // Being listed does not change what the run is. The question for the user
+  // is still settled: answering it starts a new run. An unfinished graph is
+  // still unfinished: re-entering it stays fenced until an operator cancels.
+  const answered = await withEnv(() =>
+    reenter({ agentRunService, ragService, state: "finalized_as_clarification" })
+  );
+
+  assert.equal(answered.status, 200);
+  assert.notEqual(answered.body.agentRunId, runIdOf("finalized_as_clarification"));
+  assert.deepEqual(
+    describeAfter(await readStored(store, "finalized_as_clarification")),
+    listed(["needs_input"])
+  );
+  assert.equal(
+    (
+      await withEnv(() =>
+        refusal(reenter({ agentRunService, ragService, state: "interrupted_at_node_boundary" }))
+      )
+    )?.code,
+    "AGENT_GRAPH_EXECUTION_FENCED"
+  );
+  assert.equal(ragService.calls.length, 1);
 });
 
 test("an operator can only cancel a stored graph run", async () => {
@@ -358,6 +514,10 @@ test("an operator can only cancel a stored graph run", async () => {
     finalized_as_clarification: null,
     completed: null,
     failed_partial: null,
+    claimed_by_startup_recovery: ["cancel"],
+    failed_on_outage_inside_graph: null,
+    canceled_inside_graph: null,
+    partial_before_run_failed: ["cancel"],
   });
 
   for (const state of STATES.filter((name) => offered[name])) {
@@ -369,35 +529,110 @@ test("an operator can only cancel a stored graph run", async () => {
 
     assert.equal(canceled.run.status, "canceled", state);
     assert.equal((await readStored(store, state)).status, "canceled", state);
+
+    // The cancel settles the run: a request that continues it is answered as
+    // a new run, and the canceled run is left as the operator left it.
+    const settled = await readStored(store, state);
+    const response = await withEnv(() => reenter({ agentRunService, ragService, state }));
+    const newRun = await agentRunService.getRun({ accessScope, runId: response.body.agentRunId });
+
+    assert.equal(response.status, 200, state);
+    assert.notEqual(response.body.agentRunId, runIdOf(state), state);
+    assert.equal(newRun.status, "completed", state);
+    assert.deepEqual(
+      newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
+      [{ previousRunId: runIdOf(state), reason: "settled_unified_graph_run" }],
+      state
+    );
+    assert.deepEqual(await readStored(store, state), settled, state);
+  }
+
+  // One document answer per continued run, none for the cancels.
+  assert.equal(ragService.calls.length, 7);
+});
+
+// The refusal looks at the run, not at the gate the request names: a decision
+// that names a gate the run does not have is refused the same way, and the
+// run is listed for an operator all the same.
+test("the approval endpoint refuses a decision of a stored graph gate and lists the run for an operator", async () => {
+  for (const action of ["approve", "deny"]) {
+    for (const gateId of [parkedGate.id, "another-gate"]) {
+      const { agentRunService, store } = await seed("parked_at_approval_gate");
+      const ragService = createRagService();
+      const refused = await withEnv(() =>
+        refusal(
+          createStepExecutor({ agentRunService }).applyApprovalAction({
+            accessScope,
+            action,
+            gateId,
+            payload: { approvalObjectHash: parkedGate.approvalObjectHash },
+            runId: runIdOf("parked_at_approval_gate"),
+          })
+        )
+      );
+
+      assert.deepEqual(refused, REMOVED, `${action} ${gateId}`);
+      assert.deepEqual(
+        describeAfter(await readStored(store, "parked_at_approval_gate")),
+        {
+          gates: ["pending"],
+          recovery: "manual:unified_graph_removed",
+          status: "waiting_for_user",
+        },
+        `${action} ${gateId}`
+      );
+      assert.equal(ragService.calls.length, 0, `${action} ${gateId}`);
+    }
   }
 });
 
-test("the approval endpoint refuses a decision of a stored graph gate and lists the run for an operator", async () => {
+// Once the run has ended, a decision of its gate is no longer answered with
+// "an operator must resolve it": there is nothing left to resolve. The replay
+// guard refuses it, as it refuses any decision inside a graph, and the ended
+// run is not touched.
+test("the approval endpoint refuses a decision of the gate of a stored graph run that was canceled", async () => {
   for (const action of ["approve", "deny"]) {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
     const ragService = createRagService();
-    const refused = await withEnv(() =>
-      refusal(
-        createStepExecutor({ agentRunService }).applyApprovalAction({
-          accessScope,
-          action,
-          gateId: parkedGate.id,
-          payload: { approvalObjectHash: parkedGate.approvalObjectHash },
-          runId: runIdOf("parked_at_approval_gate"),
-        })
-      )
-    );
 
-    assert.deepEqual(refused, REMOVED, action);
+    await withEnv(() => recoverOnStartup({ agentRunService, ragService, resumed: [] }));
+    await createAgentRunRecoveryActionService({
+      agentRunService,
+      recordRecoveryTrace: async () => {},
+    }).applyRecoveryAction({
+      accessScope,
+      action: "cancel",
+      runId: runIdOf("parked_at_approval_gate"),
+    });
+
+    const canceled = await readStored(store, "parked_at_approval_gate");
+
+    assert.deepEqual(describeAfter(canceled), {
+      gates: ["pending"],
+      recovery: "manual:unified_graph_removed",
+      status: "canceled",
+    });
     assert.deepEqual(
-      describeAfter(await readStored(store, "parked_at_approval_gate")),
+      await withEnv(() =>
+        refusal(
+          createStepExecutor({ agentRunService }).applyApprovalAction({
+            accessScope,
+            action,
+            gateId: parkedGate.id,
+            payload: { approvalObjectHash: parkedGate.approvalObjectHash },
+            runId: runIdOf("parked_at_approval_gate"),
+          })
+        )
+      ),
       {
-        gates: ["pending"],
-        recovery: "manual:unified_graph_removed",
-        status: "waiting_for_user",
+        code: "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY",
+        message:
+          "Guarded ExecutionGraph runs cannot be replayed as standalone steps; use whole-graph recovery.",
+        status: 409,
       },
       action
     );
+    assert.deepEqual(await readStored(store, "parked_at_approval_gate"), canceled, action);
     assert.equal(ragService.calls.length, 0, action);
   }
 });
@@ -471,6 +706,8 @@ test("a request that re-enters an interrupted stored graph is fenced and changes
     "capability_step_in_flight",
     "interrupted_at_node_boundary",
     "receipt_written_run_not_completed",
+    "claimed_by_startup_recovery",
+    "partial_before_run_failed",
   ]) {
     const { agentRunService, store } = await seed(state);
     const ragService = createRagService();
@@ -491,8 +728,16 @@ test("a request that re-enters an interrupted stored graph is fenced and changes
   }
 });
 
+// Settled: the run ended (whatever its graph looked like when it did), or it
+// was finalized as a question for the user.
 test("a request that continues a settled stored graph run is answered as a new run", async () => {
-  for (const state of ["finalized_as_clarification", "completed", "failed_partial"]) {
+  for (const state of [
+    "finalized_as_clarification",
+    "completed",
+    "failed_partial",
+    "failed_on_outage_inside_graph",
+    "canceled_inside_graph",
+  ]) {
     const { agentRunService, store } = await seed(state);
     const ragService = createRagService();
     const response = await withEnv(() => reenter({ agentRunService, ragService, state }));
@@ -517,11 +762,6 @@ test("a request that continues a settled stored graph run is answered as a new r
 });
 
 test("a stored graph node step is never retried on its own", async () => {
-  const { agentRunService, store } = await seed("failed_partial");
-  const failedStep = fixture.runs.failed_partial.steps.find((step) => step.status === "failed");
-  const recoveryState = buildAgentRunRecoveryState({
-    run: await agentRunService.getRun({ accessScope, runId: runIdOf("failed_partial") }),
-  });
   const expected = {
     code: "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY",
     message:
@@ -529,30 +769,42 @@ test("a stored graph node step is never retried on its own", async () => {
     status: 409,
   };
 
-  assert.equal(failedStep.type, "graph_node");
-  assert.equal(recoveryState.required, false);
-  assert.deepEqual(recoveryState.actions, []);
-  assert.deepEqual(
-    await refusal(
-      createStepExecutor({ agentRunService }).retryStep({
-        accessScope,
-        runId: runIdOf("failed_partial"),
-        stepId: failedStep.id,
-      })
-    ),
-    expected
-  );
-  assert.deepEqual(
-    await refusal(
-      agentRunService.retryStep({
-        accessScope,
-        runId: runIdOf("failed_partial"),
-        stepId: failedStep.id,
-      })
-    ),
-    expected
-  );
-  assert.deepEqual(await readStored(store, "failed_partial"), fixture.runs.failed_partial);
+  // Whether the graph finished (partial) or was still running when the run
+  // failed on an outage, which the run records as retryable.
+  for (const state of ["failed_partial", "failed_on_outage_inside_graph"]) {
+    const { agentRunService, store } = await seed(state);
+    const failedStep = fixture.runs[state].steps.find((step) => step.status === "failed");
+    const recoveryState = buildAgentRunRecoveryState({
+      run: await agentRunService.getRun({ accessScope, runId: runIdOf(state) }),
+    });
+
+    assert.equal(failedStep.type, "graph_node", state);
+    assert.equal(recoveryState.required, false, state);
+    assert.deepEqual(recoveryState.actions, [], state);
+    assert.deepEqual(
+      await refusal(
+        createStepExecutor({ agentRunService }).retryStep({
+          accessScope,
+          runId: runIdOf(state),
+          stepId: failedStep.id,
+        })
+      ),
+      expected,
+      state
+    );
+    assert.deepEqual(
+      await refusal(
+        agentRunService.retryStep({
+          accessScope,
+          runId: runIdOf(state),
+          stepId: failedStep.id,
+        })
+      ),
+      expected,
+      state
+    );
+    assert.deepEqual(await readStored(store, state), fixture.runs[state], state);
+  }
 });
 
 test("a background task parked at a stored graph gate fails, whatever its action", async () => {
@@ -624,4 +876,132 @@ test("a background task parked at a stored graph gate fails, whatever its action
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), failed);
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.approve), failed);
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.deny), failed);
+});
+
+// The same through the built app: startup recovery as the app runs it, the
+// routes, and what a client is sent. AGENT_RUN_RECOVERY_MODE=auto is what a
+// deployment with a PostgreSQL run store runs by default, and only such a
+// deployment can still hold these runs.
+test("a built app lists stored graph runs for an operator, refuses their approval and cancels them over HTTP", async () => {
+  const store = createInMemoryAgentRunStore();
+
+  for (const state of STATES) {
+    await store.create({ accessScope, run: structuredClone(fixture.runs[state]) });
+  }
+
+  const ragService = {
+    ...createRagService(),
+    clearDocuments: async () => [],
+    clearSessionMemory: () => true,
+    deleteDocument: async () => null,
+    ingestDocument: async () => null,
+    initializeDocumentRegistry: async () => [],
+    initializeSessionMemory: async () => true,
+  };
+  const app = await withEnv(
+    () =>
+      createApp({
+        agentRunStore: store,
+        executionPlannerAdapter: deterministicPlannerAdapter,
+        healthService: {
+          buildHealthReport: async () => ({ checks: {}, status: "ok" }),
+          runStartupHealthChecks: async () => ({ checks: {}, status: "ok" }),
+        },
+        intentPlannerAdapter: deterministicIntentPlannerAdapter,
+        ragService,
+      }),
+    { AGENT_RUN_RECOVERY_MODE: "auto" }
+  );
+  const server = createServer(app);
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const headers = {
+    "Content-Type": "application/json",
+    "x-user-id": accessScope.userId,
+    "x-workspace-id": accessScope.workspaceId,
+  };
+  const post = async (path, body) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      body: JSON.stringify(body),
+      headers,
+      method: "POST",
+    });
+
+    return { body: await response.json(), status: response.status };
+  };
+  const listed = async (scopeHeaders = headers) => {
+    const response = await fetch(`${baseUrl}/agent-runs/recovery`, { headers: scopeHeaders });
+    const body = await response.json();
+
+    return Object.fromEntries(
+      body.runs.map((run) => [
+        STATES.find((state) => runIdOf(state) === run.runId),
+        {
+          actions: run.recovery.actions.map((action) => action.type),
+          reason: run.recovery.reason,
+        },
+      ])
+    );
+  };
+  const handedOver = { actions: ["cancel"], reason: "unified_graph_removed" };
+
+  try {
+    // Startup recovery ran while the app was built.
+    assert.deepEqual(await listed(), {
+      approved_before_capability_step: handedOver,
+      capability_step_in_flight: { actions: ["cancel"], reason: "unknown_in_flight_node" },
+      claimed_by_startup_recovery: handedOver,
+      interrupted_at_node_boundary: handedOver,
+      parked_at_approval_gate: handedOver,
+      partial_before_run_failed: handedOver,
+      receipt_written_run_not_completed: handedOver,
+    });
+    // Another user of the workspace sees none of them.
+    assert.deepEqual(await listed({ ...headers, "x-user-id": "someone-else" }), {});
+
+    // A decision of the parked gate: the body carries the message, not a code.
+    for (const action of ["approve", "deny"]) {
+      assert.deepEqual(
+        await post(`/agent-runs/${runIdOf("parked_at_approval_gate")}/actions/${action}`, {
+          approvalObjectHash: parkedGate.approvalObjectHash,
+          gateId: parkedGate.id,
+        }),
+        { body: { error: REMOVED.message }, status: 409 },
+        action
+      );
+    }
+
+    // No node step of a stored graph is retried on its own.
+    const failedStep = fixture.runs.failed_partial.steps.find((step) => step.status === "failed");
+
+    assert.deepEqual(
+      await post(
+        `/agent-runs/${runIdOf("failed_partial")}/steps/${encodeURIComponent(failedStep.id)}/actions/retry`,
+        {}
+      ),
+      {
+        body: {
+          error:
+            "Guarded ExecutionGraph runs cannot be replayed as standalone steps; use whole-graph recovery.",
+        },
+        status: 409,
+      }
+    );
+
+    // The operator's one action.
+    const canceled = await post(
+      `/agent-runs/${runIdOf("parked_at_approval_gate")}/recovery/actions/cancel`,
+      { reason: "operator_cancel" }
+    );
+
+    assert.equal(canceled.status, 200);
+    assert.equal(canceled.body.run.status, "canceled");
+    assert.equal("parked_at_approval_gate" in (await listed()), false);
+    assert.equal(ragService.calls.length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await app.locals.stop?.();
+  }
 });

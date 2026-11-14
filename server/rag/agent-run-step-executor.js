@@ -179,7 +179,8 @@ export const createAgentRunStepExecutor = ({
 
       // A run of the removed v3 unified graph parked at its approval gate:
       // its gate can no longer be decided. Neither an approval nor a denial
-      // is recorded.
+      // is recorded. (A run that has ended is not refused here: the replay
+      // guard below refuses any action on it.)
       if (isRemovedUnifiedGraphApprovalPause(loadedGraph?.checkpoint)) {
         await refuseRemovedUnifiedGraphRun({ accessScope, agentRunService, runId });
       }

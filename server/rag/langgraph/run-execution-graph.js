@@ -228,9 +228,10 @@ export const runExecutionGraphOnLangGraph = async ({
   // Every graph is scheduled here, whoever called (a route, a task, startup
   // recovery, an evaluation runner calling runAgentRag directly): a removed
   // AGENT_RUNTIME or AGENT_OUTER_PLAN_RUNTIME value asked for a native
-  // scheduler and a removed AGENT_SKILL_GRAPH_ROLLOUT value for the sequential
-  // Skill chain, and running LangGraph instead would ignore it silently (ADR
-  // 0001 phases 6, 7 and 8).
+  // scheduler, a removed AGENT_SKILL_GRAPH_ROLLOUT value for the sequential
+  // Skill chain and a removed AGENT_UNIFIED_GRAPH_ROLLOUT value for the v3
+  // unified graph, and running this graph instead would ignore it silently
+  // (ADR 0001 phases 6, 7, 8 and 10).
   assertAgentRuntimeSupported();
 
   const { compiled, concurrencyCap, rejected, scopedDocIds } = admitExecutionGraphRun({

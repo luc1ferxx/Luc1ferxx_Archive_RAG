@@ -32,11 +32,12 @@ assertLangSmithTracingDisabled();
 
 // AGENT_RUNTIME=native named the native graph scheduler that phase 6 of
 // docs/adr/0001-langgraph-runtime.md deleted, AGENT_OUTER_PLAN_RUNTIME=native
-// the native outer-plan loop that phase 7 deleted, and
+// the native outer-plan loop that phase 7 deleted,
 // AGENT_SKILL_GRAPH_ROLLOUT=off|shadow the sequential Skill chain that phase 8
-// deleted; a process asked for any of them (or for any value but the one each
-// variable still accepts) refuses to start instead of running LangGraph
-// without saying so (rag/config.js). startServiceRole checks again for a
+// deleted, and AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow the v3 unified graph
+// that phase 10 deleted; a process asked for any of them (or for any value
+// but the one each variable still accepts) refuses to start instead of
+// answering another way without saying so (rag/config.js). startServiceRole checks again for a
 // caller that starts a role without coming through here.
 assertAgentRuntimeSupported();
 

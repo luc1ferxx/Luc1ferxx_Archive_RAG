@@ -415,8 +415,9 @@ export const createTasksRouter = (services) => {
     const { runId, action } = parsed;
 
     try {
-      // An approval may continue the run's graph: it runs under the request's
-      // deadline and disconnect cancellation, as /chat does (routes/chat.js).
+      // An approval runs the Capability it approved: it runs under the
+      // request's deadline and disconnect cancellation, as /chat does
+      // (routes/chat.js).
       const result = await runAgentRequestWithCancellation(req, res, () =>
         agentRunStepExecutor.applyApprovalAction({
           accessScope: getRequestAccessScope(req),

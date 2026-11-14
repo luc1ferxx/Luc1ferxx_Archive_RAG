@@ -213,10 +213,11 @@ export const runCustomSkillStage = async ({
   // Refused before anything durable exists: a request that cannot run on
   // LangGraph must not leave a graph checkpoint for recovery to resume. The
   // executor checks again at its own entry. A removed AGENT_RUNTIME or
-  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, and a removed
-  // AGENT_SKILL_GRAPH_ROLLOUT value (`off`, `shadow`) asked for the sequential
-  // chain; neither exists any more, and running the graph on LangGraph instead
-  // would ignore the request silently.
+  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, a removed
+  // AGENT_SKILL_GRAPH_ROLLOUT value (`off`, `shadow`) for the sequential
+  // chain, and a removed AGENT_UNIFIED_GRAPH_ROLLOUT value (`guarded`,
+  // `shadow`) for the v3 unified graph; none exists any more, and running
+  // this graph instead would ignore the request silently.
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();
   // Imported on first use. That keeps the graph executor and compiler out of

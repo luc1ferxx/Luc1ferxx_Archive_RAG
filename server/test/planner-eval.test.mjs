@@ -41,13 +41,6 @@ test("planner eval passes default mock LLM planner trajectories", async () => {
   ]);
   assert.equal(graphCase.response.skillGraph.selectedPlannerId, "llm_dag");
 
-  // The v3 unified graph planner's case went with that graph (ADR 0001 phase
-  // 10).
-  assert.equal(
-    report.cases.some((caseResult) => caseResult.id === "planner_unified_graph"),
-    false
-  );
-
   const fallbackCase = report.cases.find(
     (caseResult) => caseResult.id === "planner_invalid_fallback"
   );

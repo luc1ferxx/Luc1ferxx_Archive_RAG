@@ -1610,6 +1610,80 @@ test("terminal guarded graph allows approval gate provably created after graph c
   }
 });
 
+// "After the graph" is proven by the graph's own terminal event. A terminal
+// checkpoint whose run never recorded that event (the process died between
+// the checkpoint write and the event), or recorded one for another outcome,
+// proves nothing about what came after it, so the gate stays refused.
+test("terminal guarded graph without its own terminal event rejects a later approval gate", async () => {
+  const variants = [
+    { name: "no terminal graph event", recordEvent: async () => {} },
+    {
+      name: "a terminal graph event for another outcome",
+      recordEvent: (agentRunService, runId) =>
+        appendGuardedGraphCompletedEvent(agentRunService, { runId, status: "partial" }),
+    },
+  ];
+
+  for (const { name, recordEvent } of variants) {
+    for (const action of ["approve", "deny"]) {
+      const agentRunService = createAgentRunService({
+        agentRunStore: createInMemoryAgentRunStore(),
+      });
+      const calls = [];
+      const executor = createAgentRunStepExecutor({
+        agentRunService,
+        capabilityRegistry: { execute: async () => { calls.push("executed"); } },
+      });
+      const runId = `unproven-graph-${action}`;
+      const goal = "Search the web for the launch date.";
+      const approval = buildApprovalFixture({
+        capabilityId: "web.search",
+        capabilityLabel: "Web Search",
+        executionInput: { question: goal },
+        inputPreview: { question: goal },
+      });
+
+      await agentRunService.createRun({ accessScope, goal, runId, status: AGENT_RUN_STATUSES.running });
+      await persistGuardedGraphCheckpoint(agentRunService, { goal, phase: "completed", runId });
+      await recordEvent(agentRunService, runId);
+      await agentRunService.completeRun({
+        accessScope,
+        approvalGates: [approval.gate],
+        approvalSnapshots: [approval.snapshot],
+        runId,
+        status: AGENT_RUN_STATUSES.waitingForUser,
+        steps: [{
+          id: "2-capability_approval_gate",
+          type: "capability_approval_gate",
+          kind: "approval_gate",
+          label: "Capability Approval",
+          status: "paused",
+          approvalGateId: approval.gate.id,
+          capabilityId: "web.search",
+        }],
+      });
+      const before = await agentRunService.getRun({ accessScope, runId });
+
+      await assert.rejects(
+        () => executor.applyApprovalAction({
+          accessScope,
+          action,
+          gateId: approval.gate.id,
+          payload: { approvalObjectHash: approval.gate.approvalObjectHash },
+          runId,
+        }),
+        (error) => {
+          assert.equal(error.code, "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY", name);
+          assert.equal(error.status, 409, name);
+          return true;
+        }
+      );
+      assert.equal(calls.length, 0, name);
+      assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before, name);
+    }
+  }
+});
+
 // A graph-shaped step must fail closed even if its checkpoint is unavailable:
 // replaying only its stored upstream text would bypass graph ownership and
 // allow an isolated node to complete the entire run.

@@ -13,6 +13,7 @@ import {
 } from "./agent-execution-graph-checkpoint.js";
 import {
   explainRemovedUnifiedGraphRun,
+  getRemovedUnifiedGraphClaimId,
   isRemovedUnifiedGraphCheckpoint,
   isRemovedUnifiedGraphClarification,
 } from "./agent-removed-unified-graph.js";
@@ -357,11 +358,43 @@ export const createAgentRunRecoveryService = ({
           return;
         }
 
+        // Read in both modes: a run of the removed v3 unified graph
+        // (agent-removed-unified-graph.js) is handed over under the resume
+        // claim an earlier startup may have left on it, which the run store
+        // requires before it marks a claimed run.
+        const loadedGraph = await agentRunService.getExecutionGraphCheckpoint?.({
+          accessScope,
+          runId: run.runId,
+        });
+        const removedGraphClaimId = getRemovedUnifiedGraphClaimId(loadedGraph?.checkpoint);
+
         if (recoveryMode === "auto") {
-          const loadedGraph = await agentRunService.getExecutionGraphCheckpoint?.({
-            accessScope,
-            runId: run.runId,
-          });
+          if (isRemovedUnifiedGraphCheckpoint(loadedGraph?.checkpoint)) {
+            // One already finalized as a question for the user is settled:
+            // nothing crashed. Any other can never be continued, so it goes to
+            // an operator; it would otherwise wait forever unlisted. That
+            // includes a graph an earlier startup claimed and never settled:
+            // elsewhere a claim means its owner may still be running, but no
+            // process of this version can own this one.
+            if (
+              isRemovedUnifiedGraphClarification({
+                checkpoint: loadedGraph.checkpoint,
+                run,
+              })
+            ) {
+              skippedCount += 1;
+              return;
+            }
+
+            await markManualRecovery({
+              accessScope,
+              expectedGraphResumeClaimId: removedGraphClaimId,
+              fallbackReason: explainRemovedUnifiedGraphRun({ run }),
+              requestedMode: "auto",
+              run,
+            });
+            return;
+          }
 
           if (loadedGraph || hasExecutedGuardedGraph(run)) {
             if (loadedGraph?.checkpoint?.resumeClaim) {
@@ -370,31 +403,6 @@ export const createAgentRunRecoveryService = ({
               // owner crashed; changing the run to manual recovery here would
               // race the owner and could interrupt its completion.
               skippedCount += 1;
-              return;
-            }
-
-            if (isRemovedUnifiedGraphCheckpoint(loadedGraph?.checkpoint)) {
-              // A run of the removed v3 unified graph
-              // (agent-removed-unified-graph.js). One already finalized as a
-              // question for the user is settled: nothing crashed. Any other
-              // can never be continued, so it goes to an operator; it would
-              // otherwise wait forever unlisted.
-              if (
-                isRemovedUnifiedGraphClarification({
-                  checkpoint: loadedGraph.checkpoint,
-                  run,
-                })
-              ) {
-                skippedCount += 1;
-                return;
-              }
-
-              await markManualRecovery({
-                accessScope,
-                fallbackReason: explainRemovedUnifiedGraphRun({ run }),
-                requestedMode: "auto",
-                run,
-              });
               return;
             }
 
@@ -468,6 +476,7 @@ export const createAgentRunRecoveryService = ({
 
         await markManualRecovery({
           accessScope,
+          expectedGraphResumeClaimId: removedGraphClaimId,
           fallbackReason: reason,
           requestedMode: recoveryMode,
           run,

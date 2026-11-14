@@ -95,6 +95,7 @@ const node = ({
 const createNodeRun = ({
   budgetState = createAgentBudget(),
   docIds = ["doc-1"],
+  executeObservedSkill,
   graph,
   onNodeSettled,
   preflightNode,
@@ -116,7 +117,7 @@ const createNodeRun = ({
     budgetState,
     buildSkillTraceDetail: tracker.buildSkillTraceDetail,
     docIds,
-    executeObservedSkill: tracker.executeObservedSkill,
+    executeObservedSkill: executeObservedSkill ?? tracker.executeObservedSkill,
     graph,
     onNodeSettled,
     preflightNode,
@@ -371,6 +372,42 @@ test("a settled node writes its checkpoint while still running, then publishes i
   ]);
   assert.equal(run.budgetState.used.customSkillCalls, 1);
   assert.deepEqual(run.control, { aborted: false, fatalError: null, interrupt: null });
+});
+
+// The Skill tracker validates what a Skill returns; the node checks the typed
+// output again itself, so an observer that skips that hook (an injected one,
+// an older adapter) cannot hand a dependant a value outside the contract.
+test("a result the Skill's output contract refuses fails the node even when the observer let it through", async () => {
+  const graph = createExecutionGraph({ nodes: [node({ nodeId: "a" })] });
+  const run = createNodeRun({
+    // An observer that reports success without validating the output.
+    executeObservedSkill: async (skill) => ({
+      abstained: false,
+      citations: [],
+      ok: true,
+      skillId: skill.id,
+      skillVersion: skill.version,
+      text: 42,
+    }),
+    graph,
+    skills: [createSkill({ id: "a" })],
+  });
+
+  const outcome = await runExecutionGraphNode({ ...run, state: run.states[0] });
+
+  assert.equal(outcome, EXECUTION_GRAPH_NODE_OUTCOMES.settled);
+  assert.equal(run.states[0].status, EXECUTION_GRAPH_NODE_STATUSES.failed);
+  assert.equal(run.states[0].result.ok, false);
+  assert.match(run.states[0].result.error.message, /output/i);
+  // Nothing a dependant could bind, and the fail_fast node stops the graph.
+  assert.equal(run.nodeOutputs.has("a"), false);
+  assert.equal(run.control.aborted, true);
+  assert.deepEqual(run.calls, [
+    ["start", "custom_skill:a"],
+    ["fail", "custom_skill:a"],
+    ["result", "a", false],
+    ["trace", "custom_skill:a", "failed"],
+  ]);
 });
 
 test("a fail_fast failure raises control.aborted before its checkpoint write resolves", async () => {

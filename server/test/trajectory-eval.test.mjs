@@ -73,12 +73,6 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   assert.equal(report.summary.metrics.categories.privacy.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 14);
-  // The unified_graph category held only the two v3 cases' checks.
-  assert.equal(Object.hasOwn(report.summary.metrics.categories, "unified_graph"), false);
-  assert.equal(
-    report.cases.some((caseResult) => caseResult.id.startsWith("unified_graph_")),
-    false
-  );
   assert.ok(
     report.cases.some(
       (caseResult) =>
@@ -264,6 +258,5 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.doesNotMatch(markdown, /Skill graph shadow comparison/);
   assert.match(markdown, /Skill graph illegal plan rejected/);
   assert.match(markdown, /Skill graph bounded replan/);
-  assert.doesNotMatch(markdown, /Unified graph/);
   assert.match(markdown, /PASS/);
 });
