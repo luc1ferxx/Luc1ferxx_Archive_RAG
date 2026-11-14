@@ -982,24 +982,39 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | `guarded` | 通过准入的 v3 图回答整个请求；被拒的由外层执行计划回答 | 进程拒绝启动 |
 | 其他取值（例如拼错的 `gaurded`） | 当作 `off` | 进程拒绝启动 |
 
-**已存的 v3 run**（只有开过 `guarded` 的部署才有）。和删除之前“开关不是 `guarded`”时的处理相比（`test/agent-stored-unified-graph-runs.test.mjs`，同样看它的 diff）：
+**已存的 v3 run**（只有开过 `guarded` 的部署才有）。和删除之前“开关不是 `guarded`”时的处理相比（`test/agent-stored-unified-graph-runs.test.mjs`，同样看它的 diff）。标了“复核后”的行是独立复核找出来、在复核修正提交里改的，经过见下文“独立复核”；它们的“之前”一列是复核在删除之前的代码上用探针量的：
 
 | 情形 | 之前（开关不是 `guarded`） | 现在 |
 | --- | --- | --- |
 | 启动恢复（`auto`）：停在审批门、已批准但 Capability 没开始、在两个节点之间中断、收据已写但 run 没完成 | 转人工，原因 `unified_graph_rollout_not_guarded` | 转人工，原因 `unified_graph_removed` |
 | 启动恢复：节点步骤还在执行中 | 转人工，原因 `unknown_in_flight_node` | 不变 |
-| 启动恢复：checkpoint 对不上账的其他情形（摘要不符、图已 `partial` 而 run 还在跑、事件证明不了走过 guarded 路径） | 转人工，各有各的原因码 | 转人工，原因 `unified_graph_removed`（这一行是读代码得出的，没有夹具） |
-| 启动恢复：已经收尾成向用户提问 | 跳过，不动 | 不变 |
-| 审批端点批准或拒绝停在门上的 run | 409 `unified_graph_rollout_not_guarded`，run 转人工 | 409 `unified_graph_removed`，run 转人工 |
+| 启动恢复：图已 `partial` 而 run 还在跑 | 转人工，原因 `graph_finalization_requires_recovery` | 转人工，原因 `unified_graph_removed`（复核后补了夹具） |
+| 启动恢复：checkpoint 对不上账的其他情形（摘要不符、事件证明不了走过 guarded 路径） | 转人工，各有各的原因码 | 转人工，原因 `unified_graph_removed`（这一行是读代码得出的，没有夹具） |
+| 启动恢复：图被更早一次启动恢复领取过、之后没有落定（复核后） | 跳过，`auto` 和 `manual` 两种模式都是。不进恢复列表，取消是 409，重入是 409，保留期清理也不删，永远停在 `running` | 转人工，原因 `unified_graph_removed`（`manual` 模式是 `server_startup_recovery`）；之后可以取消 |
+| 启动恢复：已经收尾成向用户提问 | `auto` 跳过，不动；`manual` 像所有在等的 run 一样列出 | 不变 |
+| 审批端点批准或拒绝停在门上的 run | 409 `unified_graph_rollout_not_guarded`，run 转人工 | 409 `unified_graph_removed`，run 转人工。请求点名的不是这道门也一样：拒绝看的是 run，不看请求说的门 |
+| 审批端点批准或拒绝一个已经被取消的 run 上的门（复核后） | 409，什么都不写（复核的探针没有接审批续跑的回调，接好之后回哪个错误没有量过） | 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`，什么都不写 |
 | 带 `agentRunId` 的请求重入停在门上的 run，带着这道门的决定（后台任务的批准或拒绝） | 409 `unified_graph_rollout_not_guarded`，run 转人工，任务 failed | 409 `unified_graph_removed`，run 转人工，任务 failed |
 | 同上，不带决定（后台任务的 `continue`） | 把待审批的内容原样再说一遍，什么都不写，任务继续等 | 409 `unified_graph_removed`，run 转人工，任务 failed |
 | 同上，带的是别的门的决定 | 409 `graph_approval_not_pending`，什么都不写 | 409 `unified_graph_removed`，run 转人工 |
-| 请求重入中断的 run | 409 `AGENT_GRAPH_EXECUTION_FENCED`，什么都不写 | 不变 |
-| 请求续接已收尾的 run（已完成、已提问、已失败） | 新建一个 run 回答，记 `run_continued` | 不变（新 run 由外层执行计划回答） |
+| 请求重入没结束的 run（中断的、被领取过的、图已 `partial` 而 run 还在跑的），不管有没有被标成人工恢复 | 409 `AGENT_GRAPH_EXECUTION_FENCED`，什么都不写 | 不变 |
+| 请求续接已完成的、图 `partial` 之后失败的、已提问的 run | 新建一个 run 回答，记 `run_continued` | 不变（新 run 由外层执行计划回答） |
+| 请求续接失败或取消时图还在 `running` 阶段的 run：依赖故障、客户端断开、超过截止时间（复核后） | 409 `AGENT_GRAPH_EXECUTION_FENCED`，每次都是，永远续不上 | 新建一个 run 回答 |
+| 请求续接被人取消的 run（复核后） | 409：中断的是 `AGENT_GRAPH_EXECUTION_FENCED`，停在门上的是 `graph_approval_not_pending` | 新建一个 run 回答 |
+| 请求续接 `manual` 模式列出过的“向用户提问”（复核后） | 409 `AGENT_GRAPH_EXECUTION_FENCED` | 新建一个 run 回答 |
 | 重试一个 `graph_node` 步骤 | 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY` | 不变 |
-| 人在恢复面板上能做的 | 只有取消 | 不变 |
+| 人在恢复面板上能做的 | 只有取消，而且要等 run 被标成人工恢复之后 | 不变 |
+
+规则归成两条（`rag/agent-removed-unified-graph.js`）：
+
+- **已经收尾的**：run 已结束（完成、失败、取消，不管当时图停在哪个阶段），或者已经收尾成向用户提问。这样的 run 不动，续接它的请求开一个新 run。
+- **没收尾的**：续不了。启动恢复把它交给人，人只能取消；取消之后它就是已结束的，续接它的请求开新 run。
+
+表里的 409 是进程内错误的 `code`。经 HTTP 返回时，响应体只有 `{ "error": "<消息>" }`，没有 `code` 字段（审批、重试、恢复动作这几个路由都是这样）；`unified_graph_removed` 这个字符串对客户端只出现在 run 的 `result.recovery.reason` 和恢复列表里。
 
 和开着 `guarded` 时相比，失去的是续跑本身：停在门上的 run 不能再批准或拒绝，中断的 run 不再自动续完，收据已写的 run 不再补完成。这些 run 都要人来取消。
+
+已经收尾成向用户提问的 run 会一直停在 `waiting_for_user`：用户的回答开的是新 run；旧的那个在 `auto` 模式下不进恢复列表、不能取消，保留期清理只删已结束的 run，所以也不会删它。这是删除之前就有的行为，没有改。
 
 **原因从好几个变成一个，是有意的。** 以前的原因码来自对 v2 checkpoint 的对账，对账代码下一步会删。保留 `unknown_in_flight_node` 是因为它告诉人一件别的原因说不出的事：有一步可能已经写了东西。
 
@@ -1007,10 +1022,10 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - `AGENT_UNIFIED_GRAPH_ROLLOUT` 进了 `rag/config.js` 的已删除开关表，是第四个：未设置、空、空白或 `off`（去首尾空白、不区分大小写）照常启动；其他任何值以 `AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED` 拒绝。它是四个里唯一一个“剩下的那个值就是默认值”的，所以从没开过 v3 的部署不需要改配置，`.env` 里照抄示例写着 `off` 的也照常启动。
 - 以前拼错的值会被当作 `off`，现在拒绝。写错的人要的是一个已经不存在的东西，照 `off` 回答等于不告诉他。
-- 检查位置和前三个开关相同：`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom Skill stage、执行器。不建 app 直接调 `runAgentRag` 的评测 runner 在外层计划入口被拒：run 已经建了，以 failed 结束，没有读文档、没有规划、没有存图。
-- `eval:trajectory` 的 runner 以前把这个开关钉成 `off`，现在不钉了。环境里带着已删除的取值时每个用例都以 `case_error` 失败，而不是被 runner 盖住。
+- 检查位置和前三个开关相同：`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom Skill stage、执行器。不建 app 直接调 `runAgentRag` 的评测 runner 在外层计划入口被拒：run 已经建了，以 failed 结束，没有读文档、没有规划、没有存图。在走到外层计划之前就结束的请求（例如两份文档的比较缺一份、直接向用户提问）碰不到这个检查，照常回答；经 `server.js` 或 `createAppServices` 起来的进程没有这种情况，它们根本起不来。
+- `eval:trajectory` 的 runner 以前把这个开关钉成 `off`，现在不钉了。环境里带着已删除的取值时，走到外层计划的用例都以 `case_error` 失败，而不是被 runner 盖住。
 - `AGENT_UNIFIED_GRAPH_CAPABILITIES`（v3 图可以直接调用的 Capability 白名单）不再读取，设了也没有任何效果，不拒绝。
-- `test/agent-runtime-removed.test.mjs` 按表驱动，加了第四个开关之后是 23 个测试（原 15 个），包括真实执行 `node server.js` 的非 0 退出。
+- `test/agent-runtime-removed.test.mjs` 按表驱动，加了第四个开关之后是 23 个测试（三个开关时是 19 个），包括真实执行 `node server.js` 的非 0 退出。
 
 ### 删了什么
 
@@ -1019,18 +1034,18 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **评测**：两个 trajectory 用例、一个 planner 用例、`eval:unified-graph-planner` 脚本和它的 runner。
 - **测试**：17 个测试文件、4 个测试支持文件、44 份 golden，以及规划器 golden 摘要里统一图规划器的 21 条。
 - **前端**：聊天页不再处理“拒绝也带回一个答案”的响应（只有 v3 的图内拒绝会这样返回）。
-- **新增** `rag/agent-removed-unified-graph.js`（93 行）：认出已存的 v3 run（看 checkpoint 版本），决定交给人时用什么原因，拒绝续跑。它不运行任何节点，也不决定任何审批门。
+- **新增** `rag/agent-removed-unified-graph.js`（删除提交里 93 行，复核修正之后 136 行）：认出已存的 v3 run（看 checkpoint 版本），判断它是不是已经收尾，决定交给人时用什么原因，拒绝续跑。它不运行任何节点，也不决定任何审批门。
 - **代码量**（删除提交相对冻结提交）：生产代码（`server/rag`、`app-services.js`、`routes`）+225 −6,717 行；评测 +14 −2,122 行；测试（不含 golden）+234 −12,069 行；golden −104,803 行。
 
 ### 保留到下一步的
 
-这些代码在这一步之后没有生产调用方，测试也大多随 v3 的套件删掉了：
+这些代码在这一步之后没有生产调用方（任务级的 `deny` 例外，见它那一条），测试也大多随 v3 的套件删掉了：
 
 - LangGraph 执行器里节点停在审批门（`interrupt()`）和在同一线程上续跑审批的部分，以及上面那 3 个 `rag/langgraph/unified-graph-*.js`。
 - 图契约的 `v3` 版本、`graph_node` 步骤身份、`awaiting_approval` 状态、v2 checkpoint、`replayExecutionGraphRun`。
 - run store 的图审批门（暂停、决定、读取）和它的绑定校验。
 - `capabilities/graph-approval-preflight.js`、`capabilities/graph-contract.js`。
-- 任务级的 `deny` 动作：它只对图审批门有效，现在不可能成功。
+- 任务级的 `deny` 动作：`POST /tasks/:taskId/actions/deny` 还接受它，所以它有调用方，只是不可能成功。它只对图审批门有效：对现在能产生的每一种门都回 409；对已存的图审批门，任务先入队、再以“已删除”失败。界面不发这个动作。
 - DAG 规划器适配器里为 v3 保留根字段的分支。
 
 在它们删掉之前，覆盖率里“RAG / AgentRAG core”一组的行覆盖从 96.13% 掉到 94.26%：低于这组 95% 的目标（报告里是 warn），高于 90% 的门槛（门通过）。掉的原因就是这些代码还在而测试没了。
@@ -1060,6 +1075,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - 从没开过 `guarded` 的部署：库里没有 v3 run，升级没有任何要处理的。
 - 开过 `guarded` 的部署：升级前先把 `AGENT_UNIFIED_GRAPH_ROLLOUT` 去掉或改成 `off`，否则新版本拒绝启动。升级后第一次启动（`auto` 模式）会把没结束的 v3 run 交给人，原因见上表；已经结束的不动。想让停在审批门上的 run 得到决定，要在升级之前批准或拒绝。
+- 先停旧版本、再起新版本。新版本的启动恢复不看一个 v3 run 是不是还有旧版本的进程在跑：它会把旧进程正在执行的、连同旧进程的启动恢复正在续跑的（带 claim 的）v3 run 一起交给人，旧进程下一次写入会被 run 的版本检查拒绝。滚动发布、新旧版本同时在线的情形没有测过，这一条是读代码得出的。
 - run 和 checkpoint 的格式没有变，没有数据迁移。
 
 ### 怎样恢复
@@ -1071,7 +1087,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 冻结提交 0ce3d23c，删除提交 9653dd60。本机 Node 24.21.0。
 
-- **冻结**：两个字面值测试文件在删除之前的代码上通过（13 个测试）。已存 run 的夹具 `test/fixtures/stored-unified-graph-runs.json` 是 21eae0c6 的 v3 代码在内存 run store 里写下的记录，8 种状态加一个停在门上的后台任务；写它的脚本只存在于冻结提交里，随 v3 一起删了。
+- **冻结**：两个字面值测试文件在删除之前的代码上通过（13 个测试）。已存 run 的夹具 `test/fixtures/stored-unified-graph-runs.json` 是 21eae0c6 的 v3 代码在内存 run store 里写下的记录，8 种状态加一个停在门上的后台任务；写它的脚本只存在于冻结提交里，随 v3 一起删了。独立复核之后夹具加到 12 种状态，见下文。
 - **`coverage:gate`** 接一次性 PostgreSQL 18 + pgvector（删除提交的干净 worktree）：4,469 个测试，4,462 通过、7 跳过、0 失败。全局行覆盖 91.90%（门槛 78%、目标 85%，都通过）。阶段 9 是 4,607 个测试、92.53%。“RAG / AgentRAG core” 一组 94.26%：过门槛 90%，没到目标 95%，原因见“保留到下一步的”。
 - **`quality:current`** 按 CI 的 `quality-gate` 步骤在删除提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
 - **三个确定性 agent 评测与 21eae0c6 的比较**（屏蔽 UUID、时间戳、耗时和 git 信息）：
@@ -1084,6 +1100,64 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **单文件套件**：`agent-stored-unified-graph-runs` 9/9、`agent-unified-graph-dial` 3/3、`agent-runtime-removed` 23/23、`agent-cancellation` 18/18、`langgraph-routes` 3/3、`langgraph-planner-model` 12/12、`agent-execution-graph-checkpoint` 32/32、`langgraph-request-context` 1/1（删除提交之后补的，见“失去、且没有替代的能力和覆盖”）。
 - **Node 20.20.2** 跑受影响的 22 个服务端测试文件（带上仓库 runner 预加载的 `keep-event-loop-alive.mjs`）：427 个测试全部通过。CI 用的是 Node 22，本机没有。
 - **没有验证的**：真实 PostgreSQL 上的已存 v3 run（夹具是内存 run store 的记录；跨进程用例随 v3 删了）；真实浏览器；存量数据里是否真有 v3 run。
+
+### 独立复核（2026-11-14）
+
+冻结和删除两个提交（21eae0c6..9653dd60）交给一个只读的独立复核。它不运行测试套件、评测脚本和覆盖率，只读代码和我的日志，加上内存 run store 上的六个探针：把删除之前的 `server` 解到仓库之外，同一个探针在两棵树上各跑一遍。结论：没有高级缺陷；默认配置下每个探针前后结果相同（七种请求的响应和落库的 run，十三种 custom Skill 图在启动恢复时的结果、事件和步骤）。问题在三处：夹具里没有的已存 v3 run 状态、比代码强的说法、随 v3 套件丢掉的测试。处理如下，改动在复核修正提交 637593f3。
+
+**已存的 run（中级，改了）**
+
+- **被启动恢复领取过的 v3 run 没有人管。** 启动恢复看到图上有 claim 就跳过（对 custom Skill 图这是对的：claim 的主人可能还在跑），这一步排在“已删除的图交给人”之前。于是这样的 run 每次启动都被跳过，不进恢复列表，取消是 409，重入是 409，保留期清理也不删。出现的条件是开过 `guarded` 的部署在启动恢复领取之后、落定之前停掉，部署这次改动的那次重启就算。删除之前开关不是 `guarded` 时也是这样；删除之后没有任何进程能续跑它，就成了永久的。现在启动恢复在它的 claim 下把它交给人，两种恢复模式都是：这个版本没有进程能持有 v2 的 claim。
+- **失败或取消时图还在 `running` 阶段的 v3 run 续不上。** 依赖故障、客户端断开、超过截止时间都是这样结束的，其中依赖故障是标了可重试的失败。原来“已收尾”的判断只认两种形状（图完成且有收据、图 `partial` 且 run 失败），这类 run 每次续接都得到 409 `AGENT_GRAPH_EXECUTION_FENCED`，失败任务的 `continue` 发的正是这种请求。人取消过的 run 也是同一个结果。现在“已收尾”的规则是 run 已结束，或者已收尾成向用户提问；续接这样的 run 开新 run。
+- **`manual` 模式列出过的“向用户提问”被围住**（低级，改了）：它还是一个问题，回答它照样开新 run。
+- **停在门上的拒绝不看 run 的状态**（低级，改了）：人取消之后，审批端点和重入还在回“要人来处理”。现在对已结束的 run 不走这条拒绝。
+- 夹具加了四种状态：被启动恢复领取过的、依赖故障时在图里失败的、在图里被取消的、图已 `partial` 而 run 还没被标成失败的。它们是冻结提交 0ce3d23c 的 v3 代码写的，用的是和原脚本相同的夹具和崩溃辅助函数。`agent-stored-unified-graph-runs` 从 9 个测试到 12 个：加了 `manual` 模式、点名别的门的决定、取消之后的续接和审批，以及同样的事情经过建好的 app 走 HTTP（启动恢复由 app 自己跑，然后是恢复列表、审批、重试、取消四个路由）。五条规则各做过一次变异：去掉 `auto` 分支里的 claim、去掉 `manual` 分支里的 claim、把“已结束”收窄成“已完成”、让拒绝不跳过已结束的 run、让人工标记一律取消“提问”的资格，每一个都有测试失败。
+
+**随 v3 套件丢掉的测试（中级，补了）**
+
+这些代码 custom Skill 图和外层计划还在用，原来只在 v3 的测试里断言过：
+
+- 自动续跑失败（`auto_recovery_failed` 事件、在 claim 下交给人、原因 `graph_resume_failed`），和续跑返回了却什么都没落定：`agent-run-recovery` 17 → 19。
+- 校验器拒绝引用“在这里没有契约的 Skill”的输出：`agent-execution-graph` 46 → 47。
+- 节点自己对 Skill 输出再做一次契约检查：`agent-execution-graph-node` 16 → 17。
+- 回放守卫拒绝“图已终结却没有它自己的终结事件”之后的审批：`agent-run-step-executor` 22 → 23。去掉那个分支，新测试会失败。
+- 任务级 `deny` 对普通审批门回 409：`agent-tasks` 22 → 23。
+
+**比代码强的说法（低级，改了说法）**
+
+- “所有没收尾的 run 都交给人、人可以取消”：对被领取过的 run 不成立（已改代码）；取消只有在 run 被标成人工恢复之后才行。
+- “已失败的 run 算收尾”：只对夹具里的三种状态成立（已改代码）。
+- “环境里带着已删除的取值时每个用例都失败”：走到外层计划之前就结束的请求不会被拒。
+- “原因从 `unified_graph_rollout_not_guarded` 变成 `unified_graph_removed`”：被替换的还有 `graph_finalization_requires_recovery`、`graph_checkpoint_version_not_resumable` 和其他对账原因。表里原来把它们归在“各有各的原因码”一行，现在把有夹具的那一种单列。
+- 审批端点点名别的门：现在也把 run 交给人并回同一个拒绝，原来只写了重入的情形。
+- 模块注释里的“HTTP 错误码”：路由只返回消息，不返回 `code`。
+- 测试注释里的“照 `app-services.js` 的接法”：那些服务是测试里手工接的。现在注释照实写，另加了一个真的经过 app 的测试。
+- 删除提交的说明里“保留到下一步的代码都没有生产调用方”：任务级的 `deny` 有（见“保留到下一步的”）。提交说明不改，以本节为准。
+- 本节原来写 `agent-runtime-removed`“原 15 个”测试，实际三个开关时是 19 个。
+
+**其余低级意见**
+
+- 没有调用方的代码：`resumeAgentExecutionGraphRunInScope` 的两个参数删了；`replayExecutionGraphRun`、DAG 规划器适配器的 `version` 分支、`document_rag` 图节点的故障分支留到下一步。
+- 过时的注释：六处调用点还写着三个开关，`routes/tasks.js` 还写着“审批可能续跑这个 run 的图”，都改了；`run-execution-graph.js` 里“恢复时的读取”那一处随下一步删。
+- 三条只断言“被删的用例不在了”的断言删了，用例数已经钉住了套件的大小。
+- `evaluation/rollout-readiness-report.js` 只读 `AGENT_SKILL_GRAPH_ROLLOUT` 来判断“这个环境起不起得来”，不读新删的开关。没有改：它同样不读 `AGENT_RUNTIME` 和 `AGENT_OUTER_PLAN_RUNTIME`，而带着被拒取值的环境本来就产不出它要读的运行时冒烟报告。
+
+**复核顺带发现的两个老问题（默认配置，不在这次改动范围内，没有改）**
+
+两个都和后台任务回到它暂停的 run 有关。我各用一个探针在三棵树上复现过：现在的代码、删除之前的 21eae0c6、阶段 7 之前的 b8e4d2ed，结果相同，所以不是这几个阶段改出来的。
+
+- **后台任务批准一个普通的 Capability 审批门会失败。** 带着批准重入之后，Web 搜索执行一次，然后请求以 409 `AGENT_RUN_ACTIVE_STEP_CONFLICT` 失败（审批门那一步还是 paused），run 留在 `running`、门还是 pending。run 没有被标成失败，复核读代码的解释是完成 run 的那个调用在 `try` 里没有 `await`，`catch` 接不到它；这个解释我没有另外验证。现有的任务审批测试都把 agent 换成了桩，所以没有测到；经过真实 agent 的那条端到端用例是 v3 的 golden，已随 v3 删除。只在进程内复现，没有经过 HTTP，也没有用任务跑过。任务卡片上的 Approve 按钮发的就是这个任务级的批准（读前端代码得出）；从 run 的审批端点批准（聊天页用的那条路，有经过 HTTP 的测试）不受影响。
+- **重入一个带着 custom Skill 图 checkpoint 的 run 会被围住。** 探针重入的是一个跑过两个 custom Skill、已经完成的 run，得到 409 `AGENT_GRAPH_EXECUTION_FENCED`。任务在失败之后、或者在等用户输入时的 `continue` 会带着原来的 run 重入，所以某一轮跑过 custom Skill 的任务很可能续不下去；后半句是读 `agent-tasks.js` 得出的，没有用任务跑过。
+
+**复核没能验证的**：测试套件、评测和覆盖率（它只读了日志）；PostgreSQL 上的 run store；真实执行 `node server.js` 的拒绝；前端测试；真实模型的规划器；滚动发布或多实例（读代码的结论见“升级时已存的 run”）。它当时也没有经过建好的 app 走 HTTP，这一项在修正时补了测试。
+
+修正之后重跑（复核修正提交 637593f3，本机 Node 24.21.0）：
+
+- **`coverage:gate`** 接一次性 PostgreSQL 18 + pgvector（该提交的干净 worktree）：4,479 个测试，4,472 通过、7 跳过、0 失败。全局行覆盖 91.92%，门槛和目标都通过。“RAG / AgentRAG core” 一组 94.46%（复核之前 94.26%）：过门槛 90%，仍没到目标 95%，报告里是 warn，原因不变。比复核之前多 10 个测试：`agent-stored-unified-graph-runs` 9 → 12，上面五个文件共 6 个，`langgraph-request-context` 1 个（删除提交之后补的）。
+- **`quality:current`** 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
+- **三个确定性 agent 评测与 21eae0c6 的比较**：和复核之前相同（trajectory 共有的 15 个用例、planner 共有的 6 个用例逐字节一致，recovery-observability 的用例和指标逐字节一致；差异只有少掉的用例、prompt 集合和 `configHash`）。
+- **不接数据库的全量**：4,313 个测试，4,286 通过、27 跳过、0 失败。
+- **仍然没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；滚动发布；存量数据里是否真有 v3 run；CI 的 Node 22（合并之后看）。
 
 ## 后果
 

@@ -45,6 +45,6 @@ v3 统一图把一个请求的所有阶段（文档问答、证据检查、补�
 ## 删除之后
 
 - `AGENT_UNIFIED_GRAPH_ROLLOUT` 只接受未设置或 `off`；`guarded`、`shadow` 和其他任何取值拒绝启动（`AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED`）。`AGENT_UNIFIED_GRAPH_CAPABILITIES` 不再读取。
-- 开过 `guarded` 的部署可能还存着 v3 的 run。已经结束的不动，续接它的请求新建一个 run。没结束的不能再续跑：启动恢复、审批端点和带 `agentRunId` 的重入都把它交给人，人可以取消。`server/rag/agent-removed-unified-graph.js` 是这部分的全部代码，`server/test/agent-stored-unified-graph-runs.test.mjs` 用 v3 代码当时写下的 run 记录逐种状态钉住。
+- 开过 `guarded` 的部署可能还存着 v3 的 run。已经结束的（完成、失败、取消）和已经收尾成向用户提问的不动，续接它的请求新建一个 run。没结束的不能再续跑：启动恢复把它交给人（被更早一次启动恢复领取过的也一样），审批端点和带 `agentRunId` 的重入拒绝；人只能取消，取消之后续接它的请求同样开新 run。`server/rag/agent-removed-unified-graph.js` 是这部分的全部代码，`server/test/agent-stored-unified-graph-runs.test.mjs` 用 v3 代码当时写下的 run 记录逐种状态钉住。
 - 失去的两种编排（证据检查之后才运行 Skill、审批内容来自已验证的答案）以后想要，得在外层执行计划里另做。
 - 逐条行为、删了什么、怎样恢复，见 [ADR 0001](adr/0001-langgraph-runtime.md) 的“阶段 10 结果”。
