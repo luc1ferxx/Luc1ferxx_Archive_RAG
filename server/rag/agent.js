@@ -41,9 +41,9 @@ import {
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
-  getAgentUnifiedGraphCapabilityIds,
-  getAgentUnifiedGraphRollout,
-} from "./config.js";
+  isRemovedUnifiedGraphApprovalPause,
+  refuseRemovedUnifiedGraphRun,
+} from "./agent-removed-unified-graph.js";
 import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { resolveAgentRunTermination } from "./dependency-outage.js";
@@ -65,14 +65,6 @@ import {
   withSpan,
 } from "./tracing.js";
 import { observeAgentRun } from "./metrics-agent.js";
-import { observeUnifiedAgentGraphShadow } from "./agent-unified-graph-shadow.js";
-import {
-  continueUnifiedAgentGraphAfterApproval,
-  isUnifiedGraphAwaitingApproval,
-  restateUnifiedGraphApprovalPause,
-  resumeUnifiedAgentGraphRun,
-  runGuardedUnifiedAgentGraph,
-} from "./agent-unified-graph-run.js";
 
 const getSkillDescriptor = (skill = {}) => ({
   skillId: skill.id,
@@ -348,11 +340,9 @@ const attachAgentExperienceMemoryWrite = (response = {}, writeResult = {}) => {
 };
 
 // Everything a completed response carries besides the answer itself: the task
-// continuation and the experience-memory write. The guarded v3 path seals the
-// prepared response in its finalization receipt, so a recovered run completes
-// with exactly what the uninterrupted request would have returned. The write
-// is an upsert under a deterministic memory key, so preparing the same answer
-// again after a crash does not duplicate the record.
+// continuation and the experience-memory write. The write is an upsert under
+// a deterministic memory key, so preparing the same answer again does not
+// duplicate the record.
 const prepareCompletedAgentResponse = async ({
   accessScope,
   question,
@@ -432,81 +422,25 @@ const createGraphResumeError = (reason) => {
   return error;
 };
 
-// Completes a continued guarded v3 run with its prepared, sealed response: the
-// stored finalization receipt, or one recomputed from the reused nodes and
-// prepared (run id, continuation, experience memory) before its receipt was
-// written. Either way it is persisted under the recovery claim (none for the
-// worker an approval decision reopened).
-const completeUnifiedGraphResume = async ({
-  accessScope,
-  agentRunService,
-  claimId,
-  response,
-  runCursor,
-  runId,
-}) => {
-  const completedRun = await completeRecordedRun({
-    accessScope,
-    agentRunService,
-    graphResumeClaimId: claimId,
-    response,
-    runCursor,
-    runId,
-  });
-
-  return attachAgentRunSnapshot(response, completedRun);
-};
-
 /**
- * Continue only the persisted graph. For a v1 checkpoint that is the
- * custom_skills stage; for a v2 checkpoint (a guarded heterogeneous v3 graph)
- * it is the whole request, handled by agent-unified-graph-run.js. In
- * particular this does not call the Intent Planner, query planner,
- * preparation flow, or outer Execution Planner. A startup worker must first
- * own the persisted CAS claim and must never use the general runAgentRag
- * re-entry path for this job.
+ * Continue only the persisted graph: the custom_skills stage of a run whose
+ * stored outer plan is exactly that stage. In particular this does not call
+ * the Intent Planner, query planner, preparation flow, or outer Execution
+ * Planner. A startup worker must first own the persisted CAS claim and must
+ * never use the general runAgentRag re-entry path for this job. A checkpoint
+ * of the removed v3 unified graph (agent-removed-unified-graph.js) is not a
+ * custom-Skill graph and is refused by the check below.
  */
 const resumeAgentExecutionGraphRunInScope = async ({
   accessScope,
   agentRunService,
-  capabilityRegistry = null,
   checkpoint,
   ragService,
   replanAdapter = null,
   run,
   runId,
   skillRegistry,
-  webChatService = null,
 } = {}) => {
-  if (checkpoint?.version === "v2") {
-    return resumeUnifiedAgentGraphRun({
-      accessScope,
-      agentRunService,
-      capabilityRegistry,
-      checkpoint,
-      complete: (completion) =>
-        completeUnifiedGraphResume({
-          ...completion,
-          accessScope,
-          agentRunService,
-          runId,
-        }),
-      prepareResponse: (response, { question, taskMemory, userId }) =>
-        prepareCompletedAgentResponse({
-          accessScope,
-          question,
-          response: attachAgentRunId(response, runId),
-          taskMemory,
-          userId,
-        }),
-      ragService,
-      run,
-      runId,
-      skillRegistry,
-      webChatService,
-    });
-  }
-
   const owner = checkpoint?.owner;
   const docIds = run?.input?.docIds;
   const question = normalizeText(run?.goal);
@@ -717,94 +651,6 @@ const resumeAgentExecutionGraphRunInScope = async ({
   return attachAgentRunSnapshot(responseWithContinuation, completedRun);
 };
 
-// The continuation an approval decision starts on a guarded v3 graph paused
-// at its gate (the /agent-runs/:runId/actions/:action endpoint and a
-// background task's approval both land here). It completes the run exactly
-// as the uninterrupted request would have.
-const continueAgentExecutionGraphApprovalInScope = ({
-  accessScope,
-  action,
-  agentRunService,
-  capabilityRegistry = null,
-  gateId,
-  liveAllowedCapabilityIds = getAgentUnifiedGraphCapabilityIds(),
-  payload = {},
-  ragService,
-  runId,
-  skillRegistry,
-  webChatService = null,
-} = {}) =>
-  continueUnifiedAgentGraphAfterApproval({
-    accessScope,
-    action,
-    agentRunService,
-    capabilityRegistry,
-    liveAllowedCapabilityIds,
-    complete: (completion) =>
-      completeUnifiedGraphResume({
-        ...completion,
-        accessScope,
-        agentRunService,
-        runId,
-      }),
-    gateId,
-    payload,
-    prepareResponse: (response, { question, taskMemory, userId }) =>
-      prepareCompletedAgentResponse({
-        accessScope,
-        question,
-        response: attachAgentRunId(response, runId),
-        taskMemory,
-        userId,
-      }),
-    ragService,
-    runId,
-    skillRegistry,
-    webChatService,
-  });
-
-// A background task decides a paused run by re-entering it with the gate's
-// decision in capabilityApprovals (an approval, or a task-level denial). When
-// that run is a guarded v3 graph parked at its gate, the decision continues
-// the same graph instead of re-planning it and must name that exact gate and
-// approval object. A re-entry that carries nothing for the gate's Capability
-// (a task's `continue`) decides nothing: it returns null and the caller
-// re-states the pending approval.
-const findGraphGateDecision = ({ capabilityApprovals = {}, checkpoint }) => {
-  const boundary = checkpoint.approvalBoundary;
-  const approval =
-    capabilityApprovals?.[boundary.capabilityId] ?? capabilityApprovals?.["*"];
-
-  if (approval === undefined || approval === null) {
-    return null;
-  }
-
-  const decision = normalizeText(approval?.decision ?? approval?.action).toLowerCase();
-  const approves =
-    approval?.approved === true && (!decision || ["approve", "approved"].includes(decision));
-  const denies = approval?.approved === false && ["deny", "denied"].includes(decision);
-
-  if (
-    typeof approval !== "object" ||
-    normalizeText(approval.gateId) !== boundary.gateId ||
-    normalizeText(approval.approvalObjectHash) !== boundary.approvalObjectHash ||
-    (!approves && !denies)
-  ) {
-    const error = new Error(
-      "A paused unified graph continues only with a decision of its own gate."
-    );
-    error.code = "graph_approval_not_pending";
-    error.status = 409;
-    throw error;
-  }
-
-  return {
-    action: approves ? "approve" : "deny",
-    approvalObjectHash: boundary.approvalObjectHash,
-    gateId: boundary.gateId,
-  };
-};
-
 // A planner span carries which planner answered and whether it fell back;
 // never the question or the plan text.
 const withPlannerSpan = (kind, plan) =>
@@ -869,8 +715,6 @@ const runAgentRagInScope = async ({
   intentPlannerAdapter,
   replanAdapter = null,
   skillRegistry,
-  unifiedGraphAllowedCapabilityIds = getAgentUnifiedGraphCapabilityIds(),
-  unifiedGraphPlannerAdapter = null,
 }) => {
   if (requestedAgentRunId && agentRunService?.getExecutionGraphCheckpoint) {
     const loadedGraph = await agentRunService.getExecutionGraphCheckpoint({
@@ -878,37 +722,15 @@ const runAgentRagInScope = async ({
       runId: requestedAgentRunId,
     });
 
-    if (isUnifiedGraphAwaitingApproval(loadedGraph?.checkpoint)) {
-      const decision = findGraphGateDecision({
-        capabilityApprovals,
-        checkpoint: loadedGraph.checkpoint,
-      });
-
-      if (!decision) {
-        return restateUnifiedGraphApprovalPause({
-          accessScope,
-          agentRunService,
-          checkpoint: loadedGraph.checkpoint,
-          runId: requestedAgentRunId,
-          skillRegistry,
-        });
-      }
-
-      const { action, approvalObjectHash, gateId } = decision;
-
-      return continueAgentExecutionGraphApprovalInScope({
+    // A run of the removed v3 unified graph parked at its approval gate: no
+    // request can decide that gate or continue that graph any more. Refused
+    // unless the run has ended (an operator canceled it), which the re-entry
+    // below then continues as a new run.
+    if (isRemovedUnifiedGraphApprovalPause(loadedGraph?.checkpoint)) {
+      await refuseRemovedUnifiedGraphRun({
         accessScope,
-        action,
         agentRunService,
-        capabilityRegistry,
-        gateId,
-        // This request's operator allowlist, read now.
-        liveAllowedCapabilityIds: unifiedGraphAllowedCapabilityIds,
-        payload: { approvalObjectHash, gateId },
-        ragService,
         runId: requestedAgentRunId,
-        skillRegistry,
-        webChatService,
       });
     }
   }
@@ -1018,11 +840,12 @@ const runAgentRagInScope = async ({
         },
       });
     } catch (error) {
-      // A guarded v3 graph owned the whole earlier request and has settled
-      // (finalized as a clarification, or failed). Its run is never
-      // re-entered: a continuation such as the user's answer to that
-      // clarification is a new request, so it gets a new run; the task memory
-      // carries the context. The settled run is left untouched.
+      // A graph of the removed v3 unified graph owned the whole earlier
+      // request and has settled (the run ended, or was finalized as a
+      // question). Its run is never re-entered: a continuation such as the
+      // user's answer to its clarification is a new request, so it gets a new
+      // run; the task memory carries the context. The settled run is left
+      // untouched.
       if (error?.code !== AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE) {
         throw error;
       }
@@ -1114,101 +937,6 @@ const runAgentRagInScope = async ({
     }
 
     const agentRetrievalPlan = preparationResult.agentRetrievalPlan;
-    const unifiedGraphRollout = getAgentUnifiedGraphRollout();
-
-    if (unifiedGraphRollout === "guarded") {
-      // One request, one path: an admitted v3 graph answers the whole request
-      // and the V1 outer plan below never runs. A graph refused before any
-      // node ran (no planner, invalid proposal, an approval-gated node, or a
-      // shape the finalizer cannot represent) is recorded and falls through
-      // to V1 unchanged.
-      const unified = await runGuardedUnifiedAgentGraph({
-        accessScope,
-        agentRunId,
-        agentRunService,
-        allowedCapabilityIds: unifiedGraphAllowedCapabilityIds,
-        baseCapabilityRegistry,
-        capabilityApprovals,
-        capabilityRegistry: effectiveCapabilityRegistry,
-        docIds,
-        experienceMemory: agentExperienceMemory,
-        intentPlanner: intentPlanResult.planner,
-        plan,
-        plannerAdapter: unifiedGraphPlannerAdapter,
-        prepareResponse: (response) =>
-          prepareCompletedAgentResponse({
-            accessScope,
-            question,
-            response: attachAgentRunId(response, agentRunId),
-            taskMemory: taskMemoryContext,
-            userId,
-          }),
-        question,
-        ragService,
-        reentry: reenteredRun,
-        registry,
-        retrievalPlan: agentRetrievalPlan,
-        runCursor,
-        session: agentSession,
-        sessionId,
-        stepLifecycle,
-        taskMemory: taskMemoryContext,
-        userId,
-      });
-
-      if (unified.paused) {
-        // The graph is parked at its approval gate; the run store already
-        // holds the gate, its private snapshot, and the paused checkpoint.
-        // The run is not completed: the approval decision continues it.
-        return attachAgentRunSnapshot(
-          attachAgentRunId(unified.response, agentRunId),
-          unified.run ??
-            (await agentRunService?.getRun?.({ accessScope, runId: agentRunId }))
-        );
-      }
-
-      if (unified.response) {
-        // Already prepared and sealed in the finalization receipt.
-        const completedRun = await completeRecordedRun({
-          accessScope,
-          agentRunService,
-          approvalSnapshots: [],
-          graphResumeClaimId: null,
-          response: unified.response,
-          runCursor,
-          runId: agentRunId,
-        });
-
-        return attachAgentRunSnapshot(unified.response, completedRun);
-      }
-    }
-
-    if (unifiedGraphRollout === "shadow") {
-      await observeUnifiedAgentGraphShadow({
-        accessScope,
-        addTraceStep,
-        // The planning problem guarded poses: its allowlist, base registry and
-        // admission inputs.
-        allowedCapabilityIds: unifiedGraphAllowedCapabilityIds,
-        baseCapabilityRegistry,
-        budgetState,
-        capabilityApprovals,
-        capabilityRegistry: effectiveCapabilityRegistry,
-        docIds,
-        plan,
-        plannerAdapter: unifiedGraphPlannerAdapter,
-        question,
-        ragService,
-        record: (payload) => agentRunService?.appendRunEvent?.({
-          accessScope,
-          runId: agentRunId,
-          type: "unified_graph_planned",
-          payload,
-        }),
-        registry,
-        taskMemory: taskMemoryContext,
-      });
-    }
     const executionPlanResult = await withPlannerSpan("execution", () =>
       createAgentExecutionPlanResult({
         accessScope,
@@ -1502,19 +1230,6 @@ export const runAgentRag = (options = {}) =>
           [GEN_AI_ATTRIBUTES.conversationId]: options.sessionId,
         },
         () => runAgentRagInScope(options)
-      )
-  );
-
-export const continueAgentExecutionGraphApproval = (options = {}) =>
-  runWithRunUsage(
-    createRunUsage({ limits: resolveRunUsageLimits(options.agentBudget) }),
-    () =>
-      withAgentRunSpan(
-        {
-          "agent.run.graph_approval": true,
-          "agent.run.id": options.runId,
-        },
-        () => continueAgentExecutionGraphApprovalInScope(options)
       )
   );
 

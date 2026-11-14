@@ -3,7 +3,6 @@ import { getDagPlannerPromptDescriptor } from "./agent-dag-planner-adapter.js";
 import { getIntentPlannerPromptDescriptor } from "./agent-intent-llm-adapter.js";
 import { getExecutionPlannerPromptDescriptor } from "./agent-llm-planner-adapter.js";
 import { getReplannerPromptDescriptor } from "./agent-replan-adapter.js";
-import { getUnifiedGraphPlannerPromptDescriptor } from "./agent-unified-dag-planner-adapter.js";
 import {
   getActiveAnswerPromptDescriptors,
   listAnswerPromptDescriptors,
@@ -26,7 +25,6 @@ const getSingleTemplatePrompts = () => [
   getExecutionPlannerPromptDescriptor(),
   getDagPlannerPromptDescriptor(),
   getReplannerPromptDescriptor(),
-  getUnifiedGraphPlannerPromptDescriptor(),
   getClaimJudgePromptDescriptor(),
 ];
 

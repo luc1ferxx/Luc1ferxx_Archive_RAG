@@ -3,17 +3,17 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import { createApp as createProductionApp } from "../app.js";
-import { continueAgentExecutionGraphApproval, runAgentRag } from "../rag/agent.js";
+import { runAgentRag } from "../rag/agent.js";
 import { deterministicPlannerAdapter } from "../rag/agent-execution-plan.js";
 import { deterministicIntentPlannerAdapter } from "../rag/agent-intent-planner.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
-import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
 import {
   AGENT_RUN_STATUSES,
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
+import { CAPABILITY_IDS, createDefaultCapabilityRegistry } from "../rag/capabilities/index.js";
 import { DependencyOutageError } from "../rag/dependency-outage.js";
 import { completeText, configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import {
@@ -26,18 +26,6 @@ import {
   runWithRequestDeadline,
 } from "../rag/request-deadline.js";
 import { ServiceTimeoutError, ServiceUnavailableError } from "../rag/service-client.js";
-import {
-  APPROVAL_TASK_QUESTION,
-  DOCUMENT_LOOP_QUESTION,
-  UNIFIED_ACCESS_SCOPE,
-  UNIFIED_DOC_ID,
-  UNIFIED_SESSION_ID,
-  createApprovalGatedTaskProposal,
-  createDocumentLoopProposal,
-  createDocumentLoopRagService,
-  createProposalAdapter,
-  createTaskCapabilityRegistry,
-} from "./fixtures/unified-graph-run-fixtures.mjs";
 
 // Cancellation and outages through the agent run, in one process: runAgentRag
 // under a request deadline, and the monolith's /chat and /chat/stream with
@@ -651,59 +639,6 @@ test("an ordinary failure keeps its answer: no outage code for an error that is 
   assert.equal(response.headers.get("retry-after"), null);
 });
 
-test("a guarded v3 graph whose primary document node fails on an outage ends the run with that outage", async (t) => {
-  withEnv(t, {
-    AGENT_PLANNER_ROLLOUT: "deterministic",
-    AGENT_UNIFIED_GRAPH_ROLLOUT: "guarded",
-    RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
-    RAG_LONG_MEMORY_ENABLED: "false",
-  });
-
-  const { agentRunService } = createRunService();
-  let webCalls = 0;
-  const ragService = createDocumentLoopRagService({
-    onChat: async ({ phase }) => {
-      if (phase === "primary") {
-        throw new ServiceUnavailableError("The retrieval service is unreachable.", {
-          code: "SERVICE_UNREACHABLE",
-          service: "retrieval",
-        });
-      }
-    },
-  });
-  const error = await runAgentRag({
-    accessScope: UNIFIED_ACCESS_SCOPE,
-    agentRunService,
-    docIds: [UNIFIED_DOC_ID],
-    question: DOCUMENT_LOOP_QUESTION,
-    ragService,
-    sessionId: UNIFIED_SESSION_ID,
-    unifiedGraphPlannerAdapter: createProposalAdapter(createDocumentLoopProposal),
-    userId: UNIFIED_ACCESS_SCOPE.userId,
-    webChatService: async () => {
-      webCalls += 1;
-      return { text: "web" };
-    },
-  }).then(
-    () => assert.fail("the run should not complete"),
-    (rejection) => rejection
-  );
-
-  assert.ok(error instanceof DependencyOutageError, String(error));
-  assert.equal(error.status, 503);
-  assert.equal(error.causeCode, "SERVICE_UNREACHABLE");
-  assert.equal(webCalls, 0);
-
-  const run = await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId: error.agentRunId });
-
-  assert.equal(run.status, AGENT_RUN_STATUSES.failed);
-  assert.equal(run.error.reason, "dependency_unavailable");
-  assert.equal(run.error.retryable, true);
-  assert.ok(run.events.some((event) => event.type === "unified_graph_planned" && event.payload.status === "selected"));
-  assert.ok(run.steps.some((step) => step.type === "graph_node" && step.status === "failed"));
-  assert.ok(run.steps.every((step) => step.status !== "running"));
-});
-
 test("a custom-Skill stage whose every Skill failed on an outage ends the run with that outage", async () => {
   const { agentRunService } = createRunService();
   const error = await runAgentRag({
@@ -793,113 +728,57 @@ test("a deadline that passes inside a guarded custom-Skill graph node settles th
   assert.ok(!(await agentRunService.listRecoverableRuns()).runs.some((listed) => listed.runId === error.agentRunId));
 });
 
-// The approval endpoint continuing a guarded v3 graph (routes/tasks.js binds
-// the request's deadline around it, as /chat does). The gated node is
-// task.create, a Capability that writes.
-const pauseAtTaskApproval = async (t, { onWrite } = {}) => {
-  withEnv(t, {
-    AGENT_PLANNER_ROLLOUT: "deterministic",
-    AGENT_UNIFIED_GRAPH_CAPABILITIES: "task.create",
-    AGENT_UNIFIED_GRAPH_ROLLOUT: "guarded",
-    RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
-    RAG_LONG_MEMORY_ENABLED: "false",
-  });
-
-  const { agentRunService } = createRunService();
-  const ragService = createDocumentLoopRagService({ primary: "supported" });
-  const { registry, writes } = await createTaskCapabilityRegistry({ onWrite, ragService });
-  const paused = await runAgentRag({
-    accessScope: UNIFIED_ACCESS_SCOPE,
-    agentRunService,
-    capabilityRegistry: registry,
-    docIds: [UNIFIED_DOC_ID],
-    question: APPROVAL_TASK_QUESTION,
-    ragService,
-    sessionId: UNIFIED_SESSION_ID,
-    unifiedGraphAllowedCapabilityIds: ["task.create"],
-    unifiedGraphPlannerAdapter: createProposalAdapter(createApprovalGatedTaskProposal),
-    userId: UNIFIED_ACCESS_SCOPE.userId,
-  });
-  const gate = paused.body.approvalGates[0];
-  const runId = paused.body.agentRunId;
-
-  assert.equal((await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId })).status, "waiting_for_user");
-
-  const approve = () =>
-    createAgentRunStepExecutor({
-      agentRunService,
-      capabilityRegistry: registry,
-      continueExecutionGraphApproval: (args) =>
-        continueAgentExecutionGraphApproval({ ...args, agentRunService, capabilityRegistry: registry, ragService }),
-    }).applyApprovalAction({
-      accessScope: UNIFIED_ACCESS_SCOPE,
-      action: "approve",
-      gateId: gate.id,
-      payload: { approvalObjectHash: gate.approvalObjectHash },
-      runId,
-    });
-
-  return { agentRunService, approve, runId, writes };
-};
-
-test("an approval continuation whose request is already cancelled ends the run with the reason, never for an operator", async (t) => {
-  const { agentRunService, approve, runId, writes } = await pauseAtTaskApproval(t);
-  const error = await runWithRequestDeadline({ deadlineAt: Date.now() - 1 }, approve).then(
-    () => assert.fail("the continuation should stop"),
-    (rejection) => rejection
-  );
-
-  assert.ok(error instanceof RequestCancelledError, String(error));
-  assert.equal(error.reason, "deadline_exceeded");
-  assert.equal(error.agentRunId, runId);
-  // The approved node never launched: nothing was written.
-  assert.equal(writes.length, 0);
-
-  const run = await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId });
-
-  assert.equal(run.status, AGENT_RUN_STATUSES.failed);
-  assert.deepEqual(pickRunError(run.error), {
-    code: "AGENT_DEADLINE_EXCEEDED",
-    reason: "deadline_exceeded",
-    retryable: true,
-  });
-  assert.ok(
-    !run.events.some((event) => event.type === "manual_recovery_required"),
-    "not handed to an operator"
-  );
-  assert.ok(run.steps.every((step) => step.status !== "running"));
-  assert.ok(!(await agentRunService.listRecoverableRuns()).runs.some((listed) => listed.runId === runId));
-});
-
-test("an approved Capability that writes is never cut by the deadline: it runs once, outside the request's signal", { timeout: 20_000 }, async (t) => {
-  const inside = [];
-  // The deadline passes inside the write, on cue. A wall-clock deadline short
-  // enough to pass during the write could also pass before the approved node
-  // launched, and that safe point would cancel the continuation instead.
+// The rule is the Capability registry's (capabilities/registry.js), whatever
+// runs the Capability: one that writes is never interrupted mid-effect, so it
+// runs without the request's deadline and signal, and a read-only one keeps
+// both. (Until ADR 0001 phase 10 removed it, the v3 unified graph's approval
+// continuation was where this was pinned.)
+test("a Capability that writes is never cut by the deadline: it runs once, outside the request's signal; a read-only one keeps it", { timeout: 20_000 }, async () => {
+  const inside = { read: [], write: [] };
+  // The deadline passes inside the write, on cue.
   const deadline = createDeadlineOnCue();
-  const { agentRunService, approve, runId, writes } = await pauseAtTaskApproval(t, {
-    onWrite: async () => {
-      inside.push({ deadline: getRequestDeadline(), signal: getRequestSignal() });
-      // Still writing when the request's deadline passes: the run gets to
-      // react to it before the write ends.
-      deadline.expire();
-      await new Promise((resolve) => setTimeout(resolve, 20));
+  const registry = createDefaultCapabilityRegistry({
+    actionTaskService: {
+      createActionTask: async (task) => {
+        inside.write.push({ deadline: getRequestDeadline(), signal: getRequestSignal() });
+        // Still writing when the request's deadline passes.
+        deadline.expire();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        return { id: "task-1", label: task.label, status: task.status };
+      },
+    },
+    ragService: createRagService(),
+    webChatService: async () => {
+      inside.read.push({ deadline: getRequestDeadline(), signal: getRequestSignal() });
+
+      return { citations: [], text: "A web answer." };
     },
   });
-  const approved = await deadline.run(approve);
+  const written = await deadline.run(() =>
+    registry.execute(CAPABILITY_IDS.taskCreate, {
+      accessScope,
+      approval: { approved: true },
+      input: { description: "Review the renewal notice period.", title: "Review renewal" },
+    })
+  );
 
   assert.equal(deadline.signal.reason?.reason, "deadline_exceeded", "the write outlived the deadline");
-  assert.deepEqual(inside, [{ deadline: null, signal: null }]);
-  assert.equal(writes.length, 1);
-  // The write was the graph's last node: its step completed and, with no safe
-  // point left, the run completed with it rather than reporting a deadline
-  // over a write that happened.
-  assert.equal(approved.run.status, AGENT_RUN_STATUSES.completed);
+  assert.deepEqual(inside.write, [{ deadline: null, signal: null }]);
+  assert.equal(written.task.id, "task-1");
 
-  const run = await agentRunService.getRun({ accessScope: UNIFIED_ACCESS_SCOPE, runId });
+  const reading = createDeadlineOnCue();
 
-  assert.equal(run.steps.find((step) => step.type === "graph_node" && /dGFzaw/.test(step.id))?.status, "completed");
-  assert.ok(!(await agentRunService.listRecoverableRuns()).runs.some((listed) => listed.runId === runId));
+  await reading.run(() =>
+    registry.execute(CAPABILITY_IDS.webSearch, {
+      approval: { approved: true },
+      input: { question: "latest renewal rules" },
+    })
+  );
+
+  assert.equal(inside.read.length, 1);
+  assert.equal(typeof inside.read[0].deadline, "number");
+  assert.equal(inside.read[0].signal, reading.signal);
 });
 
 test("a research brief whose every question failed on an outage ends the run with that outage, never as missing evidence", async () => {

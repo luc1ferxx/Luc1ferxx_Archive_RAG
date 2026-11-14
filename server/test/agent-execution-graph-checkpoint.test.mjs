@@ -364,7 +364,11 @@ test("a v2 graph with an unsupported stored outer plan still requires manual rec
   assert.equal(run.status, "waiting_for_user");
 });
 
-test("a v3 graph cannot enter the legacy custom-Skill startup continuation", async () => {
+// The v3 unified graph was removed in ADR 0001 phase 10: a run that holds its
+// checkpoint is handed to an operator as such, even one whose events look
+// like the custom-Skill continuation's (test/agent-stored-unified-graph-runs
+// .test.mjs has the stored states).
+test("a stored v3 graph cannot enter the custom-Skill startup continuation", async () => {
   const { checkpoint } = createV3DocumentCheckpoint();
   const service = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
   const v3RunId = "v3-legacy-shaped-outer-plan";
@@ -402,7 +406,7 @@ test("a v3 graph cannot enter the legacy custom-Skill startup continuation", asy
   assert.equal(
     run.events.findLast((event) => event.type === "manual_recovery_required")
       ?.payload?.reason,
-    "graph_checkpoint_version_not_resumable"
+    "unified_graph_removed"
   );
 });
 

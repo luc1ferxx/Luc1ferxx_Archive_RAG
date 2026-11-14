@@ -58,8 +58,6 @@ const PINNED_PROMPT_TEMPLATES = Object.freeze({
   "qa_query_hyde@v1": "db479ed2b55e",
   "qa_query_multi_query@v1": "9f04172e48e2",
   "replanner@v1": "16e4034680c7",
-  // The heterogeneous v3 (unified) graph planner.
-  "unified_graph_planner@v1": "037c0f5c79da",
   "web_answer@v1.1": "26e8ffa6c6c4",
   "web_answer@v2.1": "9fb8253dfa4f",
 });

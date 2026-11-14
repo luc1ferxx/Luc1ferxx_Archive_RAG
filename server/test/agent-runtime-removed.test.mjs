@@ -12,21 +12,24 @@ import { startServiceRole } from "../rag/agent-service/role-server.js";
 import * as config from "../rag/config.js";
 import { LANGSMITH_TRACING_VARIABLES } from "../rag/langgraph/langsmith-guard.js";
 
-// The agent has one runtime, LangGraph (docs/adr/0001-langgraph-runtime.md).
-// Phase 6 deleted the native graph scheduler and the AGENT_RUNTIME dial that
-// selected it; phase 7 deleted the native outer loop and the
-// AGENT_OUTER_PLAN_RUNTIME dial that selected it; phase 8 deleted the
-// sequential Skill chain and the AGENT_SKILL_GRAPH_ROLLOUT values that
-// selected it (`off`, `shadow`). None of the three variables selects anything
-// any more; all are only checked (rag/config.js assertAgentRuntimeSupported):
-// unset, empty, whitespace or the one value left (langgraph for the two
-// runtime dials, guarded for the rollout; trimmed, any case) pass; any other
-// value refuses, so a process asked for something that was removed never runs
-// LangGraph without saying so. They are checked at start-up (server.js and
-// startServiceRole), when the app services are built (createAppServices: the
-// monolith, the agent tier, an evaluation runner that builds createApp), and
-// at every entry that schedules on LangGraph (the outer plan's entry, the
-// custom-Skill stage, the v3 entries and stage, and the executor), which also
+// The agent has one runtime, LangGraph, and one way to answer a request, the
+// outer execution plan (docs/adr/0001-langgraph-runtime.md). Phase 6 deleted
+// the native graph scheduler and the AGENT_RUNTIME dial that selected it;
+// phase 7 deleted the native outer loop and the AGENT_OUTER_PLAN_RUNTIME dial
+// that selected it; phase 8 deleted the sequential Skill chain and the
+// AGENT_SKILL_GRAPH_ROLLOUT values that selected it (`off`, `shadow`); phase
+// 10 deleted the v3 unified graph and the AGENT_UNIFIED_GRAPH_ROLLOUT values
+// that selected it (`guarded`, `shadow`). None of the four variables selects
+// anything any more; all are only checked (rag/config.js
+// assertAgentRuntimeSupported): unset, empty, whitespace or the one value
+// left (langgraph for the two runtime dials, guarded for the Skill graph
+// rollout, off for the unified graph rollout; trimmed, any case) pass; any
+// other value refuses, so a process asked for something that was removed
+// never answers another way without saying so. They are checked at start-up
+// (server.js and startServiceRole), when the app services are built
+// (createAppServices: the monolith, the agent tier, an evaluation runner that
+// builds createApp), and at every entry that schedules on LangGraph (the
+// outer plan's entry, the custom-Skill stage and the executor), which also
 // covers evaluation runners that call runAgentRag directly without building
 // an app.
 
@@ -37,6 +40,7 @@ const {
   AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE,
   AGENT_RUNTIME_REMOVED_CODE,
   AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE,
+  AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED_CODE,
   assertAgentRuntimeSupported,
 } = config;
 
@@ -44,7 +48,7 @@ const serverDirectory = fileURLToPath(new URL("..", import.meta.url));
 const quietLogger = { error() {}, log() {}, warn() {} };
 const SERVICE_KEYS = `runtime-removed:${"r".repeat(48)}`;
 
-// The three removed dials: the variable, its error code, the ADR phase that
+// The four removed dials: the variable, its error code, the ADR phase that
 // removed it, the one value it still accepts, the values that selected what
 // was deleted, what kind of thing it chose, a value that was never one, and
 // the getter that is gone.
@@ -79,6 +83,16 @@ const DIALS = [
     removedValues: ["off", "shadow"],
     typo: "gaurded",
   },
+  {
+    accepted: "off",
+    code: AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED_CODE,
+    getter: "getAgentUnifiedGraphRollout",
+    kind: "a rollout mode",
+    name: "AGENT_UNIFIED_GRAPH_ROLLOUT",
+    phase: 10,
+    removedValues: ["guarded", "shadow"],
+    typo: "gaurded",
+  },
 ];
 const DIAL_NAMES = DIALS.map(({ name }) => name);
 const capitalize = (value) => `${value[0].toUpperCase()}${value.slice(1)}`;
@@ -111,7 +125,7 @@ const refusedFor = (dial) => {
 const removedEnv = ({ name, removedValues }) => ({ [name]: removedValues[0] });
 const firstRemovedPattern = (dial) => removedPattern(dial, dial.removedValues[0]);
 
-// Runs `work` with exactly `env` for the three dials: a dial `env` does not
+// Runs `work` with exactly `env` for the four dials: a dial `env` does not
 // name is unset, whatever the ambient environment holds.
 const withDials = async (env, work) => {
   const saved = Object.fromEntries(
@@ -146,10 +160,13 @@ const isRemovedRuntime = ({ accepted, code, name }, pattern) => (error) => {
 const isNoRemovedRuntimeError = (error) =>
   DIALS.every(({ code }) => error?.code !== code);
 
-test("the dials are gone: config.js resolves no runtime and no Skill rollout, and each removed value has its own code", () => {
+test("the dials are gone: config.js resolves no runtime and no rollout, and each removed value has its own code", () => {
   assert.equal(AGENT_RUNTIME_REMOVED_CODE, "AGENT_RUNTIME_REMOVED");
   assert.equal(AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE, "AGENT_OUTER_PLAN_RUNTIME_REMOVED");
   assert.equal(AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE, "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED");
+  assert.equal(AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED_CODE, "AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED");
+  // The allowlist of Capabilities the unified graph could call went with it.
+  assert.equal(Object.hasOwn(config, "getAgentUnifiedGraphCapabilityIds"), false);
 
   for (const { getter } of DIALS) {
     assert.equal(Object.hasOwn(config, getter), false, getter);
@@ -248,6 +265,7 @@ test("several dials set to a removed value: one of them names the refusal, and a
       AGENT_OUTER_PLAN_RUNTIME: " LangGraph ",
       AGENT_RUNTIME: "",
       AGENT_SKILL_GRAPH_ROLLOUT: " Guarded ",
+      AGENT_UNIFIED_GRAPH_ROLLOUT: " Off ",
     })
   );
 });
@@ -255,7 +273,7 @@ test("several dials set to a removed value: one of them names the refusal, and a
 const runServer = async (env) => {
   const childEnv = { ...process.env, PORT: "0", STARTUP_HEALTH_STRICT: "false" };
 
-  // The LangSmith refusal runs first; keep it out of the way. Of the three
+  // The LangSmith refusal runs first; keep it out of the way. Of the four
   // dials only the one under test is set.
   for (const name of [...LANGSMITH_TRACING_VARIABLES, ...DIAL_NAMES]) {
     delete childEnv[name];
@@ -410,15 +428,12 @@ test("the outer plan's entry refuses a removed value of any dial before it reads
 // runAgentRag in process, never building an app. Since phase 7 every request
 // that reaches the outer plan is scheduled on LangGraph, so a document
 // question refuses with the removed-value error exactly as a custom-Skill
-// DAG or a v3 unified graph does, instead of quietly running on LangGraph:
-// its report can never pass for native or sequential-chain evidence.
+// DAG does, instead of quietly running on LangGraph: its report can never
+// pass for native, sequential-chain or unified-graph evidence.
 test("an evaluation runner's in-process run refuses a removed value of any dial", async () => {
   const { runTrajectoryEvaluation } = await import("../evaluation/trajectory-eval.js");
   const { createFollowUpCase, createSkillChainCase } = await import(
     "../evaluation/trajectory/cases/core-flow.js"
-  );
-  const { createUnifiedGraphEvidenceGatedSkillCase } = await import(
-    "../evaluation/trajectory/cases/unified-graph.js"
   );
   const runCase = async (createCase) =>
     (
@@ -434,7 +449,6 @@ test("an evaluation runner's in-process run refuses a removed value of any dial"
   for (const [caseLabel, createCase] of [
     ["document question", createFollowUpCase],
     ["custom-Skill DAG", createSkillChainCase],
-    ["v3 unified graph", createUnifiedGraphEvidenceGatedSkillCase],
   ]) {
     for (const dial of DIALS) {
       for (const value of dial.removedValues) {

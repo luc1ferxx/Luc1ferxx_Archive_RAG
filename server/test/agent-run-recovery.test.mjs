@@ -605,6 +605,89 @@ test("graph-only startup callback receives the stored graph without replanning",
   assert.deepEqual(received[0].checkpoint.graph, fixture.checkpoint.graph);
 });
 
+// A resume that fails under its claim is handed to an operator under that
+// same claim: the run store marks a claimed run only for the caller that
+// names the claim, and without the mark the run would stay `running`, claimed
+// and unlisted for good. (Until ADR 0001 phase 10 this was pinned only in the
+// suites of the removed v3 unified graph.)
+test("a graph resume that fails is handed to an operator under its claim", async () => {
+  const fixture = await createGraphRecoveryFixture();
+  const recovery = createAgentRunRecoveryService({
+    agentRunService: fixture.agentRunService,
+    recordRecoveryTrace: async () => {},
+    resumeExecutionGraph: async () => {
+      const error = new Error("The Skill catalog changed since the graph was stored.");
+      error.status = 409;
+      throw error;
+    },
+  });
+
+  const outcome = await recovery.recoverOnStartup({ mode: "auto" });
+  const run = await fixture.agentRunService.getRun({
+    accessScope: fixture.accessScope,
+    runId: fixture.runId,
+  });
+  const loaded = await fixture.agentRunService.getExecutionGraphCheckpoint({
+    accessScope: fixture.accessScope,
+    runId: fixture.runId,
+  });
+  const eventsOfType = (type) => run.events.filter((event) => event.type === type);
+
+  assert.deepEqual(
+    {
+      autoRecoveredCount: outcome.autoRecoveredCount,
+      failedCount: outcome.failedCount,
+      manualRecoveredCount: outcome.manualRecoveredCount,
+      skippedCount: outcome.skippedCount,
+    },
+    { autoRecoveredCount: 0, failedCount: 1, manualRecoveredCount: 1, skippedCount: 0 }
+  );
+  assert.deepEqual(
+    eventsOfType("auto_recovery_failed").map((event) => event.payload),
+    [{
+      error: "The Skill catalog changed since the graph was stored.",
+      status: 409,
+      type: "execution_graph",
+    }]
+  );
+  assert.equal(eventsOfType("auto_recovery_completed").length, 0);
+  // Listed for an operator, the claim still on the checkpoint.
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(run.result.recovery.mode, "manual");
+  assert.equal(run.result.recovery.reason, "graph_resume_failed");
+  assert.equal(eventsOfType("manual_recovery_required").length, 1);
+  assert.equal(typeof loaded.checkpoint.resumeClaim?.claimId, "string");
+
+  // The next startup leaves it alone.
+  const again = await recovery.recoverOnStartup({ mode: "auto" });
+
+  assert.equal(again.autoRecoveredCount + again.failedCount + again.manualRecoveredCount, 0);
+});
+
+// A resume that returns without settling the run is a failed resume too.
+test("a graph resume that settles nothing is handed to an operator", async () => {
+  const fixture = await createGraphRecoveryFixture();
+  const recovery = createAgentRunRecoveryService({
+    agentRunService: fixture.agentRunService,
+    recordRecoveryTrace: async () => {},
+    resumeExecutionGraph: async () => {},
+  });
+
+  const outcome = await recovery.recoverOnStartup({ mode: "auto" });
+  const run = await fixture.agentRunService.getRun({
+    accessScope: fixture.accessScope,
+    runId: fixture.runId,
+  });
+
+  assert.equal(outcome.failedCount, 1);
+  assert.equal(outcome.manualRecoveredCount, 1);
+  assert.deepEqual(
+    run.events.filter((event) => event.type === "auto_recovery_failed").map((event) => event.payload),
+    [{ error: "Graph resume did not settle the agent run.", status: 500, type: "execution_graph" }]
+  );
+  assert.equal(run.result.recovery.reason, "graph_resume_failed");
+});
+
 test("an existing graph claim cannot be claimed or executed again", async () => {
   const fixture = await createGraphRecoveryFixture();
   const firstClaim = await fixture.agentRunService.claimExecutionGraphResume({

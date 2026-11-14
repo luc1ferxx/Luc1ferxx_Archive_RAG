@@ -742,10 +742,8 @@ export const prepareExecutionGraphNodeLaunch = ({ context, nodeOutputs, state })
       : { priorFindings: resolvedInputs.priorFindings }),
     // The node run carries this for the trace; the persisted step carries it
     // for whoever reads the step alone. Without the contract here, the step of
-    // a node that writes is indistinguishable from a RAG read. Graph recovery
-    // compares this whole map with what it expects before it continues a v3
-    // graph (agent-unified-graph-recovery-eligibility.js). Nothing replays a
-    // node from its step.
+    // a node that writes is indistinguishable from a RAG read. Nothing replays
+    // a node from its step.
     ...describeSkillReplayContract(state.skill),
   };
 

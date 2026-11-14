@@ -87,7 +87,6 @@ export const createChatRouter = (services) => {
     ragService,
     replanAdapter,
     skillRegistry,
-    unifiedGraphPlannerAdapter,
     webChatService,
   } = services;
 
@@ -132,7 +131,6 @@ export const createChatRouter = (services) => {
       intentPlannerAdapter,
       replanAdapter,
       skillRegistry,
-      unifiedGraphPlannerAdapter,
     });
 
   // Each request runs under its deadline (the calling tier's, in a split
@@ -197,13 +195,12 @@ export const createChatRouter = (services) => {
     try {
       // The events, the result (or the error) and done come out of one
       // generator (rag/langgraph/agent-stream.js): it binds the event sink
-      // around the whole run, so the planner steps, the steps of whichever
-      // graph answers (the outer plan, a custom-Skill DAG inside it, a v3
-      // graph) and the finalizer step reach the client in emission order, and
-      // it refuses a LangSmith tracer before the run exists. The outer plan
-      // graph relays its stages' events (a custom-Skill DAG's among them)
-      // through LangGraph's custom stream into that sink; a v3 graph, which
-      // is not scheduled inside the outer plan, emits to it directly.
+      // around the whole run, so the planner steps, the steps of the outer
+      // plan (and of a custom-Skill DAG inside it) and the finalizer step
+      // reach the client in emission order, and it refuses a LangSmith tracer
+      // before the run exists. The outer plan graph relays its stages' events
+      // (a custom-Skill DAG's among them) through LangGraph's custom stream
+      // into that sink.
       await runAgentRequestWithCancellation(req, res, async () => {
         const events = streamAgentRun({
           answer: () => answer(request),

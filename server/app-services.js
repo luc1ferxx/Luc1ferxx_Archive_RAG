@@ -57,7 +57,6 @@ import { createAdminStatusService } from "./rag/admin-status.js";
 import { createAgentTriggerDispatcher } from "./rag/agent-trigger-dispatcher.js";
 import { createDefaultAgentTriggerRegistry } from "./rag/agent-triggers/registry.js";
 import {
-  continueAgentExecutionGraphApproval,
   resumeAgentExecutionGraphRun,
   runAgentRag,
 } from "./rag/agent.js";
@@ -69,10 +68,6 @@ import {
 } from "./rag/agent-dag-planner-adapter.js";
 import { replanAdapter } from "./rag/agent-replan-adapter.js";
 import { llmPlannerAdapter } from "./rag/agent-llm-planner-adapter.js";
-import {
-  deterministicUnifiedGraphPlannerAdapter,
-  unifiedGraphLlmPlannerAdapter,
-} from "./rag/agent-unified-dag-planner-adapter.js";
 import {
   deterministicIntentPlannerAdapter,
   llmIntentPlannerAdapter,
@@ -186,21 +181,6 @@ export const createDagPlannerAdapter = () =>
     llmPlanner: dagPlannerAdapter,
   });
 
-// The all-stage (v3) graph planner reads the same execution-planning dial as
-// the DAG planner. Whether a v3 graph is planned or executed at all is the
-// separate AGENT_UNIFIED_GRAPH_ROLLOUT dial (default off); the model adapter
-// replaces a proposal the validator or admission refuses with the
-// deterministic graph, never with partial execution.
-export const createUnifiedGraphPlannerAdapter = () =>
-  createRolloutPlannerAdapter({
-    configuredPlanner: () =>
-      getAgentExecutionPlanner() === "llm"
-        ? unifiedGraphLlmPlannerAdapter
-        : deterministicUnifiedGraphPlannerAdapter,
-    deterministicPlanner: deterministicUnifiedGraphPlannerAdapter,
-    llmPlanner: unifiedGraphLlmPlannerAdapter,
-  });
-
 /**
  * The replanner exists only where a model is already planning for real.
  *
@@ -234,7 +214,6 @@ export const buildChatResponse = async ({
   capabilityApprovals,
   taskMemory,
   skillRegistry,
-  unifiedGraphPlannerAdapter,
 }) => {
   const findMissingDocIds = () =>
     docIds.filter((docId) => !ragService.getDocument(docId, accessScope));
@@ -285,7 +264,6 @@ export const buildChatResponse = async ({
       dagPlannerAdapter: requestDagPlannerAdapter,
       replanAdapter: requestReplanAdapter,
       skillRegistry,
-      unifiedGraphPlannerAdapter,
     });
 
   // A registry that missed another process's replacement or delete would let
@@ -295,12 +273,13 @@ export const buildChatResponse = async ({
 };
 
 export const createAppServices = (options = {}, { uploadsDirectory }) => {
-  // A removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME or
-  // AGENT_SKILL_GRAPH_ROLLOUT value (native, off and shadow above all) refuses
-  // to build the services, so every in-process app -- the monolith, the agent
-  // tier, an evaluation runner that calls createApp -- fails before it serves
-  // anything instead of running LangGraph regardless (ADR 0001 phases 6, 7
-  // and 8; server.js and startServiceRole check earlier still).
+  // A removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME,
+  // AGENT_SKILL_GRAPH_ROLLOUT or AGENT_UNIFIED_GRAPH_ROLLOUT value (native;
+  // off and shadow; guarded and shadow above all) refuses to build the
+  // services, so every in-process app -- the monolith, the agent tier, an
+  // evaluation runner that calls createApp -- fails before it serves anything
+  // instead of answering another way regardless (ADR 0001 phases 6, 7, 8 and
+  // 10; server.js and startServiceRole check earlier still).
   assertAgentRuntimeSupported();
   // RAG_ANSWER_TEMPERATURE, RAG_ANSWER_MAX_TOKENS and RAG_LLM_MAX_TOKENS_FIELD:
   // a wrong value refuses the start rather than failing every answer call,
@@ -418,9 +397,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     options.dagPlannerAdapter ?? createDagPlannerAdapter();
   const resolvedReplanAdapter =
     options.replanAdapter ?? createReplanAdapter(resolvedDagPlannerAdapter);
-  // Used only when AGENT_UNIFIED_GRAPH_ROLLOUT is shadow or guarded.
-  const unifiedGraphPlannerAdapter =
-    options.unifiedGraphPlannerAdapter ?? createUnifiedGraphPlannerAdapter();
   const agentTaskRunner =
     options.agentTaskRunner ??
     createAgentTaskRunner({
@@ -453,7 +429,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
           sessionId,
           skillRegistry,
           taskMemory,
-          unifiedGraphPlannerAdapter,
           userId,
           webChatService,
         }),
@@ -499,20 +474,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     createAgentRunStepExecutor({
       agentRunService,
       capabilityRegistry,
-      continueExecutionGraphApproval: ({ accessScope, action, gateId, payload, runId }) =>
-        continueAgentExecutionGraphApproval({
-          accessScope,
-          action,
-          agentBudget,
-          agentRunService,
-          capabilityRegistry,
-          gateId,
-          payload,
-          ragService,
-          runId,
-          skillRegistry,
-          webChatService,
-        }),
       executeDocumentRagStep: createDocumentRagStepExecutor({
         ragService,
       }),
@@ -704,7 +665,6 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     taskService,
     tenantLifecycleService,
     tenantRegistry,
-    unifiedGraphPlannerAdapter,
     uploadStore,
     uploadsDirectory,
     webChatService,

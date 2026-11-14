@@ -2193,6 +2193,34 @@ test("agent task capability approval locks server-owned binding fields", async (
   });
 });
 
+// A task could deny only the approval gate of the removed v3 unified graph
+// (ADR 0001 phase 10). Nothing creates that gate any more, so for every gate
+// a run can create today the task-level `deny` answers 409 and the task is not
+// re-queued; an ordinary gate is denied on its agent run instead.
+test("agent task deny refuses an ordinary capability gate", async () => {
+  const runner = createAgentTaskRunner();
+
+  await assert.rejects(
+    () =>
+      runner.resume({
+        action: AGENT_TASK_ACTIONS.deny,
+        payload: {
+          approvalObjectHash: APPROVAL_OBJECT_HASH,
+          gateId: "approval:web.search:1.0.0",
+        },
+        task: buildPendingCapabilityApprovalTask(),
+      }),
+    (error) => {
+      assert.equal(error.status, 409);
+      assert.equal(
+        error.message,
+        "Only a unified graph approval gate can be denied from a task; deny this approval on its agent run."
+      );
+      return true;
+    }
+  );
+});
+
 test("postgres-backed agent task approval resumes the paused question after restart", async () => {
   const calls = [];
   const harness = createFakePostgresTaskHarness();

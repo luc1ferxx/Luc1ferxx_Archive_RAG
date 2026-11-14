@@ -113,7 +113,7 @@ const BASE_ENV = Object.freeze({
   AGENT_REQUEST_TIMEOUT_MS: undefined,
   AGENT_RUNTIME: undefined,
   AGENT_SERVICE_URL: undefined,
-  AGENT_UNIFIED_GRAPH_ROLLOUT: "off",
+  AGENT_UNIFIED_GRAPH_ROLLOUT: undefined,
   ARCHIVE_RAG_ROLE: undefined,
   MODEL_GATEWAY_URL: undefined,
   RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",

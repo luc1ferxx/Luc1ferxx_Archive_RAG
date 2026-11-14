@@ -553,8 +553,8 @@ export const getAgentIntentPlanner = () =>
     "llm",
   ]);
 
-// The agent has one runtime, LangGraph, and no dial selects another way to run
-// a request. Three variables used to:
+// The agent has one runtime, LangGraph, and one way to answer a request, the
+// outer execution plan; no dial selects another. Four variables used to:
 //
 //   AGENT_RUNTIME picked who schedules a custom-Skill graph and a guarded v3
 //   unified graph: LangGraph (the default since phase 4 of
@@ -579,25 +579,38 @@ export const getAgentIntentPlanner = () =>
 //   deleted the chain, which was the last agent path that did not run on
 //   LangGraph, and with it `off` and `shadow`.
 //
-// Nothing reads any of them to decide anything. All three are still checked:
+//   AGENT_UNIFIED_GRAPH_ROLLOUT picked whether a request could be answered by
+//   the v3 unified graph instead of the outer execution plan: never (`off`,
+//   the default), planned beside the answer for comparison (`shadow`), or
+//   executed when admitted, with the outer plan as the fallback (`guarded`).
+//   Both graphs ran on LangGraph, so this was a second way to answer rather
+//   than a second runtime. Phase 10 deleted the unified graph, and with it
+//   `guarded`, `shadow` and AGENT_UNIFIED_GRAPH_CAPABILITIES (the operator
+//   allowlist of Capabilities that graph could call, which nothing reads any
+//   more). Runs it stored are handled by agent-removed-unified-graph.js.
+//
+// Nothing reads any of them to decide anything. All four are still checked:
 // when a process starts (server.js, and startServiceRole in
 // agent-service/role-server.js), when the app services are built
 // (createAppServices in app-services.js, so every in-process app refuses,
 // evaluation runners that build createApp included), and at every entry that
-// schedules on LangGraph (the outer plan's entry, the custom-Skill stage, the
-// v3 unified graph's entries and stage, and runExecutionGraphOnLangGraph),
-// which covers in-process callers of runAgentRag that build no app, such as
-// the evaluation runners. Unset, empty, whitespace or the one value left
-// (`langgraph` for the two runtime dials, `guarded` for the rollout; trimmed,
-// any case) pass. Any other value refuses: `native`, `off` and `shadow` above
-// all, but also a typo such as "lang-graph". An operator who set one was
-// asking for something that no longer exists, and running the graph on
-// LangGraph instead would ignore that silently. (Until phase 7 a mistyped
-// AGENT_OUTER_PLAN_RUNTIME resolved to the native loop, and until phase 8 a
-// mistyped AGENT_SKILL_GRAPH_ROLLOUT resolved to `off`, the chain.)
+// schedules on LangGraph (the outer plan's entry, the custom-Skill stage and
+// runExecutionGraphOnLangGraph), which covers in-process callers of
+// runAgentRag that build no app, such as the evaluation runners. Unset,
+// empty, whitespace or the one value left (`langgraph` for the two runtime
+// dials, `guarded` for the Skill graph rollout, `off` for the unified graph
+// rollout; trimmed, any case) pass. Any other value refuses: `native`, `off`
+// and `shadow` of the Skill graph rollout and `guarded` and `shadow` of the
+// unified graph rollout above all, but also a typo such as "lang-graph". An
+// operator who set one was asking for something that no longer exists, and
+// answering as if it were unset would ignore that silently. (Until phase 7 a
+// mistyped AGENT_OUTER_PLAN_RUNTIME resolved to the native loop, until phase
+// 8 a mistyped AGENT_SKILL_GRAPH_ROLLOUT resolved to `off`, the chain, and
+// until phase 10 a mistyped AGENT_UNIFIED_GRAPH_ROLLOUT resolved to `off`.)
 export const AGENT_RUNTIME_REMOVED_CODE = "AGENT_RUNTIME_REMOVED";
 export const AGENT_OUTER_PLAN_RUNTIME_REMOVED_CODE = "AGENT_OUTER_PLAN_RUNTIME_REMOVED";
 export const AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE = "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED";
+export const AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED_CODE = "AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED";
 
 // One entry per removed dial: the value that is left (`accepted`), the values
 // that used to select what was deleted (`removedValues`), what kind of thing
@@ -634,6 +647,19 @@ const REMOVED_AGENT_DIALS = Object.freeze([
     removedValues: Object.freeze(["off", "shadow"]),
     what: "custom Skills always run as a typed graph on LangGraph",
   }),
+  // The one dial whose remaining value is "nothing": `off` was the default
+  // and is what every request does now, so a deployment that never turned the
+  // unified graph on starts as before.
+  Object.freeze({
+    accepted: "off",
+    code: AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED_CODE,
+    kind: "a rollout mode",
+    name: "AGENT_UNIFIED_GRAPH_ROLLOUT",
+    phase: 10,
+    removed: "the v3 unified graph",
+    removedValues: Object.freeze(["guarded", "shadow"]),
+    what: "every request runs the outer execution plan",
+  }),
 ]);
 
 export const assertAgentRuntimeSupported = (env = process.env) => {
@@ -663,36 +689,6 @@ export const assertAgentRuntimeSupported = (env = process.env) => {
     throw error;
   }
 };
-
-// --- AGENT track: heterogeneous v3 unified graph rollout ---------------------
-// `off` (default) keeps the V1 outer order. `shadow` plans and validates a v3
-// graph beside the V1 answer without executing it. `guarded` executes an
-// admitted v3 graph (document primary, evidence check, conditional follow-up,
-// Web, built-in and custom Skills, and one approval-gated Capability that
-// pauses the graph at its gate) on the same run store, validator/scheduler,
-// budget reservation, replay matrix, and finalizer; a graph that breaks an
-// admission rule (agent-unified-graph-admission.js) is rejected whole before
-// any node runs and the request takes the V1 path instead. An approval
-// decision continues the same graph, and startup recovery resumes or
-// finalizes a v3 graph, only under `guarded`; with any other value such runs
-// wait for an operator. Any unrecognized value still fails closed to `off`.
-export const getAgentUnifiedGraphRollout = () =>
-  toChoice(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, "off", [
-    "guarded",
-    "off",
-    "shadow",
-  ]);
-
-// Capabilities a v3 graph may call directly (comma-separated ids, default
-// none). A trusted operator allowlist, never planner input: each id must also
-// be a registered Capability with an explicit graph contract, and an
-// approval-gated one still pauses at its gate.
-export const getAgentUnifiedGraphCapabilityIds = () =>
-  String(process.env.AGENT_UNIFIED_GRAPH_CAPABILITIES ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-// --- end AGENT track block -------------------------------------------------
 
 // How rag/chunker.js cuts pages into chunks: `structured` (default) keeps
 // headings with their section, `simple` cuts fixed windows, `sentence` packs

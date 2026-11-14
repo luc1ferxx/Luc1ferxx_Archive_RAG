@@ -101,7 +101,7 @@ test("research brief declares its question-level session-memory writes unsafe to
   assert.equal(contract.retryable, false);
 });
 
-test("external and workspace built-ins declare effects before unified graph admission", () => {
+test("external and workspace built-ins declare their effects", () => {
   const registry = createBuiltInSkillRegistry();
   const expected = [
     [AGENT_SKILL_IDS.arxivImport, SKILL_EFFECTS.workspaceWrite],

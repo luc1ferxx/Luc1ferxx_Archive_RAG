@@ -82,7 +82,6 @@ const FUNCTION_BUILT_PROMPT_IDS = Object.freeze([
   "execution_planner",
   "intent_planner",
   "replanner",
-  "unified_graph_planner",
 ]);
 const TEMPLATE_VARIABLES = Object.freeze({
   comparison_answer: ["context", "diagnostics", "preferenceBlock", "questionBlock"],

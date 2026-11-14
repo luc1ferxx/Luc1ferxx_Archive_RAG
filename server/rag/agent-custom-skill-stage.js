@@ -213,10 +213,11 @@ export const runCustomSkillStage = async ({
   // Refused before anything durable exists: a request that cannot run on
   // LangGraph must not leave a graph checkpoint for recovery to resume. The
   // executor checks again at its own entry. A removed AGENT_RUNTIME or
-  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, and a removed
-  // AGENT_SKILL_GRAPH_ROLLOUT value (`off`, `shadow`) asked for the sequential
-  // chain; neither exists any more, and running the graph on LangGraph instead
-  // would ignore the request silently.
+  // AGENT_OUTER_PLAN_RUNTIME value asked for a native scheduler, a removed
+  // AGENT_SKILL_GRAPH_ROLLOUT value (`off`, `shadow`) for the sequential
+  // chain, and a removed AGENT_UNIFIED_GRAPH_ROLLOUT value (`guarded`,
+  // `shadow`) for the v3 unified graph; none exists any more, and running
+  // this graph instead would ignore the request silently.
   assertLangSmithTracingDisabled();
   assertAgentRuntimeSupported();
   // Imported on first use. That keeps the graph executor and compiler out of
@@ -416,9 +417,9 @@ export const runCustomSkillStage = async ({
 
   // The save that settles the graph (phase completed or partial) also drops
   // the run's LangGraph thread record in the same CAS
-  // (saveExecutionGraphCheckpoint's dropLangGraphRecord), exactly as the v3
-  // stage does (agent-unified-graph-stage.js): the record rides on the run
-  // row, so a thread kept after the graph settled would be rewritten whole
+  // (saveExecutionGraphCheckpoint's dropLangGraphRecord): the record rides on
+  // the run row, so a thread kept after the graph settled would be rewritten
+  // whole
   // by every later CAS of the run (the finalizer's steps, completeRun) and
   // stored with the finished run, while nothing ever resumes a settled
   // graph's thread (a replan or a recovery starts a fresh invocation, and a

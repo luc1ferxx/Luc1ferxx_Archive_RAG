@@ -10,7 +10,6 @@ import {
   getAgentRunStoreConfigStatus,
   getAgentIntentPlanner,
   getAgentPlannerRollout,
-  getAgentUnifiedGraphRollout,
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
   getLongMemoryConfigStatus,
@@ -86,22 +85,6 @@ test("config resolves no skill graph rollout", async () => {
       { code: "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED" },
       refused
     );
-  }
-});
-
-test("the all-stage graph rollout defaults to off and accepts only off, shadow, or guarded", async () => {
-  for (const [value, expected] of [
-    [undefined, "off"],
-    ["off", "off"],
-    ["shadow", "shadow"],
-    ["guarded", "guarded"],
-    [" Guarded ", "guarded"],
-    ["guard", "off"],
-    ["unknown", "off"],
-  ]) {
-    await withEnv({ AGENT_UNIFIED_GRAPH_ROLLOUT: value }, async () => {
-      assert.equal(getAgentUnifiedGraphRollout(), expected);
-    });
   }
 });
 

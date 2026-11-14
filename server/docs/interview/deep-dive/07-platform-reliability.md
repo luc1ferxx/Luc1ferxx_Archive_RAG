@@ -618,7 +618,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 
 代码：`server/rag/request-deadline.js runAgentRequestWithCancellation / resolveAgentRequestDeadline / getRequestBudgetMs`；`server/rag/dependency-outage.js classifyDependencyOutage / describeAgentRequestFailure`；`server/routes/chat.js describeAgentRouteError`
 
-> ⚠ 数据库语句不读 signal，不会被取消；调用方断开不会让检索层停下；v3 统一图里非主节点的依赖故障仍然返回 409；单体默认不绑定截止时间（AGENT_REQUEST_TIMEOUT_MS 默认 0），断开取消默认也关。
+> ⚠ 数据库语句不读 signal，不会被取消；调用方断开不会让检索层停下；单体默认不绑定截止时间（AGENT_REQUEST_TIMEOUT_MS 默认 0），断开取消默认也关。（以前这里还有一条「v3 统一图里非主节点的依赖故障仍然返回 409」：v3 统一图 2026-11-14 已删除，这条边界随它没有了，CURRENT-TRUTH 3.51。）
 
 ### Q16. 如果用户量放大 100 倍、要上多台机器，你怎么改？如果重做，你会改什么？
 
@@ -672,7 +672,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 - 模型并发上限按在途请求数算，不是按 TPM；不会根据 429 自适应（没做 AIMD）；排队等待没有单独超时，只靠请求截止时间的 signal 出队；连续失败阈值在高错误率下可能误熔断
 - 检索层没有并发上限，也没有准入控制
 - 读副本让主库语句减少 28.8%，没达到事先定的 30%，吞吐也没变快；副本和主库同机，CI 里没有副本；副本上的语句只有连接超时；不检查副本是否真的在跟随这个主库；暂停回放的集成测试只覆盖两个单体实例
-- 截止时间：数据库语句不取消；调用方断开不会让检索层停下；已经开始的写入型 Capability 会跑完；v3 统一图里非主节点的依赖故障仍返回 409；断开即取消默认关闭
+- 截止时间：数据库语句不取消；调用方断开不会让检索层停下；已经开始的写入型 Capability 会跑完；断开即取消默认关闭（以前还有一条「v3 统一图里非主节点的依赖故障仍返回 409」，2026-11-14 随 v3 统一图删除，CURRENT-TRUTH 3.51）
 - 告警规则从未在真实 Prometheus 或 promtool 里加载过；compose 没打开 METRICS；99.5% 和 20 s 的 SLO 目标是建议值；指标开销测了但不下结论
 - 压测全用假模型，规划器是确定性的；生产默认的 LLM 规划器每个请求要多 2 次模型调用，「容量约为三分之一」只是推算，没有实测；压测器、应用和数据库都在同一台机器上
 - claim memo 的 2.6 倍是在假模型、短回答下测的，真实模型下的加速比没测；CURRENT-TRUTH 3.15 里「约 90 req/s、每请求 12–13 ms」是 memo 之前的数；这里的 /chat 每请求 CPU 都测于外层计划迁 LangGraph 之前（2026-11-13，CURRENT-TRUTH 3.48），之后每请求约多 1 ms，没有重测

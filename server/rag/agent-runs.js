@@ -49,6 +49,7 @@ import {
   updateExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
+import { isSettledRemovedUnifiedGraphRun } from "./agent-removed-unified-graph.js";
 import { GRAPH_CAPABILITY_APPROVAL_TYPE } from "./capabilities/graph-approval-preflight.js";
 import {
   isRetentionExpired,
@@ -1380,29 +1381,13 @@ const isRunMarkedForManualRecovery = (run) =>
   run?.result?.recovery?.mode === "manual";
 
 /**
- * Error code of a re-entry into a run whose guarded v3 graph owned the whole
- * request and has settled: finalized (a sealed receipt; the run asked for
- * clarification or completed) or failed after a partial graph. Nothing can
- * resume such a run, so its continuation is a new request with a new run
- * (agent.js). Any other run with a graph checkpoint stays fenced.
+ * Error code of a re-entry into a settled run of the removed v3 unified graph
+ * (agent-removed-unified-graph.js: the run ended, or was finalized as a
+ * question for the user). Nothing can resume such a run, so its continuation
+ * is a new request with a new run (agent.js). Any other run with a graph
+ * checkpoint stays fenced.
  */
 export const AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE = "AGENT_RUN_SETTLED_GRAPH_REENTRY";
-
-const isSettledUnifiedGraphRun = (run, checkpoint) =>
-  checkpoint?.version === "v2" &&
-  checkpoint.graph?.version === "v3" &&
-  run?.status !== AGENT_RUN_STATUSES.running &&
-  !isRunMarkedForManualRecovery(run) &&
-  // A clarification leaves its own gate step paused; only graph node steps
-  // could still be executing.
-  !toArray(run?.steps).some(
-    (step) =>
-      step.type === getCheckpointGraphStepType(checkpoint) &&
-      ACTIVE_AGENT_RUN_STEP_STATUSES.has(step.status)
-  ) &&
-  !toArray(run?.approvalGates).some((gate) => gate.status === "pending") &&
-  ((checkpoint.phase === "completed" && checkpoint.finalization !== undefined) ||
-    (checkpoint.phase === "partial" && run.status === AGENT_RUN_STATUSES.failed));
 
 const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
   const error = new Error(
@@ -1959,7 +1944,10 @@ export const createAgentRunService = ({
       mutate: (existingRun) => {
         const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
 
-        if (graphReentryGuard && checkpoint && isSettledUnifiedGraphRun(existingRun, checkpoint)) {
+        if (
+          graphReentryGuard &&
+          isSettledRemovedUnifiedGraphRun({ checkpoint, run: existingRun })
+        ) {
           // Decided on the same snapshot the fence below would read; the
           // settled run is not written.
           const error = new Error(
