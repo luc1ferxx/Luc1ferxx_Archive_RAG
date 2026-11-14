@@ -61,8 +61,8 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/latest-quality.*` | PR current gate 专用 deterministic near-duplicate synthetic 报告；不会覆盖 robust/release 使用的 `latest.*`。 |
 | `evaluation/results/latest-current-quality-gate.{json,md}` | 当前 commit 的轻量质量证据；逐项记录 SHA、freshness、dirty、corpus/provider/config 和 metrics 检查。 |
 | `evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR deterministic profile 的固定 100% regression baseline；运行目录中的旧报告不能替换它。2026-10-29 默认 topK 从 6 改为 10 时取代了 v1（regression profile key 含 `retrievalTopK`）：两者的 metrics 和 cases 逐项相同，只差 `config.retrievalTopK`；v1 留作历史，见“候选数 topK 6 → 8 / 10”。 |
-| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `17/17` cases passed，`76/76` checks passed（2026-11-13 之前是 19 个 case、84 项 check，随 V1 chain 删掉了 `custom_skill_retry` 和 `skill_graph_shadow_comparison`），包含 goal lifecycle completion 和三个 skill graph case。 |
-| `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，覆盖 LLM plan selection、validator rejection、deterministic fallback、planner observability，以及 compare-only Intent 下由授权原子 catalog 规划 `compare_documents -> risk_review` 的 guarded case；real provider 调用真实 LLM DAG planner，分别写 provider-specific latest report。 |
+| `evaluation/results/latest-trajectory.*` | AgentRAG trajectory eval：当前默认 deterministic suite 为 `15/15` cases passed，`63/63` checks passed，包含 goal lifecycle completion 和三个 skill graph case。2026-11-13 之前是 19 个 case、84 项 check，随 V1 chain 删掉了 `custom_skill_retry` 和 `skill_graph_shadow_comparison`；2026-11-14 之前是 17 个、76 项，随 v3 统一图删掉了它的两个 case（ADR 0001 阶段 10）。 |
+| `evaluation/results/latest-planner*.{json,md}` | AgentRAG planner eval：默认 mock provider，当前 `6/6` cases、`22/22` checks（2026-11-14 之前是 7 个、27 项，随 v3 统一图删掉了 `planner_unified_graph`），覆盖 LLM plan selection、validator rejection、deterministic fallback、planner observability，以及 compare-only Intent 下由授权原子 catalog 规划 `compare_documents -> risk_review` 的 guarded case；real provider 调用真实 LLM DAG planner，分别写 provider-specific latest report。 |
 | `evaluation/results/latest-recovery-observability.{json,md}` | AgentRAG recovery observability eval：既有恢复统计与 guarded replan signal，加上从持久化 checkpoint 经新服务实例启动恢复的 `skill_graph_startup_resume` 生产路径检查；当前 `8/8` cases、`27/27` checks（阶段 9 之前是 29 项，去掉了两项单步 resume 的 check）。 |
 | `evaluation/results/latest-rollout-readiness.{json,md}` | AgentRAG rollout readiness：只输出是否 ready 的信号，要求纯 LLM planner、guarded Skill graph、real-provider DAG case、guarded runtime smoke、trajectory/recovery gate，以及零 unexpected fallback / mock-real divergence；衡量纯 LLM 规划，不是执行器默认值（`guarded`）的门禁。 |
 | `evaluation/results/latest-rerank-hard-cs.*` | Hard-CS rerank eval：baseline 不再满分，heuristic rerank 需要保持 NDCG/Recall 不回退并保留 NDCG lift。 |
@@ -349,7 +349,7 @@ Trajectory eval 有三个 `skill_graph` case。它们不再设置这个变量；
 
 默认 suite 因此从 19 个 case、84 项 check 变成 17 个、76 项，`retry` 分类随之消失。其余 case 的 check 一条没动，没有新增 case，没有改任何阈值。预算不够或图被整体拒绝时一次请求的回答，由 `test/agent-custom-skill-budget.test.mjs` 逐字钉住，不在 trajectory 里。
 
-三个 trajectory case 的 id、check id、response 投影，以及 `planner_dynamic_skill_graph` 的同类合同，都钉在 `quality-current-suite-manifest.js`（1.17.0），`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。`planner_dynamic_skill_graph` 在 mock/real provider 下都跑：Intent 固定为 compare-only，但 graph 必须组合 compare+risk；real provider 才调用真实 LLM DAG planner。这验证了 Skill 选择不再依赖硬编码复合 Intent，同时检查授权文档范围和最终 observability。
+三个 trajectory case 的 id、check id、response 投影，以及 `planner_dynamic_skill_graph` 的同类合同，都钉在 `quality-current-suite-manifest.js`（当时 1.17.0；删掉 v3 统一图的三个 case 之后是 1.18.0，这三个 skill graph case 的合同没有动），`quality:current` 会逐字段校验，多一个 case 或少一个 check 都会失败。`planner_dynamic_skill_graph` 在 mock/real provider 下都跑：Intent 固定为 compare-only，但 graph 必须组合 compare+risk；real provider 才调用真实 LLM DAG planner。这验证了 Skill 选择不再依赖硬编码复合 Intent，同时检查授权文档范围和最终 observability。
 
 Recovery 与仍需区分的证据：
 
@@ -3076,6 +3076,8 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 | 查询适配器 | dev hybrid 证据进候选 +0.0463 [+0.0244, +0.0694]；答案 F1 0.2576 → 0.2562（−0.0014），不显著 | 关（可选） |
 
 ### 统一图的真实模型规划（2026-09-27）
+
+历史记录：v3 统一图和这个评测脚本已在 2026-11-14 删除（ADR 0001 阶段 10），下面的命令不再存在，数字留作当时的测量结果。
 
 `npm run eval:unified-graph-planner -- --real --runs 3`（本地 qwen2.5:7b，只有规划器调模型）：15 次规划中模型的计划被接受 3 次，12 次回落到确定性图（漏选 Skill 6、无法投影 4、非法输出引用 4、缺审批授权 1），0 次回落到 V1；每次规划约 8 秒、约 2,000 token。报告带提交、prompt 指纹和 response_format 摘要。确定性评测：trajectory 19/19 个用例、84/84 项检查。
 
