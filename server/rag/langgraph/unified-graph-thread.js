@@ -4,9 +4,10 @@ import { EXECUTION_GRAPH_NODE_STATUSES } from "../agent-execution-graph-node.js"
 import { isApprovalInterruptPayload } from "./unified-graph-approval.js";
 
 // Reading a run's LangGraph thread back (docs/adr/0001-langgraph-runtime.md,
-// phase 3), for the two callers that must know what the thread holds before
-// they act on the run: the executor continuing an approval on the same thread
-// (run-execution-graph.js) and startup recovery (unified-graph-recovery.js).
+// phase 3), for the caller that must know what the thread holds before it
+// acts on the run: the executor continuing an approval on the same thread
+// (run-execution-graph.js). Startup recovery of a v3 unified graph was the
+// other until phase 10 removed that graph.
 //
 // The thread is read through the run's RunStoreCheckpointSaver, exactly as
 // LangGraph itself would read it: the latest checkpoint tuple, its channel

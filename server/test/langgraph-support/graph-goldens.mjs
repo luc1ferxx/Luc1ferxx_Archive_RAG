@@ -13,7 +13,10 @@
 // loop before deleting it: its pass of every scenario the outer plan answers
 // (langgraph-execution-plan-graph, langgraph-chat-stream and three
 // langgraph-routes fixtures) was frozen at commit 3313b40b, where the native
-// pass wrote each fixture and the LangGraph pass was held to it.
+// pass wrote each fixture and the LangGraph pass was held to it. Phase 10
+// removed the v3 unified graph and, with its suites, their goldens
+// (langgraph-unified-graph, langgraph-unified-graph-without-run-target, five
+// langgraph-routes fixtures and the unified planner's digests).
 //
 //   assertMatchesGraphGolden(suiteName, caseName, maskedValue)
 //     compares the canonical form of an already-masked value with

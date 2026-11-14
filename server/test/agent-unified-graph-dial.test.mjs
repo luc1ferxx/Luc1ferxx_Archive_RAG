@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createUnifiedGraphPlannerAdapter } from "../app-services.js";
 import { runAgentRag } from "../rag/agent.js";
 import {
   createAgentRunService,
@@ -11,7 +10,10 @@ import {
 // What one document question does under each value of
 // AGENT_UNIFIED_GRAPH_ROLLOUT: which path answers it and what it leaves in the
 // run store. Literal expectations, so a change to what a value does shows up
-// as a diff of this file.
+// as a diff of this file. The file was written before ADR 0001 phase 10
+// removed the v3 unified graph (`shadow` planned a graph beside the answer,
+// `guarded` let a graph answer the request, a mistyped value read as `off`);
+// its diff in that commit is what the removal changed for a new request.
 
 const accessScope = Object.freeze({ userId: "dial-user", workspaceId: "dial-workspace" });
 const DOC_ID = "vendor-msa";
@@ -68,8 +70,8 @@ const createRagService = () => {
   };
 };
 
-// The request as app-services.js sends it: the planner adapter it injects for
-// the unified graph, under the deterministic planning dial.
+// The request as app-services.js sends it, under the deterministic planning
+// dial.
 const ask = async (rollout) => {
   const store = createInMemoryAgentRunStore();
   const agentRunService = createAgentRunService({ agentRunStore: store });
@@ -92,7 +94,6 @@ const ask = async (rollout) => {
             question: QUESTION,
             ragService,
             sessionId: "dial-session",
-            unifiedGraphPlannerAdapter: createUnifiedGraphPlannerAdapter(),
             userId: accessScope.userId,
           }),
         };
@@ -149,45 +150,28 @@ test("unset or off: the outer execution plan answers", async () => {
   assert.deepEqual(await ask("off"), OUTER_PLAN);
 });
 
-test("shadow: the outer execution plan answers and a v3 graph is planned beside it", async () => {
-  assert.deepEqual(await ask("shadow"), {
-    ...OUTER_PLAN,
-    events: [
-      "run_created",
-      "run_prepared",
-      "unified_graph_planned",
-      "execution_planned",
-      "step_started",
-      "step_completed",
-      "run_completed",
-    ],
-    unifiedGraphPlanned: ["shadow:selected"],
-  });
+// A removed value refuses where the outer plan would be scheduled. A process
+// never gets this far: server.js and createAppServices refuse it at start-up
+// (test/agent-runtime-removed.test.mjs). An in-process caller of runAgentRag,
+// such as an evaluation runner, gets the error and a failed run: no document
+// is read, nothing is planned beside the answer and no graph is stored.
+const REFUSED = Object.freeze({
+  answer: null,
+  checkpoint: null,
+  documentCalls: 0,
+  error: "AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED",
+  events: ["run_created", "run_prepared", "execution_planned", "run_failed"],
+  runStatus: "failed",
+  runs: 1,
+  steps: [],
+  unifiedGraphPlanned: [],
 });
 
-test("guarded: a v3 graph answers the whole request and the outer plan never runs", async () => {
-  assert.deepEqual(await ask("guarded"), {
-    answer: ANSWER,
-    checkpoint: "v2/completed",
-    documentCalls: 1,
-    error: null,
-    events: [
-      "run_created",
-      "run_prepared",
-      "unified_graph_planned",
-      "skill_graph_checkpointed",
-      "step_started",
-      "step_completed",
-      "unified_graph_executed",
-      "run_completed",
-    ],
-    runStatus: "completed",
-    runs: 1,
-    steps: ["plan", "query_planner", "graph_node", "graph_node", "self_check", "synthesis", "answer_finalizer"],
-    unifiedGraphPlanned: ["guarded:selected"],
-  });
+test("shadow and guarded were removed: nothing is planned beside the answer and no graph answers", async () => {
+  assert.deepEqual(await ask("shadow"), REFUSED);
+  assert.deepEqual(await ask("guarded"), REFUSED);
 });
 
-test("a value that is none of the three is read as off", async () => {
-  assert.deepEqual(await ask("gaurded"), OUTER_PLAN);
+test("a value that is none of the three is refused too, no longer read as off", async () => {
+  assert.deepEqual(await ask("gaurded"), REFUSED);
 });

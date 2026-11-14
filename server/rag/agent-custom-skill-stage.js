@@ -416,9 +416,9 @@ export const runCustomSkillStage = async ({
 
   // The save that settles the graph (phase completed or partial) also drops
   // the run's LangGraph thread record in the same CAS
-  // (saveExecutionGraphCheckpoint's dropLangGraphRecord), exactly as the v3
-  // stage does (agent-unified-graph-stage.js): the record rides on the run
-  // row, so a thread kept after the graph settled would be rewritten whole
+  // (saveExecutionGraphCheckpoint's dropLangGraphRecord): the record rides on
+  // the run row, so a thread kept after the graph settled would be rewritten
+  // whole
   // by every later CAS of the run (the finalizer's steps, completeRun) and
   // stored with the finished run, while nothing ever resumes a settled
   // graph's thread (a replan or a recovery starts a fresh invocation, and a

@@ -23,8 +23,6 @@ import {
   createSkillGraphGuardedExecutionCase,
   createSkillGraphIllegalPlanCase,
 } from "./skill-graph.js";
-import { createUnifiedGraphEvidenceGatedSkillCase } from "./unified-graph.js";
-import { createUnifiedGraphApprovalGatedActionCase } from "./unified-graph-approval.js";
 
 export const createDefaultTrajectoryCases = () => [
   createSkillChainCase(),
@@ -42,6 +40,4 @@ export const createDefaultTrajectoryCases = () => [
   createSkillGraphGuardedExecutionCase(),
   createSkillGraphIllegalPlanCase(),
   createSkillGraphBoundedReplanCase(),
-  createUnifiedGraphEvidenceGatedSkillCase(),
-  createUnifiedGraphApprovalGatedActionCase(),
 ];

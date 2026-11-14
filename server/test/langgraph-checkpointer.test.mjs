@@ -271,8 +271,8 @@ const buildOwner = (fixture) =>
     userId: fixture.accessScope.userId,
   });
 
-// A heterogeneous v3 graph's v2 checkpoint, as agent-unified-graph-stage.js
-// persists it.
+// A heterogeneous v3 graph's v2 checkpoint, as the removed v3 unified graph's
+// stage persisted it.
 const createV2GraphRun = async (options = {}) => {
   const fixture = await createRunFixture(options);
   const graph = createExecutionGraph({

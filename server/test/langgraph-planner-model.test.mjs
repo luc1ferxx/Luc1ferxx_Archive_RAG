@@ -14,7 +14,7 @@ import {
   assertMatchesGraphGoldenDigest,
 } from "./langgraph-support/graph-goldens.mjs";
 
-// The five planners' model call (rag/langgraph/planner-model.js) runs through
+// The four planners' model call (rag/langgraph/planner-model.js) runs through
 // ArchiveRagChatModel. Until phase 6 of docs/adr/0001-langgraph-runtime.md
 // AGENT_RUNTIME=native called completeTextWithMetadata directly instead, and
 // every scenario below ran the same planner input on both paths and required
@@ -26,7 +26,8 @@ import {
 // The direct path's side of each comparison was frozen before it was
 // deleted, in test/fixtures/graph-goldens/langgraph-planner-model/: the
 // sha256 of each compared value's canonical form in digests.json, and the
-// five planners' whole decisions in full (decide-<planner>.json). The values
+// four planners' whole decisions in full (decide-<planner>.json; a fifth, the
+// v3 unified graph planner, went with that graph in phase 10). The values
 // are masked as they are compared; see test/langgraph-support/graph-goldens.mjs.
 // So every scenario now runs once and is compared with what the direct call
 // produced.
@@ -75,21 +76,8 @@ const { EXECUTION_GRAPH_FAILURE_POLICIES, EXECUTION_GRAPH_LIMITS, createExecutio
   await import("../rag/agent-execution-graph.js");
 const { buildReplanContext, createReplanResult } = await import("../rag/agent-replanner.js");
 const { replanAdapter } = await import("../rag/agent-replan-adapter.js");
-const { createUnifiedAgentExecutionGraphResult } = await import("../rag/agent-unified-dag-planner.js");
-const { deterministicUnifiedGraphPlannerAdapter, unifiedGraphLlmPlannerAdapter } = await import(
-  "../rag/agent-unified-dag-planner-adapter.js"
-);
-const { assessUnifiedGraphAdmission } = await import("../rag/agent-unified-graph-admission.js");
-const { createAgentBudget } = await import("../rag/agent-budget.js");
-const { AGENT_SKILL_IDS, CUSTOM_SKILL_IDS, createDefaultSkillRegistry, createSkillRegistry } =
+const { AGENT_SKILL_IDS, CUSTOM_SKILL_IDS, createSkillRegistry } =
   await import("../rag/skills/registry.js");
-const {
-  DOCUMENT_LOOP_QUESTION,
-  UNIFIED_ACCESS_SCOPE,
-  UNIFIED_DOC_ID,
-  createDocumentLoopRagService,
-  createTaskCapabilityRegistry,
-} = await import("./fixtures/unified-graph-run-fixtures.mjs");
 const { PLANNER_MODEL_ERROR_CODES, completePlannerText } = await import(
   "../rag/langgraph/planner-model.js"
 );
@@ -201,8 +189,8 @@ function mask(value) {
     return { abortSignal: true, aborted: value.aborted };
   }
 
-  // Functions are made per call (the unified planner returns its graph
-  // registry's methods); only their presence and name are comparable.
+  // Functions are made per call; only their presence and name are
+  // comparable.
   if (typeof value === "function") {
     return { function: value.name };
   }
@@ -496,46 +484,6 @@ const DAG_REPLY = fencedAfterBracketProse("Use {compare} first, then [risk_a, ri
   ],
 });
 
-// The unified planner's request (as test/agent-unified-dag-planner-adapter.test.mjs).
-const RISK_REVIEW_PLAN = Object.freeze({ mode: "risk_review", summary: "risk", wantsRiskReview: true });
-
-const planUnifiedGraph = async (plannerAdapter) => {
-  const ragService = createDocumentLoopRagService({ primary: "supported" });
-  const { registry: capabilityRegistry } = await createTaskCapabilityRegistry({ ragService });
-  const plan = { ...RISK_REVIEW_PLAN };
-
-  return createUnifiedAgentExecutionGraphResult({
-    accessScope: UNIFIED_ACCESS_SCOPE,
-    allowedCapabilityIds: ["task.create"],
-    assessGraph: ({ graph, graphRegistry }) =>
-      assessUnifiedGraphAdmission({
-        accessScope: UNIFIED_ACCESS_SCOPE,
-        capabilityApprovals: {},
-        capabilityRegistry,
-        docIds: [UNIFIED_DOC_ID],
-        graph,
-        plan,
-        registry: graphRegistry,
-      }),
-    budgetState: createAgentBudget(),
-    capabilityRegistry,
-    docIds: [UNIFIED_DOC_ID],
-    plan,
-    plannerAdapter,
-    question: DOCUMENT_LOOP_QUESTION,
-    ragService,
-    registry: createDefaultSkillRegistry(),
-  });
-};
-
-const unifiedReply = async () => {
-  const proposal = await planUnifiedGraph(deterministicUnifiedGraphPlannerAdapter);
-
-  return fencedAfterBracketProse("Graph [v3] for {risk_review}:", {
-    nodes: proposal.graph.nodes.map((node) => ({ ...node, rationale: null, when: node.when ?? null })),
-  });
-};
-
 // The replanner's request (as test/agent-replanner.test.mjs): both nodes
 // abstained, so a replan is triggered and the model is asked for a patch.
 const replanOptions = () => ({
@@ -624,16 +572,6 @@ const PLANNERS = Object.freeze([
     isSelected: (result) => result.planner.status === "selected" && !result.planner.fallback,
     name: "dag",
     reply: async () => DAG_REPLY,
-    sendsSchema: true,
-  },
-  {
-    // An empty context: the prompt the descriptor is fingerprinted from, and
-    // no catalog, hence no schema.
-    adapterCall: () => unifiedGraphLlmPlannerAdapter.createExecutionGraph({}),
-    decide: () => planUnifiedGraph(unifiedGraphLlmPlannerAdapter),
-    isSelected: (result) => result.planner.status === "selected" && !result.planner.fallback,
-    name: "unified",
-    reply: unifiedReply,
     sendsSchema: true,
   },
   {
@@ -735,12 +673,10 @@ test("every planner decides as natively, with each call through the adapter", as
   for (const planner of PLANNERS) {
     const sides = sidesByPlanner[planner.name];
 
-    // The whole decision in full where it is small enough to read (the
-    // unified planner's result carries its graph registry and catalog, about
-    // 370 KB, so it keeps a digest).
+    // The whole decision in full.
     assertPlannerCall(sides, planner.name, {
-      full: planner.name !== "unified",
-      golden: planner.name === "unified" ? "decide/unified" : `decide-${planner.name}`,
+      full: true,
+      golden: `decide-${planner.name}`,
     });
     assert.equal(sides.langgraph.error, null, planner.name);
     assert.ok(planner.isSelected(sides.langgraph.result), `${planner.name}: the model's plan was used`);

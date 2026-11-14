@@ -1,7 +1,10 @@
 import { AGENT_RUN_STEP_KINDS } from "./agent-run-steps.js";
 import { EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
-import { isUnifiedGraphAwaitingApproval } from "./agent-unified-graph-run.js";
+import {
+  isRemovedUnifiedGraphApprovalPause,
+  refuseRemovedUnifiedGraphRun,
+} from "./agent-removed-unified-graph.js";
 import {
   buildCapabilityResumeResponse,
   createDefaultAgentRunStepHandlerRegistry,
@@ -82,10 +85,6 @@ const assertStandaloneReplayAllowed = async ({
 export const createAgentRunStepExecutor = ({
   agentRunService,
   capabilityRegistry,
-  // Decides a guarded v3 graph's approval gate and continues that same graph
-  // (agent.js continueAgentExecutionGraphApproval). Without it a graph gate
-  // cannot be decided here.
-  continueExecutionGraphApproval = null,
   executeDocumentRagStep,
   executeResearchQuestionStep,
   now = () => new Date().toISOString(),
@@ -178,26 +177,11 @@ export const createAgentRunStepExecutor = ({
         runId,
       });
 
-      // A guarded v3 graph parked at its own approval gate is decided and
-      // continued as one graph, never as a standalone capability step.
-      if (isUnifiedGraphAwaitingApproval(loadedGraph?.checkpoint)) {
-        if (typeof continueExecutionGraphApproval !== "function") {
-          fail("Graph approval continuation is unavailable.", 409);
-        }
-
-        const response = await continueExecutionGraphApproval({
-          accessScope,
-          action: normalizedAction,
-          gateId: normalizedGateId,
-          payload,
-          runId,
-        });
-
-        return {
-          response: response?.body ?? null,
-          run: await agentRunService.getRun({ accessScope, runId }),
-          status: response?.status ?? null,
-        };
+      // A run of the removed v3 unified graph parked at its approval gate:
+      // its gate can no longer be decided. Neither an approval nor a denial
+      // is recorded.
+      if (isRemovedUnifiedGraphApprovalPause(loadedGraph?.checkpoint)) {
+        await refuseRemovedUnifiedGraphRun({ accessScope, agentRunService, runId });
       }
 
       const existingRun = await agentRunService.getRun({ accessScope, runId });

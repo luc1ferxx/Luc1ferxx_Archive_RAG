@@ -54,8 +54,9 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   assert.equal(report.summary.status, "pass");
   // 19 until ADR 0001 phase 8 removed the two cases that needed the
   // sequential Skill chain: custom_skill_retry (it set the rollout to `off`)
-  // and skill_graph_shadow_comparison.
-  assert.equal(report.summary.metrics.caseCount, 17);
+  // and skill_graph_shadow_comparison. 17 until phase 10 removed the two
+  // cases of the v3 unified graph.
+  assert.equal(report.summary.metrics.caseCount, 15);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.skill_selection.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.follow_up.failedCheckCount, 0);
@@ -72,8 +73,12 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
   assert.equal(report.summary.metrics.categories.privacy.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.skill_graph.checkCount, 14);
-  assert.equal(report.summary.metrics.categories.unified_graph.failedCheckCount, 0);
-  assert.equal(report.summary.metrics.categories.unified_graph.checkCount, 13);
+  // The unified_graph category held only the two v3 cases' checks.
+  assert.equal(Object.hasOwn(report.summary.metrics.categories, "unified_graph"), false);
+  assert.equal(
+    report.cases.some((caseResult) => caseResult.id.startsWith("unified_graph_")),
+    false
+  );
   assert.ok(
     report.cases.some(
       (caseResult) =>
@@ -161,47 +166,6 @@ test("trajectory eval passes default deterministic agent trajectories", async (t
     ["reused", "reused", "completed"]
   );
 
-  // The v3 unfreeze case: the Skill runs only after the document answer
-  // passes its evidence check and receives that verified answer; V1 on the
-  // same request (chain and V2 DAG, both evidence variants) runs the Skill
-  // first and unconditionally; a Web-to-Skill hand-off is refused.
-  const unifiedCase = graphCase("unified_graph_evidence_gated_skill_hand_off");
-  assert.equal(unifiedCase.passed, true);
-  assert.equal(unifiedCase.response.observed.path.plannedEvents[0].status, "selected");
-  assert.equal(unifiedCase.response.observed.handOff.priorFindingsIsDocumentAnswer, true);
-  assert.deepEqual(
-    unifiedCase.response.observed.gating.insufficient.nodeRuns.map(
-      (nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.reason]
-    ),
-    [
-      ["document", "completed", null],
-      ["evidence_check", "completed", null],
-      ["risk", "skipped", "condition_not_met"],
-    ]
-  );
-  // The V1 outer plan on the same request, once per evidence variant. (It ran
-  // twice per variant, on the sequential chain and on the DAG, until the chain
-  // was deleted; both halves reported these same numbers.)
-  assert.deepEqual(
-    unifiedCase.response.observed.v1Runs.map((v1) => [
-      v1.documentSufficient,
-      v1.customSkillCalls,
-      v1.documentRagCalls,
-    ]),
-    [
-      [true, 1, 0],
-      [false, 1, 0],
-    ]
-  );
-  assert.deepEqual(
-    unifiedCase.response.observed.externalHandOff.plannedEvents[0].errorCodes,
-    ["external_output_hand_off"]
-  );
-  assert.equal(
-    unifiedCase.response.observed.planner.evidenceKind,
-    "deterministic_injected_proposal"
-  );
-
   const suiteValidation = validateCurrentQualitySuiteReport({
     report: {
       ...report,
@@ -225,7 +189,6 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
   const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
   const originalSkillGraphRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  const originalUnifiedGraphRollout = process.env.AGENT_UNIFIED_GRAPH_ROLLOUT;
 
   process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
   process.env.RAG_LONG_MEMORY_ENABLED = "true";
@@ -258,7 +221,6 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     // only; a leaked `guarded` here would silently move every later suite
     // onto the V2 path.
     assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
-    assert.equal(process.env.AGENT_UNIFIED_GRAPH_ROLLOUT, originalUnifiedGraphRollout);
   } finally {
     if (originalAgentExperienceMemory === undefined) {
       delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
@@ -302,7 +264,6 @@ test("trajectory eval markdown summarizes categories and failed checks", async (
   assert.doesNotMatch(markdown, /Skill graph shadow comparison/);
   assert.match(markdown, /Skill graph illegal plan rejected/);
   assert.match(markdown, /Skill graph bounded replan/);
-  assert.match(markdown, /Unified graph/);
-  assert.match(markdown, /Unified graph evidence-gated Skill hand-off/);
+  assert.doesNotMatch(markdown, /Unified graph/);
   assert.match(markdown, /PASS/);
 });

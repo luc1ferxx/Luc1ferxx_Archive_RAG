@@ -387,8 +387,8 @@ test("the app environment pins every store and model setting and drops inherited
   assert.equal(pg.RAG_EMBEDDING_CACHE_MAX, String(400 * 8 + 64));
 });
 
-// Since ADR 0001 phase 6 the custom-Skill DAG and the v3 unified graph run on
-// LangGraph only: the app refuses AGENT_RUNTIME=native at start-up, so the
+// Since ADR 0001 phase 6 the custom-Skill DAG runs on LangGraph only: the app
+// refuses AGENT_RUNTIME=native at start-up, so the
 // bench never hands AGENT_RUNTIME to an app process (the shell's value is
 // dropped, and unset is LangGraph), records `langgraph`, and refuses
 // --agent-runtime native rather than measure something else under its name.
@@ -1497,7 +1497,7 @@ test("markdown report names both runtimes, and a report from before the outer-pl
         },
       ],
     });
-  const agentLabel = String.raw`\| Agent runtime \(AGENT_RUNTIME: custom-Skill DAG, v3 unified graph\) \| `;
+  const agentLabel = String.raw`\| Agent runtime \(AGENT_RUNTIME: custom-Skill DAG\) \| `;
   const outerLabel = String.raw`\| Outer plan runtime \(AGENT_OUTER_PLAN_RUNTIME: V1 outer plan, \/chat\/stream relay\) \| `;
 
   const current = markdownFor({ agentRuntime: "langgraph", outerPlanRuntime: "langgraph" });

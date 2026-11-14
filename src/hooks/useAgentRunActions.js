@@ -60,10 +60,9 @@ export const useAgentRunActions = ({
           gateId,
         });
 
-        // A decision that finalized the run carries its answer: an approval,
-        // or a denial of a unified-graph gate (the verified answer without the
-        // denied action). A V1 denial returns the run alone.
-        if (result?.response) {
+        // An approval that ran the Capability carries the run's answer. A
+        // denial returns the run alone.
+        if (action === "approve" && result?.response) {
           const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
 
           updateConversationTurn(turnIndex, {
@@ -72,12 +71,7 @@ export const useAgentRunActions = ({
           });
           setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
           await refreshAgentRunRecovery();
-
-          if (action === "approve") {
-            message.success(t("app.approvalRecorded"));
-          } else {
-            message.info(t("app.approvalDenied"));
-          }
+          message.success(t("app.approvalRecorded"));
           return;
         }
 

@@ -35,12 +35,15 @@ import {
   prepareUnifiedGraphApprovalResume,
 } from "./unified-graph-resume.js";
 
-// The scheduler of every guarded execution graph: the custom-Skill DAG
-// (agent-custom-skill-stage.js, since phase 2 of
-// docs/adr/0001-langgraph-runtime.md) and the v3 unified graph
-// (agent-unified-graph-stage.js, since phase 3). Phase 6 deleted the native
-// scheduler (runExecutionGraph in agent-execution-graph-runner.js) that was
-// the AGENT_RUNTIME=native rollback, and with it the dial; what it did on the
+// The scheduler of every guarded execution graph. Its one caller is the
+// custom-Skill DAG (agent-custom-skill-stage.js, since phase 2 of
+// docs/adr/0001-langgraph-runtime.md); from phase 3 until phase 10 removed it,
+// the v3 unified graph was the other. What only that graph used here (a node
+// parked for approval, the continuation of that approval on the same thread)
+// has no caller left and is kept until it is removed in its own step. Phase 6
+// deleted the native scheduler (runExecutionGraph in
+// agent-execution-graph-runner.js) that was the AGENT_RUNTIME=native
+// rollback, and with it the dial; what it did on the
 // parity suites' scenarios is frozen in test/fixtures/graph-goldens/, which
 // LangGraph is now compared with. "Natively" below means that deleted
 // scheduler, whose contract this one kept.
@@ -87,8 +90,7 @@ import {
 // something could still run (an independent node of a later layer, or a node
 // that would be skipped), the parked node returns its receipt instead, those
 // layers run, and the stage persists the pause through pauseForApproval with
-// the thread dropped: the continuation is then a fresh invocation. Both
-// shapes are pinned in test/langgraph-unified-graph.test.mjs.
+// the thread dropped: the continuation is then a fresh invocation.
 //
 // Durability. The agent run's graph checkpoint stays the authority: node
 // outputs, reuse, recovery, fencing and replay safety are decided from it.

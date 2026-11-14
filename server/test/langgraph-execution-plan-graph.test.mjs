@@ -200,7 +200,7 @@ const RUN_ENV = Object.freeze({
   AGENT_REQUEST_TIMEOUT_MS: undefined,
   AGENT_RUNTIME: undefined,
   AGENT_SKILL_GRAPH_ROLLOUT: undefined,
-  AGENT_UNIFIED_GRAPH_ROLLOUT: "off",
+  AGENT_UNIFIED_GRAPH_ROLLOUT: undefined,
   RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
   RAG_LONG_MEMORY_ENABLED: "false",
 });
@@ -296,8 +296,8 @@ const runTrajectoryCase = async (createCase) => {
   return report.cases[0];
 };
 
-// Every trajectory case the V1 outer plan answers (the skill_graph cases are
-// phase-2 evidence, the unified_graph cases pin the v3 graph), with what each
+// Every trajectory case the outer plan answers (the skill_graph cases are
+// phase-2 evidence), with what each
 // one proves about the outer plan on LangGraph. `planned: false` marks a case
 // whose request never reaches the plan (a pre-execution clarification, an
 // import approval asked before execution, a goal driven through tasks): it

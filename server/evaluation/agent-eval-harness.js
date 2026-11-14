@@ -8,8 +8,8 @@ export const createEvalTelemetry = () => ({
  * previous values afterwards, whether or not the callback throws.
  *
  * Eval cases run sequentially, so a case may pin a runtime dial for its own
- * duration (the unified graph rollout, memory flags) without leaking it into the
- * next case or into the CI process that launched the runner. A value of
+ * duration (a planner rollout, memory flags) without leaking it into the next
+ * case or into the CI process that launched the runner. A value of
  * `undefined` deletes the variable for the duration of the callback.
  */
 export const withEnvironmentOverrides = async (overrides, callback) => {

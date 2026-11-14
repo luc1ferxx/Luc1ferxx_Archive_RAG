@@ -266,10 +266,10 @@ export const DEFAULT_LOAD_TEST_OPTIONS = Object.freeze({
   // AGENT_REQUEST_TIMEOUT_MS of every app process (null: unset, the app's
   // default of no request deadline).
   agentRequestTimeoutMs: null,
-  // The scheduler of the custom-Skill DAG and the v3 unified graph, recorded
-  // in the report: always LangGraph since ADR 0001 phase 6 removed the native
-  // graph scheduler and AGENT_RUNTIME=native (`--agent-runtime langgraph` is
-  // still accepted, and changes nothing).
+  // The scheduler of the custom-Skill DAG, recorded in the report: always
+  // LangGraph since ADR 0001 phase 6 removed the native graph scheduler and
+  // AGENT_RUNTIME=native (`--agent-runtime langgraph` is still accepted, and
+  // changes nothing).
   agentRuntime: "langgraph",
   analyze: true,
   auth: false,
@@ -362,10 +362,11 @@ const PLANNER_MODES = new Set(["deterministic", "llm"]);
 // AGENT_* variable, so the runtimes of a before/after pair are named here and
 // recorded in the report, never taken from the shell
 // (docs/adr/0001-langgraph-runtime.md):
-// --agent-runtime names the scheduler of the custom-Skill DAG and the v3
-// unified graph. Since phase 6 that is always LangGraph: only `langgraph` is
-// accepted, it is recorded and nothing is set in the app's environment (the
-// app refuses AGENT_RUNTIME=native at start-up). Reports written before phase
+// --agent-runtime names the scheduler of the custom-Skill DAG (and, until
+// phase 10 removed it, of the v3 unified graph). Since phase 6 that is always
+// LangGraph: only `langgraph` is accepted, it is recorded and nothing is set
+// in the app's environment (the app refuses AGENT_RUNTIME=native at
+// start-up). Reports written before phase
 // 4 ran `native` unless they say otherwise; a report that recorded
 // agentRuntime `native` measured the rollback that phase 6 removed.
 // --outer-plan-runtime names the scheduler of the V1 outer plan and the
@@ -552,7 +553,7 @@ export const parseLoadTestArgs = (argv = []) => {
   if (raw["agent-runtime"] !== undefined) {
     if (raw["agent-runtime"] === "native")
       throw new Error(
-        "--agent-runtime native was removed (ADR 0001 phase 6): the custom-Skill DAG and the v3 unified graph always run on LangGraph; drop the flag."
+        "--agent-runtime native was removed (ADR 0001 phase 6): the custom-Skill DAG always runs on LangGraph; drop the flag."
       );
     if (!AGENT_RUNTIMES.has(raw["agent-runtime"]))
       throw new Error("--agent-runtime must be langgraph, the only graph scheduler since ADR 0001 phase 6.");
@@ -5989,7 +5990,7 @@ export const formatLoadTestMarkdown = (report) => {
 
   lines.push(
     `| Planner | ${config.planner} |`,
-    `| Agent runtime (AGENT_RUNTIME: custom-Skill DAG, v3 unified graph) | ${config.agentRuntime ?? "native"} |`,
+    `| Agent runtime (AGENT_RUNTIME: custom-Skill DAG) | ${config.agentRuntime ?? "native"} |`,
     // A report written before AGENT_OUTER_PLAN_RUNTIME existed has no
     // outerPlanRuntime: AGENT_RUNTIME scheduled the outer plan then, so say
     // which runtime that was rather than print a native the run never had.

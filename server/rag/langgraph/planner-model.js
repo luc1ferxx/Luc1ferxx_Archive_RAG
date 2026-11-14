@@ -1,5 +1,5 @@
-// The model call of the five planners (intent, execution, DAG, unified graph
-// and replan). It goes through the phase-1 LangChain chat model,
+// The model call of the four planners (intent, execution, DAG and replan).
+// It goes through the phase-1 LangChain chat model,
 // ArchiveRagChatModel (model.js), which hands the prompt and options to
 // completeTextWithMetadata, the call the planners made directly before the
 // migration (and still make while a LangSmith tracing variable is set; see
@@ -38,7 +38,7 @@
 //     (the default dials) into its deterministic fallback, a silent change
 //     of behaviour. The request is refused where a graph is built: the outer
 //     plan's entry (every request that reaches the plan, since ADR 0001
-//     phase 7), the custom-Skill stage and the v3 entry. The chat model
+//     phase 7) and the custom-Skill stage. The chat model
 //     still re-checks on every invoke (model.js), so a variable switched on
 //     while LangChain is being imported is refused there, and the planner
 //     falls back.

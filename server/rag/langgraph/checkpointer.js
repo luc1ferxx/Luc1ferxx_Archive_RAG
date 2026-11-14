@@ -62,9 +62,8 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 //     record is the stored one. A write still commits by revision CAS and a
 //     conflict falls back to a fresh read.
 //   - Completion drops the record (wired). The final graph checkpoint save
-//     (phase completed or partial) of both graphs -- the v3 unified graph
-//     (agent-unified-graph-stage.js) and, since phase 4, the custom-Skill DAG
-//     (agent-custom-skill-stage.js) -- clears the key in the same CAS
+//     (phase completed or partial) of the custom-Skill DAG
+//     (agent-custom-skill-stage.js) clears the key in the same CAS
 //     (saveExecutionGraphCheckpoint's dropLangGraphRecord), and failRun
 //     clears it when a run fails or is cancelled inside its graph, so a
 //     finished or terminal run never carries a thread; a paused one
@@ -285,8 +284,7 @@ export class RunStoreCheckpointSaver extends BaseCheckpointSaver {
   // put (pregel/loop.js putWrites / _checkpointerPutAfterPrevious). One
   // in-process queue keeps them from burning CAS retries on each other and
   // commits them in call order; the service's CAS stays the backstop against
-  // every other writer of the run row. Same pattern as persistCheckpoint in
-  // agent-unified-graph-stage.js.
+  // every other writer of the run row.
   #queue = Promise.resolve();
 
   constructor({

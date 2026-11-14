@@ -31,7 +31,6 @@ export const PROMPT_IDS = Object.freeze({
   qaQueryHyde: "qa_query_hyde",
   qaQueryMultiQuery: "qa_query_multi_query",
   replanner: "replanner",
-  unifiedGraphPlanner: "unified_graph_planner",
   webAnswer: "web_answer",
 });
 

@@ -2,11 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import {
-  continueAgentExecutionGraphApproval,
-  resumeAgentExecutionGraphRun,
-  runAgentRag,
-} from "../rag/agent.js";
+import { resumeAgentExecutionGraphRun, runAgentRag } from "../rag/agent.js";
 import { createAgentRunRecoveryService } from "../rag/agent-run-recovery.js";
 import {
   buildAgentRunRecoveryState,
@@ -23,12 +19,15 @@ import { createDefaultSkillRegistry } from "../rag/skills/registry.js";
 import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 
 // What the runtime does with a run the v3 unified graph stored
-// (AGENT_UNIFIED_GRAPH_ROLLOUT=guarded), under the default configuration,
-// where that graph does not run. The stored runs are data: run-store records
-// written by the v3 code, one per state such a deployment can still hold
-// (test/fixtures/stored-unified-graph-runs.json; its `provenance` says how
-// they were written). Every expectation below is a literal, so a change to
-// what happens to such a run shows up as a diff of this file.
+// (AGENT_UNIFIED_GRAPH_ROLLOUT=guarded). That graph was removed in ADR 0001
+// phase 10 (rag/agent-removed-unified-graph.js is what is left of it); a
+// deployment that ran it may still hold its runs. The stored runs are data:
+// run-store records written by the v3 code, one per state such a deployment
+// can still hold (test/fixtures/stored-unified-graph-runs.json; its
+// `provenance` says how they were written). Every expectation below is a
+// literal. The file was written before the removal, against the default
+// configuration (the graph switched off), so its diff in the removal's commit
+// is what changed for such a run.
 
 const fixture = JSON.parse(
   readFileSync(new URL("./fixtures/stored-unified-graph-runs.json", import.meta.url), "utf8")
@@ -113,12 +112,7 @@ const seed = async (...states) => {
 const readStored = (store, state) => store.get({ accessScope, runId: runIdOf(state) });
 
 // The services, wired as app-services.js wires them.
-const createStepExecutor = ({ agentRunService, ragService }) =>
-  createAgentRunStepExecutor({
-    agentRunService,
-    continueExecutionGraphApproval: (args) =>
-      continueAgentExecutionGraphApproval({ ...args, agentRunService, ragService }),
-  });
+const createStepExecutor = ({ agentRunService }) => createAgentRunStepExecutor({ agentRunService });
 
 const recoverOnStartup = ({ agentRunService, ragService, resumed }) =>
   createAgentRunRecoveryService({
@@ -158,6 +152,13 @@ const refusal = async (promise) => {
 
   return null;
 };
+
+// How every attempt to continue an unfinished stored run is refused.
+const REMOVED = Object.freeze({
+  code: "unified_graph_removed",
+  message: "This run belongs to the v3 unified graph, which was removed; an operator must resolve it.",
+  status: 409,
+});
 
 const describeStored = (run) => {
   const checkpoint = run.result.__skillGraphCheckpoint;
@@ -287,13 +288,13 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
     // Still waiting, now listed for an operator; its gate stays pending.
     parked_at_approval_gate: {
       gates: ["pending"],
-      recovery: "manual:unified_graph_rollout_not_guarded",
+      recovery: "manual:unified_graph_removed",
       status: "waiting_for_user",
     },
     // Approved, never run: the Capability is not started.
     approved_before_capability_step: {
       gates: ["approved"],
-      recovery: "manual:unified_graph_rollout_not_guarded",
+      recovery: "manual:unified_graph_removed",
       status: "waiting_for_user",
     },
     // The Capability's step was running: its outcome is unknown.
@@ -304,13 +305,13 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
     },
     interrupted_at_node_boundary: {
       gates: [],
-      recovery: "manual:unified_graph_rollout_not_guarded",
+      recovery: "manual:unified_graph_removed",
       status: "waiting_for_user",
     },
     // Its sealed answer is not delivered.
     receipt_written_run_not_completed: {
       gates: [],
-      recovery: "manual:unified_graph_rollout_not_guarded",
+      recovery: "manual:unified_graph_removed",
       status: "waiting_for_user",
     },
     // Settled: nothing crashed, nothing is touched.
@@ -377,7 +378,7 @@ test("the approval endpoint refuses a decision of a stored graph gate and lists 
     const ragService = createRagService();
     const refused = await withEnv(() =>
       refusal(
-        createStepExecutor({ agentRunService, ragService }).applyApprovalAction({
+        createStepExecutor({ agentRunService }).applyApprovalAction({
           accessScope,
           action,
           gateId: parkedGate.id,
@@ -387,20 +388,12 @@ test("the approval endpoint refuses a decision of a stored graph gate and lists 
       )
     );
 
-    assert.deepEqual(
-      refused,
-      {
-        code: "unified_graph_rollout_not_guarded",
-        message: "The unified graph rollout is no longer guarded; an operator must resolve this run.",
-        status: 409,
-      },
-      action
-    );
+    assert.deepEqual(refused, REMOVED, action);
     assert.deepEqual(
       describeAfter(await readStored(store, "parked_at_approval_gate")),
       {
         gates: ["pending"],
-        recovery: "manual:unified_graph_rollout_not_guarded",
+        recovery: "manual:unified_graph_removed",
         status: "waiting_for_user",
       },
       action
@@ -409,7 +402,7 @@ test("the approval endpoint refuses a decision of a stored graph gate and lists 
   }
 });
 
-test("a request that re-enters a graph parked at its gate", async () => {
+test("a request that re-enters a graph parked at its gate is refused and the run is listed for an operator", async () => {
   const binding = { approvalObjectHash: parkedGate.approvalObjectHash, gateId: parkedGate.id };
   const attempt = async (capabilityApprovals) => {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
@@ -445,65 +438,31 @@ test("a request that re-enters a graph parked at its gate", async () => {
       unchanged: JSON.stringify(run) === JSON.stringify(fixture.runs.parked_at_approval_gate),
     };
   };
-  const untouched = { gates: ["pending"], recovery: null, status: "waiting_for_user" };
-  const handedOver = {
-    gates: ["pending"],
-    recovery: "manual:unified_graph_rollout_not_guarded",
-    status: "waiting_for_user",
-  };
-  const notGuarded = {
-    code: "unified_graph_rollout_not_guarded",
-    message: "The unified graph rollout is no longer guarded; an operator must resolve this run.",
-    status: 409,
-  };
-
-  // Without a decision (a background task's `continue`): the pending approval
-  // is stated again and nothing is written.
-  assert.deepEqual(await attempt(undefined), {
-    after: untouched,
-    ragCalls: 0,
-    refused: null,
-    response: {
-      clarification: "capability_approval_required",
-      gateIds: [parkedGate.id],
-      runId: runIdOf("parked_at_approval_gate"),
-      status: 200,
+  const refusedAndHandedOver = {
+    after: {
+      gates: ["pending"],
+      recovery: "manual:unified_graph_removed",
+      status: "waiting_for_user",
     },
+    ragCalls: 0,
+    refused: REMOVED,
+    response: null,
     stored: 1,
-    unchanged: true,
-  });
+    unchanged: false,
+  };
 
-  // With the gate's decision (a background task's approval or denial).
-  for (const approval of [
-    { ...binding, approved: true },
-    { ...binding, approved: false, decision: "deny" },
+  // Whatever the request carries, it cannot continue the graph: without a
+  // decision (a background task's `continue`), with the gate's approval or
+  // denial (a background task's decision), or with a decision of some other
+  // gate. Nothing is decided; the run is listed for an operator.
+  for (const capabilityApprovals of [
+    undefined,
+    { [parkedGate.capabilityId]: { ...binding, approved: true } },
+    { [parkedGate.capabilityId]: { ...binding, approved: false, decision: "deny" } },
+    { [parkedGate.capabilityId]: { ...binding, approved: true, gateId: "another-gate" } },
   ]) {
-    assert.deepEqual(await attempt({ [parkedGate.capabilityId]: approval }), {
-      after: handedOver,
-      ragCalls: 0,
-      refused: notGuarded,
-      response: null,
-      stored: 1,
-      unchanged: false,
-    });
+    assert.deepEqual(await attempt(capabilityApprovals), refusedAndHandedOver);
   }
-
-  // With a decision of some other gate.
-  assert.deepEqual(
-    await attempt({ [parkedGate.capabilityId]: { ...binding, approved: true, gateId: "another-gate" } }),
-    {
-      after: untouched,
-      ragCalls: 0,
-      refused: {
-        code: "graph_approval_not_pending",
-        message: "A paused unified graph continues only with a decision of its own gate.",
-        status: 409,
-      },
-      response: null,
-      stored: 1,
-      unchanged: true,
-    }
-  );
 });
 
 test("a request that re-enters an interrupted stored graph is fenced and changes nothing", async () => {
@@ -575,7 +534,7 @@ test("a stored graph node step is never retried on its own", async () => {
   assert.deepEqual(recoveryState.actions, []);
   assert.deepEqual(
     await refusal(
-      createStepExecutor({ agentRunService, ragService: createRagService() }).retryStep({
+      createStepExecutor({ agentRunService }).retryStep({
         accessScope,
         runId: runIdOf("failed_partial"),
         stepId: failedStep.id,
@@ -596,7 +555,7 @@ test("a stored graph node step is never retried on its own", async () => {
   assert.deepEqual(await readStored(store, "failed_partial"), fixture.runs.failed_partial);
 });
 
-test("a background task parked at a stored graph gate", async () => {
+test("a background task parked at a stored graph gate fails, whatever its action", async () => {
   const act = async (action) => {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
     const ragService = createRagService();
@@ -645,11 +604,11 @@ test("a background task parked at a stored graph gate", async () => {
     ragCalls: 0,
     run: {
       gates: ["pending"],
-      recovery: "manual:unified_graph_rollout_not_guarded",
+      recovery: "manual:unified_graph_removed",
       status: "waiting_for_user",
     },
     task: {
-      error: "The unified graph rollout is no longer guarded; an operator must resolve this run.",
+      error: REMOVED.message,
       pendingGates: [],
       requiredUserAction: "",
       status: "failed",
@@ -660,18 +619,9 @@ test("a background task parked at a stored graph gate", async () => {
   assert.equal(fixture.task.status, "waiting_for_user");
   assert.equal(fixture.task.requiredUserAction, "approve_capability");
 
-  // `continue` decides nothing: the task keeps waiting with the same gate.
-  assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), {
-    ragCalls: 0,
-    run: { gates: ["pending"], recovery: null, status: "waiting_for_user" },
-    task: {
-      error: null,
-      pendingGates: [parkedGate.id],
-      requiredUserAction: "approve_capability",
-      status: "waiting_for_user",
-    },
-  });
-  // A decision fails the task and hands its run to an operator.
+  // Whatever the user does with the task, it fails with the reason and its
+  // run is handed to an operator.
+  assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), failed);
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.approve), failed);
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.deny), failed);
 });

@@ -19,7 +19,7 @@ test("planner eval passes default mock LLM planner trajectories", async () => {
 
   assert.equal(report.summary.status, "pass");
   assert.equal(report.summary.provider, "mock");
-  assert.equal(report.summary.metrics.caseCount, 7);
+  assert.equal(report.summary.metrics.caseCount, 6);
   assert.equal(report.summary.metrics.failedCaseCount, 0);
   assert.equal(report.summary.metrics.categories.planner.failedCheckCount, 0);
   assert.equal(report.summary.metrics.categories.validator.failedCheckCount, 0);
@@ -41,19 +41,12 @@ test("planner eval passes default mock LLM planner trajectories", async () => {
   ]);
   assert.equal(graphCase.response.skillGraph.selectedPlannerId, "llm_dag");
 
-  // The v3 planner's own (mock) plan: document answer, evidence check, and
-  // the Skill gated on it, admitted and executed without fallback.
-  const unifiedCase = report.cases.find(
-    (caseResult) => caseResult.id === "planner_unified_graph"
+  // The v3 unified graph planner's case went with that graph (ADR 0001 phase
+  // 10).
+  assert.equal(
+    report.cases.some((caseResult) => caseResult.id === "planner_unified_graph"),
+    false
   );
-  assert.equal(unifiedCase?.passed, true);
-  assert.deepEqual(unifiedCase.response.skillGraph.nodeSkills, [
-    "document_rag",
-    "document_evidence_check",
-    "risk_review",
-  ]);
-  assert.equal(unifiedCase.response.skillGraph.plannerFallback, false);
-  assert.equal(unifiedCase.response.planner.selectedPlannerId, "llm_unified_graph");
 
   const fallbackCase = report.cases.find(
     (caseResult) => caseResult.id === "planner_invalid_fallback"
