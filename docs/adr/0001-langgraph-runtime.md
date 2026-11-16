@@ -1146,7 +1146,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 两个都和后台任务回到它暂停的 run 有关。我各用一个探针在三棵树上复现过：现在的代码、删除之前的 21eae0c6、阶段 7 之前的 b8e4d2ed，结果相同，所以不是这几个阶段改出来的。
 
-- **后台任务批准一个普通的 Capability 审批门会失败。** 带着批准重入之后，Web 搜索执行一次，然后请求以 409 `AGENT_RUN_ACTIVE_STEP_CONFLICT` 失败（审批门那一步还是 paused），run 留在 `running`、门还是 pending。run 没有被标成失败，复核读代码的解释是完成 run 的那个调用在 `try` 里没有 `await`，`catch` 接不到它；这个解释我没有另外验证。现有的任务审批测试都把 agent 换成了桩，所以没有测到；经过真实 agent 的那条端到端用例是 v3 的 golden，已随 v3 删除。只在进程内复现，没有经过 HTTP，也没有用任务跑过。任务卡片上的 Approve 按钮发的就是这个任务级的批准（读前端代码得出）；从 run 的审批端点批准（聊天页用的那条路，有经过 HTTP 的测试）不受影响。
+- **后台任务批准一个普通的 Capability 审批门会失败。** 带着批准重入之后，Web 搜索执行一次，然后请求以 409 `AGENT_RUN_ACTIVE_STEP_CONFLICT` 失败（审批门那一步还是 paused），run 留在 `running`、门还是 pending。run 没有被标成失败，复核读代码的解释是完成 run 的那个调用在 `try` 里没有 `await`，`catch` 接不到它；这个解释我没有另外验证。现有的任务审批测试都把 agent 换成了桩，所以没有测到；经过真实 agent 的那条端到端用例是 v3 的 golden，已随 v3 删除。只在进程内复现，没有经过 HTTP，也没有用任务跑过。任务卡片上的 Approve 按钮发的就是这个任务级的批准（读前端代码得出）；从 run 的审批端点批准（聊天页用的那条路，有经过 HTTP 的测试）不受影响。（2026-11-16 已修：重入之前先通过 run store 的 `applyApprovalAction` 记下这个决定，门变成 approved、门的步骤完成，请求等待的那一步留给重入后的计划；agent 里完成 run 的三处改为 `await`，完成被拒的 run 以 failed 结束。经过真实 agent 的端到端测试在 `test/agent-task-approval-reentry.test.mjs`。）
 - **重入一个带着 custom Skill 图 checkpoint 的 run 会被围住。** 探针重入的是一个跑过两个 custom Skill、已经完成的 run，得到 409 `AGENT_GRAPH_EXECUTION_FENCED`。任务在失败之后、或者在等用户输入时的 `continue` 会带着原来的 run 重入，所以某一轮跑过 custom Skill 的任务很可能续不下去；后半句是读 `agent-tasks.js` 得出的，没有用任务跑过。
 
 **复核没能验证的**：测试套件、评测和覆盖率（它只读了日志）；PostgreSQL 上的 run store；真实执行 `node server.js` 的拒绝；前端测试；真实模型的规划器；滚动发布或多实例（读代码的结论见“升级时已存的 run”）。它当时也没有经过建好的 app 走 HTTP，这一项在修正时补了测试。
