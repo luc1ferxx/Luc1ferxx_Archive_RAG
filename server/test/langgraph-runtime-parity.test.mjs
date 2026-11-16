@@ -367,6 +367,10 @@ test("the recovery-observability replan and startup-resume signal on LangGraph m
   assert.equal(signal(langgraph.outcome.report).unsafeFallbackCount, 0);
   // The whole report and every event it was built from, not only the signal,
   // and every run, as the native pass produced them.
+  // The report's recovery block gained skillGraphRejectedCount (a custom-Skill
+  // graph rejected whole); the golden's two recovery blocks hold it as 0,
+  // since both graph events in this pass executed. Nothing the native pass
+  // produced changed.
   assertPassMatchesGolden("recovery_observability_skill_graph_signal", langgraph);
 
   assert.deepStrictEqual(langgraph.invocations, [
