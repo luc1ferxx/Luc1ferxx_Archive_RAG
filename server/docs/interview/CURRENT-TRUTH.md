@@ -462,11 +462,11 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - `quality:current` 按 CI 的 `quality-gate` 步骤：通过，八项检查全部 `pass`。
   - 三个确定性 agent 评测与 21eae0c6 的比较：和复核之前相同。
   - 不接数据库的全量：4,313 个测试，4,286 通过、27 跳过、0 失败。
+  - CI 的 Node 22（合并提交 e6b11be6 的 Quality Gate 运行 43620448518）：三个任务全部通过。`server-tests` 在 Node 22.23.4 上 4,479 个测试，4,471 通过、8 跳过、0 失败，全局行覆盖 91.92%，“RAG / AgentRAG core”一组 94.46%；`quality-gate` 里 trajectory 15/15、planner 6/6、recovery-observability 8/8，`quality:current` 通过；`frontend-checks` 28 个文件、242 个测试通过并完成构建。
 - **没有验证的**：
   - 真实 PostgreSQL 上的已存 v3 run：夹具是内存 run store 的记录，跨进程用例随 v3 删了。
   - 真实浏览器。
   - 滚动发布、新旧版本同时在线。
-  - CI 的 Node 22：合并之后看。
   - 存量数据里是否真有 v3 run。
 - **回退**：没有开关能回到 v3，只能 `git revert` 删除提交 9653dd60。冻结提交里的两个测试文件会和 revert 之后的代码不一致，要一起 revert 到冻结时的内容。被新版本标成人工恢复的 run 不会因为 revert 而重新可以批准：审批的 CAS 拒绝已标人工的 run，这和删除之前把开关从 `guarded` 关掉再打开是同一个规则。
 - **面试里的说法**：

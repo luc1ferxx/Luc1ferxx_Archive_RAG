@@ -1157,7 +1157,9 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **`quality:current`** 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
 - **三个确定性 agent 评测与 21eae0c6 的比较**：和复核之前相同（trajectory 共有的 15 个用例、planner 共有的 6 个用例逐字节一致，recovery-observability 的用例和指标逐字节一致；差异只有少掉的用例、prompt 集合和 `configHash`）。
 - **不接数据库的全量**：4,313 个测试，4,286 通过、27 跳过、0 失败。
-- **仍然没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；滚动发布；存量数据里是否真有 v3 run；CI 的 Node 22（合并之后看）。
+- **Node 20.20.2** 跑受影响的 12 个服务端测试文件：214 个测试全部通过。
+- **CI 的 Node 22**：合并进 main 之后，合并提交 e6b11be6 的 Quality Gate 运行（43620448518，2026-11-14）三个任务全部通过。`server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,479 个测试，4,471 通过、8 跳过、0 失败，全局行覆盖 91.92%，“RAG / AgentRAG core” 一组 94.46%（warn，和本机相同）；`quality-gate` 里 trajectory 15/15（63 项检查）、planner 6/6（22 项）、recovery-observability 8/8（27 项），`quality:current` 通过；`frontend-checks` 28 个文件、242 个测试通过并完成构建。
+- **仍然没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；滚动发布；存量数据里是否真有 v3 run。
 
 ## 后果
 
