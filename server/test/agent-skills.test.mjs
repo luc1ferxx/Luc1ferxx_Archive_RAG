@@ -90,6 +90,40 @@ test("document RAG declares its session-memory writes unsafe to replay", () => {
   });
 });
 
+// The document Skill types the RAG result's evidence fields for its
+// `evidence` output: a missing field takes its empty value, a field of the
+// wrong type fails the call instead of reaching the answer.
+test("document RAG types the answer's evidence and refuses a result whose fields have the wrong type", async () => {
+  const skill = createBuiltInSkillRegistry().get(AGENT_SKILL_IDS.documentRag);
+  const run = (value) =>
+    skill.execute({
+      accessScope: { userId: "alice", workspaceId: "workspace-a" },
+      docIds: ["doc-a"],
+      question: "What changed?",
+      ragService: { chat: async () => value },
+    });
+
+  assert.deepEqual((await run({ text: "Clause 4 changed." })).evidence, {
+    abstained: false,
+    citations: [],
+    comparisonAnalysisSummary: null,
+    retrievedContexts: [],
+    text: "Clause 4 changed.",
+  });
+
+  for (const [value, message] of [
+    [null, /must contain answer text/],
+    [{ text: 42 }, /must contain answer text/],
+    [{ citations: "none", text: "A" }, /citations must be an object array/],
+    [{ citations: ["doc-a"], text: "A" }, /citations must be an object array/],
+    [{ abstained: "no", text: "A" }, /abstained flag must be boolean/],
+    [{ retrievedContexts: {}, text: "A" }, /retrieved contexts must be an object array/],
+    [{ comparisonAnalysisSummary: "none", text: "A" }, /comparison analysis must be an object/],
+  ]) {
+    await assert.rejects(run(value), message, JSON.stringify(value));
+  }
+});
+
 test("research brief declares its question-level session-memory writes unsafe to replay", () => {
   const skill = createBuiltInSkillRegistry().get(AGENT_SKILL_IDS.researchBrief);
   const contract = getSkillContract(skill);

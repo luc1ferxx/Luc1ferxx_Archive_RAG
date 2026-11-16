@@ -13,6 +13,7 @@ import {
   createAgentRunRecoveryActionService,
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
 import { AGENT_TASK_ACTIONS, createAgentTaskRunner } from "../rag/agent-tasks.js";
 import {
   createAgentRunService,
@@ -796,6 +797,70 @@ test("a request that continues a settled stored graph run is answered as a new r
     // The settled run is left as it was.
     assert.deepEqual(await readStored(store, state), fixture.runs[state], state);
   }
+});
+
+// The fences a graph's worker passes check that the run's checkpoint is one
+// this runtime sealed. A stored v2 checkpoint cannot be resealed since ADR
+// 0001 phase 11 (only the custom-Skill graph's v1 can), so each fence refuses
+// such a run cleanly, with its own answer and nothing written, rather than
+// throwing on the reseal.
+test("the graph fences refuse a stored graph run: no claim, no LangGraph write, no node step", async () => {
+  const state = "interrupted_at_node_boundary";
+  const { agentRunService, store } = await seed(state);
+  const stored = fixture.runs[state];
+  const fenced = {
+    code: "AGENT_GRAPH_EXECUTION_FENCED",
+    status: 409,
+  };
+  const codeAndStatus = (value) => (value ? { code: value.code, status: value.status } : null);
+
+  assert.equal(stored.status, "running");
+  assert.equal(stored.result.__skillGraphCheckpoint.phase, "running");
+  // A startup worker cannot claim it.
+  assert.deepEqual(
+    await agentRunService.claimExecutionGraphResume({
+      accessScope,
+      checkpointDigest: stored.result.__skillGraphCheckpoint.digest,
+      runId: runIdOf(state),
+    }),
+    { checkpoint: null, claimed: false }
+  );
+  // LangGraph's saver cannot write its thread record.
+  assert.deepEqual(
+    codeAndStatus(
+      await refusal(
+        agentRunService.mutateLangGraphCheckpointRecord({
+          accessScope,
+          decide: () => ({ record: null }),
+          runId: runIdOf(state),
+        })
+      )
+    ),
+    fenced
+  );
+  // No worker can start a node step under it, claimed or not.
+  for (const expectedResumeClaimId of [null, "some-claim"]) {
+    assert.deepEqual(
+      codeAndStatus(
+        await refusal(
+          createAgentRunStepLifecycle({
+            accessScope,
+            agentRunService,
+            runId: runIdOf(state),
+          }).startGraphStep({
+            expectedResumeClaimId,
+            id: "custom_skill:primary",
+            input: { nodeId: "primary", skillId: "document_rag" },
+            label: "Document RAG",
+            type: "custom_skill",
+          })
+        )
+      ),
+      fenced,
+      String(expectedResumeClaimId)
+    );
+  }
+  assert.deepEqual(await readStored(store, state), stored);
 });
 
 test("a stored graph node step is never retried on its own", async () => {

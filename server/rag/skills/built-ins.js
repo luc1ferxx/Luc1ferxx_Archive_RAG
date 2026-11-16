@@ -326,30 +326,26 @@ const buildDiscoveryAnswer = (matches) => {
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// Only the RAG result fields used by the deterministic evidence checker may
-// enter a graph binding. Do not bind the whole raw RAG response, which also
-// carries session and retrieval internals not covered by the typed contract.
-const projectDocumentEvidence = (value, { allowMissing = false } = {}) => {
-  if (
-    !isRecord(value) ||
-    (!allowMissing && typeof value.text !== "string") ||
-    (value.text != null && typeof value.text !== "string")
-  ) {
+// The document answer's evidence fields, typed for the Skill's `evidence`
+// output, and the check that refuses a RAG result whose fields have the
+// wrong type (a missing field takes its empty value). The whole raw RAG
+// response is not exposed: it also carries session and retrieval internals
+// the typed contract does not cover. (A graph node of the removed v3 unified
+// graph bound this output to its evidence check, which also required every
+// field; ADR 0001 phases 10 and 11.)
+const projectDocumentEvidence = (value) => {
+  if (!isRecord(value) || (value.text != null && typeof value.text !== "string")) {
     throw new Error("Document evidence must contain answer text.");
   }
 
   if (
-    (!allowMissing && !Array.isArray(value.citations)) ||
-    (value.citations != null &&
-      (!Array.isArray(value.citations) || !value.citations.every(isRecord)))
+    value.citations != null &&
+    (!Array.isArray(value.citations) || !value.citations.every(isRecord))
   ) {
     throw new Error("Document evidence citations must be an object array.");
   }
 
-  if (
-    (!allowMissing && typeof value.abstained !== "boolean") ||
-    (value.abstained != null && typeof value.abstained !== "boolean")
-  ) {
+  if (value.abstained != null && typeof value.abstained !== "boolean") {
     throw new Error("Document evidence abstained flag must be boolean.");
   }
 
@@ -441,7 +437,7 @@ const createDocumentRagSkill = () => ({
       // call (the user's own question) records the exchange in memory.
       ...(memoryWrites === false ? { memoryWrites: false } : {}),
     });
-    const evidence = projectDocumentEvidence(value, { allowMissing: true });
+    const evidence = projectDocumentEvidence(value);
 
     return {
       value,
