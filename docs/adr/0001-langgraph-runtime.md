@@ -1321,7 +1321,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **第一次覆盖率门**（92d97cd6，接一次性 PostgreSQL 18 + pgvector）：4,454 个测试，1 个失败，就是上面“测试”里的 `app-planner-adapters`，已修（ab98c509）。
 - **`quality:current`** 按 CI 的 `quality-gate` 步骤在 ab98c509 的干净 worktree 上运行：通过（trajectory 15/15、63 项检查，planner 6/6、22 项，recovery-observability 8/8、27 项）。
 - **最终覆盖率门**（复核修正提交 b35629fa 的干净 worktree，一次性 PostgreSQL 18 + pgvector，本机 Node 24.21.0）：4,457 个测试，4,450 通过、7 跳过、0 失败；全局行覆盖 92.29%，“RAG / AgentRAG core” 一组 96.13%（pass）。同一次运行里三个评测重跑，结果同上（trajectory、planner 逐字节一致，recovery 只多新计数）。`quality:current` 没有在 b35629fa 上重跑：复核修正动的是 replanner、报告计数和预热，三个 agent 评测已经重跑过，另外两个评测（synthetic、feedback）不经过这些代码。
-- **CI 的 Node 22**：（合并之后待填）
+- **CI 的 Node 22**：合并进 main 之后，合并提交 d96dc94d 的 Quality Gate 运行（43832928247，2026-11-16）三个任务全部通过。`server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,457 个测试，4,449 通过、8 跳过、0 失败，全局行覆盖 92.27%，“RAG / AgentRAG core” 一组 96.11%（pass）；`quality-gate` 里 trajectory 15/15（63 项检查）、planner 6/6（22 项）、recovery-observability 8/8（27 项），`quality:current` 通过；`frontend-checks` 28 个文件通过并完成构建。本机 Node 20 不算证据：`server/package.json` 要求 Node ≥ 22.13.0，依赖里用到的 `Promise.withResolvers` 在 Node 20 上没有，`monolith-graceful-shutdown` 在那里上传就 500（与这一步无关）。
 - **没有验证的**：真实浏览器；真实模型的规划器和 replanner；PostgreSQL 上跨进程的 run。
 
 ### 独立复核（2026-11-16）
