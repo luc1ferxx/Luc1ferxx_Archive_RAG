@@ -14,7 +14,11 @@ import {
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
-import { AGENT_TASK_ACTIONS, createAgentTaskRunner } from "../rag/agent-tasks.js";
+import {
+  AGENT_TASK_ACTIONS,
+  createAgentTaskIterationRunner,
+  createAgentTaskRunner,
+} from "../rag/agent-tasks.js";
 import {
   createAgentRunService,
   createInMemoryAgentRunStore,
@@ -920,7 +924,15 @@ test("a background task parked at a stored graph gate fails on continue or appro
         },
         prepare: async () => ({ specs: [], status: "not_requested" }),
       },
-      runAgentTask: (request) => withEnv(() => runAgentRag({ ...request, agentRunService, ragService })),
+      // Wired as app-services.js wires it: a task's approval goes through the
+      // run's approval path (the step executor), every other iteration through
+      // the agent.
+      runAgentTask: createAgentTaskIterationRunner({
+        approveRunGate: (options) =>
+          withEnv(() => createStepExecutor({ agentRunService }).applyApprovalAction(options)),
+        runAgentRequest: (request) =>
+          withEnv(() => runAgentRag({ ...request, agentRunService, ragService })),
+      }),
     });
     const orchestrator = createJobOrchestrator({ runners: { [runner.id]: runner }, taskService });
     const taskId = fixture.task.id;

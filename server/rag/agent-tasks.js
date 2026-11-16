@@ -534,6 +534,49 @@ export const createAgentTaskService = ({
   },
 });
 
+/**
+ * How one task iteration reaches the agent (the runner's `runAgentTask`).
+ *
+ * A task's approval (`approve`, the task card's Approve button) decides the
+ * gate on the run it paused through the run's own approval path, the one the
+ * chat page uses (POST /agent-runs/:runId/actions/approve, the step
+ * executor's applyApprovalAction): the binding is checked against the pending
+ * gate, the gate is approved, the approved Capability runs as its queued step
+ * and the run completes. Nothing is planned again, so the steps that already
+ * completed before the gate (a document answer before a Web gate, a
+ * custom-Skill graph before a later gate) are not entered a second time. A
+ * gate that cannot be decided any more (the run ended, the gate is no longer
+ * pending, the binding is stale) is refused there and fails the task with
+ * that reason.
+ *
+ * Every other iteration is an agent request (`runAgentRequest`, runAgentRag):
+ * a new question, or the continuation of the task's run.
+ */
+export const createAgentTaskIterationRunner = ({ approveRunGate, runAgentRequest } = {}) =>
+  async ({ accessScope, agentRunId, capabilityApprovals = {}, ...request } = {}) => {
+    const approval = Object.values(capabilityApprovals ?? {}).find(
+      (entry) => entry?.approved === true && normalizeText(entry.gateId)
+    );
+
+    if (agentRunId && approval) {
+      if (typeof approveRunGate !== "function") {
+        throw buildTaskError("Agent task approval is not configured.", 500);
+      }
+
+      const result = await approveRunGate({
+        accessScope,
+        action: "approve",
+        gateId: approval.gateId,
+        payload: { approvalObjectHash: approval.approvalObjectHash },
+        runId: agentRunId,
+      });
+
+      return { body: result?.response ?? {}, status: 200 };
+    }
+
+    return runAgentRequest({ accessScope, agentRunId, ...request });
+  };
+
 export const createAgentTaskRunner = ({
   capabilityRegistry,
   goalDeliverableService,
