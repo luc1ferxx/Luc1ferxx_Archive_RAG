@@ -445,6 +445,13 @@ const recordTaskApprovals = async ({
   }
 
   const run = await agentRunService.getRun({ accessScope, runId });
+
+  // Only a run still waiting at its gate takes the decision; one that ended
+  // is continued as a new run instead (agent-runs.js, settled re-entry).
+  if (run?.status !== AGENT_RUN_STATUSES.waitingForUser) {
+    return;
+  }
+
   const pendingGateIds = new Set(
     (Array.isArray(run?.approvalGates) ? run.approvalGates : [])
       .filter((gate) => gate?.status === "pending")
@@ -911,12 +918,12 @@ const runAgentRagInScope = async ({
         },
       });
     } catch (error) {
-      // A graph of the removed v3 unified graph owned the whole earlier
-      // request and has settled (the run ended, or was finalized as a
-      // question). Its run is never re-entered: a continuation such as the
-      // user's answer to its clarification is a new request, so it gets a new
-      // run; the task memory carries the context. The settled run is left
-      // untouched.
+      // A settled run (agent-runs.js AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE: it
+      // ended, or its graph was finalized as a question for the user) is
+      // never re-entered: a continuation such as a task's `continue` after
+      // its iteration budget, or the user's answer to the question, is a new
+      // request, so it gets a new run; the task memory carries the context.
+      // The settled run is left untouched.
       if (error?.code !== AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE) {
         throw error;
       }
@@ -929,7 +936,7 @@ const runAgentRagInScope = async ({
         type: "run_continued",
         payload: {
           previousRunId: requestedAgentRunId,
-          reason: "settled_unified_graph_run",
+          reason: error.reentryReason ?? "settled_unified_graph_run",
         },
       });
     }
@@ -954,9 +961,12 @@ const runAgentRagInScope = async ({
       ragService,
       webChatService,
     });
+  // An approval is a decision about one gate of the run it was asked in. A
+  // request that asked to re-enter a run and was continued as a new run
+  // carries none into it: the new run asks again if it needs to.
   const effectiveCapabilityRegistry = withCapabilityApprovals(
     baseCapabilityRegistry,
-    capabilityApprovals
+    requestedAgentRunId && !reenteredRun ? {} : capabilityApprovals
   );
 
   if (reenteredRun && agentRunId) {
