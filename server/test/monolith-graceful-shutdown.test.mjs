@@ -318,7 +318,11 @@ test("SIGTERM drains an in-flight /chat: it answers 200, its run completes, new 
   const monolith = await startMonolith(model.url, { graceMs });
 
   // A monolith without AGENT_SERVICE_URL hosts the agent tier and loads LangGraph after it listens.
-  await monolith.waitForOutput(/\[agent\] LangGraph loaded ahead of the first agent request \(\d+ ms\)\./u);
+  // Either line ends the wait, so a failed warm-up fails here with its message instead of hanging.
+  const [warmUpLine] = await monolith.waitForOutput(
+    /\[agent\] (?:LangGraph loaded ahead|Loading LangGraph ahead)[^\n]*/u
+  );
+  assert.match(warmUpLine, /^\[agent\] LangGraph loaded ahead of the first agent request \(\d+ ms\)\.$/u);
 
   const { chat, release } = await startChatInFlight(monolith, model);
   const signalledAt = Date.now();

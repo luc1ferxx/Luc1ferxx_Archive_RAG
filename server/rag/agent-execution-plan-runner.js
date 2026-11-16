@@ -454,8 +454,9 @@ export const runAgentExecutionPlan = async (options = {}) => {
  * Never rejects: a failure is logged as a warning and the first agent request
  * imports the module itself, as before. A request that arrives meanwhile
  * waits for the same import rather than starting a second one.
- * Resolves to { ok: true, ms } or { ok: false, ms, error }. `load` is for
- * tests.
+ * Resolves to { ok: true, ms } or { ok: false, ms, error }; a load that
+ * resolves to a module without runAgentExecutionPlanOnLangGraph counts as a
+ * failure. `load` is for tests.
  */
 export const warmAgentExecutionPlanRuntime = async ({
   load = importExecutionPlanGraph,
@@ -464,7 +465,12 @@ export const warmAgentExecutionPlanRuntime = async ({
   const startedAt = performance.now();
 
   try {
-    await load();
+    const graphModule = await load();
+
+    // The module the request path runs plans with, not just any module.
+    if (typeof graphModule?.runAgentExecutionPlanOnLangGraph !== "function") {
+      throw new Error("the loaded module does not export runAgentExecutionPlanOnLangGraph");
+    }
   } catch (error) {
     const ms = Math.round(performance.now() - startedAt);
 

@@ -254,6 +254,38 @@ test("role agent loads LangGraph in the background once it listens", async () =>
   });
 });
 
+test("role agent's default warm-up loads the outer plan's graph module", async () => {
+  const exitSpy = createExitSpy();
+  const lines = [];
+  const logger = { ...quietLogger, log: (line) => lines.push(line) };
+
+  await withEnvironment({ ARCHIVE_RAG_ROLE: "agent" }, async () => {
+    const started = await startServiceRole({
+      appOptions: appOptions(),
+      exit: exitSpy.exit,
+      handleSignals: false,
+      host: "127.0.0.1",
+      logger,
+      port: 0,
+      role: "agent",
+    });
+
+    try {
+      assert.equal((await started.warmUp).ok, true);
+      assert.ok(
+        lines.some((line) =>
+          /^\[agent\] LangGraph loaded ahead of the first agent request \(\d+ ms\)\.$/u.test(line)
+        ),
+        lines.join("\n")
+      );
+    } finally {
+      await started.shutdown("SIGTERM");
+    }
+
+    assert.deepEqual(exitSpy.codes, [0]);
+  });
+});
+
 test("a role refuses to start when the topology has errors", async () => {
   await assert.rejects(
     startServiceRole({
@@ -360,6 +392,8 @@ test("retrieval and model-gateway roles load their own app lazily", async () => 
       (await (await fetch(`http://127.0.0.1:${started.port}/livez`)).json()).role,
       "retrieval"
     );
+    // Only the agent role loads LangGraph.
+    assert.equal(started.warmUp, null);
     await started.shutdown("SIGTERM");
   });
 

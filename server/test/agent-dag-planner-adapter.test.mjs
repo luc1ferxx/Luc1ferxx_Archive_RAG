@@ -856,14 +856,29 @@ test("the shadow rollout records the deterministic graph as selected and the mod
 });
 
 test("a rollout-wrapped deterministic planner with no selected Skill is rejected on its own empty graph", async () => {
+  // A recording copy of the deterministic planner, passed as the fallback and
+  // wrapped as the planner: it must be asked once, with the fallback context
+  // (selectedSkills, an array). Taken for a primary planner it would first be
+  // handed the redacted view, which has no selectedSkills, and asked twice.
+  const contexts = [];
+  const fallbackPlannerAdapter = {
+    ...deterministicDagPlannerAdapter,
+    createExecutionGraph: (context) => {
+      contexts.push(context);
+      return deterministicDagPlannerAdapter.createExecutionGraph(context);
+    },
+  };
   const result = await createAgentExecutionGraphResult(
     baseOptions({
+      fallbackPlannerAdapter,
       fallbackSelectedSkills: [],
-      plannerAdapter: withPlannerRollout(deterministicDagPlannerAdapter, "deterministic"),
+      plannerAdapter: withPlannerRollout(fallbackPlannerAdapter, "deterministic"),
       selectedSkills: [compareSkill(), riskSkill()],
     })
   );
 
+  assert.equal(contexts.length, 1);
+  assert.deepEqual(contexts[0].selectedSkills, []);
   assert.equal(result.graph, null);
   assert.equal(result.planner.status, "rejected");
   assert.equal(result.planner.rolloutMode, "deterministic");

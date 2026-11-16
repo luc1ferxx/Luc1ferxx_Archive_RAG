@@ -702,8 +702,10 @@ const addSkillGraphEvent = (recovery, event = {}) => {
   // a fallback -- nothing runs in the graph's place -- so it never moves the
   // fallback counts. Planned minus executed is not this number on stored runs:
   // a pre-phase-8 shadow event was planned and never executed without being
-  // rejected.
-  if (payload.status === "rejected") {
+  // rejected. A graph the executor's admission refused is recorded as executed
+  // with status "rejected" (after an applied replan, the earlier graph's nodes
+  // had run), so it is not counted here.
+  if (payload.status === "rejected" && payload.executed !== true) {
     recovery.skillGraphRejectedCount += 1;
   }
 

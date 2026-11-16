@@ -847,7 +847,7 @@ test("the warm-up only loads: its loader is called once, with nothing", async ()
   const result = await warmAgentExecutionPlanRuntime({
     load: async (...args) => {
       calls.push(args);
-      return {};
+      return { runAgentExecutionPlanOnLangGraph: () => {} };
     },
     logger,
   });
@@ -875,6 +875,16 @@ test("a warm-up whose load rejects logs a warning and still resolves", async () 
     lines.warn[0],
     /^\[agent\] Loading LangGraph ahead of the first agent request failed after \d+ ms; the first agent request will load it: simulated load failure$/u
   );
+});
+
+test("a warm-up that loads a module without the plan runner is a failed warm-up", async () => {
+  const { lines, logger } = recordingLogger();
+  const result = await warmAgentExecutionPlanRuntime({ load: async () => ({}), logger });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(lines.log, []);
+  assert.equal(lines.warn.length, 1);
+  assert.match(lines.warn[0], /does not export runAgentExecutionPlanOnLangGraph$/u);
 });
 
 test("a warm-up whose load throws synchronously is handled the same way", async () => {

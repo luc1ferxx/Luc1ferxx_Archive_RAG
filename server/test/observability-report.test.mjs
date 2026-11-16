@@ -776,11 +776,24 @@ test("observability report counts a custom-Skill graph rejected whole, apart fro
           status: "selected",
         },
       },
+      // A graph the executor's admission refused: recorded as executed with
+      // status "rejected", not a graph rejected whole.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: true,
+          fallback: null,
+          mode: "guarded",
+          nodeRuns: [],
+          replans: [],
+          status: "rejected",
+        },
+      },
     ],
   });
 
-  assert.equal(report.recovery.skillGraphPlannedCount, 3);
-  assert.equal(report.recovery.skillGraphExecutedCount, 1);
+  assert.equal(report.recovery.skillGraphPlannedCount, 4);
+  assert.equal(report.recovery.skillGraphExecutedCount, 2);
   assert.equal(report.recovery.skillGraphRejectedCount, 1);
   // Nothing ran in the rejected graph's place: no fallback.
   assert.equal(report.recovery.skillGraphFallbackCount, 0);

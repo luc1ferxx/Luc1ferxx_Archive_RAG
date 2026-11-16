@@ -357,13 +357,19 @@ const hasAnyCallBudget = (budgetRemaining) =>
 // those keys can still pay for a node. Trace steps never can, and neither can
 // a call budget no selectable Skill draws on (web search, research questions):
 // a run that has spent its custom-Skill calls would otherwise pay for a model
-// call whose patch the shortfall check then rejects. A run out of tokens, cost,
-// or time reports every call key as 0 and is refused here too. A Skill with no
-// budget key, or a key the caller does not report, is not limited by it -- the
-// same reading collectPendingBudgetShortfall applies.
+// call whose patch the shortfall check then rejects. A Skill with no budget
+// key, or a key the caller does not report, is not limited by it -- the same
+// reading collectPendingBudgetShortfall applies -- but a run with no call
+// budget left at all pays for nothing, whatever its Skills draw on.
 const hasSpendableBudget = ({ budgetRemaining, registry, selectedSkills }) => {
   if (!isRecord(budgetRemaining)) {
     return true;
+  }
+
+  // Out of every call budget, or out of tokens, cost, or time, which reports
+  // every call key as 0 (getRemainingBudget).
+  if (!hasAnyCallBudget(budgetRemaining)) {
+    return false;
   }
 
   const contracts = toArray(selectedSkills)
@@ -373,7 +379,7 @@ const hasSpendableBudget = ({ budgetRemaining, registry, selectedSkills }) => {
   if (contracts.length === 0) {
     // No selectable Skill resolves, so no patch can validate; leave that to the
     // validator's reason code rather than calling it a budget problem.
-    return hasAnyCallBudget(budgetRemaining);
+    return true;
   }
 
   return contracts.some(({ budgetKey }) => {
