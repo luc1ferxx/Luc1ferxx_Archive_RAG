@@ -339,6 +339,53 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 模型 0 ms 时的"在途峰值"是假服务同步回复造成的，没有意义，现在不显示。
 - 事件循环延迟没有减去 10 ms 的采样间隔，现在减掉了。
 
+### 3.53 LangGraph 迁移阶段 12：阶段 11 之后剩下的（2026-11-16）
+
+- **决定**：
+  - 用户 2026-11-16 说“继续做该做的”（ADR 0001“阶段 12 结果”）。这一步收的是阶段 11（3.52）记下的遗留，以及更早记下、一直没修的老问题里，不改变任何请求的答案、或者只修一个明确缺陷的那些。
+  - 每一项先由一个只读 agent 调查（读代码、数调用方、跑探针），再各自在单独的 worktree 里实现，最后合到一个分支上验证。在 main 的 d9a3612e 之上；修正测试的提交 ab98c509，复核修正提交 b35629fa。
+  - 会改变请求答案的产品问题没有做，留给用户（见下面“留给用户决定的”）。
+- **改了什么**（九项）：
+  - 请求不再带批准：`runAgentRag` 去掉了 `capabilityApprovals` 参数，以及把它塞进每次 Capability 调用的包装（`withCapabilityApprovals`，连通配的 `"*"` 也认）。任务的批准同一天改走 run 的审批路径之后（3.51“独立复核”里的 2026-11-16 更新），生产里没有谁再传它；需要审批的 Capability 现在只能在它的门被决定之后执行。`run_resumed` 事件不再带一直为空的 `approvedCapabilities`。任务级的 `capabilityApprovals`（任务把批准带给下一轮迭代，再交给审批路径）不变。
+  - 删掉 `rag/langgraph/tools.js`（阶段 1 的适配器，把 Skill 包成 LangChain tool）和它的 23 个测试。它是唯一一处能在图节点之外调用 custom Skill 的代码，生产里没有任何地方把这些 tool 交给图或 agent。同目录另外三个没接线的适配器（`embeddings.js`、`retriever.js`、`prompts.js`）没删：LangSmith 防泄漏测试拿 `prompts.js` 和 `retriever.js` 当被测对象。
+  - 内置 Skill 去掉只有 v3 读过的图契约：`document_rag`、`web_search`、`inventory`、`document_discovery` 不再声明 `plannerSummary`、`inputSchema`、`outputSchema`，不再返回 `evidence`、`documentCount`、`hasDocuments`、`matchedDocIds`、`hasMatches`。调查数过，生产里读这些字段的地方是 0：授权目录只收 custom Skill；内置 Skill 运行时不带 `validateOutput`，`normalizeSkillResult` 本来就把这些输出丢掉。`effects`、`idempotency`、`parallelSafe`、`replaySafe`、`retryable` 保留。`document_rag` 对 RAG 结果各字段类型的检查作为普通校验保留（`assertDocumentRagResultTypes`，错误文字不变），类型不对的结果仍然让 Skill 调用失败。
+  - 只有 `running` 的 run 有 LangGraph 写入者：写入围栏原来对没有图 checkpoint 的 run 也放行 `waiting_for_user`。这条规则来自阶段 0 的 spike（批准之后续跑同一线程），阶段 2 原样搬了过来，跟 v3 无关。生产里 saver 只在带 checkpoint 的 custom Skill 图里构造，那条分支本来就要求 `running`，所以没有请求受影响。saver 自己的 `interrupt()` 和续跑契约测试照旧保留。
+  - replanner：选中的 Skill 都付不起时不调模型。`hasSpendableBudget` 原来只要有一个预算键（`traceSteps` 除外）大于 0 就调模型；补丁只能加选中的 Skill，都记在 `customSkillCalls` 上，这个键用完而别的键还剩时，模型照样被调用，补丁随后以预算不足被拒。默认预算（`customSkillCalls` 为 2）下，两个 Skill 的图只要有一个节点弃答或失败，就白花这一次规划调用。现在先看还有没有任何调用预算，再看选中的 Skill 会用的预算键，付不起就在调用之前以 `replan_budget_exhausted` 弃答（前一半是复核之后补的）。
+  - 规划记录：`AGENT_PLANNER_ROLLOUT=deterministic|shadow` 时，app-services 用灰度包装复制了一份确定性 DAG 规划器，`createAgentExecutionGraphResult` 只按对象身份认它，于是把它当主规划器、交给脱敏上下文，先产出空图，再回落到同一张确定性图，记录写 `fallback`。现在也按 `createExecutionGraph` 函数认（`isFallbackPlanner`），记 `selected`。执行的图、预算和 Skill 调用不变；默认的 `llm` 和 CI 不受影响，已存的事件和 checkpoint 不回填。
+  - 观测报告：`recovery.skillGraphRejectedCount` 数整张被拒、没有执行的 custom Skill 图（`skill_graph_planned` 事件；复核之后不再算执行器准入时被拒、记为已执行的图），文本和 markdown 报告各多一行。它不是回落，不动两个必须为 0 的回落计数；没有门槛，没有新的评测检查，manifest 仍是 1.18.0。
+  - 承载 agent tier 的进程在 listen 之后加载 LangGraph：单体（没有设 `AGENT_SERVICE_URL`）和 `ARCHIVE_RAG_ROLE=agent` 在 listen 之后后台导入外层计划的图模块（`warmAgentExecutionPlanRuntime`）。只导入，不编译、不运行图，不碰存储、模型、租户和 run；失败只记一条警告，第一个请求照旧自己导入；没有开关。api 边缘层、检索层、模型网关和 ingest worker 仍然不加载。
+  - 测试缺口：两个执行器的回执检查各补了失败用例（正常节点交回的回执就是检查读的那份状态，只能借测试已经在用的 `Pregel.prototype.stream` 接缝删掉或改掉一个节点的回执）。reconcile 的 22 条守卫逐条删掉试过，原来有 8 条删掉也没有测试失败，现在每条都有只改它自己检查的那一项的用例。
+- **行为的变化**（默认配置下的请求、任务和已存的 run，答案都不变）：
+  - custom Skill 图的 `customSkillCalls` 用完、别的预算还剩、某个节点触发 replan。之前：调一次规划模型，补丁因预算不足被拒，以 `replan_budget_exhausted` 弃答。现在：不调模型，同样弃答，原因文字从 “Replan needs N customSkillCalls call(s) but only 0 remain.” 变成 “No skill budget remains.”。回答、Skill 结果、run 状态和 checkpoint 阶段不变。少了一种罕见情形：预算为 0 时模型给出只删除失败节点的补丁会被应用，失败的 Skill 结果因此从列表里消失；现在失败结果留在列表里。
+  - `AGENT_PLANNER_ROLLOUT=deterministic` 或 `shadow` 下新规划的 custom Skill 图：规划记录（`skill_graph_planned` 事件、图 checkpoint、OTel 的 `agent.planner.fallback`）从 `fallback: true` 变成 `selected`，执行的图不变。
+  - 承载 agent tier 的进程启动。之前：第一个 agent 请求导入 LangGraph（约 100–180 ms）。现在：listen 之后后台导入，日志多一行 `[agent] LangGraph loaded ahead of the first agent request (N ms).`。
+  - 观测报告：之前整图被拒只算在“规划数”里，现在多一个 `skillGraphRejectedCount`。“规划数减执行数”在已存的 run 上不等于它：阶段 8 之前的 shadow 事件规划了、没执行，也没被拒。
+  - 直接构造的 saver 写一个 `waiting_for_user`、没有图 checkpoint 的 run：之前放行，现在 409 `AGENT_GRAPH_EXECUTION_FENCED`。
+  - 不对外的接口：`runAgentRag` 不再接受 `capabilityApprovals`；内置 Skill 不再声明、也不再返回上面那些图契约字段。
+- **测试**：
+  - 删掉 `tools.js` 的 23 个测试。
+  - 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变。两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”）。
+  - `app-planner-adapters.test.mjs` 证明后台任务和 `/chat` 用同一个 replanner；它的两节点图用完了默认的两次 Skill 调用，按新规则 replanner 不再被问，所以给它 3 次，断言不变。全量里受新规则影响的只有这一个测试：第一次覆盖率门（92d97cd6）4,454 个测试里失败的 1 个就是它，ab98c509 修了。
+- **留给用户决定的**：
+  - 第一个 custom Skill 失败时要不要照样跑第二个（阶段 8 起的默认行为，见 3.49“失去、且没有替代的”）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）；删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。
+  - 需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）
+  - 规划器的灰度开关 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
+- **证据**（本机 Node 24.21.0）：
+  - 三个确定性 agent 评测（d9a3612e 与本分支各一个干净 worktree，屏蔽 UUID、时间戳和耗时之后比较）：trajectory 15/15、planner 6/6 逐字节一致，用例之外也一致；recovery-observability 只多了 `skillGraphRejectedCount: 0`（`recovery` 和 `observability.recovery` 两处）。
+  - `quality:current` 按 CI 的 `quality-gate` 步骤在 ab98c509 的干净 worktree 上运行：通过（trajectory 15/15、63 项检查，planner 6/6、22 项，recovery-observability 8/8、27 项）。没有在 b35629fa 上重跑：复核修正动的是 replanner、报告计数和预热，三个 agent 评测已经重跑过，另外两个评测（synthetic、feedback）不经过这些代码。
+  - 最终覆盖率门（复核修正提交 b35629fa 的干净 worktree，一次性 PostgreSQL 18 + pgvector）：4,457 个测试，4,450 通过、7 跳过、0 失败；全局行覆盖 92.29%，“RAG / AgentRAG core”一组 96.13%（pass；阶段 11 复核修正之后是 92.29%、96.11%）。同一次运行里三个评测重跑，结果同上。
+  - 预热探针（三个新进程）：冷导入 125.8 ms、124.9 ms，预热之后同一个导入 0.08 ms；预热本身约 135 ms，发生在 listen 之后。代价：这些进程一启动就到达加载 LangGraph 之后的内存（约 +60 MB RSS）；listen 之后约 100–180 ms 里模块同步求值，这时到达的请求要等。
+  - CI 的 Node 22：合并之后，合并提交 d96dc94d 的 Quality Gate 运行（43832928247）三个任务全部通过：Node 22.23.4 上 4,457 个测试，4,449 通过、8 跳过、0 失败，全局 92.27%、那一组 96.11%（pass）；quality-gate 的三个评测和 `quality:current` 通过；前端 28 个文件通过。
+- **没有验证的**：真实浏览器；真实模型的规划器和 replanner；PostgreSQL 上跨进程的 run。
+- **独立复核**（2026-11-16，只读）：三个复核 agent 各看一面（生产改动是否正确、遗留引用和文档、测试能不能抓到回退），只跑一轮，没有多票验证，意见我逐条判断。三条中级都改了：replanner 的新规则在 token、费用或时间用完时反而会调模型（那时所有调用键都报为 0，新规则先按 Skill 看，选中的 Skill 没有预算键就放行），现在先判断还有没有任何调用预算，补了测试（上线的 4 个 custom Skill 都用 `customSkillCalls`，生产里很少遇到）；预热的测试只看日志行，默认加载器换成空函数也会打出成功日志，现在预热要确认加载到的模块导出 `runAgentExecutionPlanOnLangGraph`，agent 角色的默认预热有了自己的测试；AGENTS.md 和面试材料里的过时说法（`tools.js`、`evidence` 输出、整图被拒没有计数、第一个请求加载）。低级意见都改了，其中整图被拒的计数改成只数没执行的图。
+- **回退**：没有开关（预热也没有），只能 `git revert` 这一步的提交；run 和 checkpoint 的格式没有变，没有数据要处理。
+- **面试里的说法**：
+  - 一句话：阶段 11 之后剩下的九件小事一起收掉，默认配置下没有一个请求的答案变了；会改变答案的那件（第一个 custom Skill 失败时要不要照样跑第二个）留给用户决定。
+  - 被问“为什么不顺手把第一个 Skill 失败的行为也改了”：那会改变用户看到的答案，是产品决定，不是清理。调查给了三个选项，推荐 B（失败的依赖只喂可选输入时不阻塞，约 25 行）。
+  - 被问“custom Skill 能不能绕过图被调用”：能这样做的唯一一处代码是 `rag/langgraph/tools.js`，从来没接进生产，这一步删了。
+  - 被问冷启动：承载 agent tier 的进程在 listen 之后后台加载 LangGraph，第一个 agent 请求不再付约 100–180 ms；代价是进程一启动就多约 60 MB RSS，listen 之后约 100–180 ms 里到达的请求要等模块求值完。不经过 listen 的进程内调用方（例如直接调 `runAgentRag` 的评测 runner）仍在第一次调用时加载，这是读代码得出的。
+  - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支现在只有测试走得到，删不删没定；`AGENT_PLANNER_ROLLOUT` 还在，它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
+
 ### 3.52 LangGraph 迁移阶段 11：删除共用图模块里只有 v3 用过的代码（2026-11-15）
 
 - **决定**：
@@ -367,7 +414,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **保留的**：
   - `rag/agent-removed-unified-graph.js` 和回放守卫里认 `graph_node` 类型、`agent_graph_node:` 前缀的标记：已存的 v3 run 还可能有这样的步骤，什么都不能单独重放它们。`verifyExecutionGraphCheckpoint` 拒绝任何装着 `v3` 图的 checkpoint，不管外面写的是什么版本。
   - LangGraph 线程存储（`RunStoreCheckpointSaver`）仍然是完整的 LangGraph saver，`interrupt()` 和续跑的契约测试还在：它们证明的是 saver 本身，不是哪一种图。运行时不再续跑任何线程。
-  - `document_rag` 的类型化输出 `evidence`：现在没有地方读它，但投影它的同时也在检查 RAG 结果各字段的类型。投影原来还有一种“每个字段都必须有”的模式，只有删掉的证据检查 Skill 用，这一种删了。要不要去掉这个输出，另行决定。
+  - `document_rag` 的类型化输出 `evidence`：现在没有地方读它，但投影它的同时也在检查 RAG 结果各字段的类型。投影原来还有一种“每个字段都必须有”的模式，只有删掉的证据检查 Skill 用，这一种删了。要不要去掉这个输出，另行决定。（2026-11-16 阶段 12 去掉了这个输出，类型检查作为普通校验保留（`assertDocumentRagResultTypes`，错误文字不变），见 3.53。）
 - **测试**：
   - 删掉 4 个测试文件、21 个测试，只测删掉的代码：Capability 的图契约（6 个）、图审批预检（4 个）、`document_rag` 图结果的一致性（3 个）、证据检查 Skill（8 个）。删掉 2 份 golden：`langgraph-execution-graph-runtime` 里“只有 Capability 的预检能停住或拒绝一个节点”的对照。
   - 改写的：`agent-execution-graph-checkpoint` 32 → 29（v2 checkpoint 的 7 个测试换成 custom Skill checkpoint 上对账和校验的每一种原因、节点步骤 id，以及已存的 v2 checkpoint 永远不会被当作 custom Skill checkpoint）、`agent-execution-graph` 47 → 45（v3 契约的 3 个测试换成“`v3` 是未知版本”）、`agent-execution-graph-runner` 52 → 47、`agent-execution-graph-node` 17 → 15、`langgraph-checkpointer` 23 → 22、`langgraph-execution-graph-runtime` 43 → 42。
@@ -380,7 +427,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 覆盖率闸门（`coverage:gate`）接一次性 PostgreSQL 18 + pgvector：4,445 个测试，4,438 通过、7 跳过、0 失败；全局行覆盖 92.28%（阶段 10 之后 91.92%）。“RAG / AgentRAG core”一组 96.07%（阶段 10 之后 94.46%）：过了 95% 的目标，状态从 warn 回到 pass。
   - 三个确定性 agent 评测与 5f4ae322 比较（屏蔽 UUID、时间戳、耗时和 git 信息）：trajectory 15 个用例、planner 6 个用例、recovery-observability 全部逐字节一致，用例之外（prompt 集合、`configHash`）也一致。
   - 不接数据库的全量：4,278 个测试，4,251 通过、27 跳过、0 失败。
-- **独立复核**（2026-11-15，只读）：五个维度（删掉的代码是否真的走不到、已存 v3 run、custom Skill 图、测试、残留）读删除提交，在内存 run store 上用探针对比删除前后。为了省时间，原计划的“每条意见再由三人反驳”在前四个维度交回之后停掉，意见我逐条判断。没有高级意见；两条中级是“删掉了剩下规则的唯一测试”，175cda11 已补；一条中级是任务级 `deny` 的变化，有意。低级意见在 c3ebd2fd 里改了：判断 checkpoint 是否完好只用一个函数（run store、启动恢复、回放守卫都问它，已存 v2 checkpoint 在任何路径上都不会在重新封装时抛错）；对账拒绝不是 custom Skill 图的 checkpoint；checkpoint 保存围栏的消息写出两种原因；几处测试和注释。没改、记下的：回执检查没有失败用例（以前就没有）、对账测试有几条守卫可以单独删掉而不被发现（以前就这样）、内置 Skill 上只有 v3 读过的类型化契约字段还在。
+- **独立复核**（2026-11-15，只读）：五个维度（删掉的代码是否真的走不到、已存 v3 run、custom Skill 图、测试、残留）读删除提交，在内存 run store 上用探针对比删除前后。为了省时间，原计划的“每条意见再由三人反驳”在前四个维度交回之后停掉，意见我逐条判断。没有高级意见；两条中级是“删掉了剩下规则的唯一测试”，175cda11 已补；一条中级是任务级 `deny` 的变化，有意。低级意见在 c3ebd2fd 里改了：判断 checkpoint 是否完好只用一个函数（run store、启动恢复、回放守卫都问它，已存 v2 checkpoint 在任何路径上都不会在重新封装时抛错）；对账拒绝不是 custom Skill 图的 checkpoint；checkpoint 保存围栏的消息写出两种原因；几处测试和注释。没改、记下的：回执检查没有失败用例（以前就没有）、对账测试有几条守卫可以单独删掉而不被发现（以前就这样）、内置 Skill 上只有 v3 读过的类型化契约字段还在。（这三条 2026-11-16 阶段 12 都处理了：两个执行器的回执检查补了失败用例；对账的 22 条守卫逐条删过，原来删掉也没有测试失败的 8 条补了用例；内置 Skill 上的这些字段删了。见 3.53。）
 - **复核修正之后重跑**（c3ebd2fd，本机 Node 24.21.0）：覆盖率闸门 4,447 个测试，4,440 通过、7 跳过、0 失败，全局行覆盖 92.29%，“RAG / AgentRAG core”一组 96.11%；三个确定性评测仍与 5f4ae322 逐字节一致；`quality:current` 在 175cda11 上通过；Node 20.20.2 跑改到的测试文件 372 个通过。
 - **CI 的 Node 22**（合并提交 6dcd2cd6 的 Quality Gate 运行 43814175272）：三个任务全部通过。`server-tests` 在 Node 22.23.4 上 4,447 个测试，4,439 通过、8 跳过、0 失败，全局行覆盖 92.28%，“RAG / AgentRAG core”一组 96.11%；`quality-gate` 里 trajectory 15/15、planner 6/6、recovery-observability 8/8，`quality:current` 通过；`frontend-checks` 28 个文件通过并完成构建。
 - **没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器。
@@ -390,7 +437,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 被问“怎么知道这些代码没人用”：从每个入口逐个找调用方，算上动态 import、再导出和按字符串分派的表。执行器唯一的调用方从不传审批相关的参数；唯一还有调用方的是任务级的 `deny`，所以它单独算作行为的变化。
   - 被问“怎么证明行为没变”：阶段 10 冻结的已存 v3 run 测试和复核加的任务级 `deny` 期望就是钉子，这一步对它们的改动只有 `deny`；三个确定性评测与删除前逐字节一致；逐行比较删除前后的覆盖率，原来只在删掉的测试里被覆盖的规则补了测试、做过变异。
   - 覆盖率：“RAG / AgentRAG core”一组阶段 10 之后是 94.46%（warn），当时的原因是这些代码还在而测试没了；删掉之后是 96.07%，复核修正之后 96.11%（pass）。
-  - 要主动说的：本机和合并之后 CI 的 Node 22 都通过；真实 PostgreSQL 上的已存 v3 run、真实浏览器没有验证；`document_rag` 的 `evidence` 输出现在没有读者，留不留没定。
+  - 要主动说的：本机和合并之后 CI 的 Node 22 都通过；真实 PostgreSQL 上的已存 v3 run、真实浏览器没有验证；`document_rag` 的 `evidence` 输出现在没有读者，留不留没定（2026-11-16 阶段 12 去掉了，见 3.53）。
   - 现在运行时不调 `interrupt()`，也不续跑任何线程。被问到 LangGraph 的 interrupt 和同一线程续跑，讲成做过的设计（3.17、3.51）和 spike 的结论，不要讲成现在还在跑的路径。
 
 ### 3.51 LangGraph 迁移阶段 10：删除 v3 统一图（2026-11-14）
@@ -576,7 +623,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 启动恢复（`rag/agent-run-recovery.js`）：没有图可续的 run 直接交给人，原因由 `explainInterruptedRun` 给出（有待审批项是 `pending_approval_gate`，否则是第一个中断步骤的第一个原因码，没有中断步骤是 `no_safe_recoverable_step`）。步骤上持久化的 Skill 契约继续进原因码，只是不再决定“能不能自动重放”。
 - **故意留下的**：
   - `document_rag`、`follow_up_retrieval`、`research_question` 和审批绑定的 `capability_call` 四类步骤的手动重试，以及审批放行后执行 capability 步骤：它们不是 custom Skill，当前的 run 用得到。`web_search`、`arxiv_import` 的处理器也留着，作用只是用自己的报文拒绝直接重试。
-  - `rag/langgraph/tools.js`：把 Skill 包成 LangChain tool 的适配器，能在图节点之外调用 Skill，但生产路径里没有任何地方用它，只有它自己的测试在用。所以准确的说法是“接了线的路径里，custom Skill 只在图里运行”。
+  - `rag/langgraph/tools.js`：把 Skill 包成 LangChain tool 的适配器，能在图节点之外调用 Skill，但生产路径里没有任何地方用它，只有它自己的测试在用。所以准确的说法是“接了线的路径里，custom Skill 只在图里运行”。（2026-11-16 阶段 12 已删除这个适配器和它的测试，见 3.53。它是唯一一处能在图节点之外调用 custom Skill 的代码，删了之后不用再加“接了线的路径里”这个限定。）
   - 启动恢复 trace 和发布门里 `autoReplay*` 这组名字：名字没改（存量 trace、报告和前端都读它），含义变成“自动续跑中断的图”。
   - connector 清单自己的 `replaySafety.autoReplaySafe`（另一套 schema，和步骤矩阵无关）；报告里图回落的两个计数和 `graph_fallback_after_execution_zero`（“必须为 0”的守卫）。
   - 合成和响应构建里按 `customSkillGraphExecuted` 分的两条分支：没执行图的那一支服务于所有不含 custom Skill 的请求和整图被拒的请求，不是旧链专属。
@@ -656,7 +703,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 前一个 Skill 失败后照样跑后一个：只有链这样做；图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现，能用 `off` 换回链的表现这一点现在没有了。
 - **独立复核**（只读，范围是冻结、删除、清单版本三个提交和当时的文档）：没有高、中级问题；七条低级意见。
   - 改了的：代码注释和文档里“确定性图就是顺序链的图版本”说过头了，改成写明差别并加了测试；七处检查点的注释补上第三个开关；一个评测脚本和两个测试里已经无效的 `mode` 参数删掉；`docs/agent-rag.md` 把“默认配置下基本走不到”的两种情形指错了行；测试里补上跳过原因、`skill_graph_rejected` 的归类、只选中一个 Skill 的请求。
-  - 没改、记录在案的：预算被调低又开着模型规划器时，被预算跳过的确定性图会多问一次 replanner（默认配置走不到）；恢复接口和界面仍然对图 run 里失败的 Skill 节点给出“重试失败步骤”，点了一定是 409（图成为默认以来就这样）；恢复评测和发布门里的步骤级信号用的是链当年那种步骤，只说明旧 run 还能恢复；图被整张拒绝在报告里没有单独的计数。（其中“重试失败步骤”的按钮和步骤级信号这两条，阶段 9 已经处理，见 3.50；另外两条没有变。）
+  - 没改、记录在案的：预算被调低又开着模型规划器时，被预算跳过的确定性图会多问一次 replanner（默认配置走不到）；恢复接口和界面仍然对图 run 里失败的 Skill 节点给出“重试失败步骤”，点了一定是 409（图成为默认以来就这样）；恢复评测和发布门里的步骤级信号用的是链当年那种步骤，只说明旧 run 还能恢复；图被整张拒绝在报告里没有单独的计数。（其中“重试失败步骤”的按钮和步骤级信号这两条，阶段 9 已经处理，见 3.50；另外两条没有变。2026-11-16 更新：另外两条阶段 12 也处理了，replanner 只在选中的 Skill 还付得起时才调模型，观测报告多了整图被拒的计数 `skillGraphRejectedCount`，见 3.53。）
   - 没验证的：顺序链创建、停在审批门上的 run 升级之后重新进入，按代码读下来会以 `AGENT_GRAPH_EXECUTION_FENCED` 失败，没有端到端跑过。
 - **证据**（删除之后，本机 Node 24。ADR 0001 阶段 8 的证据小节把这些结果记在提交 9c3c3de8 上：它排在删除提交 3b3a8719 之后，只改了 manifest 版本号）：
   - 覆盖率闸门接一次性 PostgreSQL + pgvector：4,595 个测试，4,588 通过、7 跳过、0 失败；全局行覆盖 92.54%，五组覆盖率门都通过。复核修正之后（提交 341ad5f3）重跑：4,598 个测试，4,591 通过、7 跳过、0 失败，92.55%；多出的 3 个是 `agent-custom-skill-budget` 新加的测试（5 个变 8 个）。
@@ -706,7 +753,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 压测：阶段 5（pgvector、假模型 0 ms、并发 1）测到每请求 CPU 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）。阶段 7 没有跑新的压测。
   - 相对真实模型约 2.4 秒的一次回答，这点开销看不出来。
 - **其他后果**：
-  - 加载：每个回答 agent 请求的进程，现在都在第一个请求时加载 `@langchain/*`。2026-11-13 实测一次性约 115 ms，GC 后常驻内存 82 → 143 MB；默认的 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core，阶段 7 实际多出来的是 LangGraph 本身，约 50 ms、21 MB。拆分部署的 api 入口和入库 worker 仍然不加载。
+  - 加载：每个回答 agent 请求的进程，现在都在第一个请求时加载 `@langchain/*`。2026-11-13 实测一次性约 115 ms，GC 后常驻内存 82 → 143 MB；默认的 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core，阶段 7 实际多出来的是 LangGraph 本身，约 50 ms、21 MB。拆分部署的 api 入口和入库 worker 仍然不加载。（2026-11-16 阶段 12 起，承载 agent tier 的进程（单体没设 `AGENT_SERVICE_URL` 时，和 `ARCHIVE_RAG_ROLE=agent`）在 listen 之后就在后台加载 LangGraph（`warmAgentExecutionPlanRuntime`），第一个请求不再付这笔，代价是一启动就多约 60 MB RSS；不经过 listen 的进程内调用方（例如直接调 `runAgentRag` 的评测 runner）仍在第一次调用时加载，这是读代码得出的。见 3.53。）
   - LangSmith：追踪变量为 true 时，`/chat/stream` 拒绝所有流式请求（在 run 建立之前，走不到外层计划的请求也一样），`/chat` 拒绝每个走到外层计划的请求（以 `LANGSMITH_TRACING_ENABLED` 让 run 失败；走不到外层计划的仍然回答）。以前原生循环上的普通文档问答还能回答。`server.js` 本来就拒绝带这种变量启动，所以只有进程内调用方或启动后环境被改动的进程会遇到。
   - 压测脚本：`--outer-plan-runtime` 现在只接受 `langgraph`，`native` 被脚本自己的参数检查拒绝。阶段 7 之前写下的报告里，`/chat` 的 CPU 数字比同一提交现在测出来的每请求低约 1 ms。
 - **回退**：没有运行时开关，只能 `git revert` 阶段 7 的删除提交。
@@ -1218,7 +1265,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 ### 3.13 工程基线（2026-09-26，压测与规模提交）
 
-- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-15 阶段 11 删除共用图模块里只有 v3 用过的代码、做完复核修正之后、在 c3ebd2fd 上的 4,447 个测试，4,440 通过、7 跳过、0 失败，全局行覆盖 92.29%，本机 Node 24、接一次性 PostgreSQL 18 + pgvector，见 3.52；这一次“RAG / AgentRAG core”一组是 96.11%，过了 95% 的目标，状态从 warn 回到 pass；CI 的 Node 22 合并之后再看。上一次是阶段 10 做完独立复核的修正之后的 4,479 个测试，全局 91.92%、那一组 94.46%（warn），本机和合并之后 CI 的 Node 22 上都通过，见 3.51。）
+- （这是历史基线，后面各节记了当时的全量数字。连 Redis 一起跑的最近一次全量是 2026-10-18 在一次性 PostgreSQL + Redis 上的 4038 项、0 失败，见 3.32；覆盖率闸门最近一次是 2026-11-16 阶段 12 做完复核修正之后、在 b35629fa 上的 4,457 个测试，4,450 通过、7 跳过、0 失败，全局行覆盖 92.29%，“RAG / AgentRAG core”一组 96.13%（pass），本机 Node 24、接一次性 PostgreSQL 18 + pgvector，见 3.53；合并之后 CI 的 Node 22（43832928247）上 4,457 个测试、0 失败，全局 92.27%、那一组 96.11%。上一次是 2026-11-15 阶段 11 删除共用图模块里只有 v3 用过的代码、做完复核修正之后、在 c3ebd2fd 上的 4,447 个测试，全局 92.29%、那一组 96.11%（阶段 10 之后是 94.46%、warn，这一次回到 pass），本机和合并之后 CI 的 Node 22 上都通过，见 3.52。）
 - 后端测试 2214 个：2205 通过，0 失败，9 个跳过（3 个需要 PostgreSQL、1 个需要 Redis 的集成测试文件在无对应服务时各报告 1 个跳过）。pgvector 集成测试在一次性 PostgreSQL 18 集群上 46/46（本次测得，含租户流水线和 run 行锁等待用例）；Redis 集成测试 5/5。
 - 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 113 个全部通过，生产构建通过（Docker 镜像构建时执行）。
