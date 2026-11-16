@@ -33,8 +33,10 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 // state channels hold -- and nothing of LangGraph's own config.
 //
 // Differences from the spike: writes record no event (the ADR's write
-// amplification item), and there is no record-level claim. A run that has a
-// graph checkpoint is claimed through claimExecutionGraphResume, whose
+// amplification item), there is no record-level claim, and only a running
+// run has a writer (the spike also admitted a run waiting for the user, so an
+// approval could resume its thread; nothing does that any more). A run that
+// has a graph checkpoint is claimed through claimExecutionGraphResume, whose
 // resumeClaim fences this saver; a run without one has no claim to hold.
 //
 // Write amplification (ADR phase 2 open item, wired in phases 3 and 4). The
@@ -258,7 +260,9 @@ const isValidRecordShape = (record) =>
  * Every write is one fenced revision CAS through
  * agentRunService.mutateLangGraphCheckpointRecord, so a stale worker's
  * superstep fails with AGENT_GRAPH_EXECUTION_FENCED once a recovery worker
- * claimed the graph or an operator took the run. The fence applies to what a
+ * claimed the graph or an operator took the run, and so does any write to a
+ * run that is not running (waiting for the user included: nothing resumes a
+ * thread across a gate any more). The fence applies to what a
  * worker persists, not to which node LangGraph starts: node starts are fenced
  * by the step lifecycle (startGraphStep with the same claim).
  *
