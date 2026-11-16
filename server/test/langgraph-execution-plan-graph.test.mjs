@@ -98,6 +98,11 @@ const { runAgentExecutionPlan } = agentExecutionPlanRunner;
 const { deterministicPlannerAdapter } = await import("../rag/agent-execution-plan.js");
 const { deterministicIntentPlannerAdapter } = await import("../rag/agent-intent-planner.js");
 const { runAgentRag } = await import("../rag/agent.js");
+// Imported after the hook too: it imports rag/agent.js and the Capability
+// registry, which must load through the redirect above.
+const { runAgentRagWithPreApprovedCapabilities } = await import(
+  "./pre-approved-capabilities-test-helpers.mjs"
+);
 const { AGENT_RUN_STATUSES, createAgentRunService, createInMemoryAgentRunStore } = await import(
   "../rag/agent-runs.js"
 );
@@ -423,8 +428,8 @@ const createRagService = ({ chat } = {}) => ({
   listDocuments: () => [{ docId: "doc-1", fileName: "policy.pdf" }],
 });
 
-const askAgent = ({ agentRunService, ragService, ...overrides }) =>
-  runAgentRag({
+const askAgent = ({ agentRunService, preApproved, ragService, ...overrides }) => {
+  const request = {
     accessScope: ACCESS_SCOPE,
     agentRunService,
     docIds: ["doc-1"],
@@ -438,7 +443,12 @@ const askAgent = ({ agentRunService, ragService, ...overrides }) =>
       throw new Error("Web search must not run.");
     },
     ...overrides,
-  });
+  };
+
+  return preApproved
+    ? runAgentRagWithPreApprovedCapabilities({ ...request, preApproved })
+    : runAgentRag(request);
+};
 
 const listRuns = async (agentRunService) =>
   (await agentRunService.listRuns({ accessScope: ACCESS_SCOPE })).runs;
@@ -537,7 +547,7 @@ test("an abstention falls through to the Web stage as the golden records: withou
   const withApproval = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
-      capabilityApprovals: {
+      preApproved: {
         [CAPABILITY_IDS.webSearch]: {
           approved: true,
           decision: "approved",

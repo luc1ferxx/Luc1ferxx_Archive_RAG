@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
+import { runAgentRagWithPreApprovedCapabilities } from "./pre-approved-capabilities-test-helpers.mjs";
 import {
   configureAgentExperienceMemoryStore,
   createInMemoryAgentExperienceStore,
@@ -537,7 +538,7 @@ test("agent rag imports arxiv papers after approved capability boundary", async 
     workspaceId: "workspace-a",
   };
   const imports = [];
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     arxivImportService: {
       importTopic: async ({ accessScope: receivedScope, maxResults, topic }) => {
@@ -570,7 +571,7 @@ test("agent rag imports arxiv papers after approved capability boundary", async 
         };
       },
     },
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.arxivImportTopic]: {
         approved: true,
         decision: "approved",

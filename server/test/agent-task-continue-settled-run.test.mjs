@@ -290,10 +290,11 @@ test("the run store continues a settled run as a new run and keeps fencing an op
   });
 });
 
-// An approval decides one gate of the run it was asked in. A task's approval
-// that arrives after its run ended continues as a new run without it: the
-// Capability does not run on the old decision, and the new run asks again.
-test("an approval sent to a run that has ended is not carried into the new run", async () => {
+// A request carries no approvals. One that continues a run that has ended
+// starts a new run, and the new run asks at its own gate. (A task's approval
+// of a run that has ended goes through the run's approval path and is refused
+// there: agent-task-approval-reentry.test.mjs.)
+test("a request that continues a run that has ended starts a new run, which asks at its own gate", async () => {
   await withEnv(async () => {
     const harness = createHarness();
     const question = "Search the web for the current launch date";
@@ -308,7 +309,6 @@ test("an approval sent to a run that has ended is not carried into the new run",
         throw new Error("the Capability must not run before approval");
       },
     });
-    const gate = paused.body.approvalGates[0];
     const runId = paused.body.agentRunId;
 
     await harness.agentRunService.failRun({
@@ -322,21 +322,12 @@ test("an approval sent to a run that has ended is not carried into the new run",
       accessScope,
       agentRunId: runId,
       agentRunService: harness.agentRunService,
-      capabilityApprovals: {
-        [gate.capabilityId]: {
-          approvalObjectHash: gate.approvalObjectHash,
-          approved: true,
-          decision: "approved",
-          gateId: gate.id,
-          source: "task_action",
-        },
-      },
       docIds: [],
       question,
       ragService: harness.ragService,
       userId: accessScope.userId,
       webChatService: async () => {
-        throw new Error("the Capability must not run on the old approval");
+        throw new Error("the Capability must not run before its new gate is decided");
       },
     });
     const newRun = await harness.agentRunService.getRun({ accessScope, runId: continued.body.agentRunId });
