@@ -2581,9 +2581,13 @@ export const createAgentRunService = ({
     );
   },
 
+  // `continuedByReentry`: the decision of a background task's approval, which
+  // re-enters the run and plans it again (agent.js); see
+  // applyApprovalActionToSteps for what that changes in the steps.
   async applyApprovalAction({
     accessScope = {},
     action,
+    continuedByReentry = false,
     gateId = "",
     payload = {},
     runId,
@@ -2677,6 +2681,7 @@ export const createAgentRunService = ({
             : AGENT_RUN_STATUSES.completed;
         const stepUpdateResult = applyApprovalActionToSteps({
           action: normalizedAction,
+          continuedByReentry,
           gate: updateResult.gate,
           steps: existingRun.steps,
         });
@@ -2698,6 +2703,7 @@ export const createAgentRunService = ({
             payload: {
               approvalObjectHash,
               capabilityId: updateResult.gate?.capabilityId ?? null,
+              ...(continuedByReentry ? { continuedByReentry: true } : {}),
               gateId: getApprovalGateKey(updateResult.gate),
               reason: normalizeText(payload.reason),
               stepId: stepUpdateResult.gateStep?.id ?? null,

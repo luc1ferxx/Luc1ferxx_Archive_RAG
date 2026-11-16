@@ -415,6 +415,58 @@ const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
   };
 };
 
+// A background task's approval (agent-tasks.js `approve`) re-enters the run a
+// Capability gate paused, carrying that gate's binding. The decision is
+// recorded on the run first, through the same run-store method as the run's
+// approval endpoint (agent-runs.js applyApprovalAction: the binding checked
+// against the gate, the gate approved and its step completed, the
+// approval_gate_approved event), so the re-entered plan runs the approved
+// Capability and the run can complete. The paused step that asked for the
+// approval stays paused for the re-entered plan to resume
+// (`continuedByReentry`). A binding that does not match the pending gate is
+// refused there, before anything runs. A gate that is no longer pending
+// (decided on the run already) is left as it is.
+const recordTaskApprovals = async ({
+  accessScope,
+  agentRunService,
+  capabilityApprovals,
+  runId,
+}) => {
+  const approvals = Object.values(capabilityApprovals ?? {}).filter(
+    (approval) => approval?.approved === true && typeof approval.gateId === "string" && approval.gateId
+  );
+
+  if (
+    approvals.length === 0 ||
+    typeof agentRunService?.getRun !== "function" ||
+    typeof agentRunService?.applyApprovalAction !== "function"
+  ) {
+    return;
+  }
+
+  const run = await agentRunService.getRun({ accessScope, runId });
+  const pendingGateIds = new Set(
+    (Array.isArray(run?.approvalGates) ? run.approvalGates : [])
+      .filter((gate) => gate?.status === "pending")
+      .map((gate) => gate.id)
+  );
+
+  for (const approval of approvals) {
+    if (!pendingGateIds.has(approval.gateId)) {
+      continue;
+    }
+
+    await agentRunService.applyApprovalAction({
+      accessScope,
+      action: "approve",
+      continuedByReentry: true,
+      gateId: approval.gateId,
+      payload: { approvalObjectHash: approval.approvalObjectHash },
+      runId,
+    });
+  }
+};
+
 const createGraphResumeError = (reason) => {
   const error = new Error(`Execution graph cannot be resumed: ${reason}.`);
   error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
@@ -828,6 +880,13 @@ const runAgentRagInScope = async ({
   let reenteredRun = Boolean(requestedAgentRunId);
 
   if (requestedAgentRunId) {
+    await recordTaskApprovals({
+      accessScope,
+      agentRunService,
+      capabilityApprovals,
+      runId: requestedAgentRunId,
+    });
+
     try {
       agentRun = await agentRunService?.updateRun?.({
         accessScope,
@@ -924,7 +983,7 @@ const runAgentRagInScope = async ({
     if (preparationResult.response) {
       const response = attachAgentRunId(preparationResult.response, agentRunId);
 
-      return completeRecordedRunAndExperience({
+      return await completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
         question,
@@ -1042,7 +1101,7 @@ const runAgentRagInScope = async ({
     if (executionResult.response) {
       const response = attachAgentRunId(executionResult.response, agentRunId);
 
-      return completeRecordedRunAndExperience({
+      return await completeRecordedRunAndExperience({
         accessScope,
         agentRunService,
         question,
@@ -1089,7 +1148,7 @@ const runAgentRagInScope = async ({
       agentRunId
     );
 
-    return completeRecordedRunAndExperience({
+    return await completeRecordedRunAndExperience({
       accessScope,
       agentRunService,
       question,
