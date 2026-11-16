@@ -11,6 +11,7 @@ import {
   EXECUTION_GRAPH_FAILURE_POLICIES,
 } from "./agent-execution-graph.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
+import { toDependencyOutageError } from "./dependency-outage.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
 import { throwIfRequestCancelled } from "./request-deadline.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
@@ -392,8 +393,12 @@ export const isExecutionGraphNodeConditionMet = ({ node, nodeOutputs }) => {
  * is the original question without priorFindings, which is what the deleted
  * sequential chain ran after a failed Skill. A dependency the node binds
  * nothing from (an ordering-only edge), a required input and a node without a
- * contract still block. Only `failed` counts: a skipped dependency (budget, a
- * false condition, an abort) still skips its dependants.
+ * contract still block, and so does a dependency that failed because a
+ * dependency of the run (the model, storage) is down: the next Skill would
+ * call it again, and the run ends with that outage instead
+ * (findWholeStageOutage in agent-execution-plan-runner.js). Only `failed`
+ * counts: a skipped dependency (budget, a false condition, an abort) still
+ * skips its dependants.
  */
 const failedDependencyLetsNodeRun = ({ contract, dependencyId, node }) => {
   const id = normalizeTrimmedText(dependencyId);
@@ -416,6 +421,14 @@ const failedDependencyLetsNodeRun = ({ contract, dependencyId, node }) => {
 };
 
 /**
+ * Whether a settled node failed because a dependency of the run (the model,
+ * storage, a service) is down, as findWholeStageOutage classifies it.
+ */
+export const didExecutionGraphNodeFailOnOutage = (state) =>
+  state?.status === EXECUTION_GRAPH_NODE_STATUSES.failed &&
+  toDependencyOutageError(state.result?.error) !== null;
+
+/**
  * The pure part of scheduling one pending node: skip it, leave it pending, or
  * let it launch. The caller still applies the concurrency cap and exclusivity
  * before launching.
@@ -423,13 +436,16 @@ const failedDependencyLetsNodeRun = ({ contract, dependencyId, node }) => {
  * `dependencyStatuses` are the statuses of `node.dependsOn` in order (undefined
  * for an unknown id, which never counts as settled). `contract` is the node's
  * Skill contract: a failed dependency that feeds only optional inputs does not
- * block the node (failedDependencyLetsNodeRun). `interrupted` is whether an
+ * block the node (failedDependencyLetsNodeRun), unless `dependencyOutages`
+ * (aligned with `node.dependsOn`) says it failed on an outage
+ * (didExecutionGraphNodeFailOnOutage). `interrupted` is whether an
  * AgentRunInterruptError is pending in this run. Returns { decision, reason },
  * `reason` set only for `skip`.
  */
 export const decideExecutionGraphNode = ({
   aborted = false,
   contract = null,
+  dependencyOutages = [],
   dependencyStatuses,
   interrupted = false,
   node,
@@ -438,6 +454,7 @@ export const decideExecutionGraphNode = ({
   const dependencyIds = node.dependsOn ?? [];
   const isFailedOptionalDependency = (status, index) =>
     status === EXECUTION_GRAPH_NODE_STATUSES.failed &&
+    dependencyOutages[index] !== true &&
     failedDependencyLetsNodeRun({ contract, dependencyId: dependencyIds[index], node });
 
   if (

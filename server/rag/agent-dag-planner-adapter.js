@@ -246,10 +246,13 @@ const buildNodeId = (skillId, index, usedNodeIds) => {
  * does not skip a node for a failed dependency that feeds only optional inputs
  * (agent-execution-graph-node.js decideExecutionGraphNode; the user's decision
  * of 2026-11-16, ADR 0001 phase 12). From 2026-09-25 until then the second
- * Skill was skipped and the run abstained. A Skill whose predecessor was
- * skipped (budget) is still skipped, and so is every Skill after a failure
- * when the graph aborts (fail_fast, which this graph does not use).
- * test/agent-custom-skill-budget.test.mjs pins both.
+ * Skill was skipped and the run abstained. A Skill whose predecessor failed on
+ * a dependency outage (the model or storage is down) is still skipped, and the
+ * run ends with the outage; so is a Skill whose predecessor was skipped
+ * (budget), and every Skill after a failure when the graph aborts (fail_fast,
+ * which this graph does not use). test/agent-custom-skill-budget.test.mjs pins
+ * the failed, the outage and the budget-skipped cases; the fail_fast abort is
+ * pinned in test/agent-execution-graph-node.test.mjs and the runtime goldens.
  *
  * This stays a chain rather than a fan-out on purpose. It is the fallback that
  * runs when the V2 planner is unavailable or produced something illegal, and a
@@ -281,8 +284,11 @@ export const createDeterministicExecutionGraph = ({ selectedSkills = [] } = {}) 
 
     nodes.push({
       dependsOn: acceptsPriorFindings ? [previousNodeId] : [],
-      // `continue` keeps a failing node from aborting the nodes that do not
-      // depend on it. It does not rescue a node that does: see above.
+      // `continue` keeps a failing node from aborting the nodes after it. The
+      // next node binds its findings only as optional priorFindings, so it
+      // still runs without them (see above), unless the failure was a
+      // dependency outage. Under fail_fast it would be skipped as
+      // aborted_after_failure.
       failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
       inputBindings,
       nodeId,

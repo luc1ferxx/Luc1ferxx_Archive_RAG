@@ -13,6 +13,7 @@ import {
   EXECUTION_GRAPH_NODE_STATUSES,
   EXECUTION_GRAPH_SCHEDULE_DECISIONS,
   decideExecutionGraphNode,
+  didExecutionGraphNodeFailOnOutage,
   isExecutionGraphNodeSettledOk,
   orderExecutionGraphNodeStatesByLayer,
   recordExecutionGraphNodeSkip,
@@ -169,6 +170,9 @@ const createNodeAction = ({
     decideExecutionGraphNode({
       aborted: control.aborted,
       contract: state.contract,
+      dependencyOutages: (state.node.dependsOn ?? []).map((dependencyId) =>
+        didExecutionGraphNodeFailOnOutage(statesByNodeId.get(dependencyId))
+      ),
       dependencyStatuses: (state.node.dependsOn ?? []).map(
         (dependencyId) => statesByNodeId.get(dependencyId)?.status
       ),

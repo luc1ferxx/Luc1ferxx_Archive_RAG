@@ -20,6 +20,7 @@ import {
   createExecutionGraphRunControl,
   createExecutionGraphStepLifecycle,
   decideExecutionGraphNode,
+  didExecutionGraphNodeFailOnOutage,
   isExecutionGraphNodeConditionMet,
   isExecutionGraphNodeSettledOk,
   prepareExecutionGraphNodeLaunch,
@@ -28,6 +29,7 @@ import {
 import * as runnerModule from "../rag/agent-execution-graph-runner.js";
 import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "../rag/agent-interrupts.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
+import { ServiceUnavailableError } from "../rag/service-client.js";
 import { CUSTOM_RAG_SKILL_CONTRACT } from "../rag/skills/custom/custom-skill-contract.js";
 
 // The per-node half of a graph run, exercised directly. The scheduler
@@ -271,6 +273,13 @@ test("decideExecutionGraphNode lets a node run past a failed dependency that fee
     dependencyFailed
   );
 
+  // A dependency that failed on an outage (the model or storage is down) still
+  // blocks: the node would call the same dependency again.
+  assert.deepEqual(
+    decide({ dependencyOutages: [true], node: dependant({ bindings: { priorFindings: output("a") } }) }),
+    dependencyFailed
+  );
+
   // An abort (a fail_fast failure) still skips it, now for the abort.
   assert.deepEqual(decide({ aborted: true, node: dependant({ bindings: { priorFindings: output("a") } }) }), {
     decision: skip,
@@ -299,6 +308,22 @@ test("decideExecutionGraphNode lets a node run past a failed dependency that fee
     reason: null,
   });
   assert.deepEqual(decide({ dependencyStatuses: [completed, failed], node: twoDependencies }), dependencyFailed);
+});
+
+test("didExecutionGraphNodeFailOnOutage reads a failed node's error as findWholeStageOutage does", () => {
+  const { completed, failed } = EXECUTION_GRAPH_NODE_STATUSES;
+  const outage = new ServiceUnavailableError("The retrieval service is unreachable.", {
+    code: "SERVICE_UNREACHABLE",
+    service: "retrieval",
+  });
+
+  assert.equal(didExecutionGraphNodeFailOnOutage({ result: { error: outage }, status: failed }), true);
+  assert.equal(
+    didExecutionGraphNodeFailOnOutage({ result: { error: new Error("The contract broke.") }, status: failed }),
+    false
+  );
+  assert.equal(didExecutionGraphNodeFailOnOutage({ result: { error: outage }, status: completed }), false);
+  assert.equal(didExecutionGraphNodeFailOnOutage(undefined), false);
 });
 
 test("createExecutionGraphNodeStates keeps declaration order and gives every node a custom_skill step", () => {
