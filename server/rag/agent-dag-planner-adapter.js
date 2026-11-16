@@ -241,15 +241,15 @@ const buildNodeId = (skillId, index, usedNodeIds) => {
  * binding. It plans what the deleted V1 sequential chain ran (the chain passed
  * earlier answers on inside a rewritten question string).
  *
- * It is not the chain when something does not run. A node bound to an earlier
- * node's findings depends on it, and the executor skips a node whose
- * dependency failed or was skipped (agent-execution-graph-node.js
- * decideExecutionGraphNode), whatever its failure policy. The chain ran the
- * next Skill anyway, on the original question. With the four shipped Skills,
- * which all accept priorFindings, a first Skill that fails therefore leaves
- * the second unrun. That has been the behaviour of every graph run since the
- * graph became the default (2026-09-25), not something the deletion of the
- * chain changed; test/agent-custom-skill-budget.test.mjs pins it.
+ * When a Skill fails, the next one still runs, on the original question,
+ * as the chain ran it: priorFindings is an optional input, and the executor
+ * does not skip a node for a failed dependency that feeds only optional inputs
+ * (agent-execution-graph-node.js decideExecutionGraphNode; the user's decision
+ * of 2026-11-16, ADR 0001 phase 12). From 2026-09-25 until then the second
+ * Skill was skipped and the run abstained. A Skill whose predecessor was
+ * skipped (budget) is still skipped, and so is every Skill after a failure
+ * when the graph aborts (fail_fast, which this graph does not use).
+ * test/agent-custom-skill-budget.test.mjs pins both.
  *
  * This stays a chain rather than a fan-out on purpose. It is the fallback that
  * runs when the V2 planner is unavailable or produced something illegal, and a

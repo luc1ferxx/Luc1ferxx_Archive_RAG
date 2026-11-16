@@ -215,6 +215,92 @@ test("decideExecutionGraphNode applies the scheduler's precedence of skip reason
   assert.equal(isExecutionGraphNodeSettledOk(skipped), false);
 });
 
+// A failed dependency that feeds only optional inputs does not block the node
+// (the user's decision of 2026-11-16, ADR 0001 phase 12); what it feeds the
+// node is then unset. Everything else a failed dependency blocked, it still
+// blocks.
+test("decideExecutionGraphNode lets a node run past a failed dependency that feeds it only optional inputs", () => {
+  const { completed, failed, running, skipped } = EXECUTION_GRAPH_NODE_STATUSES;
+  const { launch, skip, wait } = EXECUTION_GRAPH_SCHEDULE_DECISIONS;
+  const contract = {
+    inputSchema: {
+      docIds: { required: true, scoped: true, type: "string[]" },
+      priorFindings: { required: false, type: "string" },
+      question: { required: true, type: "string" },
+    },
+  };
+  const output = (nodeId) => ({ nodeId, output: "text", source: "node" });
+  const dependant = ({ bindings = {}, dependsOn = ["a"], when } = {}) => ({
+    ...node({ dependsOn, nodeId: "b", when }),
+    inputBindings: { docIds: requestField("docIds"), question: requestField("question"), ...bindings },
+  });
+  const decide = (overrides) =>
+    decideExecutionGraphNode({
+      contract,
+      dependencyStatuses: [failed],
+      nodeOutputs: new Map(),
+      ...overrides,
+    });
+  const dependencyFailed = { decision: skip, reason: EXECUTION_GRAPH_SKIP_REASONS.dependencyFailed };
+
+  assert.deepEqual(decide({ node: dependant({ bindings: { priorFindings: output("a") } }) }), {
+    decision: launch,
+    reason: null,
+  });
+
+  // Still blocked: a required input bound from it (alone or beside an optional
+  // one), an edge that binds nothing (ordering only), a `when` that reads it,
+  // and a node whose contract is not known.
+  assert.deepEqual(decide({ node: dependant({ bindings: { question: output("a") } }) }), dependencyFailed);
+  assert.deepEqual(
+    decide({ node: dependant({ bindings: { priorFindings: output("a"), question: output("a") } }) }),
+    dependencyFailed
+  );
+  assert.deepEqual(decide({ node: dependant() }), dependencyFailed);
+  assert.deepEqual(
+    decide({
+      node: dependant({
+        bindings: { priorFindings: output("a") },
+        when: { equals: true, nodeId: "a", output: "retryRecommended" },
+      }),
+    }),
+    dependencyFailed
+  );
+  assert.deepEqual(
+    decide({ contract: null, node: dependant({ bindings: { priorFindings: output("a") } }) }),
+    dependencyFailed
+  );
+
+  // An abort (a fail_fast failure) still skips it, now for the abort.
+  assert.deepEqual(decide({ aborted: true, node: dependant({ bindings: { priorFindings: output("a") } }) }), {
+    decision: skip,
+    reason: EXECUTION_GRAPH_SKIP_REASONS.abortedAfterFailure,
+  });
+
+  // Only `failed` counts: a skipped dependency still skips its dependant.
+  assert.deepEqual(
+    decide({ dependencyStatuses: [skipped], node: dependant({ bindings: { priorFindings: output("a") } }) }),
+    { decision: skip, reason: EXECUTION_GRAPH_SKIP_REASONS.dependencySkipped }
+  );
+
+  // Each dependency is judged by what it feeds: the node waits for the other
+  // one, runs once it completes, and a failure of the dependency that feeds
+  // the required question still blocks.
+  const twoDependencies = dependant({
+    bindings: { priorFindings: output("a"), question: output("c") },
+    dependsOn: ["a", "c"],
+  });
+  assert.deepEqual(decide({ dependencyStatuses: [failed, running], node: twoDependencies }), {
+    decision: wait,
+    reason: null,
+  });
+  assert.deepEqual(decide({ dependencyStatuses: [failed, completed], node: twoDependencies }), {
+    decision: launch,
+    reason: null,
+  });
+  assert.deepEqual(decide({ dependencyStatuses: [completed, failed], node: twoDependencies }), dependencyFailed);
+});
+
 test("createExecutionGraphNodeStates keeps declaration order and gives every node a custom_skill step", () => {
   const skills = [createSkill({ id: "a" }), createSkill({ id: "b" })];
   const registry = createRegistry(skills);

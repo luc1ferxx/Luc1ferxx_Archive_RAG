@@ -168,6 +168,7 @@ const createNodeAction = ({
   const decide = () =>
     decideExecutionGraphNode({
       aborted: control.aborted,
+      contract: state.contract,
       dependencyStatuses: (state.node.dependsOn ?? []).map(
         (dependencyId) => statesByNodeId.get(dependencyId)?.status
       ),

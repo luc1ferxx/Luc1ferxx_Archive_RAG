@@ -385,25 +385,66 @@ export const isExecutionGraphNodeConditionMet = ({ node, nodeOutputs }) => {
 };
 
 /**
+ * Whether a failed dependency still lets this node run (the user's decision of
+ * 2026-11-16, ADR 0001 phase 12): every input the node binds from it is
+ * optional in the node's contract, and the node's `when` does not read it. The
+ * node then runs with those inputs unset. For the shipped custom Skills that
+ * is the original question without priorFindings, which is what the deleted
+ * sequential chain ran after a failed Skill. A dependency the node binds
+ * nothing from (an ordering-only edge), a required input and a node without a
+ * contract still block. Only `failed` counts: a skipped dependency (budget, a
+ * false condition, an abort) still skips its dependants.
+ */
+const failedDependencyLetsNodeRun = ({ contract, dependencyId, node }) => {
+  const id = normalizeTrimmedText(dependencyId);
+
+  if (!contract || !id || normalizeTrimmedText(node.when?.nodeId) === id) {
+    return false;
+  }
+
+  const boundFields = Object.entries(node.inputBindings ?? {})
+    .filter(
+      ([, binding]) =>
+        binding?.source === "node" && normalizeTrimmedText(binding.nodeId) === id
+    )
+    .map(([field]) => field);
+
+  return (
+    boundFields.length > 0 &&
+    boundFields.every((field) => contract.inputSchema?.[field]?.required === false)
+  );
+};
+
+/**
  * The pure part of scheduling one pending node: skip it, leave it pending, or
  * let it launch. The caller still applies the concurrency cap and exclusivity
  * before launching.
  *
  * `dependencyStatuses` are the statuses of `node.dependsOn` in order (undefined
- * for an unknown id, which never counts as settled). `interrupted` is whether
- * an AgentRunInterruptError is pending in this run. Returns
- * { decision, reason }, `reason` set only for `skip`.
+ * for an unknown id, which never counts as settled). `contract` is the node's
+ * Skill contract: a failed dependency that feeds only optional inputs does not
+ * block the node (failedDependencyLetsNodeRun). `interrupted` is whether an
+ * AgentRunInterruptError is pending in this run. Returns { decision, reason },
+ * `reason` set only for `skip`.
  */
 export const decideExecutionGraphNode = ({
   aborted = false,
+  contract = null,
   dependencyStatuses,
   interrupted = false,
   node,
   nodeOutputs,
 }) => {
+  const dependencyIds = node.dependsOn ?? [];
+  const isFailedOptionalDependency = (status, index) =>
+    status === EXECUTION_GRAPH_NODE_STATUSES.failed &&
+    failedDependencyLetsNodeRun({ contract, dependencyId: dependencyIds[index], node });
+
   if (
     dependencyStatuses.some(
-      (status) => status === EXECUTION_GRAPH_NODE_STATUSES.failed
+      (status, index) =>
+        status === EXECUTION_GRAPH_NODE_STATUSES.failed &&
+        !isFailedOptionalDependency(status, index)
     )
   ) {
     return {
@@ -423,7 +464,11 @@ export const decideExecutionGraphNode = ({
     };
   }
 
-  if (!dependencyStatuses.every((status) => SETTLED_OK.has(status))) {
+  if (
+    !dependencyStatuses.every(
+      (status, index) => SETTLED_OK.has(status) || isFailedOptionalDependency(status, index)
+    )
+  ) {
     return { decision: EXECUTION_GRAPH_SCHEDULE_DECISIONS.wait, reason: null };
   }
 

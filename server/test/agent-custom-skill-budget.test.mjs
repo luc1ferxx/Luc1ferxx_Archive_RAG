@@ -464,40 +464,47 @@ test("a graph rejected whole is counted by the observability report from the run
   assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
 });
 
-// The second Skill is planned on the first one's findings, so it depends on
-// that node, and the executor skips a node whose dependency failed. The run
-// abstains. This is what every graph run has done since the graph became the
-// default (2026-09-25); the deletion of the chain did not change it. The chain
-// itself behaved differently: it ran the second Skill anyway, on the original
-// question, and answered with that Skill's findings. That behaviour went with
-// the chain.
-test("the first of two Skills fails: the second, which depends on its findings, does not run", async () => {
+// The second Skill is planned on the first one's findings through priorFindings,
+// an optional input, so a failed first Skill does not block it (the user's
+// decision of 2026-11-16, ADR 0001 phase 12): it runs on the original question,
+// as the deleted chain ran it, and the run answers with its findings. From
+// 2026-09-25 until then the executor skipped it (risk_review
+// skipped:dependency_failed) and the run abstained with one call spent.
+test("the first of two Skills fails: the second runs on the original question and answers", async () => {
   const outcome = await runContractReview({ failFirstCall: true });
 
   assert.deepStrictEqual(outcome, {
     answer: {
-      ...ABSTAINED_ANSWER,
+      agentAnswer: "Risk Review\n- Risk: Late notice creates renewal risk. [Source 1]",
+      agentMode: "skill_chain",
+      ragAbstained: false,
+      ragAnswer: "Risk Review\n- Risk: Late notice creates renewal risk. [Source 1]",
+      sourceCount: 1,
+      status: 200,
       traceTypes: [
         "plan:completed",
         "query_planner:completed",
         "skill_chain:completed",
         "custom_skill:failed",
+        "custom_skill:completed",
         "synthesis:completed",
-        "self_check:failed",
-        "gap_analysis:completed",
+        "self_check:completed",
         "answer_finalizer:completed",
       ],
     },
     record: {
-      agentSkills: ["summarize_contract:failed"],
-      customSkillCallsUsed: 1,
-      customSteps: ["custom_skill:summarize_contract:failed"],
+      agentSkills: ["summarize_contract:failed", "risk_review:completed"],
+      customSkillCallsUsed: 2,
+      customSteps: [
+        "custom_skill:summarize_contract:failed",
+        "custom_skill:risk_review:completed",
+      ],
       graph: [
         {
           errorCodes: [],
           executed: true,
           fallback: null,
-          nodeRuns: ["summarize_contract:failed", "risk_review:skipped:dependency_failed"],
+          nodeRuns: ["summarize_contract:failed", "risk_review:completed"],
           plannerStatus: "selected",
           status: "partial",
         },
@@ -505,7 +512,8 @@ test("the first of two Skills fails: the second, which depends on its findings, 
       rejectionSteps: [],
       skipNotes: [],
     },
-    skillCalls: ["first"],
+    // The second call carries no priorFindings.
+    skillCalls: ["first", "second: none"],
   });
 });
 
