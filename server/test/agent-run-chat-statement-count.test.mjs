@@ -866,8 +866,8 @@ test("one guarded custom-Skill /chat on LangGraph adds one run read and seven ev
 
   for (const record of records) {
     assert.equal(record.format, LANGGRAPH_CHECKPOINT_FORMAT);
-    // The custom-Skill graph checkpoints into the root namespace, which is
-    // the one readLangGraphThread reads, although it is invoked from inside
+    // The custom-Skill graph checkpoints into the thread's root namespace,
+    // although it is invoked from inside
     // the outer plan graph's custom_skills node: it must not land in a
     // subgraph namespace named after that node.
     assert.deepEqual(record.namespaces.map((namespace) => namespace.ns), [""]);

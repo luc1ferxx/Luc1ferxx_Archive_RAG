@@ -309,7 +309,7 @@ test("a StateGraph that interrupts and resumes over retention K runs exactly as 
     )
   );
 
-  // Resumed from a new saver over a new service, as a continuation is.
+  // Resumed from a new saver over a new service.
   const restartedService = createAgentRunService({ agentRunStore: fixture.agentRunStore });
   const secondSaver = new RunStoreCheckpointSaver({
     agentRunService: restartedService,
@@ -360,7 +360,7 @@ test("a thread pruned to K before it interrupts resumes exactly as an unbounded 
     const interrupted = await firstGraph.invoke({ trail: [] }, config);
     const pausedRecord = await readRecord(fixture);
 
-    // Resumed from a new saver over a new service, as a continuation is.
+    // Resumed from a new saver over a new service.
     const restartedService = createAgentRunService({ agentRunStore: fixture.agentRunStore });
     const secondSaver = new RunStoreCheckpointSaver({
       agentRunService: restartedService,
@@ -551,8 +551,8 @@ test("the graph's final checkpoint save drops the LangGraph record in the same C
   const written = await readRun(fixture);
   assert.ok(written.result[LANGGRAPH_CHECKPOINT_RESULT_KEY]);
 
-  // Refused before any store call: not a boolean, or a graph still running
-  // (or paused for approval), whose thread the continuation resumes.
+  // Refused before any store call: not a boolean, or a graph that has not
+  // settled (still running, or in a phase this runtime does not write).
   const runningUpdate = updateExecutionGraphCheckpoint(fixture.checkpoint, { replans: [] });
   for (const dropLangGraphRecord of ["yes", 1, null]) {
     await assert.rejects(
@@ -567,7 +567,7 @@ test("the graph's final checkpoint save drops the LangGraph record in the same C
   await assert.rejects(
     instrumentedService.saveExecutionGraphCheckpoint({
       ...scoped,
-      checkpoint: updateExecutionGraphCheckpoint(fixture.checkpoint, { phase: "awaiting_approval" }),
+      checkpoint: updateExecutionGraphCheckpoint(fixture.checkpoint, { phase: "paused" }),
       dropLangGraphRecord: true,
     }),
     TypeError

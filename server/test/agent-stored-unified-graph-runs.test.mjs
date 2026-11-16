@@ -13,6 +13,7 @@ import {
   createAgentRunRecoveryActionService,
 } from "../rag/agent-run-recovery-actions.js";
 import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
 import { AGENT_TASK_ACTIONS, createAgentTaskRunner } from "../rag/agent-tasks.js";
 import {
   createAgentRunService,
@@ -408,6 +409,43 @@ test("startup recovery hands every unfinished stored graph to an operator and ru
   assert.deepEqual(resumed, []);
 });
 
+// Only the custom-Skill graph is ever continued at startup, and only when its
+// run's stored outer plan was nothing but that graph. A stored v3 run is
+// handed over before any of that is looked at: here one whose record was
+// edited to look like such a run still gets the removed graph's reason and is
+// not resumed. (Before ADR 0001 phase 11 the same rule was pinned with a v2
+// checkpoint the runtime could still create.)
+test("a stored graph run that looks like a custom-Skill continuation is handed over, not resumed", async () => {
+  const run = structuredClone(fixture.runs.interrupted_at_node_boundary);
+
+  run.plan = { ...run.plan, mode: "skill_chain" };
+  run.events.push({
+    createdAt: run.events.at(-1).createdAt,
+    eventId: `${run.events.at(-1).eventId}-planned`,
+    payload: { planner: { stepIds: ["custom_skills"] } },
+    type: "execution_planned",
+  });
+
+  const store = createInMemoryAgentRunStore();
+  await store.create({ accessScope, run });
+  const agentRunService = createAgentRunService({ agentRunStore: store });
+  const resumed = [];
+  const outcome = await withEnv(() =>
+    recoverOnStartup({ agentRunService, ragService: createRagService(), resumed })
+  );
+
+  assert.deepEqual(
+    { auto: outcome.autoRecoveredCount, manual: outcome.manualRecoveredCount },
+    { auto: 0, manual: 1 }
+  );
+  assert.deepEqual(resumed, []);
+  assert.deepEqual(describeAfter(await store.get({ accessScope, runId: run.runId })), {
+    gates: [],
+    recovery: "manual:unified_graph_removed",
+    status: "waiting_for_user",
+  });
+});
+
 // AGENT_RUN_RECOVERY_MODE=manual hands every interrupted or waiting run to an
 // operator, whatever it is; the stored graph runs are no exception, the
 // claimed one included.
@@ -754,11 +792,74 @@ test("a request that continues a settled stored graph run is answered as a new r
     );
     // The answer came from the outer execution plan, not from a graph.
     assert.equal(newRun.events.some((event) => event.type === "execution_planned"), true, state);
-    assert.equal(newRun.steps.some((step) => step.type === "graph_node"), false, state);
     assert.equal(ragService.calls.length, 1, state);
     // The settled run is left as it was.
     assert.deepEqual(await readStored(store, state), fixture.runs[state], state);
   }
+});
+
+// The fences a graph's worker passes check that the run's checkpoint is one
+// this runtime sealed. A stored v2 checkpoint cannot be resealed since ADR
+// 0001 phase 11 (only the custom-Skill graph's v1 can), so each fence refuses
+// such a run cleanly, with its own answer and nothing written, rather than
+// throwing on the reseal.
+test("the graph fences refuse a stored graph run: no claim, no LangGraph write, no node step", async () => {
+  const state = "interrupted_at_node_boundary";
+  const { agentRunService, store } = await seed(state);
+  const stored = fixture.runs[state];
+  const fenced = {
+    code: "AGENT_GRAPH_EXECUTION_FENCED",
+    status: 409,
+  };
+  const codeAndStatus = (value) => (value ? { code: value.code, status: value.status } : null);
+
+  assert.equal(stored.status, "running");
+  assert.equal(stored.result.__skillGraphCheckpoint.phase, "running");
+  // A startup worker cannot claim it.
+  assert.deepEqual(
+    await agentRunService.claimExecutionGraphResume({
+      accessScope,
+      checkpointDigest: stored.result.__skillGraphCheckpoint.digest,
+      runId: runIdOf(state),
+    }),
+    { checkpoint: null, claimed: false }
+  );
+  // LangGraph's saver cannot write its thread record.
+  assert.deepEqual(
+    codeAndStatus(
+      await refusal(
+        agentRunService.mutateLangGraphCheckpointRecord({
+          accessScope,
+          decide: () => ({ record: null }),
+          runId: runIdOf(state),
+        })
+      )
+    ),
+    fenced
+  );
+  // No worker can start a node step under it, claimed or not.
+  for (const expectedResumeClaimId of [null, "some-claim"]) {
+    assert.deepEqual(
+      codeAndStatus(
+        await refusal(
+          createAgentRunStepLifecycle({
+            accessScope,
+            agentRunService,
+            runId: runIdOf(state),
+          }).startGraphStep({
+            expectedResumeClaimId,
+            id: "custom_skill:primary",
+            input: { nodeId: "primary", skillId: "document_rag" },
+            label: "Document RAG",
+            type: "custom_skill",
+          })
+        )
+      ),
+      fenced,
+      String(expectedResumeClaimId)
+    );
+  }
+  assert.deepEqual(await readStored(store, state), stored);
 });
 
 test("a stored graph node step is never retried on its own", async () => {
@@ -807,7 +908,7 @@ test("a stored graph node step is never retried on its own", async () => {
   }
 });
 
-test("a background task parked at a stored graph gate fails, whatever its action", async () => {
+test("a background task parked at a stored graph gate fails on continue or approve, and deny is no action", async () => {
   const act = async (action) => {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
     const ragService = createRagService();
@@ -827,22 +928,28 @@ test("a background task parked at a stored graph gate fails, whatever its action
     await taskService.upsertTask({ accessScope, task: structuredClone(fixture.task) });
     assert.deepEqual(await taskService.getInternalTask({ accessScope, taskId }), fixture.task);
 
-    await orchestrator.resumeTask({
-      accessScope,
-      action,
-      payload:
-        action === AGENT_TASK_ACTIONS.continue
-          ? { answer: "Use the renewal clause." }
-          : { approvalObjectHash: parkedGate.approvalObjectHash, gateId: parkedGate.id },
-      runImmediately: false,
-      taskId,
-    });
-    await orchestrator.runTask({ accessScope, taskId });
+    const refused = await refusal(
+      orchestrator.resumeTask({
+        accessScope,
+        action,
+        payload:
+          action === AGENT_TASK_ACTIONS.continue
+            ? { answer: "Use the renewal clause." }
+            : { approvalObjectHash: parkedGate.approvalObjectHash, gateId: parkedGate.id },
+        runImmediately: false,
+        taskId,
+      })
+    );
+
+    if (!refused) {
+      await orchestrator.runTask({ accessScope, taskId });
+    }
 
     const task = await taskService.getInternalTask({ accessScope, taskId });
 
     return {
       ragCalls: ragService.calls.length,
+      refused,
       run: describeAfter(await readStored(store, "parked_at_approval_gate")),
       task: {
         error: task.error ?? null,
@@ -854,6 +961,7 @@ test("a background task parked at a stored graph gate fails, whatever its action
   };
   const failed = {
     ragCalls: 0,
+    refused: null,
     run: {
       gates: ["pending"],
       recovery: "manual:unified_graph_removed",
@@ -875,7 +983,21 @@ test("a background task parked at a stored graph gate fails, whatever its action
   // run is handed to an operator.
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), failed);
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.approve), failed);
-  assert.deepEqual(await act(AGENT_TASK_ACTIONS.deny), failed);
+  // The task-level `deny` went with the graph's own approval gates (ADR 0001
+  // phase 11; it denied nothing else): refused as an unknown action before
+  // the task or its run is touched. Until then it failed the task like the
+  // other two.
+  assert.deepEqual(await act("deny"), {
+    ragCalls: 0,
+    refused: { code: undefined, message: "Unsupported agent task action: deny.", status: 400 },
+    run: { gates: ["pending"], recovery: null, status: "waiting_for_user" },
+    task: {
+      error: null,
+      pendingGates: [parkedGate.id],
+      requiredUserAction: "approve_capability",
+      status: "waiting_for_user",
+    },
+  });
 });
 
 // The same through the built app: startup recovery as the app runs it, the

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { resumeAgentExecutionGraphRun, runAgentRag } from "../rag/agent.js";
@@ -10,6 +11,7 @@ import {
   createExecutionGraphCheckpoint,
   digestExecutionGraphTypedOutput,
   reconcileExecutionGraphCheckpoint,
+  sealExecutionGraphCheckpoint,
   snapshotExecutionGraphNodeRun,
   updateExecutionGraphCheckpoint,
   verifyExecutionGraphCheckpoint,
@@ -97,25 +99,26 @@ test("typed output receipt digest is stable across object key order", () => {
   );
 });
 
-const createV3DocumentCheckpoint = () => {
+// A custom-Skill checkpoint with one node, the same checkpoint once that node
+// has settled, and the node's step.
+const createSettledCompareCheckpoint = () => {
   const budgetState = createAgentBudget();
-  const nodeId = "document:risk/a";
-  const graph = createExecutionGraph({
-    nodes: [{ nodeId, skillId: "document_rag", dependsOn: [] }],
-    version: "v3",
+  const nodeId = "compare";
+  const selectedSkills = [{ id: "compare_documents", version: "1.0.0" }];
+  const checkpoint = createExecutionGraphCheckpoint({
+    graph: createExecutionGraph({ nodes: [graphNodes[0]] }),
+    owner: buildExecutionGraphCheckpointOwner({
+      accessScope,
+      budgetState,
+      docIds,
+      plan,
+      question,
+      selectedSkills,
+      sessionId,
+      userId,
+    }),
   });
-  const owner = buildExecutionGraphCheckpointOwner({
-    accessScope,
-    budgetState,
-    docIds,
-    plan,
-    question,
-    selectedSkills: [{ id: "document_rag", version: "1.0.0" }],
-    sessionId,
-    userId,
-  });
-  const checkpoint = createExecutionGraphCheckpoint({ graph, owner, version: "v2" });
-  const stepId = buildExecutionGraphNodeStepId({ checkpointVersion: "v2", nodeId });
+  const stepId = buildExecutionGraphNodeStepId({ nodeId });
   const graphOutput = {
     abstained: false,
     citations: [{ docId: "doc-a", page: 1 }],
@@ -125,26 +128,26 @@ const createV3DocumentCheckpoint = () => {
     ...graphOutput,
     graphOutput,
     ok: true,
-    skillId: "document_rag",
+    skillId: "compare_documents",
     skillVersion: "1.0.0",
   };
   const nodeRun = snapshotExecutionGraphNodeRun({
     nodeId,
     result,
-    skillId: "document_rag",
+    skillId: "compare_documents",
     skillVersion: "1.0.0",
     status: "completed",
     stepId,
   });
   const step = {
     id: stepId,
-    input: { nodeId, skillId: "document_rag", skillVersion: "1.0.0" },
+    input: { nodeId, skillId: "compare_documents", skillVersion: "1.0.0" },
     output: {
       text: result.text,
       typedOutputDigest: digestExecutionGraphTypedOutput(graphOutput),
     },
     status: "completed",
-    type: "graph_node",
+    type: "custom_skill",
   };
 
   return {
@@ -153,28 +156,16 @@ const createV3DocumentCheckpoint = () => {
     completedCheckpoint: updateExecutionGraphCheckpoint(checkpoint, { nodeRuns: [nodeRun] }),
     nodeId,
     nodeRun,
-    owner,
+    selectedSkills,
     step,
     stepId,
   };
 };
 
-test("v3 graph nodes use a versioned namespace without changing legacy step IDs", () => {
-  const first = buildExecutionGraphNodeStepId({
-    checkpointVersion: "v2",
-    nodeId: "document:risk/a",
-  });
-  const second = buildExecutionGraphNodeStepId({
-    checkpointVersion: "v2",
-    nodeId: "document:risk%2Fa",
-  });
-
-  assert.match(first, /^agent_graph_node:[A-Za-z0-9_-]+$/);
-  assert.notEqual(first, second);
-  assert.equal(
-    buildExecutionGraphNodeStepId({ checkpointVersion: "v1", nodeId: "compare" }),
-    "custom_skill:compare"
-  );
+test("a graph node's step id is custom_skill:<nodeId>, byte for byte", () => {
+  assert.equal(buildExecutionGraphNodeStepId({ nodeId: "compare" }), "custom_skill:compare");
+  // No encoding: the id is the node id as the graph spells it.
+  assert.equal(buildExecutionGraphNodeStepId({ nodeId: "risk/a:b" }), "custom_skill:risk/a:b");
 });
 
 test("the existing conditional custom-Skill graph v2 retains a v1 checkpoint and step namespace", () => {
@@ -196,7 +187,7 @@ test("the existing conditional custom-Skill graph v2 retains a v1 checkpoint and
   assert.equal(checkpoint.version, "v1");
   assert.equal(checkpoint.graph.version, "v2");
   assert.equal(
-    buildExecutionGraphNodeStepId({ checkpointVersion: checkpoint.version, nodeId: "compare" }),
+    buildExecutionGraphNodeStepId({ nodeId: "compare" }),
     "custom_skill:compare"
   );
   assert.equal(verifyExecutionGraphCheckpoint({
@@ -212,278 +203,205 @@ test("the existing conditional custom-Skill graph v2 retains a v1 checkpoint and
   }).ok, true);
 });
 
-test("v2 checkpoint preserves its own version and reconciles a completed non-custom graph node", () => {
-  const fixture = createV3DocumentCheckpoint();
-  const verified = verifyExecutionGraphCheckpoint({
-    accessScope,
-    budgetState: fixture.budgetState,
-    checkpoint: fixture.completedCheckpoint,
-    docIds,
-    plan,
-    question,
-    selectedSkills: [{ id: "document_rag", version: "1.0.0" }],
-    sessionId,
-    userId,
-  });
-  const reconciled = reconcileExecutionGraphCheckpoint({
-    checkpoint: fixture.completedCheckpoint,
-    steps: [fixture.step],
-  });
-
-  assert.equal(fixture.checkpoint.version, "v2");
-  assert.equal(fixture.completedCheckpoint.version, "v2");
-  assert.equal(verified.ok, true);
-  assert.equal(reconciled.ok, true);
-  assert.equal(reconciled.attemptedStepCount, 1);
-  assert.deepEqual(reconciled.completedNodeRuns, [fixture.nodeRun]);
-});
-
-test("checkpoint v2 cannot be confused with the older conditional custom-Skill graph v2", () => {
-  const fixture = createV3DocumentCheckpoint();
-  const wrongGraph = updateExecutionGraphCheckpoint(fixture.checkpoint, {
-    graph: { ...fixture.checkpoint.graph, version: "v2" },
+test("reconcileExecutionGraphCheckpoint accepts a settled node and returns each of its refusal reasons", () => {
+  const fixture = createSettledCompareCheckpoint();
+  const failedCheckpoint = updateExecutionGraphCheckpoint(fixture.checkpoint, {
+    nodeRuns: [snapshotExecutionGraphNodeRun({ ...fixture.nodeRun, status: "failed" })],
   });
 
   assert.deepEqual(
-    reconcileExecutionGraphCheckpoint({ checkpoint: wrongGraph, steps: [] }),
-    { ok: false, reason: "invalid_checkpoint_shape" }
-  );
-  assert.deepEqual(
-    verifyExecutionGraphCheckpoint({
-      accessScope,
-      budgetState: fixture.budgetState,
-      checkpoint: wrongGraph,
-      docIds,
-      plan,
-      question,
-      selectedSkills: [{ id: "document_rag", version: "1.0.0" }],
-      sessionId,
-      userId,
+    reconcileExecutionGraphCheckpoint({
+      checkpoint: fixture.completedCheckpoint,
+      steps: [fixture.step],
     }),
-    { ok: false, reason: "invalid_checkpoint_shape" }
+    { attemptedStepCount: 1, completedNodeRuns: [fixture.nodeRun], ok: true, reason: null }
   );
-});
+  // A step that is not a graph node is not this function's business, whatever
+  // its status.
+  assert.equal(
+    reconcileExecutionGraphCheckpoint({
+      checkpoint: fixture.completedCheckpoint,
+      steps: [fixture.step, { id: "document_rag:primary", status: "running", type: "document_rag" }],
+    }).ok,
+    true
+  );
+  // A node that failed and whose graph is over: nothing to reuse, nothing wrong.
+  assert.deepEqual(
+    reconcileExecutionGraphCheckpoint({
+      checkpoint: updateExecutionGraphCheckpoint(failedCheckpoint, { phase: "partial" }),
+      steps: [{ ...fixture.step, status: "failed" }],
+    }),
+    { attemptedStepCount: 1, completedNodeRuns: [], ok: true, reason: null }
+  );
 
-test("v2 checkpoint rejects unknown, active, and missing heterogeneous node receipts", () => {
-  const fixture = createV3DocumentCheckpoint();
-  const mismatchCases = [
+  for (const { checkpoint = fixture.completedCheckpoint, name, reason, steps } of [
     {
-      checkpoint: fixture.completedCheckpoint,
-      reason: "checkpoint_step_mismatch",
-      steps: [{ ...fixture.step, id: "agent_graph_node:unknown" }],
-    },
-    {
-      checkpoint: fixture.completedCheckpoint,
-      reason: "checkpoint_step_mismatch",
-      steps: [{ ...fixture.step, type: "custom_skill" }],
-    },
-    {
-      checkpoint: fixture.completedCheckpoint,
-      reason: "checkpoint_step_mismatch",
-      steps: [{ id: "document_rag:primary", status: "completed", type: "document_rag" }],
-    },
-    {
-      checkpoint: fixture.completedCheckpoint,
-      reason: "unknown_in_flight_node",
-      steps: [{ id: "document_rag:primary", status: "running", type: "document_rag" }],
-    },
-    {
-      checkpoint: fixture.completedCheckpoint,
-      reason: "duplicate_graph_step_receipt",
-      steps: [fixture.step, { ...fixture.step }],
-    },
-    {
-      checkpoint: fixture.completedCheckpoint,
+      name: "a node step still running",
       reason: "unknown_in_flight_node",
       steps: [{ ...fixture.step, status: "running" }],
     },
     {
+      name: "a node step still paused",
+      reason: "unknown_in_flight_node",
+      steps: [{ ...fixture.step, status: "paused" }],
+    },
+    {
       checkpoint: fixture.checkpoint,
+      name: "a step of a node the checkpoint never recorded",
       reason: "checkpoint_step_mismatch",
       steps: [fixture.step],
     },
     {
-      checkpoint: fixture.completedCheckpoint,
+      name: "a step another Skill ran",
+      reason: "checkpoint_step_mismatch",
+      steps: [{ ...fixture.step, input: { ...fixture.step.input, skillId: "risk_review" } }],
+    },
+    {
+      name: "a step another version of the Skill ran",
+      reason: "checkpoint_step_mismatch",
+      steps: [{ ...fixture.step, input: { ...fixture.step.input, skillVersion: "2.0.0" } }],
+    },
+    {
+      name: "a completed step whose text is not the checkpoint's",
+      reason: "completed_step_without_checkpoint",
+      steps: [{ ...fixture.step, output: { ...fixture.step.output, text: "Something else." } }],
+    },
+    {
+      name: "a completed step whose typed output is not the checkpoint's",
+      reason: "completed_step_without_checkpoint",
+      steps: [{
+        ...fixture.step,
+        output: { ...fixture.step.output, typedOutputDigest: `v1:sha256:${"0".repeat(64)}` },
+      }],
+    },
+    {
+      checkpoint: failedCheckpoint,
+      name: "a completed step of a node the checkpoint holds as failed",
+      reason: "completed_step_without_checkpoint",
+      steps: [fixture.step],
+    },
+    {
+      checkpoint: failedCheckpoint,
+      name: "a failed node while its graph is still running",
+      reason: "failed_node_requires_recovery",
+      steps: [{ ...fixture.step, status: "failed" }],
+    },
+    {
+      checkpoint: updateExecutionGraphCheckpoint(fixture.completedCheckpoint, { phase: "partial" }),
+      name: "a failed step of a node the checkpoint holds as completed",
+      reason: "failed_step_checkpoint_mismatch",
+      steps: [{ ...fixture.step, status: "failed" }],
+    },
+    {
+      name: "a settled node without its step",
       reason: "checkpoint_missing_completed_step",
       steps: [],
     },
     {
       checkpoint: updateExecutionGraphCheckpoint(fixture.checkpoint, {
-        nodeRuns: [snapshotExecutionGraphNodeRun({
-          ...fixture.nodeRun,
-          status: "failed",
-        })],
+        nodeRuns: [fixture.nodeRun, fixture.nodeRun],
       }),
-      reason: "checkpoint_missing_node_step",
-      steps: [],
+      name: "two runs of one node",
+      reason: "duplicate_checkpoint_node_run",
+      steps: [fixture.step],
     },
-  ];
-
-  for (const { checkpoint, reason, steps } of mismatchCases) {
+  ]) {
     assert.deepEqual(
       reconcileExecutionGraphCheckpoint({ checkpoint, steps }),
-      { ok: false, reason }
+      { ok: false, reason },
+      name
     );
   }
 });
 
-test("a v2 graph with an unsupported stored outer plan still requires manual recovery", async () => {
-  const { checkpoint } = createV3DocumentCheckpoint();
-  const service = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
-  const unsupportedRunId = "v3-unsupported-outer-plan";
-  let resumeCalls = 0;
-  await service.createRun({
-    accessScope,
-    goal: question,
-    input: { docIds, sessionId, userId },
-    plan: { mode: plan.mode },
-    runId: unsupportedRunId,
-  });
-  await service.appendRunEvent({
-    accessScope,
-    runId: unsupportedRunId,
-    type: "execution_planned",
-    payload: { planner: { stepIds: ["document_rag", "unrelated_outer_step"] } },
-  });
-  await service.saveExecutionGraphCheckpoint({
-    accessScope,
-    checkpoint,
-    runId: unsupportedRunId,
-  });
-  const recovery = createAgentRunRecoveryService({
-    agentRunService: service,
-    recordRecoveryTrace: async () => {},
-    resumeExecutionGraph: async () => { resumeCalls += 1; },
-  });
+test("verifyExecutionGraphCheckpoint names a broken shape, a changed body and a changed owner", () => {
+  const fixture = createSettledCompareCheckpoint();
+  const verify = (checkpoint, overrides = {}) =>
+    verifyExecutionGraphCheckpoint({
+      accessScope,
+      budgetState: fixture.budgetState,
+      checkpoint,
+      docIds,
+      plan,
+      question,
+      selectedSkills: fixture.selectedSkills,
+      sessionId,
+      userId,
+      ...overrides,
+    });
 
-  const outcome = await recovery.recoverOnStartup({ mode: "auto" });
-  const run = await service.getRun({ accessScope, runId: unsupportedRunId });
-  assert.equal(outcome.autoRecoveredCount, 0);
-  assert.equal(outcome.manualRecoveredCount, 1);
-  assert.equal(resumeCalls, 0);
-  assert.equal(run.status, "waiting_for_user");
+  assert.deepEqual(verify(fixture.completedCheckpoint), { ok: true, reason: null });
+  assert.deepEqual(verify(null), { ok: false, reason: "invalid_checkpoint_shape" });
+  assert.deepEqual(
+    verify({ ...fixture.completedCheckpoint, phase: "awaiting_approval" }),
+    { ok: false, reason: "invalid_checkpoint_shape" }
+  );
+  assert.deepEqual(
+    verify({ ...fixture.completedCheckpoint, nodeRuns: [] }),
+    { ok: false, reason: "checkpoint_digest_mismatch" }
+  );
+
+  for (const overrides of [
+    { accessScope: { ...accessScope, userId: "bob" } },
+    { docIds: ["doc-a"] },
+    { question: "Another question." },
+    { selectedSkills: [{ id: "compare_documents", version: "2.0.0" }] },
+    { sessionId: "another-session" },
+  ]) {
+    assert.deepEqual(
+      verify(fixture.completedCheckpoint, overrides),
+      { ok: false, reason: "checkpoint_owner_mismatch" },
+      Object.keys(overrides)[0]
+    );
+  }
 });
 
-// The v3 unified graph was removed in ADR 0001 phase 10: a run that holds its
-// checkpoint is handed to an operator as such, even one whose events look
-// like the custom-Skill continuation's (test/agent-stored-unified-graph-runs
-// .test.mjs has the stored states).
-test("a stored v3 graph cannot enter the custom-Skill startup continuation", async () => {
-  const { checkpoint } = createV3DocumentCheckpoint();
-  const service = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
-  const v3RunId = "v3-legacy-shaped-outer-plan";
-  let resumeCalls = 0;
-  await service.createRun({
-    accessScope,
-    goal: question,
-    input: { docIds, sessionId, userId },
-    plan,
-    runId: v3RunId,
-  });
-  await service.appendRunEvent({
-    accessScope,
-    runId: v3RunId,
-    type: "execution_planned",
-    payload: { planner: { stepIds: ["custom_skills"] } },
-  });
-  await service.saveExecutionGraphCheckpoint({
-    accessScope,
-    checkpoint,
-    runId: v3RunId,
-  });
-  const recovery = createAgentRunRecoveryService({
-    agentRunService: service,
-    recordRecoveryTrace: async () => {},
-    resumeExecutionGraph: async () => { resumeCalls += 1; },
-  });
+// What the removed v3 unified graph stored (ADR 0001 phases 10 and 11): a v2
+// checkpoint of a v3 graph, here one a run of that graph left behind
+// (test/fixtures/stored-unified-graph-runs.json). Nothing in this module
+// creates, seals, verifies or reconciles one as a custom-Skill checkpoint; a
+// run that holds one is recognized by the version alone and handled in
+// agent-removed-unified-graph.js (test/agent-stored-unified-graph-runs.test.mjs).
+test("a checkpoint of the removed unified graph is never taken for a custom-Skill checkpoint", () => {
+  const stored = JSON.parse(
+    readFileSync(new URL("./fixtures/stored-unified-graph-runs.json", import.meta.url), "utf8")
+  ).runs.completed;
+  const checkpoint = stored.result.__skillGraphCheckpoint;
+  const unsupported = /Unsupported execution graph checkpoint version/;
 
-  const outcome = await recovery.recoverOnStartup({ mode: "auto" });
-  const run = await service.getRun({ accessScope, runId: v3RunId });
-  assert.equal(outcome.autoRecoveredCount, 0);
-  assert.equal(outcome.manualRecoveredCount, 1);
-  assert.equal(resumeCalls, 0);
-  assert.equal(run.status, "waiting_for_user");
-  assert.equal(
-    run.events.findLast((event) => event.type === "manual_recovery_required")
-      ?.payload?.reason,
-    "unified_graph_removed"
+  assert.equal(checkpoint.version, "v2");
+  assert.equal(checkpoint.graph.version, "v3");
+  assert.throws(
+    () => createExecutionGraphCheckpoint({ graph: checkpoint.graph, owner: checkpoint.owner, version: "v2" }),
+    unsupported
   );
-});
-
-test("v3 graph node lifecycle is fenced by its v2 checkpoint and cannot be claimed while active", async () => {
-  const fixture = createV3DocumentCheckpoint();
-  const service = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
-  const v3RunId = "v3-fenced-node";
-  await service.createRun({
-    accessScope,
-    goal: question,
-    input: { docIds, sessionId, userId },
-    plan,
-    runId: v3RunId,
-  });
-
-  await assert.rejects(
-    service.recordRunStep({
+  assert.throws(() => sealExecutionGraphCheckpoint(checkpoint), unsupported);
+  assert.throws(() => updateExecutionGraphCheckpoint(checkpoint, { phase: "running" }), unsupported);
+  assert.deepEqual(
+    verifyExecutionGraphCheckpoint({ accessScope, checkpoint, docIds, question }),
+    { ok: false, reason: "invalid_checkpoint_shape" }
+  );
+  // The graph contract alone is refused too, whatever version the checkpoint
+  // around it claims.
+  assert.deepEqual(
+    verifyExecutionGraphCheckpoint({
       accessScope,
-      eventType: "step_started",
-      input: fixture.step.input,
-      label: "Document RAG",
-      runId: v3RunId,
-      status: "running",
-      stepId: fixture.stepId,
-      type: "graph_node",
+      checkpoint: { ...checkpoint, version: "v1" },
+      docIds,
+      question,
     }),
-    { code: "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY", status: 409 }
+    { ok: false, reason: "invalid_checkpoint_shape" }
   );
-
-  await service.saveExecutionGraphCheckpoint({
-    accessScope,
-    checkpoint: fixture.checkpoint,
-    runId: v3RunId,
-  });
-  const lifecycle = createAgentRunStepLifecycle({
-    accessScope,
-    agentRunService: service,
-    runId: v3RunId,
-  });
-  await lifecycle.startGraphStep({
-    expectedResumeClaimId: null,
-    id: fixture.stepId,
-    input: fixture.step.input,
-    label: "Document RAG",
-    type: "graph_node",
-  });
-
-  const loaded = await service.getExecutionGraphCheckpoint({ accessScope, runId: v3RunId });
-  assert.equal(loaded.steps[0].type, "graph_node");
-  assert.equal(loaded.steps[0].id, fixture.stepId);
-  assert.equal(loaded.steps[0].status, "running");
-  assert.equal((await service.claimExecutionGraphResume({
-    accessScope,
-    checkpointDigest: fixture.checkpoint.digest,
-    runId: v3RunId,
-  })).claimed, false);
-
-  await assert.rejects(
-    service.recordRunStep({
-      accessScope,
-      eventType: "step_completed",
-      output: fixture.step.output,
-      runId: v3RunId,
-      status: "completed",
-      stepId: fixture.stepId,
-    }),
-    { code: "AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY", status: 409 }
-  );
-  await lifecycle.completeGraphStep({
-    expectedResumeClaimId: null,
-    id: fixture.stepId,
-    output: fixture.step.output,
-  });
-  assert.equal(
-    (await service.getRun({ accessScope, runId: v3RunId })).steps[0].status,
-    "completed"
-  );
+  // It is never reconciled either, whatever state its run was stored in.
+  for (const run of Object.values(
+    JSON.parse(readFileSync(new URL("./fixtures/stored-unified-graph-runs.json", import.meta.url), "utf8")).runs
+  )) {
+    assert.deepEqual(
+      reconcileExecutionGraphCheckpoint({ checkpoint: run.result.__skillGraphCheckpoint, steps: run.steps }),
+      { ok: false, reason: "invalid_checkpoint_shape" },
+      run.runId
+    );
+  }
 });
 
 const createSkill = ({ calls, effects = SKILL_EFFECTS.readOnly, id }) => ({

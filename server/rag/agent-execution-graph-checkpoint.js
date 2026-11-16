@@ -3,37 +3,19 @@ import { createHash } from "node:crypto";
 import { normalizeText } from "../lib/normalize-text.js";
 import { normalizeTaskAccessScope } from "./tasks.js";
 
-export const EXECUTION_GRAPH_CHECKPOINT_VERSIONS = Object.freeze({
+// The custom-Skill graph's checkpoint. v2 was the checkpoint of the removed v3
+// unified graph (ADR 0001 phases 10 and 11): nothing writes or reads one any
+// more, and a run that still stores one is handled, by that version string
+// alone, in agent-removed-unified-graph.js.
+const EXECUTION_GRAPH_CHECKPOINT_VERSIONS = Object.freeze({
   v1: "v1",
-  v2: "v2",
 });
 export const EXECUTION_GRAPH_CHECKPOINT_VERSION = EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v1;
 export const EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY = "__skillGraphCheckpoint";
-const V2_GRAPH_VERSION = "v3";
-const V2_GRAPH_NODE_STEP_PREFIX = "agent_graph_node:";
 
-export const buildExecutionGraphNodeStepId = ({
-  checkpointVersion = EXECUTION_GRAPH_CHECKPOINT_VERSION,
-  nodeId,
-} = {}) => {
-  if (checkpointVersion === EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v1) {
-    // Preserve the existing graph receipt identity byte for byte.
-    return `custom_skill:${nodeId}`;
-  }
-
-  if (checkpointVersion !== EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2) {
-    throw new Error("Unsupported execution graph checkpoint version.");
-  }
-
-  const normalizedNodeId = normalizeText(nodeId);
-  if (!normalizedNodeId || nodeId !== normalizedNodeId) {
-    throw new Error("Execution graph nodeId must be a non-empty canonical string.");
-  }
-
-  // Node IDs are planner-authored and may contain punctuation. Encoding keeps
-  // the v3 receipt namespace injective without reserving delimiter characters.
-  return `${V2_GRAPH_NODE_STEP_PREFIX}${Buffer.from(nodeId, "utf8").toString("base64url")}`;
-};
+// The lifecycle step of a graph node: the graph receipt identity, byte for
+// byte what it has always been.
+export const buildExecutionGraphNodeStepId = ({ nodeId } = {}) => `custom_skill:${nodeId}`;
 
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -128,6 +110,20 @@ export const sealExecutionGraphCheckpoint = (checkpoint = {}) => {
   };
 };
 
+/**
+ * Whether the checkpoint is one this runtime sealed and nothing changed
+ * since: its digest reseals. A checkpoint version this runtime does not
+ * write (the removed v3 unified graph's v2 among them) cannot be resealed,
+ * so it is not intact; this never throws.
+ */
+export const isExecutionGraphCheckpointIntact = (checkpoint) => {
+  try {
+    return sealExecutionGraphCheckpoint(checkpoint).digest === checkpoint.digest;
+  } catch {
+    return false;
+  }
+};
+
 export const createExecutionGraphCheckpoint = ({
   graph,
   owner,
@@ -167,20 +163,14 @@ export const verifyExecutionGraphCheckpoint = ({
   if (
     !isRecord(checkpoint) ||
     !Object.values(EXECUTION_GRAPH_CHECKPOINT_VERSIONS).includes(checkpoint.version) ||
-    (checkpoint.version === EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2 &&
-      checkpoint.graph?.version !== V2_GRAPH_VERSION) ||
-    (checkpoint.version === EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v1 &&
-      checkpoint.graph?.version === V2_GRAPH_VERSION) ||
     !isRecord(checkpoint.graph) ||
+    // The removed unified graph's contract: never a custom-Skill graph.
+    checkpoint.graph.version === "v3" ||
     !isRecord(checkpoint.owner) ||
     !isRecord(checkpoint.owner.budget?.limits) ||
     !isRecord(checkpoint.owner.budget?.usedAtEntry) ||
     !Array.isArray(checkpoint.nodeRuns) ||
-    !["running", "completed", "partial", "awaiting_approval"].includes(checkpoint.phase) ||
-    (checkpoint.phase === "awaiting_approval" &&
-      (checkpoint.version !== EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2 ||
-        !isRecord(checkpoint.approvalBoundary) ||
-        checkpoint.resumeClaim)) ||
+    !["running", "completed", "partial"].includes(checkpoint.phase) ||
     !Number.isSafeInteger(checkpoint.sequence) ||
     checkpoint.sequence < 0
   ) {
@@ -236,8 +226,9 @@ export const snapshotExecutionGraphNodeRun = (nodeRun = {}) => ({
 });
 
 export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {}) => {
-  const v2 = checkpoint?.version === EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2;
-  if (v2 && checkpoint.graph?.version !== V2_GRAPH_VERSION) {
+  // Only the custom-Skill graph's checkpoint has node steps this reads; a
+  // stored v2 checkpoint of the removed v3 unified graph is never reconciled.
+  if (checkpoint?.version !== EXECUTION_GRAPH_CHECKPOINT_VERSION) {
     return { ok: false, reason: "invalid_checkpoint_shape" };
   }
 
@@ -247,25 +238,8 @@ export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {
   const checkpointRuns = new Map(
     toArray(checkpoint?.nodeRuns).map((run) => [run.nodeId, run])
   );
-  if (v2 && graphNodes.size !== toArray(checkpoint?.graph?.nodes).length) {
-    return { ok: false, reason: "duplicate_graph_node_id" };
-  }
   if (checkpointRuns.size !== toArray(checkpoint?.nodeRuns).length) {
     return { ok: false, reason: "duplicate_checkpoint_node_run" };
-  }
-
-  const v2NodeIdsByStepId = new Map();
-  if (v2) {
-    try {
-      for (const nodeId of new Set([...graphNodes.keys(), ...checkpointRuns.keys()])) {
-        v2NodeIdsByStepId.set(
-          buildExecutionGraphNodeStepId({ checkpointVersion: "v2", nodeId }),
-          nodeId
-        );
-      }
-    } catch {
-      return { ok: false, reason: "invalid_checkpoint_shape" };
-    }
   }
 
   const completedNodeRuns = [];
@@ -273,41 +247,16 @@ export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {
 
   for (const step of toArray(steps)) {
     const stepId = normalizeText(step?.id);
-    const isV2GraphStep = v2 && (
-      stepId.startsWith(V2_GRAPH_NODE_STEP_PREFIX) ||
-      step?.type === "graph_node" ||
-      Boolean(step?.input?.nodeId && (
-        graphNodes.has(step.input.nodeId) || checkpointRuns.has(step.input.nodeId)
-      ))
-    );
-    if (v2 && !isV2GraphStep) {
-      // A v3 graph owns the entire execution path. An unclassified lifecycle
-      // step may have performed work; ignoring it would make a resume unsafe.
-      return {
-        ok: false,
-        reason: ["pending", "running", "paused"].includes(step?.status)
-          ? "unknown_in_flight_node"
-          : "checkpoint_step_mismatch",
-      };
-    }
-    if (!v2 && !stepId.startsWith("custom_skill:")) {
+    if (!stepId.startsWith("custom_skill:")) {
       continue;
     }
 
-    if (v2 && attemptedStepIds.has(stepId)) {
-      return { ok: false, reason: "duplicate_graph_step_receipt" };
-    }
     attemptedStepIds.add(stepId);
-    const nodeId = v2
-      ? v2NodeIdsByStepId.get(stepId)
-      : stepId.slice("custom_skill:".length);
-    if (v2 && !nodeId) {
-      return { ok: false, reason: "checkpoint_step_mismatch" };
-    }
+    const nodeId = stepId.slice("custom_skill:".length);
     const node = graphNodes.get(nodeId);
     const saved = checkpointRuns.get(nodeId);
 
-    if (step.status === "running" || step.status === "paused" || (v2 && step.status === "pending")) {
+    if (step.status === "running" || step.status === "paused") {
       // A process may have reached a write even when its completed node run
       // was never checkpointed. An active step is therefore never inferred to
       // be safe from a missing checkpoint entry or a read-only declaration.
@@ -319,12 +268,6 @@ export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {
     // reuse; the saved run is the only admissible historical identity.
     if (
       !saved ||
-      (v2 && (
-        stepId !== buildExecutionGraphNodeStepId({ checkpointVersion: "v2", nodeId }) ||
-        saved.stepId !== stepId ||
-        step.type !== "graph_node" ||
-        step.input?.nodeId !== nodeId
-      )) ||
       step.input?.skillId !== saved.skillId ||
       (node && step.input?.skillId !== node.skillId) ||
       step.input?.skillVersion !== saved.skillVersion
@@ -370,33 +313,14 @@ export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {
     ) {
       return { ok: false, reason: "failed_step_checkpoint_mismatch" };
     }
-
-    if (v2 && step.status === "skipped" && saved.status !== "skipped") {
-      return { ok: false, reason: "checkpoint_step_mismatch" };
-    }
-
-    if (v2 && !["completed", "failed", "skipped"].includes(step.status)) {
-      return { ok: false, reason: "checkpoint_step_mismatch" };
-    }
   }
 
   for (const saved of checkpointRuns.values()) {
-    if (v2 && saved.stepId !== buildExecutionGraphNodeStepId({
-      checkpointVersion: "v2",
-      nodeId: saved.nodeId,
-    })) {
-      return { ok: false, reason: "checkpoint_step_mismatch" };
-    }
-
     if (
       ["completed", "reused"].includes(saved.status) &&
       !completedNodeRuns.some((run) => run.nodeId === saved.nodeId)
     ) {
       return { ok: false, reason: "checkpoint_missing_completed_step" };
-    }
-
-    if (v2 && saved.status === "failed" && !attemptedStepIds.has(saved.stepId)) {
-      return { ok: false, reason: "checkpoint_missing_node_step" };
     }
   }
 

@@ -130,74 +130,6 @@ test("v2 graph accepts a condition on a required boolean dependency output", () 
   assert.equal(compileExecutionGraph({ graph, ...conditionalContext() }).ok, true);
 });
 
-const explicitWebContext = () => ({
-  authorizedDocIds: [],
-  authorizedSkillIds: ["web_search"],
-  registry: createSkillRegistry([
-    {
-      ...createTestSkill({
-        budgetKey: "webSearchCalls",
-        effects: "external_read",
-        id: "web_search",
-        inputSchema: { question: { type: "string", required: true } },
-        outputSchema: {
-          abstained: { type: "boolean", required: true },
-          citations: { type: "citation[]", required: true },
-          text: { type: "string", required: true },
-        },
-        parallelSafe: false,
-      }),
-      idempotency: "nondeterministic",
-      replaySafe: false,
-      retryable: false,
-    },
-  ]),
-});
-
-const webNode = () => ({
-  dependsOn: [],
-  failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.failFast,
-  inputBindings: { question: requestField("question") },
-  nodeId: "web",
-  skillId: "web_search",
-});
-
-test("v3 admits an explicitly contracted authorized non-document node", () => {
-  const context = explicitWebContext();
-  const graph = createExecutionGraph({ nodes: [webNode()], version: "v3" });
-
-  assert.equal(validateExecutionGraph({ ...context, graph }).ok, true);
-  assert.equal(compileExecutionGraph({ ...context, graph }).ok, true);
-});
-
-test("v3 refuses a missing runtime authorization catalog and inferred replay policy", () => {
-  const context = explicitWebContext();
-  const graph = createExecutionGraph({ nodes: [webNode()], version: "v3" });
-  const noCatalog = validateExecutionGraph({
-    ...context,
-    authorizedSkillIds: null,
-    graph,
-  });
-  const inferred = validateExecutionGraph({
-    ...context,
-    graph,
-    registry: createSkillRegistry([createTestSkill({ id: "web_search" })]),
-  });
-
-  assert.ok(codesOf(noCatalog).includes(EXECUTION_GRAPH_REASON_CODES.missingAuthorizationCatalog));
-  assert.ok(codesOf(inferred).includes(EXECUTION_GRAPH_REASON_CODES.implicitRuntimeContract));
-});
-
-test("v3 rejects planner-authored top-level policy even with a valid catalog", () => {
-  const graph = {
-    ...createExecutionGraph({ nodes: [webNode()], version: "v3" }),
-    approval: true,
-  };
-  const result = validateExecutionGraph({ ...explicitWebContext(), graph });
-
-  assert.ok(codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.forgedPolicy));
-});
-
 test("v1 graph rejects conditions while remaining the default version", () => {
   const graph = conditionalGraph({ nodeId: "gate", output: "proceed", equals: true }, "v1");
   const result = validateExecutionGraph({ graph, ...conditionalContext() });
@@ -720,6 +652,19 @@ test("validateExecutionGraph rejects an unknown graph version", () => {
   assert.ok(
     codesOf(result).includes(EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion)
   );
+});
+
+// v3 was the contract of the unified graph, removed in ADR 0001 phases 10 and
+// 11. It is not a version any more: a graph that names it is refused like any
+// unknown version and compiles to nothing, however valid its nodes are.
+test("a graph that names the removed v3 contract is refused as an unknown version", () => {
+  const graph = { ...createExecutionGraph({ nodes: [compareNode()] }), version: "v3" };
+  const result = validateExecutionGraph({ graph, ...baseContext() });
+
+  assert.equal(validateExecutionGraph({ graph: { ...graph, version: "v1" }, ...baseContext() }).ok, true);
+  assert.equal(result.ok, false);
+  assert.deepEqual(codesOf(result), [EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion]);
+  assert.equal(compileExecutionGraph({ graph, ...baseContext() }).ok, false);
 });
 
 test("validateExecutionGraph rejects an empty graph", () => {

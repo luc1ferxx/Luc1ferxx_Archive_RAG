@@ -271,24 +271,6 @@ const buildOwner = (fixture) =>
     userId: fixture.accessScope.userId,
   });
 
-// A heterogeneous v3 graph's v2 checkpoint, as the removed v3 unified graph's
-// stage persisted it.
-const createV2GraphRun = async (options = {}) => {
-  const fixture = await createRunFixture(options);
-  const graph = createExecutionGraph({
-    nodes: [{ nodeId: "document:primary", skillId: "document_rag", dependsOn: [] }],
-    version: "v3",
-  });
-  const checkpoint = createExecutionGraphCheckpoint({ graph, owner: buildOwner(fixture), version: "v2" });
-  await fixture.agentRunService.saveExecutionGraphCheckpoint({
-    accessScope: fixture.accessScope,
-    checkpoint,
-    runId: fixture.runId,
-  });
-
-  return { ...fixture, checkpoint };
-};
-
 const requestBinding = (field) => ({ source: "request", field });
 
 // The custom-Skill typed DAG's v1 checkpoint, as agent-custom-skill-stage.js
@@ -621,7 +603,7 @@ test("a StateGraph interrupts, persists in the run row, and resumes from a new s
   assert.deepStrictEqual(pendingState.next, ["gate"]);
   assert.deepStrictEqual(pendingState.tasks[0].interrupts.map((entry) => entry.value), [{ gateId: "gate-1" }]);
 
-  // Resumed while the run waits for the user, as an approval continuation is.
+  // Resumed while the run waits for the user: the saver admits an open run.
   const completed = await secondGraph.invoke(new Command({ resume: { approved: true } }), {
     configurable: { thread_id: secondSaver.threadId },
     durability: "sync",
@@ -882,67 +864,6 @@ test("a record copied onto another run, or one this module did not write, is ref
   await rejectsWithCode(targetSaver.deleteThread(targetSaver.threadId), "LANGGRAPH_CHECKPOINT_INVALID_RECORD", 409);
 });
 
-test("with a v2 graph checkpoint the saver is fenced by the graph's resume claim", async () => {
-  const fixture = await createV2GraphRun();
-  const original = createSaver(fixture);
-
-  // Unclaimed: the original request's worker (claim null) owns the graph.
-  const first = await original.put(threadConfig(original), makeCheckpoint(checkpointId(1)), INPUT_METADATA, {});
-
-  const claim = await fixture.agentRunService.claimExecutionGraphResume({
-    accessScope: ALICE,
-    checkpointDigest: fixture.checkpoint.digest,
-    runId: fixture.runId,
-  });
-  assert.equal(claim.claimed, true);
-  const claimId = claim.checkpoint.resumeClaim.claimId;
-
-  await rejectsWithCode(
-    original.put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {}),
-    "AGENT_GRAPH_EXECUTION_FENCED",
-    409
-  );
-  await rejectsWithCode(original.putWrites(first, [["trail", "x"]], "task-1"), "AGENT_GRAPH_EXECUTION_FENCED", 409);
-  await rejectsWithCode(original.deleteThread(original.threadId), "AGENT_GRAPH_EXECUTION_FENCED", 409);
-  await rejectsWithCode(
-    createSaver(fixture, { graphResumeClaimId: "another-claim" }).put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {}),
-    "AGENT_GRAPH_EXECUTION_FENCED",
-    409
-  );
-  // Reads stay open to the stale worker; only writes are fenced.
-  assert.equal((await original.getTuple(threadConfig(original))).checkpoint.id, checkpointId(1));
-
-  const recovery = createSaver(fixture, { graphResumeClaimId: claimId });
-  await recovery.put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {});
-  assert.equal((await recovery.getTuple(threadConfig(recovery))).checkpoint.id, checkpointId(2));
-
-  // The graph checkpoint itself was not touched by the saver, not even by
-  // deleteThread, which only tombstones the saver's own key.
-  const beforeDelete = await readRun(fixture);
-  assert.deepStrictEqual(beforeDelete.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
-  await recovery.deleteThread(recovery.threadId);
-  const run = await readRun(fixture);
-  assert.equal(run.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null);
-  assert.deepStrictEqual(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
-  assert.deepStrictEqual(run.steps, beforeDelete.steps);
-  assert.deepStrictEqual(run.events, beforeDelete.events);
-
-  // A graph checkpoint whose digest no longer reseals fences every writer.
-  await patchRun(fixture, {
-    result: {
-      [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: {
-        ...run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY],
-        phase: "completed",
-      },
-    },
-  });
-  await rejectsWithCode(
-    recovery.put(threadConfig(recovery), makeCheckpoint(checkpointId(3)), INPUT_METADATA, {}),
-    "AGENT_GRAPH_EXECUTION_FENCED",
-    409
-  );
-});
-
 test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGraphResume, the claim fences the saver like the graph's node steps", async () => {
   const fixture = await createV1SkillGraphRun();
   const original = createSaver(fixture);
@@ -988,9 +909,19 @@ test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGrap
     () => original.put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {}),
     () => original.putWrites(first, [["trail", "x"]], "task-1"),
     () => original.deleteThread(original.threadId),
+    // A worker that names some other claim is no better off.
+    () =>
+      createSaver(fixture, { graphResumeClaimId: "another-claim" }).put(
+        first,
+        makeCheckpoint(checkpointId(2)),
+        loopMetadata(0),
+        {}
+      ),
   ]) {
     await rejectsWithCode(attempt(), "AGENT_GRAPH_EXECUTION_FENCED", 409);
   }
+  // Reads stay open to the stale worker; only writes are fenced.
+  assert.equal((await original.getTuple(threadConfig(original))).checkpoint.id, checkpointId(1));
 
   // The claimant writes both.
   const recovery = createSaver(fixture, { graphResumeClaimId: claimId });
@@ -1000,6 +931,16 @@ test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGrap
   assert.deepStrictEqual(run.steps.map((step) => [step.id, step.status]), [["custom_skill:compare", "running"]]);
   assert.equal((await recovery.getTuple(threadConfig(recovery))).checkpoint.id, checkpointId(2));
   assert.deepStrictEqual(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
+
+  // The claimant's tombstone drops only the saver's own record: the graph
+  // checkpoint, the steps and the events are left as they were.
+  await recovery.deleteThread(recovery.threadId);
+  const tombstoned = await readRun(fixture);
+  assert.equal(tombstoned.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null);
+  assert.deepStrictEqual(tombstoned.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
+  assert.deepStrictEqual(tombstoned.steps, run.steps);
+  assert.deepStrictEqual(tombstoned.events, run.events);
+  await recovery.put(threadConfig(recovery), makeCheckpoint(checkpointId(2)), INPUT_METADATA, {});
 
   // A settled graph has no LangGraph writer, the claimant included.
   await patchRun(fixture, {
@@ -1011,6 +952,18 @@ test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGrap
   });
   await rejectsWithCode(
     recovery.putWrites(threadConfig(recovery, { checkpoint_id: checkpointId(2) }), [["trail", "y"]], "task-2"),
+    "AGENT_GRAPH_EXECUTION_FENCED",
+    409
+  );
+
+  // So has a graph checkpoint whose digest no longer reseals, whatever it says.
+  await patchRun(fixture, {
+    result: {
+      [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: { ...claim.checkpoint, sequence: claim.checkpoint.sequence + 1 },
+    },
+  });
+  await rejectsWithCode(
+    recovery.put(threadConfig(recovery), makeCheckpoint(checkpointId(3)), INPUT_METADATA, {}),
     "AGENT_GRAPH_EXECUTION_FENCED",
     409
   );
@@ -1033,8 +986,7 @@ test("without a graph checkpoint an unclaimed saver writes while the run is open
   }
   assert.equal((await readRun(fixture)).revision, before.revision);
 
-  // Waiting for the user is still open (an approval continuation resumes
-  // there).
+  // Waiting for the user is still an open run, which the rule admits.
   await fixture.agentRunService.updateRun({
     accessScope: ALICE,
     runId: fixture.runId,
@@ -1165,8 +1117,8 @@ test("a run marked for manual recovery or already settled is fenced, and the siz
   await small.putWrites(threadConfig(small, { checkpoint_id: checkpointId(1) }), [["trail", "x"]], "task-1");
 });
 
-test("with a v2 graph checkpoint the saver writes only while the run and its graph are running", async () => {
-  const fixture = await createV2GraphRun();
+test("with a graph checkpoint the saver writes only while the run and its graph are running", async () => {
+  const fixture = await createV1SkillGraphRun();
   const saver = createSaver(fixture);
   const first = await saver.put(threadConfig(saver), makeCheckpoint(checkpointId(1)), INPUT_METADATA, {});
   const running = (await readRun(fixture)).result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
@@ -1176,38 +1128,19 @@ test("with a v2 graph checkpoint the saver writes only while the run and its gra
     () => saver.deleteThread(saver.threadId),
   ];
 
-  // Paused for approval, as pauseExecutionGraphForApproval leaves it: the
-  // graph is awaiting the user and the run waits for them. No worker owns a
-  // LangGraph write until the decision CAS reopens both.
-  const paused = await patchRun(fixture, {
-    result: {
-      [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: updateExecutionGraphCheckpoint(running, {
-        phase: "awaiting_approval",
-      }),
-    },
-    status: "waiting_for_user",
-  });
+  // Each rule alone. A running graph on a run that waits for the user: no
+  // worker owns a LangGraph write while the run is not running.
+  const waiting = await patchRun(fixture, { status: "waiting_for_user" });
+  assert.equal(waiting.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY].phase, "running");
   for (const attempt of attempts()) {
     await rejectsWithCode(attempt(), "AGENT_GRAPH_EXECUTION_FENCED", 409);
   }
-  assert.equal((await readRun(fixture)).revision, paused.revision);
+  assert.equal((await readRun(fixture)).revision, waiting.revision);
 
-  // Each rule alone: a running graph on a run waiting for the user, and a
-  // graph phase that is not running on a running run.
-  const reopenedGraph = updateExecutionGraphCheckpoint(
-    paused.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY],
-    { phase: "running" }
-  );
-  const graphOnly = await patchRun(fixture, {
-    result: { [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: reopenedGraph },
-  });
-  assert.equal(graphOnly.status, "waiting_for_user");
-  for (const attempt of attempts()) {
-    await rejectsWithCode(attempt(), "AGENT_GRAPH_EXECUTION_FENCED", 409);
-  }
+  // A graph phase that is not running, on a running run.
   const partial = await patchRun(fixture, {
     result: {
-      [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: updateExecutionGraphCheckpoint(reopenedGraph, {
+      [EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY]: updateExecutionGraphCheckpoint(running, {
         phase: "partial",
       }),
     },
@@ -1467,7 +1400,7 @@ test("mutateLangGraphCheckpointRecord commits one event-less CAS of that key onl
 // (rag/langgraph/drain-bridge.js; docs/adr/0001-langgraph-runtime.md, the
 // accepted deviation). If a LangGraph upgrade changes this behaviour, this
 // test fails and the drain can be re-evaluated; the drain itself is proven
-// by the cancellation parity tests of the execution-graph, unified-graph and
+// by the cancellation parity tests of the execution-graph and
 // execution-plan-graph suites.
 test("pinned LangGraph behaviour on the run-store saver: an AbortSignal rejects invoke while the node is still running, discards its writes, and the resume runs it again", async () => {
   const { instrumented, instrumentedService, ...fixture } = await createInstrumentedFixture({

@@ -2193,17 +2193,18 @@ test("agent task capability approval locks server-owned binding fields", async (
   });
 });
 
-// A task could deny only the approval gate of the removed v3 unified graph
-// (ADR 0001 phase 10). Nothing creates that gate any more, so for every gate
-// a run can create today the task-level `deny` answers 409 and the task is not
-// re-queued; an ordinary gate is denied on its agent run instead.
-test("agent task deny refuses an ordinary capability gate", async () => {
+// A task could deny only the approval gate of the removed v3 unified graph.
+// ADR 0001 phase 10 pinned that it answered 409 for every gate a run can still
+// create; phase 11 removed the action, so `deny` is an unknown action now and
+// the task is not re-queued. An ordinary gate is denied on its agent run.
+test("agent task deny is not an action any more", async () => {
   const runner = createAgentTaskRunner();
 
+  assert.equal(Object.hasOwn(AGENT_TASK_ACTIONS, "deny"), false);
   await assert.rejects(
     () =>
       runner.resume({
-        action: AGENT_TASK_ACTIONS.deny,
+        action: "deny",
         payload: {
           approvalObjectHash: APPROVAL_OBJECT_HASH,
           gateId: "approval:web.search:1.0.0",
@@ -2211,11 +2212,8 @@ test("agent task deny refuses an ordinary capability gate", async () => {
         task: buildPendingCapabilityApprovalTask(),
       }),
     (error) => {
-      assert.equal(error.status, 409);
-      assert.equal(
-        error.message,
-        "Only a unified graph approval gate can be denied from a task; deny this approval on its agent run."
-      );
+      assert.equal(error.status, 400);
+      assert.equal(error.message, "Unsupported agent task action: deny.");
       return true;
     }
   );

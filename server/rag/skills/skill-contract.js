@@ -138,29 +138,6 @@ export const getSkillContract = (skill = {}) => ({
   ...inferSkillContractDefaults(skill),
 });
 
-// Legacy V1 Skills may infer a permissive-looking read-only contract for
-// compatibility. A heterogeneous model-planned graph cannot infer effects,
-// replay policy, or field types: every admitted runtime entry must declare
-// those values on the trusted Skill object itself.
-export const hasExplicitExecutionGraphContract = (skill = {}) =>
-  Boolean(
-    normalizeText(skill.id) &&
-    normalizeText(skill.version) &&
-    VALID_EFFECTS.has(skill.effects) &&
-    VALID_IDEMPOTENCY.has(skill.idempotency) &&
-    isRecord(skill.inputSchema) &&
-    isRecord(skill.outputSchema) &&
-    typeof skill.parallelSafe === "boolean" &&
-    typeof skill.replaySafe === "boolean" &&
-    typeof skill.retryable === "boolean" &&
-    Object.values(skill.inputSchema).every(
-      (field) => isRecord(field) && VALID_VALUE_TYPES.has(field.type)
-    ) &&
-    Object.values(skill.outputSchema).every(
-      (field) => isRecord(field) && VALID_VALUE_TYPES.has(field.type)
-    )
-  );
-
 /**
  * The only skill view the V2 planner ever receives. Mirrors
  * capabilities/registry.js describeCapability: plain data, no executable

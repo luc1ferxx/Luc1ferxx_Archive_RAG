@@ -6,13 +6,13 @@
 
 ## 30 秒讲法
 
-Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 PostgreSQL 里是一行（steps、result 等是 JSON 列），每次状态变更是一条带 revision 的 CAS，同一条 SQL 返回提交后的行和完整事件列表，所以 /chat 路径上不回读。我不承诺 exactly-once，承诺的是「自动恢复路径不重放副作用」：启动恢复自己只续跑中断的图（先认领，在节点边界），不单独重放任何步骤，其余中断的 run 交给人；重放安全矩阵按步骤类型登记失败的步骤能不能由人重试，Skill 自己的声明只往原因码里加原因；写型 Capability 用 runId+节点的确定性幂等键，审批绑定输入的哈希；恢复时凡是「在途、说不清有没有写」的步骤一律转人工。现在生效的审批只有外层计划的 capability_call 审批。图内审批我做过：v3 统一图里的审批用 LangGraph 的 interrupt + 同一线程 Command(resume)，线程只是回执，权威是自己带 digest 的 graph checkpoint，授权永远从 run store 重读，Capability 最多执行一次，有 7 个跨进程 PostgreSQL 用例。2026-11-14 v3 统一图整个删除（用户要 agent 只有一种回答请求的方式，而数字不支持让 v3 当那一种），图内审批随它没有了；开过 guarded 的部署里没结束的 v3 run 现在交给人、只能取消。取消用 drain 而不是 AbortSignal，因为在原始 LangGraph 上实测，把 signal 交给它会让在途节点在续跑时再跑一次（至少一次）。
+Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 PostgreSQL 里是一行（steps、result 等是 JSON 列），每次状态变更是一条带 revision 的 CAS，同一条 SQL 返回提交后的行和完整事件列表，所以 /chat 路径上不回读。我不承诺 exactly-once，承诺的是「自动恢复路径不重放副作用」：启动恢复自己只续跑中断的图（先认领，在节点边界），不单独重放任何步骤，其余中断的 run 交给人；重放安全矩阵按步骤类型登记失败的步骤能不能由人重试，Skill 自己的声明只往原因码里加原因；写型 Capability 用确定性幂等键（外层计划的步骤按 runId+根步骤+Capability；按 runId+节点的那种是 v3 图节点用的，随 v3 删了），审批绑定输入的哈希；恢复时凡是「在途、说不清有没有写」的步骤一律转人工。现在生效的审批只有外层计划的 capability_call 审批。图内审批我做过：v3 统一图里的审批用 LangGraph 的 interrupt + 同一线程 Command(resume)，线程只是回执，权威是自己带 digest 的 graph checkpoint，授权永远从 run store 重读，Capability 最多执行一次，有 7 个跨进程 PostgreSQL 用例。2026-11-14 v3 统一图整个删除（用户要 agent 只有一种回答请求的方式，而数字不支持让 v3 当那一种），图内审批随它没有了，共用模块里剩下的那部分代码 2026-11-15 也删了，现在每次调用都从 checkpoint 重来、不续跑线程；开过 guarded 的部署里没结束的 v3 run 现在交给人、只能取消。取消用 drain 而不是 AbortSignal，因为在原始 LangGraph 上实测，把 signal 交给它会让在途节点在续跑时再跑一次（至少一次）。
 
 ## 关键文件
 
 | 文件 | 作用 |
 | --- | --- |
-| `server/rag/agent-runs.js` | run 服务层：mutateStoredRun（cursor 乐观尝试 + 重读重判；重试次数由各方法传入，claim、checkpoint、completeRun、failRun、recordRunStep 等用 DEFAULT_AGENT_RUN_MUTATION_RETRIES=32，无图守卫的 updateRun 和 V1 applyApprovalAction 用默认 0）、createAgentRunCursor、claimExecutionGraphResume / saveExecutionGraphCheckpoint / pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction / applyApprovalAction、completeRun / failRun（hasCommittedCapabilityWrite）、markManualRecovery、stripInternalRunFields（剥私有字段，事件 id 经 toPublicRunEventIds 改写成 runId:n）。其中 pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction 是图审批门，只有 v3 统一图用过，阶段 10 之后没有生产调用方，下一步删 |
+| `server/rag/agent-runs.js` | run 服务层：mutateStoredRun（cursor 乐观尝试 + 重读重判；重试次数由各方法传入，claim、checkpoint、completeRun、failRun、recordRunStep 等用 DEFAULT_AGENT_RUN_MUTATION_RETRIES=32，无图守卫的 updateRun 和 V1 applyApprovalAction 用默认 0）、createAgentRunCursor、claimExecutionGraphResume / saveExecutionGraphCheckpoint / applyApprovalAction、completeRun / failRun（hasCommittedCapabilityWrite）、markManualRecovery、stripInternalRunFields（剥私有字段，事件 id 经 toPublicRunEventIds 改写成 runId:n）。判断 checkpoint 是否完好的地方都经 isExecutionGraphCheckpointIntact：已存的 v2 checkpoint 封不回去，算不完好，领取不到，LangGraph 线程写入和节点步骤回 409 AGENT_GRAPH_EXECUTION_FENCED，不会在重新封装时抛错（阶段 11 起）。原来这里还有图审批门 pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction，只有 v3 统一图用过，2026-11-15 阶段 11 已删除 |
 | `server/rag/postgres-agent-run-store.js` | PG 存储：commitRunUpdate 的 revision CAS SQL（WHERE revision = $4）、buildRunEventListCte（同语句返回事件列表）、lockRunRowFirst（FOR NO KEY UPDATE 前导）、审批快照表与 SQLSTATE 22012（APPROVAL_SNAPSHOT_ROLLBACK_SQLSTATE）强制回滚、listRecoverable（只按 status 过滤） |
 | `server/rag/agent-run-state-machine.js` | 5 个状态与合法转换（AGENT_RUN_STATUS_TRANSITIONS），终态只能自环，completed/failed 仅经显式 retry 回 running（RETRYABLE_AGENT_RUN_STATUSES） |
 | `server/rag/agent-run-step-replay-safety.js` | 重放安全矩阵 STEP_REPLAY_SAFETY_MATRIX、isStepRetryAllowed（失败的步骤能不能由人重试）与 buildStepReplaySafetyAssessment（原因码）；Skill 持久化的声明只往原因码里加原因（getDeclaredContractReasonCodes）；「可自动重放」一列 2026-11-13 阶段 9 删除 |
@@ -23,14 +23,14 @@ Agent 的每次运行（状态、步骤、审批门、图 checkpoint）在 Postg
 | `server/rag/agent-run-step-executor.js` | approve/deny/retry 入口（applyApprovalAction、retryStep；resumeStep 阶段 9 删除）；审批走外层计划的 capability_call 步骤；对着一个停在审批门上的已存 v3 run 批准或拒绝，答 409 unified_graph_removed、run 转人工（阶段 10 之前这里把 v3 图审批交给 agent.js 的图内审批续跑，已删除） |
 | `server/rag/agent-run-step-lifecycle.js` | startStep / startGraphStep 开头的 throwIfRequestCancelled 安全点，图步骤带 expectedResumeClaimId |
 | `server/rag/capabilities/approval-execution-snapshot.js` | 审批对象哈希（内部函数 buildApprovalObjectHash）、createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot（私有快照重算哈希，timingSafeEqual 比较） |
-| `server/rag/capabilities/graph-approval-preflight.js` | preflightCapabilityGraphApproval / verifyCapabilityGraphApproval：续跑时按 live Capability 与当前绑定输入重算门。只有 v3 图内审批用过，阶段 10 之后没有生产调用方，下一步删 |
+| `server/rag/capabilities/graph-approval-preflight.js`（已删除） | preflightCapabilityGraphApproval / verifyCapabilityGraphApproval：续跑时按 live Capability 与当前绑定输入重算门。只有 v3 图内审批用过，阶段 10 之后没有生产调用方，2026-11-15 阶段 11 删除，现在 grep 不到；删除之前的代码在提交 5f4ae322 |
 | `server/rag/capabilities/registry.js` | approvalPolicy.writesWorkspace === true 的 Capability 用 runOutsideRequestDeadline 执行，开始后不被取消打断 |
 | `server/rag/capabilities/artifacts.js` | buildCapabilityArtifactIdempotencyKey：确定性幂等键（超长时截断 + sha256） |
 | `server/rag/langgraph/checkpointer.js` | RunStoreCheckpointSaver：写在 run.result.__langGraphCheckpoint，经 run 服务 CAS 与写者围栏；LANGGRAPH_CHECKPOINT_RETENTION=2；DEFAULT_LANGGRAPH_MAX_RECORD_BYTES=262144；deriveLangGraphThreadId 对租户和 runId 取哈希 |
-| `server/rag/langgraph/run-execution-graph.js` | runExecutionGraphOnLangGraph，唯一图调度器：非续跑时先 deleteThread（tombstone）、durability sync、RunControl drain；审批续跑 Command(resume) 的部分只有 v3 图内审批用过，阶段 10 之后没有生产调用方，下一步删 |
+| `server/rag/langgraph/run-execution-graph.js` | runExecutionGraphOnLangGraph，唯一图调度器：每次调用先 deleteThread（tombstone）、从图 checkpoint 重新开始，durability sync、RunControl drain，结束后逐个节点比对回执、必须完全相同；审批续跑 Command(resume) 的部分只有 v3 图内审批用过，2026-11-15 阶段 11 删除，运行时不再续跑任何线程 |
 | `server/rag/langgraph/drain-bridge.js` | bridgeRequestSignalToDrain（signal 触发 requestDrain）、resolveDrainedInvocationError（GraphDrained 映射回请求自己的取消错误） |
-| `server/rag/langgraph/unified-graph-approval.js` | buildApprovalInterruptPayload：interrupt 载荷只有 kind、nodeId、gateId:null（公开 id，不含快照和输入）；RUNTIME_RESUME_MARKER 是唯一 resume 值。v3 图内审批用的，阶段 10 之后没有生产调用方，下一步删 |
-| `server/rag/langgraph/unified-graph-resume.js` | prepareUnifiedGraphApprovalResume：线程回执与 checkpoint 对账后才 resume 同一线程，矛盾即 409 转人工。同上，阶段 10 之后没有生产调用方 |
+| `server/rag/langgraph/unified-graph-approval.js`（已删除） | buildApprovalInterruptPayload：interrupt 载荷只有 kind、nodeId、gateId:null（公开 id，不含快照和输入）；RUNTIME_RESUME_MARKER 是唯一 resume 值。v3 图内审批用的，阶段 10 之后没有生产调用方，2026-11-15 阶段 11 删除（连同 unified-graph-thread.js），删除之前的代码在提交 5f4ae322 |
+| `server/rag/langgraph/unified-graph-resume.js`（已删除） | prepareUnifiedGraphApprovalResume：线程回执与 checkpoint 对账后才 resume 同一线程，矛盾即 409 转人工。同上，2026-11-15 阶段 11 删除 |
 | `server/rag/agent-removed-unified-graph.js` | v3 统一图留下的全部代码（阶段 10 新增，复核修正之后 136 行）：认出已存的 v3 run（看 checkpoint 版本），判断它是不是已经收尾（run 已结束，或已收尾成向用户提问），决定交给人时用什么原因，拒绝续跑；不运行任何节点，也不决定任何审批门。原来这一行是 langgraph/unified-graph-recovery.js（verifyLangGraphThreadForRecovery，认领前核对线程），阶段 10 随 v3 统一图删除 |
 | `server/rag/request-deadline.js` | AsyncLocalStorage 截止时间与 signal、throwIfRequestCancelled、runAgentRequestWithCancellation、runOutsideRequestDeadline、REQUEST_CANCELLATION_CODES |
 | `server/rag/dependency-outage.js` | classifyDependencyOutage 按 code/status/SQLSTATE 分类（503/504 + Retry-After，DEFAULT_OUTAGE_RETRY_AFTER_SECONDS=5）、resolveAgentRunTermination、describeAgentRequestFailure |
@@ -109,7 +109,7 @@ CURRENT-TRUTH.md 3.30：eval:recovery-observability 8/8，删除原生调度器�
 
 **为什么**
 
-恢复时 running/paused 的图步骤即使声明只读也判 unknown_in_flight_node，因为存储证明不了原 worker 已停（已存的 v3 run 里还在执行中的节点步骤同样以这个原因转人工）；Capability 写带 buildCapabilityArtifactIdempotencyKey（外层计划的步骤 parts=[runId, rootStepId, capabilityId]；图节点 parts=[runId, nodeId, skillId] 是 v3 图内审批用的，阶段 10 之后没有生产调用方），工件表 UNIQUE(owner_user_id, workspace_id, idempotency_key) + ON CONFLICT
+恢复时 running/paused 的图步骤即使声明只读也判 unknown_in_flight_node，因为存储证明不了原 worker 已停（已存的 v3 run 里还在执行中的节点步骤同样以这个原因转人工）；Capability 写带 buildCapabilityArtifactIdempotencyKey（外层计划的步骤 parts=[runId, rootStepId, capabilityId]；图节点 parts=[runId, nodeId, skillId] 是 v3 图内审批用的，随 v3 统一图删除；节点执行 Capability 的入口（节点输入里的 capabilityRegistry 和 services）2026-11-15 阶段 11 也删了），工件表 UNIQUE(owner_user_id, workspace_id, idempotency_key) + ON CONFLICT
 
 **为什么不用主流替代方案**
 
@@ -149,7 +149,7 @@ CURRENT-TRUTH.md 3.5（较早）：PG 集成 15/15，其中 5 个是图恢复跨
 
 **为什么**
 
-权威 checkpoint 带 sha256 digest、owner 摘要（scope、预算、docIds、问题、选中 Skill 等）和每个节点 typed 输出摘要，要和 step 回执对账；LangGraph channel state 不懂这些。写在 run 行上就和节点 step 共用同一个 CAS 与围栏，不加表、不加第二个 run store；每次调用先 tombstone 旧线程、从 checkpoint 种子重来，只有图内审批续跑才 resume 同一线程（v3 统一图的路径，2026-11-14 删除后没有生产调用方）
+权威 checkpoint 带 sha256 digest、owner 摘要（scope、预算、docIds、问题、选中 Skill 等）和每个节点 typed 输出摘要，要和 step 回执对账；LangGraph channel state 不懂这些。写在 run 行上就和节点 step 共用同一个 CAS 与围栏，不加表、不加第二个 run store；每次调用先 tombstone 旧线程、从 checkpoint 种子重来，没有例外（以前图内审批续跑会 resume 同一线程，那是 v3 统一图的路径，2026-11-14 删除后没有生产调用方，2026-11-15 阶段 11 删了这段代码）
 
 **为什么不用主流替代方案**
 
@@ -169,7 +169,7 @@ ADR 0001「不可放松的约束」第 2 条：不用 PostgresSaver 的 checkpoi
 
 **为什么**
 
-现在生效的是哈希这一半：外层计划的 capability_call 审批，门上带 approvalObjectHash，批准请求必须带这个哈希，执行前用私有快照重算。另一半（一个 CAS 写 gate、快照和暂停的 checkpoint；interrupt 和 resume）是 v3 图内审批的设计，v3 统一图 2026-11-14 删除后代码还在共用模块里，没有生产调用方，下一步删（CURRENT-TRUTH.md 3.51）。下面是当时的设计。防 TOCTOU（批准 A 执行 B）：approvalObjectHash = sha256(规范化 {accessScope, capabilityId, capabilityVersion, executionInput, inputPreview, snapshotVersion})，gate、私有快照、暂停的 checkpoint、状态在一个 CAS 里写；LangGraph 会把客户端 resume 值作为 __resume__ 写进线程，所以只用 RUNTIME_RESUME_MARKER，客户端文本不进 run 行；续跑时 verifyCapabilityGraphApproval 按 live Capability 和当前绑定输入重算
+现在生效的是哈希这一半：外层计划的 capability_call 审批，门上带 approvalObjectHash，批准请求必须带这个哈希，执行前用私有快照重算。另一半（一个 CAS 写 gate、快照和暂停的 checkpoint；interrupt 和 resume）是 v3 图内审批的设计，v3 统一图 2026-11-14 删除后代码在共用模块里留了一步，没有生产调用方，2026-11-15 阶段 11 删除（CURRENT-TRUTH.md 3.51、3.52）。下面是当时的设计。防 TOCTOU（批准 A 执行 B）：approvalObjectHash = sha256(规范化 {accessScope, capabilityId, capabilityVersion, executionInput, inputPreview, snapshotVersion})，gate、私有快照、暂停的 checkpoint、状态在一个 CAS 里写；LangGraph 会把客户端 resume 值作为 __resume__ 写进线程，所以只用 RUNTIME_RESUME_MARKER，客户端文本不进 run 行；续跑时 verifyCapabilityGraphApproval 按 live Capability 和当前绑定输入重算
 
 **为什么不用主流替代方案**
 
@@ -183,7 +183,7 @@ Capability 升级版本会让待批门失效（graph_approval_stale）；admissi
 
 CURRENT-TRUTH.md 3.17：过期 Capability 版本和被篡改的审批门都被拒（图内审批当时的证据）；ADR 0001 阶段 0 spike：伪造的批准、带 update / goto 的 Command 都被拒（spike 测试已在阶段 4 删除，性质由生产套件覆盖）
 
-**代码**：server/rag/capabilities/approval-execution-snapshot.js createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot；server/rag/agent-runs.js pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction；server/rag/langgraph/unified-graph-approval.js RUNTIME_RESUME_MARKER / buildApprovalInterruptPayload；server/rag/capabilities/graph-approval-preflight.js verifyCapabilityGraphApproval
+**代码**：server/rag/capabilities/approval-execution-snapshot.js createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot；（图内审批这一半，2026-11-15 阶段 11 已删除，现在 grep 不到，删除之前的代码在提交 5f4ae322：）server/rag/agent-runs.js pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction；server/rag/langgraph/unified-graph-approval.js RUNTIME_RESUME_MARKER / buildApprovalInterruptPayload；server/rag/capabilities/graph-approval-preflight.js verifyCapabilityGraphApproval
 
 ### D8. 取消用 drain（RunControl.requestDrain）+ 原生安全点，不把 AbortSignal 交给 LangGraph
 
@@ -388,7 +388,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 权威是自己的图 checkpoint：sha256 digest、owner 摘要（scope、预算、问题、选中 Skill 等）、每个节点 typed 输出摘要，要和 step 回执对账
 - ADR 的硬约束：不出现第二个 run store，不用 PostgresSaver 的 checkpoints 表
 - RunStoreCheckpointSaver 写在 run 行上，和节点 step 共用 CAS 与围栏
-- 每次调用先 tombstone 旧线程、从 checkpoint 种子重来；只有图内审批续跑 resume 同一线程、而且先核对回执，那是 v3 统一图的路径，2026-11-14 删除后没有生产调用方
+- 每次调用先 tombstone 旧线程、从 checkpoint 种子重来，结束后逐个节点比对回执、必须完全相同；以前只有图内审批续跑 resume 同一线程、而且先核对回执，那是 v3 统一图的路径，2026-11-14 删除后没有生产调用方，2026-11-15 阶段 11 删了这段代码，现在没有任何调用续跑线程
 - 代价是写放大：保留 2 个、no-op 不读、完成或失败即丢
 
 代码：`server/rag/langgraph/checkpointer.js RunStoreCheckpointSaver / LANGGRAPH_CHECKPOINT_RETENTION`；`server/rag/langgraph/run-execution-graph.js runExecutionGraphOnLangGraph`（原来这里还列着 langgraph/unified-graph-recovery.js verifyLangGraphThreadForRecovery，阶段 10 随 v3 统一图删除）
@@ -415,13 +415,13 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 
 - 审批门带私有执行快照；approvalObjectHash = sha256(规范化 {accessScope, capabilityId, capabilityVersion, executionInput, inputPreview, snapshotVersion})
 - 批准请求必须带门上显示的哈希，不一致就 409；执行前再用私有快照重算哈希，timingSafeEqual 比较
-- 现在生效的只有外层计划的 capability_call 审批；下面四条是 v3 图内审批的设计，2026-11-14 随 v3 统一图删除（代码还在共用模块里，没有生产调用方，下一步删），讲的时候说「当时」
+- 现在生效的只有外层计划的 capability_call 审批；下面四条是 v3 图内审批的设计，2026-11-14 随 v3 统一图删除（共用模块里剩下的代码 2026-11-15 阶段 11 也删了），讲的时候说「当时」
 - 当时：gate、快照、暂停的 checkpoint、状态在一个 CAS 里写；快照冲突用除零（SQLSTATE 22012）强制整条语句回滚，因为数据修改 CTE 不会因最终 SELECT 无行而回滚
 - 当时：v3 门必须 pending 且唯一，只能决定一次
 - 当时：续跑时 verifyCapabilityGraphApproval 按 live Capability、live 策略和当前绑定输入重算；版本变了 graph_approval_stale
 - 当时：resume 值只用 RUNTIME_RESUME_MARKER，interrupt 载荷只有 kind、nodeId、gateId:null，决定从 run store 读
 
-代码：`server/rag/capabilities/approval-execution-snapshot.js createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot`；`server/rag/agent-runs.js pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction`；`server/rag/postgres-agent-run-store.js commitRunUpdate`；`server/rag/langgraph/unified-graph-approval.js RUNTIME_RESUME_MARKER`
+代码：`server/rag/capabilities/approval-execution-snapshot.js createApprovalExecutionSnapshot / verifyApprovalExecutionSnapshot`；`server/rag/postgres-agent-run-store.js commitRunUpdate`；（「当时」那几条的代码 2026-11-15 阶段 11 已删除，删除之前在提交 5f4ae322：）`server/rag/agent-runs.js pauseExecutionGraphForApproval / applyExecutionGraphApprovalAction`；`server/rag/langgraph/unified-graph-approval.js RUNTIME_RESUME_MARKER`
 
 > ⚠ 会被追问「图内审批现在还在吗？」：不在了。它是 v3 统一图的路径，v3 统一图 2026-11-14 删除：用户要 agent 只有一种回答请求的方式，而 7B 规划统一图只接受 3/15、文档问答 CPU 约 1 ms 对 11–15 ms、六类请求答不了。图内审批证明的是运行时契约，不是模型规划效果。现在生效的只有外层计划的 capability_call 审批，它的审批内容来自原始问题，不是已验证的文档答案。
 
@@ -437,7 +437,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - ADR spike：interrupt 之前的代码跑 2 次、之后副作用 1 次，所以 interrupt 必须是第一个有效操作
 - 删除原生调度器前冻结 golden（8 个套件、102 个文件），恢复评测 8/8 前后屏蔽后逐字节一致
 
-代码：`server/rag/capabilities/artifacts.js buildCapabilityArtifactIdempotencyKey`；`server/rag/agent-run-step-handlers/capability-steps.js createCapabilityCallStepHandler`；`server/test/agent-cancellation.test.mjs`（原来这里列的 agent-unified-graph-postgres.integration.test.mjs 和 agent-unified-graph-approval.test.mjs 已随 v3 统一图删除；langgraph/unified-graph-resume.js prepareUnifiedGraphApprovalResume 还在，没有生产调用方）
+代码：`server/rag/capabilities/artifacts.js buildCapabilityArtifactIdempotencyKey`；`server/rag/agent-run-step-handlers/capability-steps.js createCapabilityCallStepHandler`；`server/test/agent-cancellation.test.mjs`（原来这里列的 agent-unified-graph-postgres.integration.test.mjs 和 agent-unified-graph-approval.test.mjs 已随 v3 统一图删除；langgraph/unified-graph-resume.js prepareUnifiedGraphApprovalResume 阶段 10 之后没有生产调用方，2026-11-15 阶段 11 删除）
 
 > ⚠ 不要说「线上验证过」，也不要说「有跨进程测试在跑」：那 7 个用例随 v3 统一图删了。能说的是「做过图内审批，当时用跨进程集成测试加故障注入点覆盖了暂停、批准、写后崩溃、拒绝」；第三方 adapter 不遵守幂等键就没有保证。
 
@@ -547,6 +547,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 | custom Skill 步骤不再单独重放（阶段 9）之后的恢复证据 | eval:recovery-observability 8/8，检查项 29 → 27；可恢复的 run 4 → 3，转人工 1 → 2，手动动作 3 → 2，自动恢复尝试 3 → 1（成功率仍是 1）；agent-skill-step-replay 12/12（冻结时 10 个）、agent-run-recovery 17/17、agent-run-recovery-actions 7/7、agent-run-step-executor 22/22（原 26 个）；覆盖率闸门 4,607 个测试（通过 4,600、跳过 7、失败 0） | CURRENT-TRUTH.md 3.50；docs/adr/0001-langgraph-runtime.md 阶段 9 | 独立复核修正之后、在 015f06a1 上，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；独立复核没有高级缺陷，两条中级意见都不是这次改出来的，已处理；合并进 main 之后 CI 的 Node 22.23.4 上也通过（合并提交 db3ed97b，运行 43529876304：4,607 个测试，4,599 通过、8 跳过、0 失败，行覆盖 92.52%）。恢复评测的计数来自内存 store 上的确定性造数，自动恢复那一次由图启动续跑探针提供；去掉的两项检查随功能一起消失，阈值没改 |
 | 真实模型规划 v3 统一图 | 模型计划只被接受 3/15，12 次回落确定性图，0 次回落 V1 | CURRENT-TRUTH.md 3.17；docs/evaluation.md「统一图的真实模型规划（2026-09-27）」 | 本地 qwen2.5:7b、3 轮 15 次规划；历史测量：v3 统一图 2026-11-14 已删除（3.51）；图内审批的证据是确定性提案 |
 | 删除 v3 统一图（阶段 10）之后已存 v3 run 的处理 | 已结束的（完成、失败、取消）和已收尾成向用户提问的不动，续接它的请求开新 run；没结束的续不了，启动恢复把它交给人（被更早一次启动恢复领取过的也一样），原因 unified_graph_removed（节点步骤还在执行中的是 unknown_in_flight_node），审批端点和带 agentRunId 重入停在门上的 run 被拒，人只能取消；agent-stored-unified-graph-runs 12/12（独立复核之前 9/9）、agent-unified-graph-dial 3/3；eval:recovery-observability 不变，8 个用例、27 项检查，用例和指标与删除前逐字节一致；覆盖率闸门 4,479 个测试（通过 4,472、跳过 7、失败 0） | CURRENT-TRUTH.md 3.51；docs/adr/0001-langgraph-runtime.md 阶段 10 | 复核修正提交 637593f3，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；夹具是 v3 代码在内存 run store 里写下的记录（12 种状态加一个停在门上的后台任务，其中 4 种是独立复核之后补的）；真实 PostgreSQL 上的已存 v3 run 没有验证，跨进程用例随 v3 删了 |
+| 删除共用图模块里只有 v3 用过的代码（阶段 11）之后 | 已存 v3 run 的处理和阶段 10 之后一样，唯一的变化是任务级的 deny：409 → 400「Unsupported agent task action: deny.」，任务和 run 都不动；已存的 v2 checkpoint 封不回去，领取不到，LangGraph 线程写入和节点步骤都是 409 AGENT_GRAPH_EXECUTION_FENCED；agent-stored-unified-graph-runs 12 → 14 个测试；eval:recovery-observability 与 5f4ae322 屏蔽后逐字节一致；覆盖率闸门 4,445 个测试（通过 4,438、跳过 7、失败 0），「RAG / AgentRAG core」一组 96.07% | CURRENT-TRUTH.md 3.52；docs/adr/0001-langgraph-runtime.md 阶段 11 | 删除提交 64e32dba，本机 Node 24.21.0、一次性 PostgreSQL 18 + pgvector；CI 的 Node 22 合并之后再看；真实 PostgreSQL 上的已存 v3 run 仍没有验证 |
 | 依赖故障默认 Retry-After | 5 秒 | server/rag/dependency-outage.js DEFAULT_OUTAGE_RETRY_AFTER_SECONDS | 原因自带 Retry-After 时用原因的 |
 
 ## 要主动说出口的边界
@@ -563,7 +564,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 优雅停机只覆盖 HTTP 请求，进程内的后台 agent 任务仍被切断，留给启动恢复。
 - 图内审批（v3 guarded）2026-11-14 随 v3 统一图删除：停在审批门、决定之后在同一张图上续跑、Capability 恰好执行一次，以及它的 7 个跨进程 PostgreSQL 用例都没有了。外层计划的 Capability 审批还在，是另一条路径，审批内容来自原始问题，不是已验证的文档答案。图内审批当时的证据来自确定性提案和 mock，7B 模型规划统一图只接受 3/15。
 - 开过 guarded 的部署里已存的 v3 run：停在门上的不能再批准或拒绝，中断的不再自动续完，收据已写的不再补完成，都要人来取消；已经结束的不动。
-- 阶段 10 没做完、没验证的：run store 的图审批门（暂停、决定、读取）和它的绑定校验、执行器里节点停在审批门和同一线程续跑、v2 checkpoint、capabilities/graph-approval-preflight.js、任务级的 deny 动作（只对图审批门有效，现在不可能成功）还在代码里，没有生产调用方，下一步删。真实 PostgreSQL 上的已存 v3 run 没有验证（夹具是内存 run store 的记录），真实浏览器没有验证，存量数据里是否真有 v3 run 也没有验证。
+- 阶段 10 当时没做完的，阶段 11（2026-11-15，CURRENT-TRUTH.md 3.52）删了：run store 的图审批门（暂停、决定、读取）和它的绑定校验、执行器里节点停在审批门和同一线程续跑、v2 checkpoint、capabilities/graph-approval-preflight.js 和 graph-contract.js、任务级的 deny 动作。现在运行时不停在审批门、不续跑线程；任务级的 deny 是未知动作，回 400，停在已存 v3 图审批门上的后台任务要用 continue 或 approve 让它失败、或者取消任务。没验证的：真实 PostgreSQL 上的已存 v3 run（夹具是内存 run store 的记录），真实浏览器，存量数据里是否真有 v3 run，阶段 11 在 CI 的 Node 22 上的结果（合并之后看）。
 - 写放大：LangGraph 线程记录随 run 行每次 CAS 被整行重写；单行设计在单个 run 节点很多、事件很多时会变贵，没做过规模测试。
 - LangGraph 包装依赖 @langchain/langgraph 1.5.0 和 @langchain/core 1.2.17 的具体行为（drain 后输出流一个微任务就出错、maxConcurrency 低于 superstep 宽度时丢任务等），版本是精确钉住的，升级要重跑契约测试。
 - 所有数字来自单机、假模型或确定性用例，没有生产流量；PostgreSQL 集成测试在 CI 里依赖 pgvector service，本地没有数据库时报告为跳过。
@@ -590,7 +591,8 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
   - 原以为：interrupt 载荷只含 nodeId
   - 实际：载荷只有 kind、nodeId、gateId:null 三个字段（公开 id，不含快照和输入）
   - 依据：server/rag/langgraph/unified-graph-approval.js buildApprovalInterruptPayload 返回 { gateId: null, kind: UNIFIED_GRAPH_INTERRUPT_KIND, nodeId }
-  - 2026-11-14 更新（阶段 10）：这个文件还在，但图内审批是 v3 统一图的路径，v3 删除后它没有生产调用方，下一步删（CURRENT-TRUTH.md 3.51）
+  - 2026-11-14 更新（阶段 10）：这个文件还在，但图内审批是 v3 统一图的路径，v3 删除后它没有生产调用方，下一步删（CURRENT-TRUTH.md 3.51） 2026-11-15 更新（阶段 11）：这部分代码已删除，见 CURRENT-TRUTH 3.52。
+  - 2026-11-15 更新（阶段 11）：这个文件已删除，现在 grep 不到；上面的依据到阶段 11 之前成立（CURRENT-TRUTH.md 3.52）
 - **requestFlow 第 8 步、questionLadder L1 第 2 题、limitations 第 2 条**
   - 原以为：下一次启动 app.js 调 recoverOnStartup / app.js 调 recoverOnStartup 一次
   - 实际：app.js（单体/api）和 agent-service/app.js（agent 层）启动时各调一次
@@ -634,7 +636,8 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
   - 原以为：节点 preflight 被停靠 → interrupt
   - 实际：只有后续层没有独立工作时才 interrupt；否则停靠节点返回回执，先跑完独立层，再丢线程、按原生方式持久化暂停
   - 依据：AGENTS.md「Approval parking」（hasExecutionGraphWorkBeforePause）；run-execution-graph.js 中 interrupts.length === 0 && parked.length > 0 时 deleteThread
-  - 2026-11-14 更新（阶段 10）：这是 v3 图内审批的行为，入口已随 v3 统一图删除；审批停靠的代码还在共用的执行器里，没有生产调用方，下一步删
+  - 2026-11-14 更新（阶段 10）：这是 v3 图内审批的行为，入口已随 v3 统一图删除；审批停靠的代码还在共用的执行器里，没有生产调用方，下一步删 2026-11-15 更新（阶段 11）：这部分代码已删除，见 CURRENT-TRUTH 3.52。
+  - 2026-11-15 更新（阶段 11）：审批停靠的代码（hasExecutionGraphWorkBeforePause、调 interrupt() 的那一支、暂停后丢线程）已删除，现在 grep 不到；上面的依据到阶段 11 之前成立（CURRENT-TRUTH.md 3.52）
 - **questionLadder L4 多实例题**
   - 原以为：图 run：在途 step 判 unknown_in_flight_node 转人工
   - 实际：补充节点边界情形：恢复进程可能认领并接着跑，原 worker 下一次写被 fence、那次请求失败

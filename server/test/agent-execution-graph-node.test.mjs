@@ -98,7 +98,6 @@ const createNodeRun = ({
   executeObservedSkill,
   graph,
   onNodeSettled,
-  preflightNode,
   skills,
   stepLifecycle,
 }) => {
@@ -120,7 +119,6 @@ const createNodeRun = ({
     executeObservedSkill: executeObservedSkill ?? tracker.executeObservedSkill,
     graph,
     onNodeSettled,
-    preflightNode,
     question: "Review the contract.",
     recordSkillResult: (result) => calls.push(["result", result.skillId, result.ok]),
     recordSkippedSkill: (entry) => calls.push(["skipped", entry.skill.id, entry.budget?.ok ?? null]),
@@ -152,7 +150,7 @@ test("the runner re-exports the node module's status vocabularies unchanged", ()
 
 test("decideExecutionGraphNode applies the scheduler's precedence of skip reasons", () => {
   const { completed, failed, pending, reused, running, skipped } = EXECUTION_GRAPH_NODE_STATUSES;
-  const { hold, launch, skip, wait } = EXECUTION_GRAPH_SCHEDULE_DECISIONS;
+  const { launch, skip, wait } = EXECUTION_GRAPH_SCHEDULE_DECISIONS;
   const conditional = node({
     dependsOn: ["check"],
     nodeId: "follow-up",
@@ -161,7 +159,6 @@ test("decideExecutionGraphNode applies the scheduler's precedence of skip reason
   const decide = (overrides) =>
     decideExecutionGraphNode({
       dependencyStatuses: [],
-      graphVersion: "v2",
       node: node({ nodeId: "n" }),
       nodeOutputs: new Map(),
       ...overrides,
@@ -178,7 +175,7 @@ test("decideExecutionGraphNode applies the scheduler's precedence of skip reason
   });
 
   // Anything not completed/reused waits, an unknown dependency included.
-  for (const status of [pending, running, EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval, undefined]) {
+  for (const status of [pending, running, undefined]) {
     assert.deepEqual(decide({ dependencyStatuses: [completed, status] }), { decision: wait, reason: null });
   }
 
@@ -186,16 +183,13 @@ test("decideExecutionGraphNode applies the scheduler's precedence of skip reason
   // skipped until that work settles.
   assert.equal(decide({ aborted: true, dependencyStatuses: [running] }).decision, wait);
 
-  // A pending interrupt holds a v3 node at a clean boundary and skips a v2 one.
-  assert.deepEqual(decide({ dependencyStatuses: [reused], graphVersion: "v3", interrupted: true }), {
-    decision: hold,
-    reason: null,
-  });
+  // A pending interrupt, like an abort, skips a node whose dependencies have
+  // settled: nothing new starts behind it.
   assert.deepEqual(decide({ dependencyStatuses: [reused], interrupted: true }), {
     decision: skip,
     reason: EXECUTION_GRAPH_SKIP_REASONS.abortedAfterFailure,
   });
-  assert.deepEqual(decide({ aborted: true, graphVersion: "v3" }), {
+  assert.deepEqual(decide({ aborted: true }), {
     decision: skip,
     reason: EXECUTION_GRAPH_SKIP_REASONS.abortedAfterFailure,
   });
@@ -221,14 +215,14 @@ test("decideExecutionGraphNode applies the scheduler's precedence of skip reason
   assert.equal(isExecutionGraphNodeSettledOk(skipped), false);
 });
 
-test("createExecutionGraphNodeStates keeps declaration order and the v1/v3 step identities", () => {
+test("createExecutionGraphNodeStates keeps declaration order and gives every node a custom_skill step", () => {
   const skills = [createSkill({ id: "a" }), createSkill({ id: "b" })];
   const registry = createRegistry(skills);
+  const stepIdOf = (nodeId) => `custom_skill:${nodeId}`;
+  const stepType = "custom_skill";
 
-  for (const [version, stepIdOf, stepType] of [
-    ["v2", (nodeId) => `custom_skill:${nodeId}`, "custom_skill"],
-    ["v3", (nodeId) => `agent_graph_node:${Buffer.from(nodeId).toString("base64url")}`, "graph_node"],
-  ]) {
+  // Both graph contracts a custom-Skill graph can have.
+  for (const version of ["v1", "v2"]) {
     const graph = createExecutionGraph({
       nodes: [node({ nodeId: "b:second", skillId: "b" }), node({ nodeId: "a", skillId: "a" })],
       version,
@@ -281,33 +275,6 @@ test("createExecutionGraphNodeStates reuses a checkpointed run and fails closed 
     assert.throws(
       () => createExecutionGraphNodeStates({ completedNodeRuns: [tampered], graph, registry }),
       (error) => error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY" && error.status === 409
-    );
-  }
-});
-
-test("createExecutionGraphNodeStates settles a denied node and refuses one that is unknown or settled", async () => {
-  const graph = createExecutionGraph({ nodes: [node({ nodeId: "a" }), node({ nodeId: "b" })], version: "v3" });
-  const registry = createRegistry([createSkill({ id: "a" }), createSkill({ id: "b" })]);
-  const { states } = createExecutionGraphNodeStates({ deniedNodeIds: ["b"], graph, registry });
-
-  assert.deepEqual(
-    states.map(({ reason, status }) => ({ reason, status })),
-    [
-      { reason: null, status: "pending" },
-      { reason: EXECUTION_GRAPH_SKIP_REASONS.approvalDenied, status: "skipped" },
-    ]
-  );
-
-  const first = createNodeRun({ graph, onNodeSettled: async () => {}, skills: [createSkill({ id: "a" }), createSkill({ id: "b" })] });
-  await runExecutionGraphNode({ ...first, state: first.states[0] });
-
-  for (const options of [
-    { deniedNodeIds: ["missing"] },
-    { completedNodeRuns: [buildExecutionGraphNodeRun(first.states[0])], deniedNodeIds: ["a"] },
-  ]) {
-    assert.throws(
-      () => createExecutionGraphNodeStates({ ...options, graph, registry }),
-      (error) => error.code === "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY"
     );
   }
 });
@@ -477,23 +444,6 @@ test("an exhausted budget skips the node before any lifecycle step", async () =>
   assert.deepEqual(run.calls, [["skipped", "a", false], ["budgetLimit", "Skill a"]]);
 });
 
-test("a preflight park holds no step, no budget and no output", async () => {
-  const graph = createExecutionGraph({ nodes: [node({ nodeId: "write" })], version: "v3" });
-  const run = createNodeRun({
-    graph,
-    preflightNode: async () => ({ awaitingApproval: true }),
-    skills: [createSkill({ id: "write", kind: "capability", parallelSafe: false })],
-  });
-
-  const outcome = await runExecutionGraphNode({ ...run, state: run.states[0] });
-
-  assert.equal(outcome, EXECUTION_GRAPH_NODE_OUTCOMES.awaitingApproval);
-  assert.equal(run.states[0].status, EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval);
-  assert.deepEqual(run.states[0].awaiting.boundInputs, { docIds: ["doc-1"], question: "Review the contract." });
-  assert.deepEqual(run.calls, []);
-  assert.equal(run.budgetState.used.customSkillCalls, 0);
-});
-
 test("a lifecycle error leaves the node pending and rejects without touching control", async () => {
   const graph = createExecutionGraph({ nodes: [node({ nodeId: "a" })] });
   const run = createNodeRun({
@@ -568,7 +518,6 @@ test("createExecutionGraphNodeContext applies the scheduler's defaults and is fr
   assert.deepEqual([...context.authorizedDocIdSet], ["doc-1", "doc-2"]);
   assert.deepEqual([...context.requestedDocIdSet], ["doc-1"]);
   assert.deepEqual(context.requestValues, { docIds: ["doc-1"], question: "Q", retrievalPlan: undefined });
-  assert.equal(context.preflightNode, null);
   assert.equal(context.graphResumeClaimId, undefined);
   assert.deepEqual(
     context.buildSkillTraceDetail({ skillId: "s", skillVersion: "1" }, { nodeId: "n" }),

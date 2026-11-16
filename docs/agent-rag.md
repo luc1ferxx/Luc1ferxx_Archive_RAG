@@ -74,11 +74,12 @@ AgentRAG 的工具能力通过 `server/rag/skills/registry.js` 注册。
 - `arxiv_import`
 - `workspace_action`
 - `document_rag`
-- `document_evidence_check`（只有已删除的 v3 图用过，不参与 intent 匹配；现在没有调用方，随共用图模块里的 v3 支持一起在下一步删除）
 - `web_search`
 - `inventory`
 - `document_discovery`
 - `research_brief`
+
+只给已删除的 v3 图用的内置 Skill `document_evidence_check`（证据检查节点）在 ADR 0001 阶段 11 删除。
 
 白名单 custom skills 位于 `server/rag/skills/custom/`：
 

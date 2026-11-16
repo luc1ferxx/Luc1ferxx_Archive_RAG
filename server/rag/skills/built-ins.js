@@ -12,11 +12,6 @@ import { toDependencyOutageError } from "../dependency-outage.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import { getDocumentFormatForMimeType } from "../document-formats.js";
-import { buildAgentRetrievalPlan } from "../agent-query-planner.js";
-import {
-  buildFollowUpQuestion,
-  evaluateDocumentEvidence,
-} from "../agent-self-check.js";
 import { rebaseEvidenceResults } from "../source-labels.js";
 import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 import {
@@ -29,7 +24,6 @@ import {
 export const AGENT_SKILL_IDS = {
   arxivImport: "arxiv_import",
   documentRag: "document_rag",
-  documentEvidenceCheck: "document_evidence_check",
   webSearch: "web_search",
   inventory: "inventory",
   documentDiscovery: "document_discovery",
@@ -332,30 +326,26 @@ const buildDiscoveryAnswer = (matches) => {
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// Only the RAG result fields used by the deterministic evidence checker may
-// enter a graph binding. Do not bind the whole raw RAG response, which also
-// carries session and retrieval internals not covered by the typed contract.
-const projectDocumentEvidence = (value, { allowMissing = false } = {}) => {
-  if (
-    !isRecord(value) ||
-    (!allowMissing && typeof value.text !== "string") ||
-    (value.text != null && typeof value.text !== "string")
-  ) {
+// The document answer's evidence fields, typed for the Skill's `evidence`
+// output, and the check that refuses a RAG result whose fields have the
+// wrong type (a missing field takes its empty value). The whole raw RAG
+// response is not exposed: it also carries session and retrieval internals
+// the typed contract does not cover. (A graph node of the removed v3 unified
+// graph bound this output to its evidence check, which also required every
+// field; ADR 0001 phases 10 and 11.)
+const projectDocumentEvidence = (value) => {
+  if (!isRecord(value) || (value.text != null && typeof value.text !== "string")) {
     throw new Error("Document evidence must contain answer text.");
   }
 
   if (
-    (!allowMissing && !Array.isArray(value.citations)) ||
-    (value.citations != null &&
-      (!Array.isArray(value.citations) || !value.citations.every(isRecord)))
+    value.citations != null &&
+    (!Array.isArray(value.citations) || !value.citations.every(isRecord))
   ) {
     throw new Error("Document evidence citations must be an object array.");
   }
 
-  if (
-    (!allowMissing && typeof value.abstained !== "boolean") ||
-    (value.abstained != null && typeof value.abstained !== "boolean")
-  ) {
+  if (value.abstained != null && typeof value.abstained !== "boolean") {
     throw new Error("Document evidence abstained flag must be boolean.");
   }
 
@@ -382,32 +372,6 @@ const projectDocumentEvidence = (value, { allowMissing = false } = {}) => {
     retrievedContexts: value.retrievedContexts ?? [],
     comparisonAnalysisSummary: value.comparisonAnalysisSummary ?? null,
   };
-};
-
-const assertScopedDocumentEvidence = ({ docIds, evidence, question }) => {
-  if (
-    !Array.isArray(docIds) ||
-    docIds.length === 0 ||
-    !docIds.every((docId) => typeof docId === "string" && docId.trim()) ||
-    typeof question !== "string" ||
-    !question.trim()
-  ) {
-    throw new Error("Document evidence check requires a question and selected documents.");
-  }
-
-  const selectedDocIds = new Set(docIds);
-  const projected = projectDocumentEvidence(evidence);
-
-  for (const item of [...projected.citations, ...projected.retrievedContexts]) {
-    if (
-      item.docId !== undefined &&
-      (typeof item.docId !== "string" || !selectedDocIds.has(item.docId))
-    ) {
-      throw new Error("Document evidence contains a document outside the selected scope.");
-    }
-  }
-
-  return projected;
 };
 
 const createDocumentRagSkill = () => ({
@@ -473,7 +437,7 @@ const createDocumentRagSkill = () => ({
       // call (the user's own question) records the exchange in memory.
       ...(memoryWrites === false ? { memoryWrites: false } : {}),
     });
-    const evidence = projectDocumentEvidence(value, { allowMissing: true });
+    const evidence = projectDocumentEvidence(value);
 
     return {
       value,
@@ -485,84 +449,6 @@ const createDocumentRagSkill = () => ({
         citations: value.citations?.length ?? 0,
         abstained: Boolean(value.abstained),
         retrievalPlan,
-      },
-    };
-  },
-});
-
-const createDocumentEvidenceCheckSkill = () => ({
-  id: AGENT_SKILL_IDS.documentEvidenceCheck,
-  version: BUILT_IN_SKILL_VERSION,
-  label: "Document Evidence Check",
-  kind: "built_in",
-  budgetKey: null,
-  requiresAccessScope: true,
-  effects: SKILL_EFFECTS.readOnly,
-  idempotency: SKILL_IDEMPOTENCY.deterministic,
-  parallelSafe: true,
-  replaySafe: true,
-  retryable: true,
-  plannerSummary: "Deterministically check a document answer's cited support and recommend a scoped follow-up when needed.",
-  inputSchema: {
-    docIds: { required: true, scoped: true, type: SKILL_VALUE_TYPES.stringArray },
-    question: { required: true, type: SKILL_VALUE_TYPES.string },
-    evidence: { required: true, type: SKILL_VALUE_TYPES.object },
-  },
-  outputSchema: {
-    text: { required: true, type: SKILL_VALUE_TYPES.string },
-    citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
-    abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    check: { required: true, type: SKILL_VALUE_TYPES.object },
-    passed: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    retryRecommended: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    followUpQuestion: { required: true, type: SKILL_VALUE_TYPES.string },
-    followUpRetrievalPlan: { required: false, type: SKILL_VALUE_TYPES.object },
-  },
-  // Graph-only: the V1 intent matcher and its existing document loop remain
-  // unchanged until the heterogeneous graph owns the whole execution path.
-  match: () => false,
-  plannerActions: () => [],
-  execute: async ({ docIds, evidence, question }) => {
-    const scopedEvidence = assertScopedDocumentEvidence({
-      docIds,
-      evidence,
-      question,
-    });
-    const check = evaluateDocumentEvidence({
-      ragResult: { ok: true, value: scopedEvidence },
-      docIds,
-    });
-    const followUpQuestion = check.retryRecommended
-      ? buildFollowUpQuestion({ question, check })
-      : "";
-    const followUpRetrievalPlan = check.retryRecommended
-      ? buildAgentRetrievalPlan({
-          question: followUpQuestion,
-          docIds,
-          phase: "follow_up",
-          focus: {
-            originalQuestion: question,
-            reasons: check.reasons,
-            unsupportedClaims: check.claimSupport?.claims
-              ?.filter((claim) => !claim.supported)
-              .map((claim) => claim.text) ?? [],
-          },
-        })
-      : null;
-
-    return {
-      text: scopedEvidence.text,
-      citations: scopedEvidence.citations,
-      abstained: scopedEvidence.abstained || !check.passed,
-      check,
-      passed: check.passed,
-      retryRecommended: check.retryRecommended,
-      followUpQuestion,
-      ...(followUpRetrievalPlan ? { followUpRetrievalPlan } : {}),
-      traceDetail: {
-        passed: check.passed,
-        retryRecommended: check.retryRecommended,
-        reasons: check.reasons,
       },
     };
   },
@@ -1107,7 +993,6 @@ export const createBuiltInSkills = () => [
   createArxivImportSkill(),
   createWorkspaceActionSkill(),
   createDocumentRagSkill(),
-  createDocumentEvidenceCheckSkill(),
   createWebSearchSkill(),
   createInventorySkill(),
   createDocumentDiscoverySkill(),

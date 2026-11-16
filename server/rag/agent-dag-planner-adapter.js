@@ -219,35 +219,14 @@ const normalizeGraphNode = (node) => {
 export const normalizeExecutionGraphNodes = (rawNodes) =>
   toArray(rawNodes).map(normalizeGraphNode);
 
-export const normalizeExecutionGraphPayload = (
-  payload,
-  { version = undefined } = {}
-) => {
+export const normalizeExecutionGraphPayload = (payload) => {
   const rawNodes = Array.isArray(payload) ? payload : payload?.nodes;
 
   if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
     throw new Error("DAG planner response must contain a non-empty nodes array.");
   }
 
-  const nodes = normalizeExecutionGraphNodes(rawNodes);
-
-  if (version === undefined) {
-    return createExecutionGraph({ nodes });
-  }
-
-  // v3 is a distinct all-stage contract. Preserve every planner-supplied
-  // root field for its validator to reject; dropping a forged approval or
-  // policy field here would launder an unauthorized proposal.
-  return {
-    ...(isRecord(payload) ? payload : {}),
-    nodes,
-    revision: isRecord(payload) && payload.revision !== undefined
-      ? payload.revision
-      : 0,
-    version: isRecord(payload) && payload.version !== undefined
-      ? payload.version
-      : version,
-  };
+  return createExecutionGraph({ nodes: normalizeExecutionGraphNodes(rawNodes) });
 };
 
 const buildNodeId = (skillId, index, usedNodeIds) => {

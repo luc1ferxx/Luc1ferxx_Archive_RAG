@@ -520,7 +520,6 @@ const runExecutorScenario = async ({ scenario }) => {
     docIds = [...DOC_IDS],
     graph,
     maxConcurrency,
-    preflightNode = null,
     probe,
     skills,
     wrap = (work) => work(),
@@ -552,7 +551,6 @@ const runExecutorScenario = async ({ scenario }) => {
         onNodeSettled: ({ nodeRun }) => {
           settled.push(nodeRun);
         },
-        ...(preflightNode ? { preflightNode } : {}),
         question: QUESTION,
         ragService: {},
         recordSkillResult: tracker.recordSkillResult,
@@ -3295,68 +3293,6 @@ test("parity: manual recovery while a node runs fences that node's settlement, a
   // thread, committed or pending, once the run was taken.
   assert.ok(threadCheckpoints > 0);
   assert.deepEqual(receiptKeys, []);
-});
-
-// ---------------------------------------------------------------------------
-// A node's preflight grant (ported from the phase-0 spike)
-// ---------------------------------------------------------------------------
-
-test("parity: only a Capability's preflight may park or reject a node; the same answer for a custom Skill stops the run before its budget, step or call", async () => {
-  // The node code (agent-execution-graph-node.js) refuses a preflight answer
-  // for anything but a Capability: a custom Skill can be neither parked for
-  // approval nor failed by a preflight. Both answers stop the run with the
-  // same error as natively, after the upstream node settled and before
-  // the refused node reserved budget, opened a step or called its Skill.
-  for (const answer of [
-    { awaitingApproval: true },
-    { rejectedInput: new Error("not a Capability") },
-  ]) {
-    const label = Object.keys(answer)[0];
-    const { langgraph } = await assertParity({
-      golden: `preflight-${label}`,
-      level: "executor",
-      build: () => {
-        const probe = createProbe();
-        const preflights = [];
-
-        return {
-          graph: createExecutionGraph({
-            nodes: [
-              graphNode({ nodeId: "compare", skillId: "compare_documents" }),
-              graphNode({ dependsOn: ["compare"], nodeId: "risk", skillId: "risk_review" }),
-            ],
-          }),
-          preflightNode: ({ node }) => {
-            preflights.push(node.nodeId);
-            return node.nodeId === "risk" ? answer : null;
-          },
-          preflights,
-          probe,
-          skills: [
-            createScriptedSkill({ id: "compare_documents", probe }),
-            createScriptedSkill({ id: "risk_review", probe }),
-          ],
-        };
-      },
-    });
-
-    assert.equal(
-      langgraph.observed.outcome.error?.message,
-      "Only a trusted Capability preflight may provide node runtime grants.",
-      label
-    );
-    assert.deepEqual(
-      langgraph.probe.journal.filter(({ event }) => event === "start").map(({ skillId }) => skillId),
-      ["compare_documents"],
-      label
-    );
-    assert.equal(langgraph.observed.budget.used.customSkillCalls, 1, label);
-    assert.deepEqual(
-      langgraph.observed.steps.map(({ id, status }) => ({ id, status })),
-      [{ id: "custom_skill:compare", status: "completed" }],
-      label
-    );
-  }
 });
 
 // ---------------------------------------------------------------------------
