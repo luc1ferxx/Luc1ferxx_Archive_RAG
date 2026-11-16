@@ -564,7 +564,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 优雅停机只覆盖 HTTP 请求，进程内的后台 agent 任务仍被切断，留给启动恢复。
 - 图内审批（v3 guarded）2026-11-14 随 v3 统一图删除：停在审批门、决定之后在同一张图上续跑、Capability 恰好执行一次，以及它的 7 个跨进程 PostgreSQL 用例都没有了。外层计划的 Capability 审批还在，是另一条路径，审批内容来自原始问题，不是已验证的文档答案。图内审批当时的证据来自确定性提案和 mock，7B 模型规划统一图只接受 3/15。
 - 开过 guarded 的部署里已存的 v3 run：停在门上的不能再批准或拒绝，中断的不再自动续完，收据已写的不再补完成，都要人来取消；已经结束的不动。
-- 阶段 10 当时没做完的，阶段 11（2026-11-15，CURRENT-TRUTH.md 3.52）删了：run store 的图审批门（暂停、决定、读取）和它的绑定校验、执行器里节点停在审批门和同一线程续跑、v2 checkpoint、capabilities/graph-approval-preflight.js 和 graph-contract.js、任务级的 deny 动作。现在运行时不停在审批门、不续跑线程；任务级的 deny 是未知动作，回 400，停在已存 v3 图审批门上的后台任务要用 continue 或 approve 让它失败、或者取消任务。没验证的：真实 PostgreSQL 上的已存 v3 run（夹具是内存 run store 的记录），真实浏览器，存量数据里是否真有 v3 run，阶段 11 在 CI 的 Node 22 上的结果（合并之后看）。
+- 阶段 10 当时没做完的，阶段 11（2026-11-15，CURRENT-TRUTH.md 3.52）删了：run store 的图审批门（暂停、决定、读取）和它的绑定校验、执行器里节点停在审批门和同一线程续跑、v2 checkpoint、capabilities/graph-approval-preflight.js 和 graph-contract.js、任务级的 deny 动作。现在运行时不停在审批门、不续跑线程；任务级的 deny 是未知动作，回 400，停在已存 v3 图审批门上的后台任务要用 continue 或 approve 让它失败、或者取消任务。没验证的：真实 PostgreSQL 上的已存 v3 run（夹具是内存 run store 的记录），真实浏览器，存量数据里是否真有 v3 run（阶段 11 在合并之后 CI 的 Node 22 上通过）。
 - 写放大：LangGraph 线程记录随 run 行每次 CAS 被整行重写；单行设计在单个 run 节点很多、事件很多时会变贵，没做过规模测试。
 - LangGraph 包装依赖 @langchain/langgraph 1.5.0 和 @langchain/core 1.2.17 的具体行为（drain 后输出流一个微任务就出错、maxConcurrency 低于 superstep 宽度时丢任务等），版本是精确钉住的，升级要重跑契约测试。
 - 所有数字来自单机、假模型或确定性用例，没有生产流量；PostgreSQL 集成测试在 CI 里依赖 pgvector service，本地没有数据库时报告为跳过。

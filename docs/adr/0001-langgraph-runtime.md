@@ -1236,7 +1236,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **`coverage:gate`** 接一次性 PostgreSQL 18 + pgvector（删除提交的干净 worktree）：4,445 个测试，4,438 通过、7 跳过、0 失败。全局行覆盖 92.28%（阶段 10 之后 91.92%）。“RAG / AgentRAG core” 一组 96.07%（阶段 10 之后 94.46%）：过了 95% 的目标，状态从 warn 回到 pass。
 - **三个确定性 agent 评测与 main 5f4ae322 的比较**（屏蔽 UUID、时间戳、耗时和 git 信息）：trajectory 15 个用例、planner 6 个用例、recovery-observability 全部逐字节一致，用例之外（prompt 集合、`configHash`）也一致。
 - **不接数据库的全量**：4,278 个测试，4,251 通过、27 跳过、0 失败。
-- **没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；CI 的 Node 22（合并之后看）。
+- **没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；CI 的 Node 22（合并之后看，见下文“独立复核”末尾）。
 
 ### 独立复核（2026-11-15）
 
@@ -1271,7 +1271,8 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **三个确定性 agent 评测与 main 5f4ae322 的比较**：仍然全部逐字节一致，用例之外也一致。
 - **`quality:current`** 按 CI 的 `quality-gate` 步骤在 175cda11 的干净 worktree 上运行：通过（trajectory 15/15、planner 6/6、recovery-observability 8/8，八项检查全部 `pass`）。c3ebd2fd 之后没有重跑：它没有改评测走得到的行为，上面的评测对比也一致。
 - **Node 20.20.2**（175cda11）：第二步改到的 10 个测试文件和 4 个相关文件，372 个测试全部通过。复核修正涉及的 11 个测试文件在本机 Node 24 上 237 个测试通过。
-- **仍然没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器；CI 的 Node 22（合并之后看）。
+- **CI 的 Node 22**：合并进 main 之后，合并提交 6dcd2cd6 的 Quality Gate 运行（43814175272，2026-11-16）三个任务全部通过。`server-tests` 在 Node 22.23.4 上跑完全量测试和覆盖率门：4,447 个测试，4,439 通过、8 跳过、0 失败，全局行覆盖 92.28%，“RAG / AgentRAG core” 一组 96.11%（pass）；`quality-gate` 里 trajectory 15/15（63 项检查）、planner 6/6（22 项）、recovery-observability 8/8（27 项），`quality:current` 通过；`frontend-checks` 28 个文件通过并完成构建。
+- **仍然没有验证的**：真实 PostgreSQL 上的已存 v3 run；真实浏览器。
 
 ## 后果
 
