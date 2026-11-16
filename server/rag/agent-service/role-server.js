@@ -1,4 +1,5 @@
 import { createApp } from "../../app.js";
+import { warmAgentExecutionPlanRuntime } from "../agent-execution-plan-runner.js";
 import { isStandaloneProfileEnabled } from "../../standalone-profile.js";
 import {
   assertAgentRuntimeSupported,
@@ -329,14 +330,16 @@ export const createGracefulShutdown = ({
 
 /**
  * Starts one split-deployment role and returns { app, server, port, shutdown,
- * metrics } (metrics: the /metrics listener's { host, port, close }, or null
- * without METRICS_ENABLED).
+ * metrics, warmUp } (metrics: the /metrics listener's { host, port, close }, or
+ * null without METRICS_ENABLED; warmUp: the agent role's background load of
+ * LangGraph once it listens, a promise that never rejects, null in the other
+ * roles).
  * Throws before listening when the topology has errors (the messages are the
  * validator's, secret-free). Without `port` it listens on resolveRolePort().
  * `shutdownFinalizers` run after the role's own finalizers, once the requests
  * have drained and before the database pool closes (server.js flushes its
- * spans there). `handleSignals: false`, `exit`, `loaders` and `appOptions` are
- * for tests.
+ * spans there). `handleSignals: false`, `exit`, `loaders`, `appOptions` and
+ * `warmAgentRuntime` are for tests.
  */
 export const startServiceRole = async ({
   appOptions = {},
@@ -351,6 +354,7 @@ export const startServiceRole = async ({
   role,
   shutdownFinalizers = [],
   signals = process,
+  warmAgentRuntime = warmAgentExecutionPlanRuntime,
 }) => {
   // A removed AGENT_RUNTIME, AGENT_OUTER_PLAN_RUNTIME,
   // AGENT_SKILL_GRAPH_ROLLOUT or AGENT_UNIFIED_GRAPH_ROLLOUT value (native,
@@ -417,5 +421,10 @@ export const startServiceRole = async ({
 
   logger.log(`[service] role ${role} is running on port ${listeningPort}.`);
 
-  return { app, metrics, port: listeningPort, server, shutdown };
+  // The agent tier answers agent requests: load LangGraph now, in the
+  // background, not inside the first one. The api edge, retrieval and
+  // model-gateway roles never load it.
+  const warmUp = role === "agent" ? warmAgentRuntime({ logger }) : null;
+
+  return { app, metrics, port: listeningPort, server, shutdown, warmUp };
 };

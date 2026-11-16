@@ -222,6 +222,38 @@ test("requests still running when the grace period ends are cut, then the proces
   });
 });
 
+test("role agent loads LangGraph in the background once it listens", async () => {
+  const exitSpy = createExitSpy();
+  const calls = [];
+
+  await withEnvironment({ ARCHIVE_RAG_ROLE: "agent" }, async () => {
+    const started = await startServiceRole({
+      appOptions: appOptions(),
+      exit: exitSpy.exit,
+      handleSignals: false,
+      host: "127.0.0.1",
+      logger: quietLogger,
+      port: 0,
+      role: "agent",
+      warmAgentRuntime: async (options) => {
+        calls.push(options);
+
+        return { ms: 0, ok: true };
+      },
+    });
+
+    try {
+      assert.deepEqual(calls, [{ logger: quietLogger }]);
+      assert.deepEqual(await started.warmUp, { ms: 0, ok: true });
+      assert.equal((await fetch(`http://127.0.0.1:${started.port}/livez`)).status, 200);
+    } finally {
+      await started.shutdown("SIGTERM");
+    }
+
+    assert.deepEqual(exitSpy.codes, [0]);
+  });
+});
+
 test("a role refuses to start when the topology has errors", async () => {
   await assert.rejects(
     startServiceRole({
@@ -274,6 +306,8 @@ test("role api starts the public edge: documents answer while agent routes wait 
 
       assert.equal(chat.status, 503);
       assert.equal((await chat.json()).code, SERVICE_CLIENT_ERROR_CODES.unreachable);
+      // The edge does not host the agent tier, so it never loads LangGraph.
+      assert.equal(started.warmUp, null);
     } finally {
       await started.shutdown("SIGTERM");
     }

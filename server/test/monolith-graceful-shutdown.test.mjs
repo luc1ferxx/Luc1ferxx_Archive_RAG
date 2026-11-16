@@ -316,6 +316,10 @@ test("SIGTERM drains an in-flight /chat: it answers 200, its run completes, new 
   const graceMs = 20_000;
   const model = await startFakeModel();
   const monolith = await startMonolith(model.url, { graceMs });
+
+  // A monolith without AGENT_SERVICE_URL hosts the agent tier and loads LangGraph after it listens.
+  await monolith.waitForOutput(/\[agent\] LangGraph loaded ahead of the first agent request \(\d+ ms\)\./u);
+
   const { chat, release } = await startChatInFlight(monolith, model);
   const signalledAt = Date.now();
 
