@@ -42,9 +42,9 @@ export {
 import { normalizeText } from "../lib/normalize-text.js";
 import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.js";
 import {
-  EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
   buildExecutionGraphNodeStepId,
-  sealExecutionGraphCheckpoint,
+  EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
+  isExecutionGraphCheckpointIntact,
   updateExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
@@ -1334,17 +1334,6 @@ const assertExecutionGraphRunOwner = ({ expectedResumeClaimId = null, run } = {}
   return true;
 };
 
-// Function declaration: assertExecutionGraphRunOwner above uses it.
-function isExecutionGraphCheckpointIntact(checkpoint) {
-  try {
-    return sealExecutionGraphCheckpoint(checkpoint).digest === checkpoint.digest;
-  } catch {
-    // A checkpoint version this runtime does not write (the removed v3
-    // unified graph's v2 among them) cannot be resealed: not intact.
-    return false;
-  }
-}
-
 const LANGGRAPH_WRITABLE_RUN_STATUSES = new Set([
   AGENT_RUN_STATUSES.running,
   AGENT_RUN_STATUSES.waitingForUser,
@@ -2075,10 +2064,7 @@ export const createAgentRunService = ({
     runCursor = null,
     runId,
   } = {}) {
-    if (
-      !checkpoint ||
-      sealExecutionGraphCheckpoint(checkpoint).digest !== checkpoint.digest
-    ) {
+    if (!checkpoint || !isExecutionGraphCheckpointIntact(checkpoint)) {
       throw new Error("Execution graph checkpoint has an invalid digest.");
     }
 
@@ -2201,7 +2187,7 @@ export const createAgentRunService = ({
           (previous && run.status !== AGENT_RUN_STATUSES.running)
         ) {
           const error = new Error(
-            "Execution graph checkpoint is owned by a resume claim."
+            "Execution graph checkpoint is owned by a resume claim, or its run is no longer running."
           );
           error.code = "AGENT_GRAPH_EXECUTION_FENCED";
           error.status = 409;

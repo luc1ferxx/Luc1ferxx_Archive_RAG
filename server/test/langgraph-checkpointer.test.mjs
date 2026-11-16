@@ -271,8 +271,6 @@ const buildOwner = (fixture) =>
     userId: fixture.accessScope.userId,
   });
 
-// A heterogeneous v3 graph's v2 checkpoint, as the removed v3 unified graph's
-// stage persisted it.
 const requestBinding = (field) => ({ source: "request", field });
 
 // The custom-Skill typed DAG's v1 checkpoint, as agent-custom-skill-stage.js
@@ -605,7 +603,7 @@ test("a StateGraph interrupts, persists in the run row, and resumes from a new s
   assert.deepStrictEqual(pendingState.next, ["gate"]);
   assert.deepStrictEqual(pendingState.tasks[0].interrupts.map((entry) => entry.value), [{ gateId: "gate-1" }]);
 
-  // Resumed while the run waits for the user, as an approval continuation is.
+  // Resumed while the run waits for the user: the saver admits an open run.
   const completed = await secondGraph.invoke(new Command({ resume: { approved: true } }), {
     configurable: { thread_id: secondSaver.threadId },
     durability: "sync",
@@ -933,6 +931,16 @@ test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGrap
   assert.deepStrictEqual(run.steps.map((step) => [step.id, step.status]), [["custom_skill:compare", "running"]]);
   assert.equal((await recovery.getTuple(threadConfig(recovery))).checkpoint.id, checkpointId(2));
   assert.deepStrictEqual(run.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
+
+  // The claimant's tombstone drops only the saver's own record: the graph
+  // checkpoint, the steps and the events are left as they were.
+  await recovery.deleteThread(recovery.threadId);
+  const tombstoned = await readRun(fixture);
+  assert.equal(tombstoned.result[LANGGRAPH_CHECKPOINT_RESULT_KEY], null);
+  assert.deepStrictEqual(tombstoned.result[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY], claim.checkpoint);
+  assert.deepStrictEqual(tombstoned.steps, run.steps);
+  assert.deepStrictEqual(tombstoned.events, run.events);
+  await recovery.put(threadConfig(recovery), makeCheckpoint(checkpointId(2)), INPUT_METADATA, {});
 
   // A settled graph has no LangGraph writer, the claimant included.
   await patchRun(fixture, {
@@ -1392,7 +1400,7 @@ test("mutateLangGraphCheckpointRecord commits one event-less CAS of that key onl
 // (rag/langgraph/drain-bridge.js; docs/adr/0001-langgraph-runtime.md, the
 // accepted deviation). If a LangGraph upgrade changes this behaviour, this
 // test fails and the drain can be re-evaluated; the drain itself is proven
-// by the cancellation parity tests of the execution-graph, unified-graph and
+// by the cancellation parity tests of the execution-graph and
 // execution-plan-graph suites.
 test("pinned LangGraph behaviour on the run-store saver: an AbortSignal rejects invoke while the node is still running, discards its writes, and the resume runs it again", async () => {
   const { instrumented, instrumentedService, ...fixture } = await createInstrumentedFixture({

@@ -309,7 +309,7 @@ test("a StateGraph that interrupts and resumes over retention K runs exactly as 
     )
   );
 
-  // Resumed from a new saver over a new service, as a continuation is.
+  // Resumed from a new saver over a new service.
   const restartedService = createAgentRunService({ agentRunStore: fixture.agentRunStore });
   const secondSaver = new RunStoreCheckpointSaver({
     agentRunService: restartedService,
@@ -360,7 +360,7 @@ test("a thread pruned to K before it interrupts resumes exactly as an unbounded 
     const interrupted = await firstGraph.invoke({ trail: [] }, config);
     const pausedRecord = await readRecord(fixture);
 
-    // Resumed from a new saver over a new service, as a continuation is.
+    // Resumed from a new saver over a new service.
     const restartedService = createAgentRunService({ agentRunStore: fixture.agentRunStore });
     const secondSaver = new RunStoreCheckpointSaver({
       agentRunService: restartedService,

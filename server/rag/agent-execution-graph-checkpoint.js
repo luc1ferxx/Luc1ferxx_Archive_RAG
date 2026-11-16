@@ -110,6 +110,20 @@ export const sealExecutionGraphCheckpoint = (checkpoint = {}) => {
   };
 };
 
+/**
+ * Whether the checkpoint is one this runtime sealed and nothing changed
+ * since: its digest reseals. A checkpoint version this runtime does not
+ * write (the removed v3 unified graph's v2 among them) cannot be resealed,
+ * so it is not intact; this never throws.
+ */
+export const isExecutionGraphCheckpointIntact = (checkpoint) => {
+  try {
+    return sealExecutionGraphCheckpoint(checkpoint).digest === checkpoint.digest;
+  } catch {
+    return false;
+  }
+};
+
 export const createExecutionGraphCheckpoint = ({
   graph,
   owner,
@@ -212,6 +226,12 @@ export const snapshotExecutionGraphNodeRun = (nodeRun = {}) => ({
 });
 
 export const reconcileExecutionGraphCheckpoint = ({ checkpoint, steps = [] } = {}) => {
+  // Only the custom-Skill graph's checkpoint has node steps this reads; a
+  // stored v2 checkpoint of the removed v3 unified graph is never reconciled.
+  if (checkpoint?.version !== EXECUTION_GRAPH_CHECKPOINT_VERSION) {
+    return { ok: false, reason: "invalid_checkpoint_shape" };
+  }
+
   const graphNodes = new Map(
     toArray(checkpoint?.graph?.nodes).map((node) => [node.nodeId, node])
   );

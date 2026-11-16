@@ -9,7 +9,7 @@ import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js
 import { normalizeText } from "../lib/normalize-text.js";
 import {
   reconcileExecutionGraphCheckpoint,
-  sealExecutionGraphCheckpoint,
+  isExecutionGraphCheckpointIntact,
 } from "./agent-execution-graph-checkpoint.js";
 import {
   explainRemovedUnifiedGraphRun,
@@ -407,8 +407,7 @@ export const createAgentRunRecoveryService = ({
             }
 
             const reconciliation = loadedGraph
-              ? sealExecutionGraphCheckpoint(loadedGraph.checkpoint).digest !==
-                  loadedGraph.checkpoint.digest
+              ? !isExecutionGraphCheckpointIntact(loadedGraph.checkpoint)
                 ? { ok: false, reason: "checkpoint_digest_mismatch" }
                 : loadedGraph.checkpoint.phase !== "running"
                   ? { ok: false, reason: "graph_finalization_requires_recovery" }

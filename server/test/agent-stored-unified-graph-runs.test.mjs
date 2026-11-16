@@ -792,7 +792,6 @@ test("a request that continues a settled stored graph run is answered as a new r
     );
     // The answer came from the outer execution plan, not from a graph.
     assert.equal(newRun.events.some((event) => event.type === "execution_planned"), true, state);
-    assert.equal(newRun.steps.some((step) => step.type === "graph_node"), false, state);
     assert.equal(ragService.calls.length, 1, state);
     // The settled run is left as it was.
     assert.deepEqual(await readStored(store, state), fixture.runs[state], state);

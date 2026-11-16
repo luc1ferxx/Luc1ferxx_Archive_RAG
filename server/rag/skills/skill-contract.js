@@ -138,6 +138,11 @@ export const getSkillContract = (skill = {}) => ({
   ...inferSkillContractDefaults(skill),
 });
 
+/**
+ * The only skill view the V2 planner ever receives. Mirrors
+ * capabilities/registry.js describeCapability: plain data, no executable
+ * references, no match predicate, no internal prompt builders.
+ */
 export const describeSkillForPlanner = (skill = {}) => {
   const contract = getSkillContract(skill);
 

@@ -187,7 +187,7 @@ test("the existing conditional custom-Skill graph v2 retains a v1 checkpoint and
   assert.equal(checkpoint.version, "v1");
   assert.equal(checkpoint.graph.version, "v2");
   assert.equal(
-    buildExecutionGraphNodeStepId({ checkpointVersion: checkpoint.version, nodeId: "compare" }),
+    buildExecutionGraphNodeStepId({ nodeId: "compare" }),
     "custom_skill:compare"
   );
   assert.equal(verifyExecutionGraphCheckpoint({
@@ -203,7 +203,7 @@ test("the existing conditional custom-Skill graph v2 retains a v1 checkpoint and
   }).ok, true);
 });
 
-test("reconcileExecutionGraphCheckpoint accepts a settled node and names each way a checkpoint and its steps disagree", () => {
+test("reconcileExecutionGraphCheckpoint accepts a settled node and returns each of its refusal reasons", () => {
   const fixture = createSettledCompareCheckpoint();
   const failedCheckpoint = updateExecutionGraphCheckpoint(fixture.checkpoint, {
     nodeRuns: [snapshotExecutionGraphNodeRun({ ...fixture.nodeRun, status: "failed" })],
@@ -392,12 +392,16 @@ test("a checkpoint of the removed unified graph is never taken for a custom-Skil
     }),
     { ok: false, reason: "invalid_checkpoint_shape" }
   );
-  // Its node steps are not custom-Skill steps, so none of its settled nodes
-  // finds a receipt: no node of it is ever reused.
-  assert.deepEqual(
-    reconcileExecutionGraphCheckpoint({ checkpoint, steps: stored.steps }),
-    { ok: false, reason: "checkpoint_missing_completed_step" }
-  );
+  // It is never reconciled either, whatever state its run was stored in.
+  for (const run of Object.values(
+    JSON.parse(readFileSync(new URL("./fixtures/stored-unified-graph-runs.json", import.meta.url), "utf8")).runs
+  )) {
+    assert.deepEqual(
+      reconcileExecutionGraphCheckpoint({ checkpoint: run.result.__skillGraphCheckpoint, steps: run.steps }),
+      { ok: false, reason: "invalid_checkpoint_shape" },
+      run.runId
+    );
+  }
 });
 
 const createSkill = ({ calls, effects = SKILL_EFFECTS.readOnly, id }) => ({

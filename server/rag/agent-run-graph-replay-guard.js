@@ -2,7 +2,7 @@ import { normalizeText } from "../lib/normalize-text.js";
 import {
   buildExecutionGraphNodeStepId,
   EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
-  sealExecutionGraphCheckpoint,
+  isExecutionGraphCheckpointIntact,
 } from "./agent-execution-graph-checkpoint.js";
 
 // The step id prefix of the removed v3 unified graph's node steps (their type
@@ -81,11 +81,7 @@ const isTerminalCheckpoint = (checkpoint) => {
     return false;
   }
 
-  try {
-    return sealExecutionGraphCheckpoint(checkpoint).digest === checkpoint.digest;
-  } catch {
-    return false;
-  }
+  return isExecutionGraphCheckpointIntact(checkpoint);
 };
 
 const findTerminalGraphEventIndex = (checkpoint, events) => {
