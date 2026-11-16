@@ -562,6 +562,17 @@ const capNodesToBudget = ({ budgetRemaining, limits, selectedSkills }) => {
     : limits;
 };
 
+// withPlannerRollout and withShadowPlanner return a copy of the adapter they
+// wrap, so under AGENT_PLANNER_ROLLOUT=deterministic|shadow the deterministic
+// planner arrives as a different object. Its createExecutionGraph is still the
+// deterministic one, and it plans from the selected Skill contracts (the
+// fallback context), not the redacted view; handed the redacted view it would
+// build an empty graph and the request would be recorded as a fallback.
+const isFallbackPlanner = (plannerAdapter, fallbackPlannerAdapter) =>
+  plannerAdapter === fallbackPlannerAdapter ||
+  (typeof plannerAdapter?.createExecutionGraph === "function" &&
+    plannerAdapter.createExecutionGraph === fallbackPlannerAdapter?.createExecutionGraph);
+
 export const createAgentExecutionGraphResult = async ({
   authorizedDocIds = [],
   budgetRemaining = null,
@@ -681,7 +692,7 @@ export const createAgentExecutionGraphResult = async ({
       }),
     });
 
-  if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
+  if (!plannerAdapter || isFallbackPlanner(plannerAdapter, fallbackPlannerAdapter)) {
     try {
       const graphResult = await createFallbackGraph();
 
