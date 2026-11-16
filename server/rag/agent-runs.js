@@ -1378,11 +1378,6 @@ const assertExecutionGraphRunOwner = ({ expectedResumeClaimId = null, run } = {}
   return true;
 };
 
-const LANGGRAPH_WRITABLE_RUN_STATUSES = new Set([
-  AGENT_RUN_STATUSES.running,
-  AGENT_RUN_STATUSES.waitingForUser,
-]);
-
 // The graph phases after which no LangGraph superstep can follow: only a
 // save of one of these may drop the thread record (saveExecutionGraphCheckpoint).
 const SETTLED_EXECUTION_GRAPH_CHECKPOINT_PHASES = new Set(["completed", "partial"]);
@@ -1392,10 +1387,12 @@ const SETTLED_EXECUTION_GRAPH_CHECKPOINT_PHASES = new Set(["completed", "partial
  * the same revision CAS commits against. It is the graph-writer rule of
  * recordRunStep and assertExecutionGraphRunOwner, so a LangGraph superstep is
  * owned by exactly the worker that owns the graph's node steps:
- *   - the run is open (running or waiting for the user) and not handed to an
- *     operator;
- *   - with a graph checkpoint (the custom-Skill DAG's): the run and the graph
- *     phase are running, the checkpoint digest reseals, and its resume claim
+ *   - the run is running and not handed to an operator. A run that waits for
+ *     the user has no LangGraph writer: nothing parks a graph at a gate or
+ *     resumes its thread any more (ADR 0001 phase 11), and every invocation
+ *     starts a fresh thread on a running run (run-execution-graph.js);
+ *   - with a graph checkpoint (the custom-Skill DAG's): the graph phase is
+ *     running, the checkpoint digest reseals, and its resume claim
  *     is the writer's (null for the original request's worker, the UUID
  *     claimExecutionGraphResume issued for a startup-recovery worker). A
  *     settled graph has no LangGraph writer: the runner writes the final
@@ -1412,11 +1409,10 @@ const assertLangGraphCheckpointWriter = ({ graphResumeClaimId = null, run } = {}
   const expectedClaimId = normalizeText(graphResumeClaimId);
 
   if (
-    !LANGGRAPH_WRITABLE_RUN_STATUSES.has(run?.status) ||
+    run?.status !== AGENT_RUN_STATUSES.running ||
     isRunMarkedForManualRecovery(run) ||
     (checkpoint
-      ? run.status !== AGENT_RUN_STATUSES.running ||
-        checkpoint.phase !== "running" ||
+      ? checkpoint.phase !== "running" ||
         !isExecutionGraphCheckpointIntact(checkpoint) ||
         normalizeText(checkpoint.resumeClaim?.claimId) !== expectedClaimId
       : expectedClaimId !== "")

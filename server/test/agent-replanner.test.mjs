@@ -4,7 +4,7 @@ import "./langgraph-support/langsmith-off.mjs";
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAgentBudget } from "../rag/agent-budget.js";
+import { consumeBudget, createAgentBudget, getRemainingBudget } from "../rag/agent-budget.js";
 import {
   EXECUTION_GRAPH_FAILURE_POLICIES,
   EXECUTION_GRAPH_REASON_CODES,
@@ -675,6 +675,97 @@ test("createReplanResult does not ask the model when only trace steps remain", a
   assert.equal(result.decision, REPLAN_DECISIONS.abstain);
   assert.equal(result.reasonCode, REPLAN_REASON_CODES.budgetExhausted);
   assert.equal(adapterCalls, 0);
+});
+
+// The budget a real run passes is getRemainingBudget's: every key, including
+// call budgets no custom Skill can draw on. A run that has spent its custom
+// Skill calls still has web search and research questions left, and those
+// cannot pay for a patch node, so the model must not be asked.
+test("createReplanResult does not ask the model when only budgets the Skills cannot use remain", async () => {
+  const budgetState = createAgentBudget({ maxCustomSkillCalls: 2 });
+  consumeBudget(budgetState, "customSkillCalls");
+  consumeBudget(budgetState, "customSkillCalls");
+  const budgetRemaining = getRemainingBudget(budgetState);
+
+  assert.equal(budgetRemaining.customSkillCalls, 0);
+  assert.ok(budgetRemaining.webSearchCalls > 0);
+  assert.ok(budgetRemaining.documentRagCalls > 0);
+
+  let adapterCalls = 0;
+  const result = await createReplanResult(
+    baseOptions({
+      budgetRemaining,
+      replanAdapter: stubAdapter(() => {
+        adapterCalls += 1;
+        return timelinePatch();
+      }),
+    })
+  );
+
+  assert.equal(result.decision, REPLAN_DECISIONS.abstain);
+  assert.equal(result.reasonCode, REPLAN_REASON_CODES.budgetExhausted);
+  assert.equal(result.reason, "No skill budget remains.");
+  assert.equal(adapterCalls, 0);
+});
+
+// A Skill without a budget key is not limited by any one key, but a run that
+// has no call budget left at all (out of tokens, cost, or time reports every
+// call key as 0) pays for nothing: the model is not asked.
+test("createReplanResult does not ask the model when no call budget is left, even for Skills without a budget key", async () => {
+  const withoutBudgetKey = (skill) => ({ ...skill, budgetKey: null });
+  const skills = [compareSkill(), riskSkill(), timelineSkill()].map(withoutBudgetKey);
+  let adapterCalls = 0;
+  const result = await createReplanResult(
+    baseOptions({
+      budgetRemaining: {
+        arxivPaperFetches: 0,
+        customSkillCalls: 0,
+        documentRagCalls: 0,
+        researchQuestions: 0,
+        traceSteps: 5,
+        webSearchCalls: 0,
+      },
+      registry: createSkillRegistry(skills),
+      replanAdapter: stubAdapter(() => {
+        adapterCalls += 1;
+        return timelinePatch();
+      }),
+      selectedSkills: skills,
+    })
+  );
+
+  assert.equal(result.decision, REPLAN_DECISIONS.abstain);
+  assert.equal(result.reasonCode, REPLAN_REASON_CODES.budgetExhausted);
+  assert.equal(adapterCalls, 0);
+});
+
+// The other direction: an exhausted unrelated budget must not stop a replan
+// the Skills' own budget can still pay for.
+test("createReplanResult asks the model while the Skills' own budget remains", async () => {
+  let adapterCalls = 0;
+  const result = await createReplanResult(
+    baseOptions({
+      budgetRemaining: {
+        arxivPaperFetches: 0,
+        customSkillCalls: 1,
+        documentRagCalls: 0,
+        researchQuestions: 0,
+        traceSteps: 4,
+        webSearchCalls: 0,
+      },
+      replanAdapter: stubAdapter(() => {
+        adapterCalls += 1;
+        return timelinePatch();
+      }),
+    })
+  );
+
+  assert.equal(adapterCalls, 1);
+  assert.equal(result.decision, REPLAN_DECISIONS.applied);
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.nodeId),
+    ["compare", "risk", "timeline"]
+  );
 });
 
 // A node that abstained still ran, still spent budget, and would abstain again

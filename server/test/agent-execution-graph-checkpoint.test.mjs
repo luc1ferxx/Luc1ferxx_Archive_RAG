@@ -233,6 +233,27 @@ test("reconcileExecutionGraphCheckpoint accepts a settled node and returns each 
     }),
     { attemptedStepCount: 1, completedNodeRuns: [], ok: true, reason: null }
   );
+  // A failed node a bounded replan retired from the graph while it is still
+  // running: its step counts as an attempt, and only a node still in the
+  // graph needs recovery.
+  assert.deepEqual(
+    reconcileExecutionGraphCheckpoint({
+      checkpoint: updateExecutionGraphCheckpoint(failedCheckpoint, {
+        graph: { ...failedCheckpoint.graph, nodes: [] },
+      }),
+      steps: [{ ...fixture.step, status: "failed" }],
+    }),
+    { attemptedStepCount: 1, completedNodeRuns: [], ok: true, reason: null }
+  );
+
+  // Each case below changes one thing the check compares, so no other check
+  // refuses it in that check's place.
+  const withSavedRun = (patch) =>
+    updateExecutionGraphCheckpoint(fixture.completedCheckpoint, {
+      nodeRuns: [{ ...fixture.nodeRun, ...patch }],
+    });
+  const withSavedResult = (patch) =>
+    withSavedRun({ result: { ...fixture.nodeRun.result, ...patch } });
 
   for (const { checkpoint = fixture.completedCheckpoint, name, reason, steps } of [
     {
@@ -260,6 +281,66 @@ test("reconcileExecutionGraphCheckpoint accepts a settled node and returns each 
       name: "a step another version of the Skill ran",
       reason: "checkpoint_step_mismatch",
       steps: [{ ...fixture.step, input: { ...fixture.step.input, skillVersion: "2.0.0" } }],
+    },
+    {
+      // The step and the graph's node name one Skill, the saved run (and its
+      // result) another.
+      checkpoint: withSavedRun({
+        result: { ...fixture.nodeRun.result, skillId: "risk_review" },
+        skillId: "risk_review",
+      }),
+      name: "a step whose Skill is the node's but not the saved run's",
+      reason: "checkpoint_step_mismatch",
+      steps: [fixture.step],
+    },
+    {
+      // The step and the saved run agree; the graph's node now names
+      // another Skill.
+      checkpoint: updateExecutionGraphCheckpoint(fixture.completedCheckpoint, {
+        graph: {
+          ...fixture.completedCheckpoint.graph,
+          nodes: fixture.completedCheckpoint.graph.nodes.map((node) => ({
+            ...node,
+            skillId: "risk_review",
+          })),
+        },
+      }),
+      name: "a step whose Skill is the saved run's but not the node's",
+      reason: "checkpoint_step_mismatch",
+      steps: [fixture.step],
+    },
+    {
+      // Everything else matches, its successful result included.
+      checkpoint: withSavedRun({ status: "failed" }),
+      name: "a completed step whose saved run is failed but kept its result",
+      reason: "completed_step_without_checkpoint",
+      steps: [fixture.step],
+    },
+    {
+      checkpoint: withSavedResult({ ok: false }),
+      name: "a completed step whose saved result is not ok",
+      reason: "completed_step_without_checkpoint",
+      steps: [fixture.step],
+    },
+    {
+      checkpoint: withSavedResult({ skillId: "risk_review" }),
+      name: "a completed step whose saved result names another Skill",
+      reason: "completed_step_without_checkpoint",
+      steps: [fixture.step],
+    },
+    {
+      checkpoint: withSavedResult({ skillVersion: "2.0.0" }),
+      name: "a completed step whose saved result names another Skill version",
+      reason: "completed_step_without_checkpoint",
+      steps: [fixture.step],
+    },
+    {
+      // No typed output to digest, and a step that claims none either: the
+      // two missing digests are equal, and still nothing proves the output.
+      checkpoint: withSavedResult({ graphOutput: undefined }),
+      name: "a completed step whose saved result has no typed output",
+      reason: "completed_step_without_checkpoint",
+      steps: [{ ...fixture.step, output: { ...fixture.step.output, typedOutputDigest: null } }],
     },
     {
       name: "a completed step whose text is not the checkpoint's",

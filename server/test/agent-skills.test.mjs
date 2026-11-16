@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
+import { runAgentRagWithPreApprovedCapabilities } from "./pre-approved-capabilities-test-helpers.mjs";
 import {
   configureAgentExperienceMemoryStore,
   createInMemoryAgentExperienceStore,
@@ -90,10 +91,10 @@ test("document RAG declares its session-memory writes unsafe to replay", () => {
   });
 });
 
-// The document Skill types the RAG result's evidence fields for its
-// `evidence` output: a missing field takes its empty value, a field of the
-// wrong type fails the call instead of reaching the answer.
-test("document RAG types the answer's evidence and refuses a result whose fields have the wrong type", async () => {
+// The document Skill refuses a RAG result whose evidence fields have the
+// wrong type: the call fails instead of the value reaching the answer. A
+// missing field is allowed, and the RAG result itself is the Skill's value.
+test("document RAG refuses a RAG result whose evidence fields have the wrong type", async () => {
   const skill = createBuiltInSkillRegistry().get(AGENT_SKILL_IDS.documentRag);
   const run = (value) =>
     skill.execute({
@@ -102,14 +103,14 @@ test("document RAG types the answer's evidence and refuses a result whose fields
       question: "What changed?",
       ragService: { chat: async () => value },
     });
+  const ragValue = { text: "Clause 4 changed." };
+  const output = await run(ragValue);
 
-  assert.deepEqual((await run({ text: "Clause 4 changed." })).evidence, {
-    abstained: false,
-    citations: [],
-    comparisonAnalysisSummary: null,
-    retrievedContexts: [],
-    text: "Clause 4 changed.",
-  });
+  assert.equal(output.value, ragValue);
+  assert.equal(output.text, "Clause 4 changed.");
+  assert.deepEqual(output.citations, []);
+  assert.equal(output.abstained, false);
+  assert.equal(Object.hasOwn(output, "evidence"), false);
 
   for (const [value, message] of [
     [null, /must contain answer text/],
@@ -121,6 +122,16 @@ test("document RAG types the answer's evidence and refuses a result whose fields
     [{ comparisonAnalysisSummary: "none", text: "A" }, /comparison analysis must be an object/],
   ]) {
     await assert.rejects(run(value), message, JSON.stringify(value));
+  }
+});
+
+// No graph runs a built-in Skill (the authorized catalog admits custom Skills
+// only), so built-ins carry no graph contract: ADR 0001 phase 11.
+test("built-in Skills declare no graph contract", () => {
+  for (const skill of createBuiltInSkillRegistry().list()) {
+    for (const field of ["plannerSummary", "inputSchema", "outputSchema"]) {
+      assert.equal(Object.hasOwn(skill, field), false, `${skill.id}.${field}`);
+    }
   }
 });
 
@@ -537,7 +548,7 @@ test("agent rag imports arxiv papers after approved capability boundary", async 
     workspaceId: "workspace-a",
   };
   const imports = [];
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     arxivImportService: {
       importTopic: async ({ accessScope: receivedScope, maxResults, topic }) => {
@@ -570,7 +581,7 @@ test("agent rag imports arxiv papers after approved capability boundary", async 
         };
       },
     },
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.arxivImportTopic]: {
         approved: true,
         decision: "approved",

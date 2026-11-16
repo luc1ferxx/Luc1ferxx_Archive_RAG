@@ -717,6 +717,9 @@ test("observability report aggregates skill graph signals into recovery metrics"
   assert.equal(report.recovery.eventCount, 3);
   assert.equal(report.recovery.skillGraphPlannedCount, 3);
   assert.equal(report.recovery.skillGraphExecutedCount, 1);
+  // The pre-phase-8 rejected event (it fell back to V1) was rejected whole;
+  // the shadow event was planned and never executed but not rejected.
+  assert.equal(report.recovery.skillGraphRejectedCount, 1);
   assert.equal(report.recovery.skillGraphFallbackCount, 1);
   assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
   assert.equal(report.recovery.skillGraphReusedNodeCount, 2);
@@ -728,6 +731,79 @@ test("observability report aggregates skill graph signals into recovery metrics"
   assert.match(formatted, /skill graph fallbacks after execution: 0/);
   assert.match(formatted, /skill graph reused nodes: 2/);
   assert.match(formatted, /skill graph replans applied: 1/);
+});
+
+test("observability report counts a custom-Skill graph rejected whole, apart from planned minus executed and from fallbacks", () => {
+  const report = buildObservabilityReport({
+    events: [
+      // What the custom-Skill stage records since ADR 0001 phase 8 when
+      // validation refuses the graph before any node runs.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          errorCodes: ["unregistered_capability"],
+          executed: false,
+          fallback: null,
+          graph: null,
+          mode: "guarded",
+          nodeRuns: [],
+          planner: { status: "rejected" },
+          replans: [],
+          status: "rejected",
+        },
+      },
+      // An executed graph is not rejected.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: true,
+          fallback: null,
+          mode: "guarded",
+          nodeRuns: [{ nodeId: "risk_review", status: "completed" }],
+          replans: [],
+          status: "completed",
+        },
+      },
+      // A stored pre-phase-8 shadow event: planned, never executed, not rejected.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: false,
+          fallback: null,
+          mode: "shadow",
+          nodeRuns: [],
+          replans: [],
+          status: "selected",
+        },
+      },
+      // A graph the executor's admission refused: recorded as executed with
+      // status "rejected", not a graph rejected whole.
+      {
+        type: "skill_graph_planned",
+        payload: {
+          executed: true,
+          fallback: null,
+          mode: "guarded",
+          nodeRuns: [],
+          replans: [],
+          status: "rejected",
+        },
+      },
+    ],
+  });
+
+  assert.equal(report.recovery.skillGraphPlannedCount, 4);
+  assert.equal(report.recovery.skillGraphExecutedCount, 2);
+  assert.equal(report.recovery.skillGraphRejectedCount, 1);
+  // Nothing ran in the rejected graph's place: no fallback.
+  assert.equal(report.recovery.skillGraphFallbackCount, 0);
+  assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
+  assert.match(formatObservabilityReport(report), /skill graph rejected whole: 1/);
+
+  const empty = buildObservabilityReport({ events: [] });
+
+  assert.equal(empty.recovery.skillGraphRejectedCount, 0);
+  assert.match(formatObservabilityReport(empty), /skill graph rejected whole: 0/);
 });
 
 test("observability report counts a fallback after node execution as unsafe", () => {

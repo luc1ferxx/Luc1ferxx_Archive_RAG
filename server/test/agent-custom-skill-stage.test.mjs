@@ -1144,6 +1144,57 @@ test("a replan that widens document scope is rejected and the run keeps its firs
   assert.deepEqual(record.graph.nodeIds, ["compare"]);
 });
 
+test("a run that spent its Skill budget does not pay for a replan it cannot fund", async () => {
+  const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
+  const risk = createRecordingSkill({
+    id: "risk_review",
+    label: "Risk",
+    respond: async () => ({ abstained: true, citations: [], text: "" }),
+  });
+  const timeline = createRecordingSkill({ id: "extract_timeline", label: "Timeline" });
+  const harness = createHarness({
+    budget: { maxCustomSkillCalls: 2 },
+    skills: [compare, risk, timeline],
+  });
+  let patchCalls = 0;
+
+  const results = await runCustomSkillStage({
+    ...harness.options,
+    customSkills: [compare.skill, risk.skill, timeline.skill],
+    plannerAdapter: stubPlanner([
+      readOnlyNode({ nodeId: "compare", skillId: "compare_documents" }),
+      readOnlyNode({ nodeId: "risk", skillId: "risk_review" }),
+    ]),
+    replanAdapter: {
+      createPatch: () => {
+        patchCalls += 1;
+        return {
+          addNodes: [readOnlyNode({ nodeId: "timeline", skillId: "extract_timeline" })],
+        };
+      },
+      id: "test_replanner",
+    },
+  });
+
+  const remaining = getRemainingBudget(harness.budgetState);
+  // Web search and the other call budgets are untouched; only the Skill
+  // budget is gone, and it is the only one a patch node could draw on.
+  assert.equal(remaining.customSkillCalls, 0);
+  assert.ok(remaining.webSearchCalls > 0);
+
+  assert.equal(patchCalls, 0);
+  assert.equal(timeline.calls.length, 0);
+  assert.equal(results.length, 2);
+
+  const [record] = harness.graphRecords;
+  assert.deepEqual(
+    record.replans.map((replan) => [replan.decision, replan.reasonCode]),
+    [[REPLAN_DECISIONS.abstain, REPLAN_REASON_CODES.budgetExhausted]]
+  );
+  assert.equal(record.replans[0].reason, "No skill budget remains.");
+  assert.deepEqual(record.graph.nodeIds, ["compare", "risk"]);
+});
+
 // ---------------------------------------------------------------------------
 // The contract the rest of the run depends on
 // ---------------------------------------------------------------------------

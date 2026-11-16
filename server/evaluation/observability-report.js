@@ -217,6 +217,7 @@ const createRecoveryStats = () => ({
   taskRecoveryActionCounts: {},
   skillGraphPlannedCount: 0,
   skillGraphExecutedCount: 0,
+  skillGraphRejectedCount: 0,
   skillGraphFallbackCount: 0,
   skillGraphUnsafeFallbackCount: 0,
   skillGraphReusedNodeCount: 0,
@@ -676,13 +677,13 @@ const addStepReplayEvent = (recovery, event = {}) => {
 };
 
 // The custom skill stage records one skill_graph_planned event per run it
-// planned a graph for. Recovery cares about four things in it: whether a graph
-// executed at all, whether the stage fell back to the V1 chain, whether that
-// fallback ever happened after a node had already run (it must not -- that
-// would repeat charged work), and how much settled work a replan reused rather
-// than re-executed. The chain was deleted in ADR 0001 phase 8: an event
-// written since then never records a fallback, and the two fallback counts
-// only ever move for runs stored before it.
+// planned a graph for. Recovery cares about five things in it: whether a graph
+// executed at all, whether it was rejected whole, whether the stage fell back
+// to the V1 chain, whether that fallback ever happened after a node had already
+// run (it must not -- that would repeat charged work), and how much settled
+// work a replan reused rather than re-executed. The chain was deleted in ADR
+// 0001 phase 8: an event written since then never records a fallback, and the
+// two fallback counts only ever move for runs stored before it.
 const addSkillGraphEvent = (recovery, event = {}) => {
   const payload = getEventPayload(event);
   const nodeRuns = Array.isArray(payload.nodeRuns) ? payload.nodeRuns : [];
@@ -693,6 +694,19 @@ const addSkillGraphEvent = (recovery, event = {}) => {
 
   if (payload.executed === true) {
     recovery.skillGraphExecutedCount += 1;
+  }
+
+  // Rejected whole: validation refused the graph before any node ran, each
+  // selected Skill was reported as not run (AGENT_SKILL_GRAPH_REJECTED) and the
+  // request was answered without them (agent-custom-skill-stage.js). It is not
+  // a fallback -- nothing runs in the graph's place -- so it never moves the
+  // fallback counts. Planned minus executed is not this number on stored runs:
+  // a pre-phase-8 shadow event was planned and never executed without being
+  // rejected. A graph the executor's admission refused is recorded as executed
+  // with status "rejected" (after an applied replan, the earlier graph's nodes
+  // had run), so it is not counted here.
+  if (payload.status === "rejected" && payload.executed !== true) {
+    recovery.skillGraphRejectedCount += 1;
   }
 
   if (payload.fallback) {
@@ -1192,6 +1206,7 @@ export const formatObservabilityReport = (report) => {
     `  task recovery completed: ${report.recovery.taskRecoveryCompletedCount}`,
     `  skill graph planned: ${report.recovery.skillGraphPlannedCount}`,
     `  skill graph executed: ${report.recovery.skillGraphExecutedCount}`,
+    `  skill graph rejected whole: ${report.recovery.skillGraphRejectedCount}`,
     `  skill graph fallbacks: ${report.recovery.skillGraphFallbackCount}`,
     `  skill graph fallbacks after execution: ${report.recovery.skillGraphUnsafeFallbackCount}`,
     `  skill graph reused nodes: ${report.recovery.skillGraphReusedNodeCount}`,

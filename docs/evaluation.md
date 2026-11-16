@@ -488,11 +488,11 @@ npm run observability:report -- --json
 - LLMOps operation / model route 指标、token/cost/SLO 聚合，以及 annotation、alert、budget status counts
 - planner fallback reason top list
 - 各 `agentMode` 下的 planner `stepIds` 分布
-- recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率（自动续跑的图）、step retry 次数、step replay failure 数，并在同一区块展示 planner fallback count 和 skill graph 的 planned / executed / fallback / reused node / replan 计数
+- recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率（自动续跑的图）、step retry 次数、step replay failure 数，并在同一区块展示 planner fallback count 和 skill graph 的 planned / executed / rejected whole（整张图被拒，不算 fallback，没有门槛，阶段 12 起）/ fallback / reused node / replan 计数
 - query planner intent、retrieval query 数量和 topK profile
 - RAG route mode、latency、citation 和 abstain 指标
 
-`eval:recovery-observability` 会用 deterministic fixture 与实际 guarded graph 服务重建探针生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure、observed planner fallback 和 skill graph 执行后 fallback（`recoverySkillGraphUnsafeFallbackCount`，阈值 0）都必须为 0，同时要求 report 覆盖 recoverable run、manual recovery action、auto replay attempt、step retry 和 graph startup resume（“step resume” 一项在阶段 9 随功能删除）。这里的 auto replay 指启动时自动续跑中断的图：启动恢复不单独重放任何 step。`recovery` 区块的 planned / executed / fallback / reused / replan 计数来自 `skill_graph_planned` run event；resume claim / completion 来自 run 事件，是否重复执行来自服务重建探针在生成报告前的直接断言。PostgreSQL 跨进程恢复仍需独立环境验证。
+`eval:recovery-observability` 会用 deterministic fixture 与实际 guarded graph 服务重建探针生成 `latest-recovery-observability.*`，再由 `quality:gate` 的 recovery gate 检查：observability eval case/check 不能失败，auto replay failure、manual recovery action failure、step replay failure、observed planner fallback 和 skill graph 执行后 fallback（`recoverySkillGraphUnsafeFallbackCount`，阈值 0）都必须为 0，同时要求 report 覆盖 recoverable run、manual recovery action、auto replay attempt、step retry 和 graph startup resume（“step resume” 一项在阶段 9 随功能删除）。这里的 auto replay 指启动时自动续跑中断的图：启动恢复不单独重放任何 step。`recovery` 区块的 planned / executed / rejected / fallback / reused / replan 计数来自 `skill_graph_planned` run event；resume claim / completion 来自 run 事件，是否重复执行来自服务重建探针在生成报告前的直接断言。PostgreSQL 跨进程恢复仍需独立环境验证。
 
 ## Feedback regression
 

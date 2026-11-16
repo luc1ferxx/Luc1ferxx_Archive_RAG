@@ -6,9 +6,11 @@ import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.
 // metadata the ExecutionGraph needs, plus the redacted descriptor the V2
 // planner is allowed to see. A Skill that does not declare them gets the
 // conservative values from inferSkillContractDefaults (read-only, not
-// parallel-safe, free-text question in / text out). That is enough for a
-// built-in Skill; the agent's custom-Skill catalog (authorized-catalog.js)
-// admits only Skills that declare the contract themselves.
+// parallel-safe, free-text question in / text out). Built-in Skills declare
+// only effects/idempotency/parallelSafe/replaySafe/retryable: no graph runs
+// them, so they carry no schemas. The agent's custom-Skill catalog
+// (authorized-catalog.js) admits only Skills that declare the contract
+// themselves.
 
 export const SKILL_EFFECTS = Object.freeze({
   externalRead: "external_read",

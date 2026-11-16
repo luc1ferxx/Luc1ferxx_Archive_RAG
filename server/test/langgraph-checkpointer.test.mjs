@@ -585,12 +585,6 @@ test("a StateGraph interrupts, persists in the run row, and resumes from a new s
   // The service kept the request's CAS base current.
   assert.equal(runCursor.read({ accessScope: ALICE, runId: fixture.runId }).revision, paused.revision);
 
-  await fixture.agentRunService.updateRun({
-    accessScope: ALICE,
-    runId: fixture.runId,
-    patch: { status: "waiting_for_user" },
-  });
-
   // Simulated restart: nothing survives but the run store.
   const restartedService = createAgentRunService({ agentRunStore: fixture.agentRunStore });
   const secondSaver = new RunStoreCheckpointSaver({
@@ -603,7 +597,7 @@ test("a StateGraph interrupts, persists in the run row, and resumes from a new s
   assert.deepStrictEqual(pendingState.next, ["gate"]);
   assert.deepStrictEqual(pendingState.tasks[0].interrupts.map((entry) => entry.value), [{ gateId: "gate-1" }]);
 
-  // Resumed while the run waits for the user: the saver admits an open run.
+  // Resumed from a new saver over a new service while the run is still running.
   const completed = await secondGraph.invoke(new Command({ resume: { approved: true } }), {
     configurable: { thread_id: secondSaver.threadId },
     durability: "sync",
@@ -631,7 +625,7 @@ test("a StateGraph interrupts, persists in the run row, and resumes from a new s
   assert.deepStrictEqual(eventTypes(finished), ["run_created"]);
   assert.deepStrictEqual(finished.result.answerReceipt, { digest: "sha256:receipt" });
   assert.deepStrictEqual(finished.steps, paused.steps);
-  assert.equal(finished.status, "waiting_for_user");
+  assert.equal(finished.status, "running");
   assert.equal(Object.hasOwn(finished.result, EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY), false);
   assertPlainJsonRecord(record);
 });
@@ -969,7 +963,7 @@ test("with a v1 custom-Skill graph checkpoint claimed through claimExecutionGrap
   );
 });
 
-test("without a graph checkpoint an unclaimed saver writes while the run is open, and a claim-bound one is fenced", async () => {
+test("without a graph checkpoint an unclaimed saver writes only while the run is running, and a claim-bound one is fenced", async () => {
   const fixture = await createRunFixture();
   const unclaimed = createSaver(fixture);
   const first = await unclaimed.put(threadConfig(unclaimed), makeCheckpoint(checkpointId(1)), INPUT_METADATA, {});
@@ -986,11 +980,29 @@ test("without a graph checkpoint an unclaimed saver writes while the run is open
   }
   assert.equal((await readRun(fixture)).revision, before.revision);
 
-  // Waiting for the user is still an open run, which the rule admits.
+  // A run that waits for the user has no LangGraph writer (ADR 0001 phase
+  // 11): every write is fenced and changes nothing. Reads are not fenced.
   await fixture.agentRunService.updateRun({
     accessScope: ALICE,
     runId: fixture.runId,
     patch: { status: "waiting_for_user" },
+  });
+  const waitingRevision = (await readRun(fixture)).revision;
+  for (const attempt of [
+    () => unclaimed.put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {}),
+    () => unclaimed.putWrites(first, [["trail", "x"]], "task-1"),
+    () => unclaimed.deleteThread(unclaimed.threadId),
+  ]) {
+    await rejectsWithCode(attempt(), "AGENT_GRAPH_EXECUTION_FENCED", 409);
+  }
+  assert.equal((await readRun(fixture)).revision, waitingRevision);
+  assert.equal((await unclaimed.getTuple(threadConfig(unclaimed))).checkpoint.id, checkpointId(1));
+
+  // Control: back to running, the same saver writes.
+  await fixture.agentRunService.updateRun({
+    accessScope: ALICE,
+    runId: fixture.runId,
+    patch: { status: "running" },
   });
   await unclaimed.put(first, makeCheckpoint(checkpointId(2)), loopMetadata(0), {});
   assert.equal((await unclaimed.getTuple(threadConfig(unclaimed))).checkpoint.id, checkpointId(2));

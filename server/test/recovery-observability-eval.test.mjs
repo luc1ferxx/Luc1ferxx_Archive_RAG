@@ -93,6 +93,8 @@ test("recovery observability eval builds a deterministic passing report", () => 
   assert.match(markdown, /PASS Agent task recovery/);
   assert.match(markdown, /PASS Primary persisted step lifecycle/);
   assert.match(markdown, /Skill graph reused nodes: `2`/);
+  // Both graph events in the production pass executed; none was rejected whole.
+  assert.match(markdown, /Skill graph rejected whole: `0`/);
   assert.match(markdown, /PASS Skill graph signal/);
   assert.match(markdown, /PASS Skill graph startup resume/);
   assert.doesNotMatch(markdown, /Step resume count/);

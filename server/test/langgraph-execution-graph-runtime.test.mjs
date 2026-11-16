@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { Annotation, END, MemorySaver, START, StateGraph } from "@langchain/langgraph";
+import { Pregel } from "@langchain/langgraph/pregel";
 
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { resumeAgentExecutionGraphRun } from "../rag/agent.js";
@@ -46,7 +47,10 @@ import {
 } from "../rag/langgraph/compile-execution-graph.js";
 import { createExecutionGraphConcurrencyGate } from "../rag/langgraph/concurrency-gate.js";
 import { LANGSMITH_TRACING_ENABLED_CODE } from "../rag/langgraph/langsmith-guard.js";
-import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
+import {
+  LANGGRAPH_RUNNER_ERROR_CODES,
+  runExecutionGraphOnLangGraph,
+} from "../rag/langgraph/run-execution-graph.js";
 import {
   REQUEST_CANCELLATION_REASONS,
   createRequestCancellation,
@@ -2245,6 +2249,116 @@ test("the LangGraph runtime refuses to run while LangSmith tracing is on, before
     assert.deepEqual(staged.observed.steps, []);
     assert.equal(staged.langGraphRecord, null);
     assert.deepEqual(probe.journal, []);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The receipts check
+// ---------------------------------------------------------------------------
+
+// While `work` runs, the receipts of every state LangGraph's invoke reads
+// from its stream (streamMode "values") pass through `edit`: what invoke
+// returns when LangGraph lost or changed a node's receipt, which no node can
+// do on purpose. The thread record and the nodes themselves are untouched.
+const withEditedReceipts = async (edit, work) => {
+  const streamPregel = Pregel.prototype.stream;
+
+  Pregel.prototype.stream = async function streamEditingReceipts(input, options) {
+    const stream = await streamPregel.call(this, input, options);
+
+    if (options?.streamMode !== "values") {
+      return stream;
+    }
+
+    return (async function* editReceipts() {
+      for await (const chunk of stream) {
+        yield chunk?.receipts ? { ...chunk, receipts: edit({ ...chunk.receipts }) } : chunk;
+      }
+    })();
+  };
+
+  try {
+    return await work();
+  } finally {
+    Pregel.prototype.stream = streamPregel;
+  }
+};
+
+const twoNodeScenario = (wrap) => {
+  const probe = createProbe();
+
+  return {
+    nodes: [
+      graphNode({ nodeId: "risk", skillId: "risk_review" }),
+      graphNode({ nodeId: "timeline", skillId: "extract_timeline" }),
+    ],
+    probe,
+    skills: [
+      createScriptedSkill({ id: "risk_review", probe }),
+      createScriptedSkill({ id: "extract_timeline", probe }),
+    ],
+    wrap,
+  };
+};
+
+test("a node LangGraph finished without its receipt fails the stage with the receipt mismatch, and the graph is never reported settled", async () => {
+  // The control: the same edit hook, changing nothing, leaves the run alone.
+  const untouched = await runStageScenario({
+    scenario: twoNodeScenario((work) => withEditedReceipts((receipts) => receipts, work)),
+  });
+
+  assert.equal(untouched.observed.outcome.result.length, 2);
+  assert.equal(untouched.observed.checkpoint.phase, "completed");
+
+  const { observed } = await runStageScenario({
+    scenario: twoNodeScenario((work) =>
+      withEditedReceipts((receipts) => {
+        delete receipts["node:timeline"];
+        return receipts;
+      }, work)
+    ),
+  });
+
+  assert.equal(observed.outcome.error.code, LANGGRAPH_RUNNER_ERROR_CODES.receiptMismatch);
+  assert.equal(observed.outcome.error.status, 500);
+  assert.equal(observed.outcome.error.executionGraphNodeRuns, null);
+  assert.equal(Object.hasOwn(observed.outcome, "result"), false);
+  // Both Skills ran; only the receipt was lost. The stage reports no graph:
+  // no settling checkpoint save and no execution-graph record.
+  assert.deepEqual(
+    observed.journal.filter(({ event }) => event === "end").map(({ skillId }) => skillId).sort(),
+    ["extract_timeline", "risk_review"]
+  );
+  assert.equal(observed.checkpoint.phase, "running");
+  assert.deepEqual(observed.graphEvents, []);
+});
+
+test("a receipt that disagrees with its node's state fails the executor with the receipt mismatch, and no node run is returned", async () => {
+  for (const [name, change] of [
+    ["another status", (receipt) => ({ ...receipt, status: "skipped" })],
+    ["another skip reason", (receipt) => ({ ...receipt, reason: "dependency_skipped" })],
+    ["another output digest", (receipt) => ({ ...receipt, outputDigest: `v1:sha256:${"0".repeat(64)}` })],
+  ]) {
+    const scenario = twoNodeScenario((work) =>
+      withEditedReceipts((receipts) => {
+        if (receipts["node:risk"]) {
+          receipts["node:risk"] = change(receipts["node:risk"]);
+        }
+
+        return receipts;
+      }, work)
+    );
+    const { observed } = await runExecutorScenario({
+      scenario: { ...scenario, graph: createExecutionGraph({ nodes: scenario.nodes }) },
+    });
+
+    assert.equal(
+      observed.outcome.error.code,
+      LANGGRAPH_RUNNER_ERROR_CODES.receiptMismatch,
+      name
+    );
+    assert.equal(observed.outcome.error.executionGraphNodeRuns, null, name);
+    assert.equal(Object.hasOwn(observed.outcome, "result"), false, name);
   }
 });
 

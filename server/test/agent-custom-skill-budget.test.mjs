@@ -3,6 +3,7 @@ import "./langgraph-support/langsmith-off.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { buildObservabilityReport } from "../evaluation/observability-report.js";
 import { runAgentRag } from "../rag/agent.js";
 import {
   createAgentRunService,
@@ -412,6 +413,55 @@ test("documents the stage cannot verify for the caller: no Skill runs, and the r
     },
     skillCalls: [],
   });
+});
+
+// The observability report reads the same stored event. It runs the request
+// itself rather than through runContractReview, whose whole return value every
+// test above pins.
+test("a graph rejected whole is counted by the observability report from the run's stored event", async () => {
+  const rag = createRagService({ withDocumentLookup: false });
+  const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+  const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+
+  delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+
+  let response;
+
+  try {
+    response = await runAgentRag({
+      accessScope: ACCESS_SCOPE,
+      agentRunService,
+      docIds: [DOC_ID],
+      question: QUESTION,
+      ragService: rag.service,
+      sessionId: "budget-session",
+      userId: ACCESS_SCOPE.userId,
+      webChatService: async () => {
+        throw new Error("Web search should not run.");
+      },
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
+    } else {
+      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previous;
+    }
+  }
+
+  const run = await agentRunService.getRun({
+    accessScope: ACCESS_SCOPE,
+    runId: response.body.agentRunId,
+  });
+  const report = buildObservabilityReport({ events: run.events });
+
+  // No Skill was called, and the report says the graph was rejected whole
+  // rather than leaving it to planned minus executed.
+  assert.deepStrictEqual(rag.questions, []);
+  assert.equal(report.recovery.skillGraphPlannedCount, 1);
+  assert.equal(report.recovery.skillGraphExecutedCount, 0);
+  assert.equal(report.recovery.skillGraphRejectedCount, 1);
+  assert.equal(report.recovery.skillGraphFallbackCount, 0);
+  assert.equal(report.recovery.skillGraphUnsafeFallbackCount, 0);
 });
 
 // The second Skill is planned on the first one's findings, so it depends on

@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { createApp } from "./app.js";
+import { warmAgentExecutionPlanRuntime } from "./rag/agent-execution-plan-runner.js";
 import {
   assertAgentRuntimeSupported,
   getServiceShutdownGraceMs,
@@ -168,6 +169,14 @@ const startMonolith = async () => {
         ? `server is running on port ${port} (standalone: filesystem document registry, no PostgreSQL)`
         : `server is running on port ${port}`
     );
+
+    // This process answers agent requests unless AGENT_SERVICE_URL sends them
+    // elsewhere: load LangGraph now, in the background, instead of inside the
+    // first agent request. It never rejects; a failure is logged and the first
+    // request loads it as before (rag/agent-execution-plan-runner.js).
+    if (hostsServiceTier(SERVICE_TIERS.agent)) {
+      void warmAgentExecutionPlanRuntime();
+    }
   });
 
   // METRICS_ENABLED=true: /metrics on its own listener (METRICS_PORT), never

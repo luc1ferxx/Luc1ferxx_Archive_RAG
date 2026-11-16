@@ -149,12 +149,11 @@ const recoverOnStartup = ({ agentRunService, mode = "auto", ragService, resumed 
     },
   }).recoverOnStartup({ mode });
 
-const reenter = ({ agentRunService, capabilityApprovals, ragService, state }) =>
+const reenter = ({ agentRunService, ragService, state }) =>
   runAgentRag({
     accessScope,
     agentRunId: runIdOf(state),
     agentRunService,
-    ...(capabilityApprovals ? { capabilityApprovals } : {}),
     docIds: [DOC_ID],
     question: QUESTION,
     ragService,
@@ -680,8 +679,7 @@ test("the approval endpoint refuses a decision of the gate of a stored graph run
 });
 
 test("a request that re-enters a graph parked at its gate is refused and the run is listed for an operator", async () => {
-  const binding = { approvalObjectHash: parkedGate.approvalObjectHash, gateId: parkedGate.id };
-  const attempt = async (capabilityApprovals) => {
+  const attempt = async () => {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
     const ragService = createRagService();
     let response = null;
@@ -689,7 +687,6 @@ test("a request that re-enters a graph parked at its gate is refused and the run
       refusal(
         reenter({
           agentRunService,
-          capabilityApprovals,
           ragService,
           state: "parked_at_approval_gate",
         }).then((value) => {
@@ -728,18 +725,11 @@ test("a request that re-enters a graph parked at its gate is refused and the run
     unchanged: false,
   };
 
-  // Whatever the request carries, it cannot continue the graph: without a
-  // decision (a background task's `continue`), with the gate's approval or
-  // denial (a background task's decision), or with a decision of some other
-  // gate. Nothing is decided; the run is listed for an operator.
-  for (const capabilityApprovals of [
-    undefined,
-    { [parkedGate.capabilityId]: { ...binding, approved: true } },
-    { [parkedGate.capabilityId]: { ...binding, approved: false, decision: "deny" } },
-    { [parkedGate.capabilityId]: { ...binding, approved: true, gateId: "another-gate" } },
-  ]) {
-    assert.deepEqual(await attempt(capabilityApprovals), refusedAndHandedOver);
-  }
+  // A request (a background task's `continue`) cannot continue the graph.
+  // Nothing is decided; the run is listed for an operator. A request carries
+  // no decision: a background task's decision goes through the run's approval
+  // path, which refuses it (below).
+  assert.deepEqual(await attempt(), refusedAndHandedOver);
 });
 
 test("a request that re-enters an interrupted stored graph is fenced and changes nothing", async () => {

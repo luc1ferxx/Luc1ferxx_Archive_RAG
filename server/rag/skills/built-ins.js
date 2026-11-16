@@ -17,7 +17,6 @@ import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.
 import {
   SKILL_EFFECTS,
   SKILL_IDEMPOTENCY,
-  SKILL_VALUE_TYPES,
   describeSkillReplayContract,
 } from "./skill-contract.js";
 
@@ -326,14 +325,13 @@ const buildDiscoveryAnswer = (matches) => {
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-// The document answer's evidence fields, typed for the Skill's `evidence`
-// output, and the check that refuses a RAG result whose fields have the
-// wrong type (a missing field takes its empty value). The whole raw RAG
-// response is not exposed: it also carries session and retrieval internals
-// the typed contract does not cover. (A graph node of the removed v3 unified
-// graph bound this output to its evidence check, which also required every
-// field; ADR 0001 phases 10 and 11.)
-const projectDocumentEvidence = (value) => {
+// Refuses a RAG result whose evidence fields have the wrong type, so a
+// malformed result fails the Skill call (a failed Skill result) instead of
+// reaching the document loop and the finalizer, which read these fields from
+// the result's `value`. A missing field is allowed. (It also used to project
+// the fields into a typed `evidence` output that only the removed v3 unified
+// graph read; ADR 0001 phases 10 and 11.)
+const assertDocumentRagResultTypes = (value) => {
   if (!isRecord(value) || (value.text != null && typeof value.text !== "string")) {
     throw new Error("Document evidence must contain answer text.");
   }
@@ -364,14 +362,6 @@ const projectDocumentEvidence = (value) => {
   ) {
     throw new Error("Document evidence comparison analysis must be an object.");
   }
-
-  return {
-    text: value.text ?? "",
-    citations: value.citations ?? [],
-    abstained: value.abstained ?? false,
-    retrievedContexts: value.retrievedContexts ?? [],
-    comparisonAnalysisSummary: value.comparisonAnalysisSummary ?? null,
-  };
 };
 
 const createDocumentRagSkill = () => ({
@@ -388,20 +378,6 @@ const createDocumentRagSkill = () => ({
   parallelSafe: false,
   replaySafe: false,
   retryable: false,
-  // One primary ragService.chat call, not the self-check/follow-up document
-  // loop. Runtime identity remains outside model-controlled input bindings.
-  plannerSummary: "Run one scoped primary document RAG call; session and memory writes are not replay-safe.",
-  inputSchema: {
-    docIds: { required: true, scoped: true, type: SKILL_VALUE_TYPES.stringArray },
-    question: { required: true, type: SKILL_VALUE_TYPES.string },
-    retrievalPlan: { required: false, type: SKILL_VALUE_TYPES.object },
-  },
-  outputSchema: {
-    text: { required: true, type: SKILL_VALUE_TYPES.string },
-    citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
-    abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    evidence: { required: true, type: SKILL_VALUE_TYPES.object },
-  },
   match: ({ plan }) => Boolean(plan.wantsDocumentRag),
   plannerActions: ({ docIds }) => [
     {
@@ -437,14 +413,13 @@ const createDocumentRagSkill = () => ({
       // call (the user's own question) records the exchange in memory.
       ...(memoryWrites === false ? { memoryWrites: false } : {}),
     });
-    const evidence = projectDocumentEvidence(value);
+    assertDocumentRagResultTypes(value);
 
     return {
       value,
       text: value.text,
       citations: value.citations ?? [],
       abstained: Boolean(value.abstained),
-      evidence,
       traceDetail: {
         citations: value.citations?.length ?? 0,
         abstained: Boolean(value.abstained),
@@ -605,15 +580,6 @@ const createWebSearchSkill = () => ({
   parallelSafe: false,
   replaySafe: false,
   retryable: false,
-  plannerSummary: "Search the external Web only through the user-confirmation capability policy.",
-  inputSchema: {
-    question: { required: true, type: SKILL_VALUE_TYPES.string },
-  },
-  outputSchema: {
-    text: { required: true, type: SKILL_VALUE_TYPES.string },
-    citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
-    abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
-  },
   match: ({ plan }) => Boolean(plan.wantsWeb),
   plannerActions: () => [
     {
@@ -650,21 +616,12 @@ const createInventorySkill = () => ({
   budgetKey: null,
   requiresAccessScope: true,
   // listDocuments is a scoped, local metadata read. It neither calls RAG nor
-  // writes a session, so its typed graph output can be reused safely.
+  // writes a session, so it is safe to replay.
   effects: SKILL_EFFECTS.readOnly,
   idempotency: SKILL_IDEMPOTENCY.readOnlyRag,
   parallelSafe: false,
   replaySafe: true,
   retryable: true,
-  plannerSummary: "List metadata for documents visible in the caller's workspace; no document RAG call.",
-  inputSchema: {},
-  outputSchema: {
-    text: { required: true, type: SKILL_VALUE_TYPES.string },
-    citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
-    abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    documentCount: { required: true, type: SKILL_VALUE_TYPES.number },
-    hasDocuments: { required: true, type: SKILL_VALUE_TYPES.boolean },
-  },
   match: ({ plan }) => Boolean(plan.wantsInventory),
   plannerActions: () => [
     {
@@ -685,8 +642,6 @@ const createInventorySkill = () => ({
       text,
       citations: [],
       abstained: false,
-      documentCount: documents.length,
-      hasDocuments: documents.length > 0,
       traceDetail: {
         documentCount: documents.length,
       },
@@ -702,25 +657,12 @@ const createDocumentDiscoverySkill = () => ({
   budgetKey: null,
   requiresAccessScope: true,
   // Metadata search itself is read-only, but its capability requires user
-  // confirmation. A graph may only bind a non-empty, authorized doc set; the
-  // legacy empty-set search-all behavior remains on the V1 path.
+  // confirmation.
   effects: SKILL_EFFECTS.readOnly,
   idempotency: SKILL_IDEMPOTENCY.adapterDefined,
   parallelSafe: false,
   replaySafe: false,
   retryable: false,
-  plannerSummary: "Search selected workspace document metadata through a user-confirmation capability.",
-  inputSchema: {
-    docIds: { required: true, scoped: true, type: SKILL_VALUE_TYPES.stringArray },
-    question: { required: true, type: SKILL_VALUE_TYPES.string },
-  },
-  outputSchema: {
-    text: { required: true, type: SKILL_VALUE_TYPES.string },
-    citations: { required: true, type: SKILL_VALUE_TYPES.citationArray },
-    abstained: { required: true, type: SKILL_VALUE_TYPES.boolean },
-    matchedDocIds: { required: true, type: SKILL_VALUE_TYPES.stringArray },
-    hasMatches: { required: true, type: SKILL_VALUE_TYPES.boolean },
-  },
   match: ({ plan }) => Boolean(plan.wantsDiscovery),
   plannerActions: () => [
     {
@@ -760,8 +702,6 @@ const createDocumentDiscoverySkill = () => ({
       text,
       citations: [],
       abstained: false,
-      matchedDocIds: matches.map(({ document }) => document.docId),
-      hasMatches: matches.length > 0,
       traceDetail: {
         matchCount: matches.length,
       },

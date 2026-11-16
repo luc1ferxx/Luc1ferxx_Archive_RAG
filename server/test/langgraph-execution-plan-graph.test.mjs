@@ -98,6 +98,11 @@ const { runAgentExecutionPlan } = agentExecutionPlanRunner;
 const { deterministicPlannerAdapter } = await import("../rag/agent-execution-plan.js");
 const { deterministicIntentPlannerAdapter } = await import("../rag/agent-intent-planner.js");
 const { runAgentRag } = await import("../rag/agent.js");
+// Imported after the hook too: it imports rag/agent.js and the Capability
+// registry, which must load through the redirect above.
+const { runAgentRagWithPreApprovedCapabilities } = await import(
+  "./pre-approved-capabilities-test-helpers.mjs"
+);
 const { AGENT_RUN_STATUSES, createAgentRunService, createInMemoryAgentRunStore } = await import(
   "../rag/agent-runs.js"
 );
@@ -112,6 +117,7 @@ const {
   bindExecutionPlanGraphContext,
   compileAgentExecutionPlanGraph,
   runAgentExecutionPlanOnLangGraph,
+  runExecutionPlanStagesOnLangGraph,
 } = await import("../rag/langgraph/execution-plan-graph.js");
 const {
   REQUEST_CANCELLATION_REASONS,
@@ -423,8 +429,8 @@ const createRagService = ({ chat } = {}) => ({
   listDocuments: () => [{ docId: "doc-1", fileName: "policy.pdf" }],
 });
 
-const askAgent = ({ agentRunService, ragService, ...overrides }) =>
-  runAgentRag({
+const askAgent = ({ agentRunService, preApproved, ragService, ...overrides }) => {
+  const request = {
     accessScope: ACCESS_SCOPE,
     agentRunService,
     docIds: ["doc-1"],
@@ -438,7 +444,12 @@ const askAgent = ({ agentRunService, ragService, ...overrides }) =>
       throw new Error("Web search must not run.");
     },
     ...overrides,
-  });
+  };
+
+  return preApproved
+    ? runAgentRagWithPreApprovedCapabilities({ ...request, preApproved })
+    : runAgentRag(request);
+};
 
 const listRuns = async (agentRunService) =>
   (await agentRunService.listRuns({ accessScope: ACCESS_SCOPE })).runs;
@@ -537,7 +548,7 @@ test("an abstention falls through to the Web stage as the golden records: withou
   const withApproval = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
-      capabilityApprovals: {
+      preApproved: {
         [CAPABILITY_IDS.webSearch]: {
           approved: true,
           decision: "approved",
@@ -1072,4 +1083,127 @@ test("runAgentExecutionPlanOnLangGraph rethrows the original stage error by iden
       return true;
     }
   );
+});
+
+// --- The receipts check --------------------------------------------------
+
+// The scheduling part on its own (runExecutionPlanStagesOnLangGraph) over
+// PLAN, every stage a no-op unless `stages` names it.
+const scheduleStages = ({ stages = {}, state }) => {
+  const entered = [];
+  const run = () =>
+    runExecutionPlanStagesOnLangGraph({
+      accessScope: ACCESS_SCOPE,
+      agentRunId: null,
+      executionPlan: PLAN,
+      getStage: (step) => async () => {
+        entered.push(step.id);
+        await stages[step.id]?.();
+      },
+      isStageInert: () => false,
+      state,
+    });
+
+  return { entered, run };
+};
+
+// While `work` runs, every stream LangGraph hands its consumer passes
+// through `edit`, an async generator over the stream's chunks: what the
+// consumer sees when LangGraph lost a stage's receipt, or when the execution
+// state no longer matches the receipts by the time the stream ends.
+const withEditedPlanStream = async (edit, work) => {
+  const stream = Pregel.prototype.stream;
+
+  Pregel.prototype.stream = async function streamEditedPlan(...args) {
+    return edit(await stream.apply(this, args));
+  };
+
+  try {
+    return await work();
+  } finally {
+    Pregel.prototype.stream = stream;
+  }
+};
+
+const assertPlanReceiptMismatch = (error) => {
+  assert.equal(error?.code, LANGGRAPH_EXECUTION_PLAN_ERROR_CODES.receiptMismatch);
+  assert.equal(error?.status, 500);
+  return true;
+};
+
+test("a stage LangGraph finished without its receipt fails the plan with the receipt mismatch instead of returning its state", async () => {
+  const webSearch = AGENT_EXECUTION_STEP_IDS.webSearch;
+  const dropWebReceipt = async function* dropWebReceipt(chunks) {
+    for await (const chunk of chunks) {
+      if (Array.isArray(chunk) && chunk[0] === "updates" && chunk[1]?.[webSearch]) {
+        continue;
+      }
+
+      yield chunk;
+    }
+  };
+
+  // The control: the same hook, passing every chunk, returns the state.
+  const passed = { response: null };
+  const control = scheduleStages({ state: passed });
+
+  assert.equal(
+    await withEditedPlanStream(async function* pass(chunks) {
+      yield* chunks;
+    }, control.run),
+    passed
+  );
+
+  const dropped = scheduleStages({ state: { response: null } });
+
+  await assert.rejects(withEditedPlanStream(dropWebReceipt, dropped.run), assertPlanReceiptMismatch);
+  // Both stages ran; only the Web stage's receipt was lost.
+  assert.deepStrictEqual(dropped.entered, PLAN.map((step) => step.id));
+});
+
+test("an execution state that no longer matches the last stage's receipt fails the plan with the receipt mismatch", async () => {
+  const afterStream = (change) =>
+    async function* changeAfterStream(chunks) {
+      yield* chunks;
+      change();
+    };
+
+  // The document stage set the response, so the plan ended there with a
+  // "responded" receipt; by the end of the stream the response is gone.
+  const withdrawn = { response: null };
+  const responding = scheduleStages({
+    stages: {
+      [AGENT_EXECUTION_STEP_IDS.documentRag]: async () => {
+        withdrawn.response = { body: {}, status: 200 };
+      },
+    },
+    state: withdrawn,
+  });
+
+  await assert.rejects(
+    withEditedPlanStream(
+      afterStream(() => {
+        withdrawn.response = null;
+      }),
+      responding.run
+    ),
+    assertPlanReceiptMismatch
+  );
+  assert.deepStrictEqual(responding.entered, [AGENT_EXECUTION_STEP_IDS.documentRag]);
+
+  // Every stage ran and none set the response, yet by the end of the stream
+  // there is one: the last receipt does not report it.
+  const appeared = { response: null };
+  const whole = scheduleStages({ state: appeared });
+
+  await assert.rejects(
+    withEditedPlanStream(
+      afterStream(() => {
+        appeared.response = { body: {}, status: 200 };
+      }),
+      whole.run
+    ),
+    assertPlanReceiptMismatch
+  );
+  assert.deepStrictEqual(whole.entered, PLAN.map((step) => step.id));
 });

@@ -795,3 +795,152 @@ test("createAgentExecutionGraphResult carries the rollout mode through", async (
 
   assert.equal(result.planner.rolloutMode, "guarded");
 });
+
+// A rollout wrapper is a copy of the adapter it wraps. Under
+// AGENT_PLANNER_ROLLOUT=deterministic the copy is still the deterministic
+// planner: it plans from the selected Skill contracts and is not a fallback.
+test("the deterministic planner under a rollout wrapper is selected, not a fallback", async () => {
+  const plannerAdapter = withPlannerRollout(deterministicDagPlannerAdapter, "deterministic");
+
+  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
+  const unwrapped = await createAgentExecutionGraphResult(
+    baseOptions({ plannerAdapter: deterministicDagPlannerAdapter })
+  );
+
+  assert.equal(result.planner.fallback, false);
+  assert.equal(result.planner.status, "selected");
+  assert.equal(result.planner.fallbackReason, null);
+  assert.deepEqual(result.planner.fallbackReasonCodes, []);
+  assert.equal(result.planner.requestedPlannerId, DAG_PLANNER_IDS.deterministic);
+  assert.equal(result.planner.selectedPlannerId, DAG_PLANNER_IDS.deterministic);
+  assert.equal(result.planner.rolloutMode, "deterministic");
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.skillId),
+    ["compare_documents", "risk_review"]
+  );
+  assert.deepEqual(result.graph, unwrapped.graph);
+});
+
+// Shadow keeps the deterministic graph primary and lets the model plan beside
+// it. The primary is the deterministic planner, so it is selected; the model's
+// graph is recorded, compared, and never run.
+test("the shadow rollout records the deterministic graph as selected and the model's beside it", async () => {
+  let shadowCalls = 0;
+  const plannerAdapter = withPlannerRollout(
+    withShadowPlanner(
+      deterministicDagPlannerAdapter,
+      stubAdapter(DAG_PLANNER_IDS.llm, () => {
+        shadowCalls += 1;
+        return { nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })] };
+      })
+    ),
+    "shadow"
+  );
+
+  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
+
+  assert.equal(result.planner.fallback, false);
+  assert.equal(result.planner.status, "selected");
+  assert.equal(result.planner.fallbackReason, null);
+  assert.equal(result.planner.selectedPlannerId, DAG_PLANNER_IDS.deterministic);
+  assert.equal(result.planner.rolloutMode, "shadow");
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.nodeId),
+    ["compare_documents", "risk_review"]
+  );
+  assert.equal(shadowCalls, 1);
+  assert.equal(result.planner.shadow.status, "selected");
+  assert.equal(result.planner.shadow.requestedPlannerId, DAG_PLANNER_IDS.llm);
+  assert.deepEqual(result.planner.shadow.nodeIds, ["compare"]);
+  assert.equal(result.planner.shadow.diverged, true);
+});
+
+test("a rollout-wrapped deterministic planner with no selected Skill is rejected on its own empty graph", async () => {
+  // A recording copy of the deterministic planner, passed as the fallback and
+  // wrapped as the planner: it must be asked once, with the fallback context
+  // (selectedSkills, an array). Taken for a primary planner it would first be
+  // handed the redacted view, which has no selectedSkills, and asked twice.
+  const contexts = [];
+  const fallbackPlannerAdapter = {
+    ...deterministicDagPlannerAdapter,
+    createExecutionGraph: (context) => {
+      contexts.push(context);
+      return deterministicDagPlannerAdapter.createExecutionGraph(context);
+    },
+  };
+  const result = await createAgentExecutionGraphResult(
+    baseOptions({
+      fallbackPlannerAdapter,
+      fallbackSelectedSkills: [],
+      plannerAdapter: withPlannerRollout(fallbackPlannerAdapter, "deterministic"),
+      selectedSkills: [compareSkill(), riskSkill()],
+    })
+  );
+
+  assert.equal(contexts.length, 1);
+  assert.deepEqual(contexts[0].selectedSkills, []);
+  assert.equal(result.graph, null);
+  assert.equal(result.planner.status, "rejected");
+  assert.equal(result.planner.rolloutMode, "deterministic");
+  assert.match(result.planner.fallbackReason, /non-empty nodes array/);
+});
+
+// The deterministic planner is recognised by its function, not by its id: an
+// adapter that only borrows the id is still a primary planner whose output is
+// validated and, on failure, replaced by the deterministic graph.
+test("an adapter that only shares the deterministic id is planned as a primary planner", async () => {
+  const plannerAdapter = stubAdapter(DAG_PLANNER_IDS.deterministic, () => {
+    throw new Error("impostor planner unavailable");
+  });
+
+  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
+
+  assert.equal(result.planner.fallback, true);
+  assert.match(result.planner.fallbackReason, /impostor planner unavailable/);
+  assert.deepEqual(
+    result.graph.nodes.map((node) => node.skillId),
+    ["compare_documents", "risk_review"]
+  );
+});
+
+// llm and guarded_llm wrap the model's planner, and configured hands it over
+// unwrapped. Either way it is a primary planner: its own graph is selected,
+// and its failure is still recorded as a fallback to the deterministic graph.
+test("the model planner's record is unchanged under the llm, guarded_llm and configured rollouts", async () => {
+  const modelPlanner = stubAdapter(DAG_PLANNER_IDS.llm, () => ({
+    nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
+  }));
+  const failingModelPlanner = stubAdapter(DAG_PLANNER_IDS.llm, () => {
+    throw new Error("model planner unavailable");
+  });
+  const rollouts = [
+    ["llm", (adapter) => withPlannerRollout(adapter, "llm")],
+    ["guarded_llm", (adapter) => withPlannerRollout(adapter, "guarded_llm")],
+    ["configured", (adapter) => adapter],
+  ];
+
+  for (const [rolloutMode, wrap] of rollouts) {
+    const selected = await createAgentExecutionGraphResult(
+      baseOptions({ plannerAdapter: wrap(modelPlanner) })
+    );
+
+    assert.equal(selected.planner.fallback, false, rolloutMode);
+    assert.equal(selected.planner.status, "selected", rolloutMode);
+    assert.equal(selected.planner.selectedPlannerId, DAG_PLANNER_IDS.llm, rolloutMode);
+    assert.deepEqual(selected.planner.nodeIds, ["compare"], rolloutMode);
+
+    const fallback = await createAgentExecutionGraphResult(
+      baseOptions({ plannerAdapter: wrap(failingModelPlanner) })
+    );
+
+    assert.equal(fallback.planner.fallback, true, rolloutMode);
+    assert.equal(fallback.planner.status, "fallback", rolloutMode);
+    assert.equal(fallback.planner.requestedPlannerId, DAG_PLANNER_IDS.llm, rolloutMode);
+    assert.equal(
+      fallback.planner.selectedPlannerId,
+      DAG_PLANNER_IDS.deterministic,
+      rolloutMode
+    );
+    assert.match(fallback.planner.fallbackReason, /model planner unavailable/, rolloutMode);
+  }
+});

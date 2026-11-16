@@ -790,6 +790,7 @@ export const formatRecoveryObservabilityReportMarkdown = (report = {}) => {
     `- Planner fallback count: \`${recovery.plannerFallbackCount ?? 0}\``,
     `- Skill graph planned: \`${recovery.skillGraphPlannedCount ?? 0}\``,
     `- Skill graph executed: \`${recovery.skillGraphExecutedCount ?? 0}\``,
+    `- Skill graph rejected whole: \`${recovery.skillGraphRejectedCount ?? 0}\``,
     `- Skill graph fallbacks: \`${recovery.skillGraphFallbackCount ?? 0}\``,
     `- Skill graph fallbacks after execution: \`${
       recovery.skillGraphUnsafeFallbackCount ?? 0

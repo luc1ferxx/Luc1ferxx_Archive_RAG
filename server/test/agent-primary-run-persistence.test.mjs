@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runAgentRag } from "../rag/agent.js";
+import { runAgentRagWithPreApprovedCapabilities } from "./pre-approved-capabilities-test-helpers.mjs";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { runDocumentRagLoop } from "../rag/agent-document-loop.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
@@ -496,10 +497,10 @@ test("research brief persists lifecycle-backed research question steps", async (
 test("approved web search persists a tool step that needs approval to replay", async () => {
   const agentRunService = createRunService();
   const webQuestion = "Search the web for the current launch date.";
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     agentRunService,
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.webSearch]: {
         approved: true,
         decision: "approved",
@@ -546,10 +547,10 @@ test("approved web search persists a tool step that needs approval to replay", a
 test("web search failed Result persists structured error message", async () => {
   const agentRunService = createRunService();
   const webQuestion = "Search the web for the current launch date.";
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     agentRunService,
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.webSearch]: {
         approved: true,
         decision: "approved",
@@ -610,10 +611,10 @@ test("inventory persists workspace scope and stable step id", async () => {
 test("document discovery persists question, docIds, and stable step id", async () => {
   const agentRunService = createRunService();
   const discoveryQuestion = "Which document covers remote work policy?";
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     agentRunService,
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.documentDiscovery]: {
         approved: true,
         decision: "approved",
@@ -657,7 +658,7 @@ test("document discovery persists question, docIds, and stable step id", async (
 test("approved arxiv import persists sanitized topic and stable step id", async () => {
   const agentRunService = createRunService();
   const imports = [];
-  const response = await runAgentRag({
+  const response = await runAgentRagWithPreApprovedCapabilities({
     accessScope,
     agentRunService,
     arxivImportService: {
@@ -690,7 +691,7 @@ test("approved arxiv import persists sanitized topic and stable step id", async 
         };
       },
     },
-    capabilityApprovals: {
+    preApproved: {
       [CAPABILITY_IDS.arxivImportTopic]: {
         approved: true,
         decision: "approved",

@@ -428,14 +428,63 @@ export const createAgentExecutionPlanStages = ({
  * The plan is scheduled on LangGraph (rag/langgraph/execution-plan-graph.js:
  * one Pregel node per scheduled stage, a safe point for a cancelled request
  * at every node's entry, the plan ending at the stage that set the response).
- * That module is imported on first use, so a process that never runs an agent
- * request (the api edge of a split deployment, the ingest worker) never loads
- * LangGraph.
+ * That module is imported on first use, so a process that does not host the
+ * agent tier (the api edge of a split deployment, the ingest worker, the
+ * retrieval and model-gateway roles) never loads LangGraph. A process that
+ * does host it imports the module right after it listens
+ * (warmAgentExecutionPlanRuntime), so the first agent request does not pay
+ * for it.
  */
+const importExecutionPlanGraph = () => import("./langgraph/execution-plan-graph.js");
+
 export const runAgentExecutionPlan = async (options = {}) => {
-  const { runAgentExecutionPlanOnLangGraph } = await import(
-    "./langgraph/execution-plan-graph.js"
-  );
+  const { runAgentExecutionPlanOnLangGraph } = await importExecutionPlanGraph();
 
   return runAgentExecutionPlanOnLangGraph(options);
+};
+
+/**
+ * Loads LangGraph (the outer plan's graph module) ahead of the first agent
+ * request, which would otherwise pay for it (about 100-180 ms) after its run
+ * is created and while its deadline runs. Only the import: no graph is
+ * compiled or run, and no storage, model, tenant or run is touched. Called,
+ * without awaiting, by the processes that host the agent tier once they
+ * listen (server.js, rag/agent-service/role-server.js).
+ *
+ * Never rejects: a failure is logged as a warning and the first agent request
+ * imports the module itself, as before. A request that arrives meanwhile
+ * waits for the same import rather than starting a second one.
+ * Resolves to { ok: true, ms } or { ok: false, ms, error }; a load that
+ * resolves to a module without runAgentExecutionPlanOnLangGraph counts as a
+ * failure. `load` is for tests.
+ */
+export const warmAgentExecutionPlanRuntime = async ({
+  load = importExecutionPlanGraph,
+  logger = console,
+} = {}) => {
+  const startedAt = performance.now();
+
+  try {
+    const graphModule = await load();
+
+    // The module the request path runs plans with, not just any module.
+    if (typeof graphModule?.runAgentExecutionPlanOnLangGraph !== "function") {
+      throw new Error("the loaded module does not export runAgentExecutionPlanOnLangGraph");
+    }
+  } catch (error) {
+    const ms = Math.round(performance.now() - startedAt);
+
+    logger.warn?.(
+      `[agent] Loading LangGraph ahead of the first agent request failed after ${ms} ms; ` +
+        `the first agent request will load it: ${error?.message ?? error}`
+    );
+
+    return { error, ms, ok: false };
+  }
+
+  const ms = Math.round(performance.now() - startedAt);
+
+  logger.log?.(`[agent] LangGraph loaded ahead of the first agent request (${ms} ms).`);
+
+  return { ms, ok: true };
 };

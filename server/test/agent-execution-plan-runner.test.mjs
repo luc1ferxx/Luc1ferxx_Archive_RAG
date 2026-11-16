@@ -11,6 +11,7 @@ import {
 } from "../rag/agent-execution-plan.js";
 import {
   runAgentExecutionPlan,
+  warmAgentExecutionPlanRuntime,
 } from "../rag/agent-execution-plan-runner.js";
 import { deterministicDagPlannerAdapter } from "../rag/agent-dag-planner-adapter.js";
 import { REPLAN_DECISIONS, REPLAN_REASON_CODES } from "../rag/agent-replanner.js";
@@ -808,4 +809,95 @@ test("execution plan runner returns clarification before web fallback when docum
     harness.trace.map((step) => step.type),
     ["document_rag", "self_check"]
   );
+});
+
+// warmAgentExecutionPlanRuntime: what the processes that host the agent tier
+// call once they listen (server.js, rag/agent-service/role-server.js).
+const recordingLogger = () => {
+  const lines = { log: [], warn: [] };
+
+  return {
+    lines,
+    logger: {
+      error() {},
+      log: (line) => lines.log.push(line),
+      warn: (line) => lines.warn.push(line),
+    },
+  };
+};
+
+test("the warm-up imports the outer plan's graph module and logs how long it took", async () => {
+  const { lines, logger } = recordingLogger();
+  const result = await warmAgentExecutionPlanRuntime({ logger });
+
+  assert.equal(result.ok, true);
+  assert.equal(Number.isInteger(result.ms) && result.ms >= 0, true);
+  assert.deepEqual(lines.warn, []);
+  assert.equal(lines.log.length, 1);
+  assert.match(lines.log[0], /^\[agent\] LangGraph loaded ahead of the first agent request \(\d+ ms\)\.$/u);
+
+  const graph = await import("../rag/langgraph/execution-plan-graph.js");
+
+  assert.equal(typeof graph.runAgentExecutionPlanOnLangGraph, "function");
+});
+
+test("the warm-up only loads: its loader is called once, with nothing", async () => {
+  const calls = [];
+  const { logger } = recordingLogger();
+  const result = await warmAgentExecutionPlanRuntime({
+    load: async (...args) => {
+      calls.push(args);
+      return { runAgentExecutionPlanOnLangGraph: () => {} };
+    },
+    logger,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [[]]);
+});
+
+test("a warm-up whose load rejects logs a warning and still resolves", async () => {
+  const { lines, logger } = recordingLogger();
+  const failure = new Error("simulated load failure");
+  const result = await warmAgentExecutionPlanRuntime({
+    load: async () => {
+      throw failure;
+    },
+    logger,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, failure);
+  assert.equal(Number.isInteger(result.ms) && result.ms >= 0, true);
+  assert.deepEqual(lines.log, []);
+  assert.equal(lines.warn.length, 1);
+  assert.match(
+    lines.warn[0],
+    /^\[agent\] Loading LangGraph ahead of the first agent request failed after \d+ ms; the first agent request will load it: simulated load failure$/u
+  );
+});
+
+test("a warm-up that loads a module without the plan runner is a failed warm-up", async () => {
+  const { lines, logger } = recordingLogger();
+  const result = await warmAgentExecutionPlanRuntime({ load: async () => ({}), logger });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(lines.log, []);
+  assert.equal(lines.warn.length, 1);
+  assert.match(lines.warn[0], /does not export runAgentExecutionPlanOnLangGraph$/u);
+});
+
+test("a warm-up whose load throws synchronously is handled the same way", async () => {
+  const { lines, logger } = recordingLogger();
+  const result = await warmAgentExecutionPlanRuntime({
+    load: () => {
+      throw new Error("synchronous failure");
+    },
+    logger,
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(lines.log, []);
+  assert.equal(lines.warn.length, 1);
+  assert.match(lines.warn[0], /synchronous failure$/u);
 });

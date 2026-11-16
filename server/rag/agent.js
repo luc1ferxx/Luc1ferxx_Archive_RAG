@@ -400,21 +400,6 @@ const completeRecordedRunAndExperience = async ({
   return attachAgentRunSnapshot(responseWithExperienceMemory, completedRun);
 };
 
-const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
-  if (!capabilityRegistry || Object.keys(approvals).length === 0) {
-    return capabilityRegistry;
-  }
-
-  return {
-    ...capabilityRegistry,
-    execute: (capabilityId, payload = {}) =>
-      capabilityRegistry.execute(capabilityId, {
-        ...payload,
-        approval: payload.approval ?? approvals[capabilityId] ?? approvals["*"],
-      }),
-  };
-};
-
 const createGraphResumeError = (reason) => {
   const error = new Error(`Execution graph cannot be resumed: ${reason}.`);
   error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
@@ -708,7 +693,6 @@ const runAgentRagInScope = async ({
   userId,
   accessScope,
   agentRunId: requestedAgentRunId,
-  capabilityApprovals = {},
   taskMemory = null,
   dagPlannerAdapter = null,
   executionPlannerAdapter,
@@ -876,29 +860,22 @@ const runAgentRagInScope = async ({
     runCursor,
     runId: agentRunId,
   });
-  const baseCapabilityRegistry =
+  // A request carries no approvals: a gated Capability asks at its gate, and
+  // the gate is decided through the run's approval path (the step executor's
+  // applyApprovalAction), for the chat page and a background task alike.
+  const runCapabilityRegistry =
     capabilityRegistry ??
     createDefaultCapabilityRegistry({
       arxivImportService,
       ragService,
       webChatService,
     });
-  // An approval is a decision about one gate of the run it was asked in. A
-  // request that asked to re-enter a run and was continued as a new run
-  // carries none into it: the new run asks again if it needs to.
-  const effectiveCapabilityRegistry = withCapabilityApprovals(
-    baseCapabilityRegistry,
-    requestedAgentRunId && !reenteredRun ? {} : capabilityApprovals
-  );
 
   if (reenteredRun && agentRunId) {
     await agentRunService?.appendRunEvent?.({
       accessScope,
       runId: agentRunId,
       type: "run_resumed",
-      payload: {
-        approvedCapabilities: Object.keys(capabilityApprovals),
-      },
     });
   }
 
@@ -981,7 +958,7 @@ const runAgentRagInScope = async ({
       budgetState,
       arxivImportService,
       buildSkillTraceDetail,
-      capabilityRegistry: effectiveCapabilityRegistry,
+      capabilityRegistry: runCapabilityRegistry,
       dagPlannerAdapter,
       docIds,
       executeObservedSkill,
