@@ -551,8 +551,8 @@ test("the graph's final checkpoint save drops the LangGraph record in the same C
   const written = await readRun(fixture);
   assert.ok(written.result[LANGGRAPH_CHECKPOINT_RESULT_KEY]);
 
-  // Refused before any store call: not a boolean, or a graph still running
-  // (or paused for approval), whose thread the continuation resumes.
+  // Refused before any store call: not a boolean, or a graph that has not
+  // settled (still running, or in a phase this runtime does not write).
   const runningUpdate = updateExecutionGraphCheckpoint(fixture.checkpoint, { replans: [] });
   for (const dropLangGraphRecord of ["yes", 1, null]) {
     await assert.rejects(
@@ -567,7 +567,7 @@ test("the graph's final checkpoint save drops the LangGraph record in the same C
   await assert.rejects(
     instrumentedService.saveExecutionGraphCheckpoint({
       ...scoped,
-      checkpoint: updateExecutionGraphCheckpoint(fixture.checkpoint, { phase: "awaiting_approval" }),
+      checkpoint: updateExecutionGraphCheckpoint(fixture.checkpoint, { phase: "paused" }),
       dropLangGraphRecord: true,
     }),
     TypeError

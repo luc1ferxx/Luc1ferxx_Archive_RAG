@@ -4,7 +4,6 @@ import {
   SKILL_EFFECTS,
   SKILL_VALUE_TYPES,
   getSkillContract,
-  hasExplicitExecutionGraphContract,
   isAssignableValueType,
 } from "./skills/skill-contract.js";
 
@@ -15,13 +14,13 @@ import {
 // mutates the graph it is handed. Everything it can refuse, it refuses here --
 // so an illegal graph is rejected as a whole and no node ever partially runs.
 
-export const EXECUTION_GRAPH_VERSIONS = Object.freeze({
+// Both are custom-Skill graphs. (v3, the removed unified graph's contract for
+// document, Web, built-in, custom Skill and Capability nodes in one graph, is
+// no longer a version: ADR 0001 phases 10 and 11. A graph that names it is
+// refused like any unknown version.)
+const EXECUTION_GRAPH_VERSIONS = Object.freeze({
   v1: "v1",
   v2: "v2",
-  // v3 reserves a separate contract for heterogeneous document, Web,
-  // built-in, custom Skill, and approval-gated Capability nodes. v1/v2 stay
-  // custom-Skill graphs and keep their existing checkpoint identity.
-  v3: "v3",
 });
 
 // Existing callers and deterministic fallback continue to create v1 graphs.
@@ -51,11 +50,9 @@ export const EXECUTION_GRAPH_REASON_CODES = Object.freeze({
   inputTypeMismatch: "input_type_mismatch",
   invalidCondition: "invalid_condition",
   invalidGraphVersion: "invalid_graph_version",
-  implicitRuntimeContract: "implicit_runtime_contract",
   invalidNodeShape: "invalid_node_shape",
   maxDepthExceeded: "max_depth_exceeded",
   maxNodesExceeded: "max_nodes_exceeded",
-  missingAuthorizationCatalog: "missing_authorization_catalog",
   missingRequiredInput: "missing_required_input",
   outOfScopeDocument: "out_of_scope_document",
   selfDependency: "self_dependency",
@@ -100,7 +97,6 @@ const V2_NODE_FIELDS = new Set([
   "skillId",
   "when",
 ]);
-const V3_GRAPH_FIELDS = new Set(["nodes", "revision", "version"]);
 
 const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -327,10 +323,7 @@ const collectConditionErrors = ({ graphVersion, node, skillContractsByNodeId }) 
     }),
   ];
 
-  if (
-    graphVersion === EXECUTION_GRAPH_VERSIONS.v2 ||
-    graphVersion === EXECUTION_GRAPH_VERSIONS.v3
-  ) {
+  if (graphVersion === EXECUTION_GRAPH_VERSIONS.v2) {
     const extraFields = Object.keys(node).filter((field) => !V2_NODE_FIELDS.has(field));
 
     if (extraFields.length > 0) {
@@ -344,11 +337,8 @@ const collectConditionErrors = ({ graphVersion, node, skillContractsByNodeId }) 
     return [];
   }
 
-  if (
-    graphVersion !== EXECUTION_GRAPH_VERSIONS.v2 &&
-    graphVersion !== EXECUTION_GRAPH_VERSIONS.v3
-  ) {
-    return invalid(`Node ${nodeId} may declare when only in a v2 or v3 execution graph.`);
+  if (graphVersion !== EXECUTION_GRAPH_VERSIONS.v2) {
+    return invalid(`Node ${nodeId} may declare when only in a v2 execution graph.`);
   }
 
   const when = node.when;
@@ -658,31 +648,9 @@ export const validateExecutionGraph = ({
     errors.push(
       buildError({
         code: EXECUTION_GRAPH_REASON_CODES.invalidGraphVersion,
-        message: `Execution graph version must be v1, v2, or v3, received ${graphVersion || "(empty)"}.`,
+        message: `Execution graph version must be v1 or v2, received ${graphVersion || "(empty)"}.`,
       })
     );
-  }
-
-  if (graphVersion === EXECUTION_GRAPH_VERSIONS.v3) {
-    const extraFields = Object.keys(graph).filter((field) => !V3_GRAPH_FIELDS.has(field));
-
-    if (extraFields.length > 0) {
-      errors.push(
-        buildError({
-          code: EXECUTION_GRAPH_REASON_CODES.forgedPolicy,
-          message: `v3 execution graph contains runtime-owned or unsupported fields: ${extraFields.join(", ")}.`,
-        })
-      );
-    }
-
-    if (!Array.isArray(authorizedSkillIds)) {
-      errors.push(
-        buildError({
-          code: EXECUTION_GRAPH_REASON_CODES.missingAuthorizationCatalog,
-          message: "v3 execution graph requires a runtime-owned authorized node catalog.",
-        })
-      );
-    }
   }
 
   const nodes = toArray(graph.nodes);
@@ -744,20 +712,6 @@ export const validateExecutionGraph = ({
         buildError({
           code: EXECUTION_GRAPH_REASON_CODES.unregisteredCapability,
           message: `Node ${nodeId} references skill ${skillId} that is not registered and authorized for this request.`,
-          nodeId,
-        })
-      );
-    }
-
-    if (
-      graphVersion === EXECUTION_GRAPH_VERSIONS.v3 &&
-      skill &&
-      !hasExplicitExecutionGraphContract(skill)
-    ) {
-      errors.push(
-        buildError({
-          code: EXECUTION_GRAPH_REASON_CODES.implicitRuntimeContract,
-          message: `Node ${nodeId} references ${skillId} without an explicit typed effects and replay contract.`,
           nodeId,
         })
       );

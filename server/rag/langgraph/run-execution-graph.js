@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { Command, RunControl } from "@langchain/langgraph";
+import { RunControl } from "@langchain/langgraph";
 
 import {
   EXECUTION_GRAPH_NODE_STATUSES,
@@ -29,27 +29,21 @@ import {
 import { createExecutionGraphConcurrencyGate } from "./concurrency-gate.js";
 import { bridgeRequestSignalToDrain, resolveDrainedInvocationError } from "./drain-bridge.js";
 import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
-import { RUNTIME_RESUME_MARKER } from "./unified-graph-approval.js";
-import {
-  UNIFIED_GRAPH_RESUME_ERROR_CODES,
-  prepareUnifiedGraphApprovalResume,
-} from "./unified-graph-resume.js";
 
-// The scheduler of every guarded execution graph. Its one caller is the
-// custom-Skill DAG (agent-custom-skill-stage.js, since phase 2 of
-// docs/adr/0001-langgraph-runtime.md); from phase 3 until phase 10 removed it,
-// the v3 unified graph was the other. What only that graph used here (a node
-// parked for approval, the continuation of that approval on the same thread)
-// has no caller left and is kept until it is removed in its own step. Phase 6
-// deleted the native scheduler (runExecutionGraph in
+// The scheduler of the guarded execution graph: the custom-Skill DAG
+// (agent-custom-skill-stage.js, since phase 2 of
+// docs/adr/0001-langgraph-runtime.md). From phase 3 until phase 10 removed
+// it, the v3 unified graph ran here too, and with it a node could park at an
+// approval gate and continue on the same thread; phase 11 removed that. Phase
+// 6 deleted the native scheduler (runExecutionGraph in
 // agent-execution-graph-runner.js) that was the AGENT_RUNTIME=native
 // rollback, and with it the dial; what it did on the
 // parity suites' scenarios is frozen in test/fixtures/graph-goldens/, which
 // LangGraph is now compared with. "Natively" below means that deleted
 // scheduler, whose contract this one kept.
 //
-// Admission, the node states (and with them checkpoint reuse and denied
-// nodes), each node's work and the end of the run are the shared modules'
+// Admission, the node states (and with them checkpoint reuse), each node's
+// work and the end of the run are the shared modules'
 // functions (agent-execution-graph-runner.js, agent-execution-graph-node.js);
 // this file only schedules. LangGraph enters the nodes superstep by
 // superstep, and the in-process gate (concurrency-gate.js) holds each one to
@@ -83,31 +77,13 @@ import {
 // that earlier node was not ready yet, i.e. waited for a dependency still in
 // flight beside a sibling that already settled, which is race 1.
 //
-// An approval pause binds to the settled nodes the native scheduler's pause
-// did. A graph pauses once nothing else can run; a parked v3 node interrupts
-// the thread only when every pending node of a later layer depends on it
-// (compile-execution-graph.js hasExecutionGraphWorkBeforePause). When
-// something could still run (an independent node of a later layer, or a node
-// that would be skipped), the parked node returns its receipt instead, those
-// layers run, and the stage persists the pause through pauseForApproval with
-// the thread dropped: the continuation is then a fresh invocation.
-//
 // Durability. The agent run's graph checkpoint stays the authority: node
 // outputs, reuse, recovery, fencing and replay safety are decided from it.
 // LangGraph's own thread checkpoint
 // (RunStoreCheckpointSaver, on the same run row) is secondary: it holds
-// receipts, and a call is a fresh invocation -- a replan or a startup
+// receipts, and every call is a fresh invocation: a replan or a startup
 // recovery starts a new thread, seeded from the graph checkpoint's completed
-// runs, after the previous thread is tombstoned -- except the continuation of
-// an approval the graph parked on this thread (phase 3,
-// unified-graph-resume.js): that one resumes the thread's pending interrupt
-// with Command({ resume }), after the thread's receipts were checked against
-// the graph checkpoint, so the nodes that settled before the pause are not
-// entered again and the parked node re-runs from its first line into the
-// stage's preflight, which now holds the decided gate. A thread that has no
-// such interrupt (the pause was persisted without one), or that is behind the
-// checkpoint, gets the fresh invocation; a thread that contradicts the
-// checkpoint refuses the continuation.
+// runs, after the previous thread is tombstoned. Nothing resumes a thread.
 //
 // The invocation is always a root one. The outer plan runs on LangGraph too
 // (since ADR 0001 phase 7 always), so the custom-Skill graph is invoked from
@@ -115,8 +91,8 @@ import {
 // (execution-plan-graph.js), where LangGraph's ambient config carries that
 // node's nesting keys; invoked there as is, the graph would run as a subgraph
 // and checkpoint into a namespace named after the outer task
-// ("custom_skills:<task id>"), which readLangGraphThread (namespace "") never
-// finds. So the invoke runs under an empty LangChain async context, with
+// ("custom_skills:<task id>") instead of the thread's root namespace. So the
+// invoke runs under an empty LangChain async context, with
 // every option it needs passed explicitly, and the thread is in namespace ""
 // whoever calls the executor.
 //
@@ -129,7 +105,6 @@ import {
 
 export const LANGGRAPH_RUNNER_ERROR_CODES = Object.freeze({
   receiptMismatch: "AGENT_LANGGRAPH_RECEIPT_MISMATCH",
-  threadConflict: UNIFIED_GRAPH_RESUME_ERROR_CODES.threadConflict,
 });
 
 const createReceiptMismatchError = () => {
@@ -146,41 +121,17 @@ const createReceiptMismatchError = () => {
 
 const isPending = (state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.pending;
 
-// A receipt the thread wrote before a resume says `completed` for a node
-// this invocation reuses from the graph checkpoint; the digest is the same
-// typed output. Everything else must be the receipt the state builds now.
-const receiptMatchesState = ({ nodeOutputs, receipt, state }) => {
-  const expected = buildExecutionGraphReceipt({ nodeOutputs, state });
-
-  return (
-    isDeepStrictEqual(receipt, expected) ||
-    (state.status === EXECUTION_GRAPH_NODE_STATUSES.reused &&
-      receipt?.status === EXECUTION_GRAPH_NODE_STATUSES.completed &&
-      receipt.reason === null &&
-      receipt.outputDigest === expected.outputDigest)
-  );
-};
-
-// Every node is entered once and returns its receipt, so a missing or
-// different one means LangGraph lost or reordered work. After an interrupt
-// the parked node and the nodes behind it have none yet (they are pending or
-// parked in process), and only the receipts that exist are checked.
-const assertReceipts = ({ interrupted, nodeOutputs, receipts, states }) => {
+// Every node is entered once and returns its receipt, the receipt its state
+// builds now, so a missing or different one means LangGraph lost or reordered
+// work.
+const assertReceipts = ({ nodeOutputs, receipts, states }) => {
   for (const state of states) {
     const key = toExecutionGraphReceiptKey(state.node.nodeId);
 
-    if (!Object.hasOwn(receipts, key)) {
-      if (
-        interrupted &&
-        (isPending(state) || state.status === EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval)
-      ) {
-        continue;
-      }
-
-      throw createReceiptMismatchError();
-    }
-
-    if (!receiptMatchesState({ nodeOutputs, receipt: receipts[key], state })) {
+    if (
+      !Object.hasOwn(receipts, key) ||
+      !isDeepStrictEqual(receipts[key], buildExecutionGraphReceipt({ nodeOutputs, state }))
+    ) {
       throw createReceiptMismatchError();
     }
   }
@@ -193,28 +144,18 @@ const assertReceipts = ({ interrupted, nodeOutputs, receipts, states }) => {
  * a run service and run id, LangGraph checkpoints into that run
  * (RunStoreCheckpointSaver bound to `graphResumeClaimId`, so its writes are
  * fenced exactly like the node steps); otherwise it runs without one (an ephemeral
- * thread nothing reads back), and a parked node returns its receipt instead
- * of calling interrupt(), so the caller persists the pause through
- * pauseForApproval once nothing else can run.
- *
- * `approvalResume` ({ gateId, nodeId }, the stored approval boundary) says
- * this call continues a decided approval gate: the thread is resumed when
- * it still holds that node's pause (see prepareApprovalResume), and a fresh
- * invocation runs otherwise.
+ * thread nothing reads back).
  */
 export const runExecutionGraphOnLangGraph = async ({
   agentRunId = null,
   agentRunService = null,
-  approvalResume = null,
   authorizedDocIds,
   authorizedSkillIds = null,
   completedNodeRuns = [],
-  deniedNodeIds = [],
   docIds = [],
   graph,
   limits = EXECUTION_GRAPH_LIMITS,
   maxConcurrency,
-  pauseForApproval = null,
   registry,
   runCursor = null,
   // accessScope, the observability and lifecycle hooks, the request values
@@ -248,11 +189,10 @@ export const runExecutionGraphOnLangGraph = async ({
     return rejected;
   }
 
-  // Built before anything is written: an invalid reuse or denial list throws
-  // here, with nothing changed.
+  // Built before anything is written: an invalid reuse list throws here, with
+  // nothing changed.
   const { nodeOutputs, states, statesByNodeId } = createExecutionGraphNodeStates({
     completedNodeRuns,
-    deniedNodeIds,
     graph,
     registry,
   });
@@ -264,17 +204,14 @@ export const runExecutionGraphOnLangGraph = async ({
   });
   const control = createExecutionGraphRunControl();
 
-  // Nothing left to launch (every node reused or denied): there is nothing to
-  // schedule, and an invocation could only add a drain stop between nodes
-  // that never run. Decided before the thread is touched:
-  // a graph with nothing to run has no LangGraph writer (a settled graph,
-  // replayed for its finalization, is fenced off the thread record).
+  // Nothing left to launch (every node reused): there is nothing to schedule,
+  // and an invocation could only add a drain stop between nodes that never
+  // run. Decided before the thread is touched: a graph with nothing to run
+  // has no LangGraph writer.
   if (!states.some(isPending)) {
     return finishExecutionGraphRun({
-      context,
       control,
       graph,
-      pauseForApproval,
       states,
       statesByNodeId,
     });
@@ -289,9 +226,7 @@ export const runExecutionGraphOnLangGraph = async ({
         // (checkpointer.js, "Retention"): the record rides on the run row and
         // is rewritten whole by every later CAS of the run, and nothing here
         // reads further back than the newest checkpoint and its pending
-        // writes -- a resume of a parked node's interrupt
-        // (unified-graph-resume.js), the recovery read (unified-graph-
-        // thread.js) and the receipts check after invoke.
+        // writes (the receipts check after invoke).
         retainCheckpoints: LANGGRAPH_CHECKPOINT_RETENTION,
         runCursor,
         runId: agentRunId,
@@ -302,24 +237,11 @@ export const runExecutionGraphOnLangGraph = async ({
   const threadId = checkpointer?.threadId ??
     deriveLangGraphThreadId(nodeOptions.accessScope, `ephemeral:${randomUUID()}`);
 
-  const resume = checkpointer && approvalResume
-    ? await prepareUnifiedGraphApprovalResume({
-        approvalResume,
-        context,
-        graph,
-        nodeOutputs,
-        saver: checkpointer,
-        states,
-        statesByNodeId,
-      })
-    : null;
-
-  if (checkpointer && !resume) {
-    // Every other call starts a new thread: an earlier invocation's record
-    // (the graph before a replan, a crashed attempt, a pause persisted
-    // without an interrupt) must not be resumed or mistaken for this one.
-    // The tombstone is fenced like any saver write, so only the graph's
-    // current owner can drop it.
+  if (checkpointer) {
+    // Every call starts a new thread: an earlier invocation's record (the
+    // graph before a replan, a crashed attempt) must not be mistaken for
+    // this one. The tombstone is fenced like any saver write, so only the
+    // graph's current owner can drop it.
     await checkpointer.deleteThread(threadId);
   }
 
@@ -338,9 +260,6 @@ export const runExecutionGraphOnLangGraph = async ({
     context,
     control,
     gate: createExecutionGraphConcurrencyGate(concurrencyCap),
-    graph,
-    // A parked node stops the thread only where a thread exists to resume.
-    interruptOnApproval: Boolean(checkpointer),
     nodeOutputs,
     states,
     statesByNodeId,
@@ -360,16 +279,9 @@ export const runExecutionGraphOnLangGraph = async ({
       undefined,
       () =>
         app.invoke(
-          // A resume answers the thread's one pending interrupt by id,
-          // always with the runtime's own marker
-          // (unified-graph-approval.js): no client value is ever persisted
-          // as the thread's __resume__ write, and the node reads its
-          // decision from the run store.
-          resume
-            ? new Command({ resume: { [resume.interruptId]: RUNTIME_RESUME_MARKER } })
-            : { receipts: {} },
+          { receipts: {} },
           {
-            // The root namespace, explicitly: readLangGraphThread reads it.
+            // The root namespace, explicitly.
             configurable: { thread_id: threadId, checkpoint_ns: "" },
             control: runControl,
             // Each superstep is checkpointed before the next one starts.
@@ -378,8 +290,7 @@ export const runExecutionGraphOnLangGraph = async ({
             // a superstep must be started, and the gate decides when it
             // proceeds.
             maxConcurrency: graph.nodes.length,
-            // One superstep per topological layer, plus the input step
-            // (counted from the thread's current step on a resume).
+            // One superstep per topological layer, plus the input step.
             recursionLimit: compiled.depth + 1,
           }
         ),
@@ -393,49 +304,15 @@ export const runExecutionGraphOnLangGraph = async ({
     removeDrainBridge();
   }
 
-  const interrupts = Array.isArray(output?.__interrupt__) ? output.__interrupt__ : [];
-  const parked = states.filter(
-    (state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval
-  );
-
-  // A parked node stopped the graph: its superstep's other nodes settled and
-  // were committed to the thread before invoke returned (durability sync).
-  // Each interrupt must be a parked node's and no other, or the thread
-  // cannot be resumed for the pause the stage is about to persist.
-  if (
-    interrupts.length > 0 &&
-    (interrupts.length !== parked.length ||
-      interrupts.some(
-        (pending) => !parked.some((state) => state.node.nodeId === pending?.value?.nodeId)
-      ))
-  ) {
-    throw createReceiptMismatchError();
-  }
-
   assertReceipts({
-    interrupted: interrupts.length > 0,
     nodeOutputs,
     receipts: output?.receipts ?? {},
     states,
   });
 
-  if (checkpointer && interrupts.length === 0 && parked.length > 0) {
-    // The parked node returned its receipt because later layers still had
-    // work to run before the pause (compile-execution-graph.js); the graph
-    // ran them and stops here, once nothing else can run. The thread holds
-    // no interrupt to resume, so it is dropped now: the continuation starts
-    // a fresh invocation, and no thread without a pause outlives the pause
-    // the stage persists next.
-    await checkpointer.deleteThread(threadId);
-  }
-
-  // On a pause: the stage's pauseForApproval, now that nothing else can run
-  // (or the parked node's abandonment after a failure).
   return finishExecutionGraphRun({
-    context,
     control,
     graph,
-    pauseForApproval,
     states,
     statesByNodeId,
   });

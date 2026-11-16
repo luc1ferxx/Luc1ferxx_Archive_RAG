@@ -4,9 +4,7 @@ import {
   GraphDrained,
   START,
   StateGraph,
-  interrupt,
   isGraphDrained,
-  isGraphInterrupt,
 } from "@langchain/langgraph";
 
 import { normalizeTrimmedText } from "../../lib/normalize-text.js";
@@ -22,9 +20,8 @@ import {
 } from "../agent-execution-graph-node.js";
 import { getRequestCancellation } from "../request-deadline.js";
 import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
-import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 
-// A validated ExecutionGraph (custom-Skill v2, or v3) as a LangGraph
+// A validated ExecutionGraph (the custom-Skill graph) as a LangGraph
 // StateGraph: one LangGraph node per graph node, START into every node
 // without dependencies, a join edge from a node's dependencies into it, and
 // every node no other node depends on into END.
@@ -50,31 +47,10 @@ import { buildApprovalInterruptPayload } from "./unified-graph-approval.js";
 // Every node returns its receipt, skipped ones included, so a join always fires
 // and every node of the graph is entered exactly once, in the superstep of its
 // topological layer, and in name order inside it, which is the layer-order
-// queue the native scheduler scanned (orderExecutionGraphNodeStatesByLayer). The
-// one exception is a v3 node its approval preflight parked (phase 3): on a
-// checkpointed thread it calls interrupt() instead of returning, so LangGraph
-// stops after that superstep with the pause recorded in the thread, and the
-// approval decision later resumes the same thread (run-execution-graph.js). The
-// park spent nothing -- no step, no budget, no trace, no checkpoint write
-// (agent-execution-graph-node.js) -- so interrupt() is the node's first
-// effectful operation, and the re-run LangGraph does on resume repeats only
-// reads before the stage's preflight hands the node its decided gate. The value
-// interrupt() returns on that re-run is never read: the decision comes from the
-// run store.
-//
-// The native scheduler paused only once nothing else could run: after a node
-// parked it kept launching every pending node that did not depend on it,
-// and the gate bound to the checkpoint those nodes settled into; LangGraph
-// keeps that pause state. An
-// interrupt() stops LangGraph after the parked node's superstep, so it is
-// called only when every pending node of a later layer depends on the parked
-// one (hasExecutionGraphWorkBeforePause); layers are static here, since every
-// node is entered in the superstep of its layer. Otherwise the parked node
-// returns its receipt like any other, the later layers run what the native
-// pass would run (its dependants wait, as natively), and the executor
-// persists the pause natively and drops the thread, so the continuation is
-// the fresh invocation a native pause gets. Either way the pause state is the
-// native one.
+// queue the native scheduler scanned (orderExecutionGraphNodeStatesByLayer).
+// (From phase 3 until phase 11 a node could also park at an approval gate and
+// stop the thread with interrupt(); only the v3 unified graph had such nodes,
+// and that went with it.)
 //
 // Edges are resolved by the validator's node id (trimmed), as it resolved
 // them when it accepted the graph; the node code then looks dependencies up
@@ -118,66 +94,6 @@ export const encodeExecutionGraphNodeName = ({ index, nodeCount, nodeId }) => {
  * back from the thread instead of adding a receipt.
  */
 export const toExecutionGraphReceiptKey = (nodeId) => `node:${nodeId}`;
-
-// The nodes reachable from `nodeId` through dependsOn edges (the ones whose
-// launch waits on it), by the validator's trimmed id.
-const collectExecutionGraphDescendants = ({ nodeId, states }) => {
-  const dependants = new Map(states.map((state) => [normalizeTrimmedText(state.node.nodeId), []]));
-
-  for (const state of states) {
-    for (const dependencyId of state.node.dependsOn ?? []) {
-      dependants.get(normalizeTrimmedText(dependencyId))?.push(normalizeTrimmedText(state.node.nodeId));
-    }
-  }
-
-  const descendants = new Set();
-  const frontier = [normalizeTrimmedText(nodeId)];
-
-  while (frontier.length > 0) {
-    for (const dependantId of dependants.get(frontier.pop()) ?? []) {
-      if (!descendants.has(dependantId)) {
-        descendants.add(dependantId);
-        frontier.push(dependantId);
-      }
-    }
-  }
-
-  return descendants;
-};
-
-/**
- * Whether the native scheduler would still run (or skip) something before
- * pausing for the approval of `nodeId`: a pending node of a later layer than
- * that node's which does not depend on it, directly or through any node.
- * Such a node LangGraph has not entered yet, so an interrupt() in the parked
- * node's superstep would pause before it, where native pauses after it. A
- * pending node of the same layer is in the superstep already and settles
- * before the interrupt stops the graph; a pending dependant waits natively
- * too. `compiled` is admission's compileExecutionGraph result (its layers are
- * the validator's, trimmed ids), `states` the node states.
- */
-export const hasExecutionGraphWorkBeforePause = ({ compiled, nodeId, states }) => {
-  const layerByNodeId = new Map(
-    (compiled?.layers ?? []).flatMap((layer, index) => layer.map((id) => [id, index]))
-  );
-  const parkedLayer = layerByNodeId.get(normalizeTrimmedText(nodeId));
-
-  if (parkedLayer === undefined) {
-    throw new TypeError("A parked node must belong to a compiled layer.");
-  }
-
-  const descendants = collectExecutionGraphDescendants({ nodeId, states });
-
-  return states.some((state) => {
-    const id = normalizeTrimmedText(state.node.nodeId);
-
-    return (
-      state.status === EXECUTION_GRAPH_NODE_STATUSES.pending &&
-      !descendants.has(id) &&
-      (layerByNodeId.get(id) ?? -1) > parkedLayer
-    );
-  });
-};
 
 // A node only ever writes its own key, so a keyed merge is the whole reducer.
 // A reducer (not LastValue) is required anyway: nodes of one superstep write
@@ -235,15 +151,11 @@ const passSafePoint = (control) => {
 };
 
 const createNodeAction = ({
-  compiled,
   context,
   control,
   gate,
-  graph,
-  interruptOnApproval,
   nodeOutputs,
   state,
-  states,
   statesByNodeId,
   trackNode,
 }) => {
@@ -259,7 +171,6 @@ const createNodeAction = ({
       dependencyStatuses: (state.node.dependsOn ?? []).map(
         (dependencyId) => statesByNodeId.get(dependencyId)?.status
       ),
-      graphVersion: graph.version,
       interrupted: Boolean(control.interrupt),
       node: state.node,
       nodeOutputs,
@@ -272,9 +183,8 @@ const createNodeAction = ({
     // switched on since the outer entry checked must not see the next one.
     assertLangSmithTracingDisabled();
 
-    // Settled before this invocation: reused from the graph checkpoint or
-    // denied at its approval gate. Nothing is launched, so, as natively, no
-    // safe point applies.
+    // Settled before this invocation: reused from the graph checkpoint.
+    // Nothing is launched, so, as natively, no safe point applies.
     if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
       return toUpdate();
     }
@@ -284,9 +194,9 @@ const createNodeAction = ({
     let { decision, reason } = decide();
 
     // `wait` (a dependency left pending by an interrupt or never settled)
-    // and `hold` (a v3 graph with a pending interrupt) both leave the node
-    // pending, as the native loop does once nothing else can run; the native
-    // pass passes over such a node without stopping, so it takes no turn.
+    // leaves the node pending, as the native loop does once nothing else can
+    // run; the native pass passes over such a node without stopping, so it
+    // takes no turn.
     if (decision !== EXECUTION_GRAPH_SCHEDULE_DECISIONS.launch) {
       if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
         // The native pass decides a skip when its scan reaches the node:
@@ -331,32 +241,11 @@ const createNodeAction = ({
     if (decision === EXECUTION_GRAPH_SCHEDULE_DECISIONS.launch) {
       await runExecutionGraphNode({ context, control, nodeOutputs, state });
 
-      if (
-        interruptOnApproval &&
-        state.status === EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval &&
-        !hasExecutionGraphWorkBeforePause({ compiled, nodeId, states })
-      ) {
-        // Parked at its gate with nothing left that native would run before
-        // pausing (see the header). On the first pass this throws
-        // GraphInterrupt: LangGraph records the payload as the thread's
-        // pending interrupt, lets the superstep's other nodes finish, and
-        // returns; the stage then persists the gate against the checkpoint
-        // those nodes settled into. The payload is public ids only
-        // (unified-graph-approval.js). On a resumed thread interrupt()
-        // returns the resume marker at once instead (never read), so a node
-        // that parked again there would return an awaiting_approval receipt
-        // and the executor would persist that pause natively, which the run
-        // store refuses as a second gate; the stage's preflight hands the
-        // approved node its decided gate, so it never parks again.
-        interrupt(buildApprovalInterruptPayload({ nodeId }));
-      }
-
       // An AgentRunInterruptError hands the node back as pending, and the
-      // native loop decides it again on its next pass: a v2 node is then
-      // skipped (aborted_after_failure, so its dependants are skipped too),
-      // a v3 node is held pending. Entered only once here, the node takes
-      // that decision now. It cannot be `launch` again: the interrupt is
-      // pending.
+      // native loop decides it again on its next pass: the node is then
+      // skipped (aborted_after_failure, so its dependants are skipped too).
+      // Entered only once here, the node takes that decision now. It cannot
+      // be `launch` again: the interrupt is pending.
       ({ decision, reason } = state.status === EXECUTION_GRAPH_NODE_STATUSES.pending
         ? decide()
         : { decision: null, reason: null });
@@ -381,11 +270,10 @@ const createNodeAction = ({
       releaseSlot = release;
     })
       .catch((error) => {
-        // A drain and an approval park are LangGraph's own stop signals, not
-        // failures: neither sets the run's fatal error.
+        // A drain is LangGraph's own stop signal, not a failure: it does not
+        // set the run's fatal error.
         if (
           isGraphDrained(error) ||
-          isGraphInterrupt(error) ||
           error?.code === LANGGRAPH_EXECUTION_GRAPH_ERROR_CODES.nodeStopped
         ) {
           throw error;
@@ -415,12 +303,7 @@ const createNodeAction = ({
  * and `nodeOutputs` the run's shared node context, control flags and typed
  * outputs, `gate` the concurrency gate, and `trackNode(promise)` registers a
  * node's in-flight work and returns it.
- * `checkpointer` is a BaseCheckpointSaver or false. With `interruptOnApproval`
- * (which needs a checkpointer: interrupt() refuses to run without one) a node
- * parked at its approval gate stops the graph with interrupt() instead of
- * returning a receipt, unless native would still run something before the
- * pause (hasExecutionGraphWorkBeforePause); without it the parked node
- * returns its receipt and the graph runs on, as it did in phase 2.
+ * `checkpointer` is a BaseCheckpointSaver or false.
  */
 export const compileExecutionGraphOnLangGraph = ({
   checkpointer = false,
@@ -428,17 +311,11 @@ export const compileExecutionGraphOnLangGraph = ({
   context,
   control,
   gate,
-  graph,
-  interruptOnApproval = false,
   nodeOutputs,
   states,
   statesByNodeId,
   trackNode,
 }) => {
-  if (interruptOnApproval && !checkpointer) {
-    throw new TypeError("An approval interrupt needs a LangGraph checkpointer.");
-  }
-
   if (!Array.isArray(compiled?.layers) || !Array.isArray(compiled?.order)) {
     throw new TypeError("A LangGraph execution graph needs the compiled graph's layers.");
   }
@@ -464,15 +341,11 @@ export const compileExecutionGraphOnLangGraph = ({
     builder.addNode(
       name,
       createNodeAction({
-        compiled,
         context,
         control,
         gate,
-        graph,
-        interruptOnApproval,
         nodeOutputs,
         state,
-        states,
         statesByNodeId,
         trackNode,
       })

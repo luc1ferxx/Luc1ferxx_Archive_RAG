@@ -66,8 +66,9 @@ import { assertLangSmithTracingDisabled } from "./langsmith-guard.js";
 //     (agent-custom-skill-stage.js) clears the key in the same CAS
 //     (saveExecutionGraphCheckpoint's dropLangGraphRecord), and failRun
 //     clears it when a run fails or is cancelled inside its graph, so a
-//     finished or terminal run never carries a thread; a paused one
-//     (approval) keeps it, because the continuation resumes that thread.
+//     finished or terminal run never carries a thread. (Until ADR 0001
+//     phase 11 a graph paused for approval kept its thread for the
+//     continuation to resume; nothing pauses a graph any more.)
 
 export { LANGGRAPH_CHECKPOINT_RESULT_KEY };
 export const LANGGRAPH_CHECKPOINT_FORMAT = "archive-rag.langgraph-saver/v1";

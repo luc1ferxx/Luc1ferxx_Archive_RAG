@@ -5,6 +5,9 @@ import {
   sealExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 
+// The step id prefix of the removed v3 unified graph's node steps (their type
+// was `graph_node`). A run that graph stored can still hold such steps, and
+// they are refused like a custom Skill's: nothing replays one.
 const V3_GRAPH_STEP_PREFIX = "agent_graph_node:";
 const TERMINAL_GRAPH_PHASES = new Set(["completed", "partial"]);
 const POST_GRAPH_STEP_EVENTS = new Set([
@@ -135,16 +138,9 @@ export const assertStandaloneGraphReplayAllowed = ({
     ? checkpoint.graph.nodes
     : [];
   // A step whose type does not say so can still carry a node's step id.
-  const originalIsGraphNode = graphNodes.some((node) => {
-    try {
-      return buildExecutionGraphNodeStepId({
-        checkpointVersion: checkpoint.version,
-        nodeId: node.nodeId,
-      }) === original.id;
-    } catch {
-      return false;
-    }
-  });
+  const originalIsGraphNode = graphNodes.some(
+    (node) => buildExecutionGraphNodeStepId({ nodeId: node.nodeId }) === original.id
+  );
 
   if (originalIsGraphNode || !isTerminalCheckpoint(checkpoint)) {
     failStandaloneGraphAction();

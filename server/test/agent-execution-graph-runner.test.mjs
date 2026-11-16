@@ -11,9 +11,7 @@ import {
   createExecutionGraph,
 } from "../rag/agent-execution-graph.js";
 import { runExecutionGraphOnLangGraph } from "../rag/langgraph/run-execution-graph.js";
-import { AGENT_INTERRUPT_TYPES, AgentRunInterruptError } from "../rag/agent-interrupts.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
-import { createBuiltInSkills } from "../rag/skills/built-ins.js";
 import {
   CUSTOM_RAG_SKILL_INPUT_SCHEMA,
   CUSTOM_RAG_SKILL_CONTRACT,
@@ -27,12 +25,14 @@ import {
 
 // The scheduler contract of a guarded execution graph (concurrency,
 // exclusivity, layer order, fail_fast, budget, input and output gates,
-// checkpoints, interrupts, approvals, recovery fences), on the only scheduler
-// left: runExecutionGraphOnLangGraph. These assertions were written for the
-// native scheduler that phase 6 of docs/adr/0001-langgraph-runtime.md deleted
-// and held unchanged on LangGraph (they ran there through
+// checkpoints, recovery fences), on the only scheduler left:
+// runExecutionGraphOnLangGraph. These assertions were written for the native
+// scheduler that phase 6 of docs/adr/0001-langgraph-runtime.md deleted and
+// held unchanged on LangGraph (they ran there through
 // test/langgraph-native-runner-suite.test.mjs until then); none was changed
-// when the suite moved.
+// when the suite moved. The cases of the v3 unified graph (a node that is not
+// a custom Skill, a node parked for approval, the document evidence loop)
+// left with that graph in phases 10 and 11.
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -155,7 +155,6 @@ const runGraph = async ({
   authorizedDocIds = null,
   authorizedSkillIds,
   budgetState = createAgentBudget(),
-  capabilityRegistry,
   completedNodeRuns,
   docIds = ["doc-1", "doc-2"],
   graph,
@@ -178,7 +177,6 @@ const runGraph = async ({
     authorizedDocIds: authorizedDocIds ?? docIds,
     authorizedSkillIds: authorizedSkillIds ?? registry.list().map((skill) => skill.id),
     budgetState,
-    capabilityRegistry,
     buildSkillTraceDetail: tracker.buildSkillTraceDetail,
     completedNodeRuns,
     docIds,
@@ -203,289 +201,6 @@ const runGraph = async ({
 
   return { budgetState, budgetTrace, lifecycle, outcome, trace, tracker };
 };
-
-// This test asserts the default follow-up question; the flag that changes it
-// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
-// not change what is asserted.
-const pinDefaultFollowUpQuestion = (t) => {
-  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-
-  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
-  t.after(() => {
-    if (previous === undefined) {
-      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-    } else {
-      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
-    }
-  });
-};
-
-test("v3 runs a contracted non-custom node with a distinct graph lifecycle identity", async () => {
-  const calls = [];
-  const registry = createRegistry([{
-    ...createSkill({
-      budgetKey: "webSearchCalls",
-      effects: SKILL_EFFECTS.externalRead,
-      execute: async ({ capabilityRegistry, question }) => {
-        calls.push({ capabilityRegistry, question });
-        return { citations: [], text: "External evidence" };
-      },
-      id: "web_search",
-      inputSchema: { question: { required: true, type: SKILL_VALUE_TYPES.string } },
-      parallelSafe: false,
-    }),
-    idempotency: SKILL_IDEMPOTENCY.nondeterministic,
-    kind: "built_in",
-    replaySafe: false,
-    retryable: false,
-  }]);
-  const capabilityRegistry = { marker: "trusted-runtime-only" };
-  const graph = createExecutionGraph({
-    nodes: [node({
-      inputBindings: { question: requestField("question") },
-      nodeId: "web:search",
-      skillId: "web_search",
-    })],
-    version: "v3",
-  });
-
-  const { lifecycle, outcome, trace } = await runGraph({
-    capabilityRegistry,
-    docIds: [],
-    graph,
-    registry,
-  });
-
-  const expectedStepId = `agent_graph_node:${Buffer.from("web:search").toString("base64url")}`;
-  assert.equal(outcome.ok, true);
-  assert.equal(outcome.nodeRuns[0].stepId, expectedStepId);
-  assert.deepEqual(calls, [{ capabilityRegistry, question: "Compare the two contracts and review the risks." }]);
-  assert.deepEqual(lifecycle.map(({ type, id, verb }) => ({ type, id, verb })), [
-    { id: expectedStepId, type: "graph_node", verb: "start" },
-    { id: expectedStepId, type: undefined, verb: "complete" },
-  ]);
-  assert.equal(trace[0].type, "graph_node");
-});
-
-test("graph preflight interrupts before lifecycle start, budget charge, or adapter execution", async () => {
-  let executed = 0;
-  let started = 0;
-  let preflighted = 0;
-  const skill = createSkill({
-    execute: async () => {
-      executed += 1;
-      return { citations: [], text: "Unexpected execution" };
-    },
-    id: "approval_example",
-    parallelSafe: false,
-  });
-  const registry = createRegistry([skill]);
-  const budgetState = createAgentBudget();
-  const graph = createExecutionGraph({
-    nodes: [node({ nodeId: "write", skillId: skill.id })],
-    version: "v3",
-  });
-
-  await assert.rejects(
-    runExecutionGraphOnLangGraph({
-      accessScope: { userId: "alice", workspaceId: "acme" },
-      authorizedDocIds: ["doc-1"],
-      authorizedSkillIds: [skill.id],
-      budgetState,
-      docIds: ["doc-1"],
-      executeObservedSkill: async () => {
-        executed += 1;
-        throw new Error("Unexpected adapter call");
-      },
-      graph,
-      preflightNode: ({ boundInputs, node: graphNode }) => {
-        preflighted += 1;
-        assert.equal(graphNode.nodeId, "write");
-        assert.deepEqual(boundInputs.docIds, ["doc-1"]);
-        assert.equal(budgetState.used.customSkillCalls, 0);
-        throw new AgentRunInterruptError({
-          type: AGENT_INTERRUPT_TYPES.capabilityApprovalRequired,
-        });
-      },
-      question: "Review a document",
-      registry,
-      stepLifecycle: {
-        startStep: async () => { started += 1; },
-        completeStep: async () => { throw new Error("Unexpected completion"); },
-        failStep: async () => { throw new Error("Unexpected failure step"); },
-      },
-    }),
-    (error) => error.agentRunInterrupt === true &&
-      error.executionGraphNodeRuns[0].status === "pending"
-  );
-  assert.equal(preflighted, 1);
-  assert.equal(started, 0);
-  assert.equal(executed, 0);
-  assert.equal(budgetState.used.customSkillCalls, 0);
-});
-
-const createDocumentFollowUpGraph = () => createExecutionGraph({
-  nodes: [
-    node({ nodeId: "primary", skillId: "document_rag" }),
-    node({
-      dependsOn: ["primary"],
-      inputBindings: {
-        docIds: requestField("docIds"),
-        evidence: nodeOutput("primary", "evidence"),
-        question: requestField("question"),
-      },
-      nodeId: "check",
-      skillId: "document_evidence_check",
-    }),
-    node({
-      dependsOn: ["check"],
-      inputBindings: {
-        docIds: requestField("docIds"),
-        question: nodeOutput("check", "followUpQuestion"),
-        retrievalPlan: nodeOutput("check", "followUpRetrievalPlan"),
-      },
-      nodeId: "follow-up",
-      skillId: "document_rag",
-      when: { equals: true, nodeId: "check", output: "retryRecommended" },
-    }),
-  ],
-  version: "v3",
-});
-
-test("v3 document evidence node schedules exactly one typed follow-up when support is missing", async (t) => {
-  pinDefaultFollowUpQuestion(t);
-  const registry = createRegistry(createBuiltInSkills());
-  const docIds = ["doc-1", "doc-2"];
-  const calls = [];
-  const graph = createDocumentFollowUpGraph();
-  const primaryRetrievalPlan = {
-    phase: "primary",
-    retrievalQueries: [{ id: "primary", query: "contract risks" }],
-  };
-  const { outcome, budgetState } = await runGraph({
-    docIds,
-    graph,
-    ragService: {
-      chat: async (selectedDocIds, question, options) => {
-        calls.push({ selectedDocIds, question, options });
-        return calls.length === 1
-          ? { abstained: false, citations: [], text: "The agreements differ." }
-          : {
-              abstained: false,
-              citations: [{
-                docId: "doc-1",
-                excerpt: "The agreements differ in notice periods.",
-                fileName: "a.pdf",
-                pageNumber: 1,
-                rank: 1,
-              }],
-              text: "The agreements differ in notice periods. [Source 1]",
-            };
-      },
-    },
-    registry,
-    retrievalPlan: primaryRetrievalPlan,
-  });
-
-  assert.equal(outcome.status, "completed");
-  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), [
-    "completed", "completed", "completed",
-  ]);
-  assert.equal(outcome.nodeRuns[1].result.graphOutput.retryRecommended, true);
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls.map((call) => call.selectedDocIds), [docIds, docIds]);
-  assert.match(calls[1].question, /Evidence issue:/);
-  assert.equal(calls[0].options.retrievalPlan, primaryRetrievalPlan);
-  assert.deepEqual(
-    calls[1].options.retrievalPlan,
-    outcome.nodeRuns[1].result.graphOutput.followUpRetrievalPlan
-  );
-  assert.equal(calls[1].options.retrievalPlan.phase, "follow_up");
-  assert.notDeepEqual(calls[1].options.retrievalPlan, primaryRetrievalPlan);
-  assert.deepEqual(
-    calls[1].options.retrievalPlan.retrievalQueries.map(({ id }) => id),
-    ["primary", "follow-up-evidence", "follow-up-source-check"]
-  );
-  assert.equal(budgetState.used.documentRagCalls, 2);
-});
-
-test("v3 explicit document abstention does not schedule a follow-up RAG call", async () => {
-  const calls = [];
-  const { outcome, budgetState } = await runGraph({
-    graph: createDocumentFollowUpGraph(),
-    ragService: {
-      chat: async (...args) => {
-        calls.push(args);
-        return { abstained: true, citations: [], text: "Insufficient evidence." };
-      },
-    },
-    registry: createRegistry(createBuiltInSkills()),
-  });
-
-  assert.equal(outcome.status, "completed");
-  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), [
-    "completed", "completed", "skipped",
-  ]);
-  assert.equal(outcome.nodeRuns[1].result.graphOutput.retryRecommended, false);
-  assert.equal(
-    Object.hasOwn(outcome.nodeRuns[1].result.graphOutput, "followUpRetrievalPlan"),
-    false
-  );
-  assert.equal(calls.length, 1);
-  assert.equal(budgetState.used.documentRagCalls, 1);
-});
-
-test("v3 validates a document result before taking a conditional Web edge", async () => {
-  const order = [];
-  const builtIns = createBuiltInSkills();
-  const registry = createRegistry(builtIns.filter(
-    (skill) => ["document_rag", "web_search"].includes(skill.id)
-  ));
-  const ragService = {
-    chat: async (selectedDocIds, requestQuestion, options) => {
-      order.push("document_rag");
-      assert.deepEqual(selectedDocIds, ["doc-1", "doc-2"]);
-      assert.equal(options.accessScope.userId, "alice");
-      assert.equal(requestQuestion, "Compare the two contracts and review the risks.");
-      return { abstained: true, citations: [], text: "Insufficient document evidence." };
-    },
-  };
-  const capabilityRegistry = {
-    execute: async (capabilityId, args) => {
-      order.push("web_search");
-      assert.equal(capabilityId, "web.search");
-      assert.equal(args.accessScope.workspaceId, "acme");
-      return { citations: [{ url: "https://example.test/source" }], text: "External context." };
-    },
-  };
-  const graph = createExecutionGraph({
-    nodes: [
-      node({ nodeId: "document", skillId: "document_rag" }),
-      node({
-        dependsOn: ["document"],
-        inputBindings: { question: requestField("question") },
-        nodeId: "web",
-        skillId: "web_search",
-        when: { equals: true, nodeId: "document", output: "abstained" },
-      }),
-    ],
-    version: "v3",
-  });
-
-  const { budgetState, outcome, trace } = await runGraph({
-    capabilityRegistry,
-    graph,
-    ragService,
-    registry,
-  });
-
-  assert.equal(outcome.ok, true);
-  assert.deepEqual(order, ["document_rag", "web_search"]);
-  assert.deepEqual(outcome.nodeRuns.map((run) => run.status), ["completed", "completed"]);
-  assert.deepEqual(trace.map((step) => step.type), ["graph_node", "graph_node"]);
-  assert.equal(getBudgetSnapshot(budgetState).used.documentRagCalls, 1);
-  assert.equal(getBudgetSnapshot(budgetState).used.webSearchCalls, 1);
-});
 
 test("a typed upstream docIds output cannot widen the request scope", async () => {
   const executed = [];

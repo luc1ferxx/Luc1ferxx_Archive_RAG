@@ -1,16 +1,9 @@
 import {
   EXECUTION_GRAPH_NODE_STATUSES,
-  EXECUTION_GRAPH_SCHEDULE_DECISIONS,
   EXECUTION_GRAPH_SKIP_REASONS,
   buildExecutionGraphNodeRun,
   buildExecutionGraphRunResult,
   buildRejectedExecutionGraphRun,
-  createExecutionGraphNodeContext,
-  createExecutionGraphNodeStates,
-  createExecutionGraphRunControl,
-  decideExecutionGraphNode,
-  orderExecutionGraphNodeStatesByLayer,
-  recordExecutionGraphNodeSkip,
 } from "./agent-execution-graph-node.js";
 import {
   EXECUTION_GRAPH_LIMITS,
@@ -19,7 +12,7 @@ import {
 } from "./agent-execution-graph.js";
 
 // The two ends of a validated ExecutionGraph's run that do not depend on how
-// its nodes are scheduled, plus the replay of a settled graph.
+// its nodes are scheduled.
 //
 // The runtime owns everything the planner is not allowed to decide: what
 // runs, when, how many at once, what each node is allowed to read, and what a
@@ -32,13 +25,14 @@ import {
 //
 // The scheduler is LangGraph (langgraph/run-execution-graph.js
 // runExecutionGraphOnLangGraph): the validator's topological layer order
-// (orderExecutionGraphNodeStatesByLayer) as the queue, the concurrency cap,
-// side-effect exclusivity and the approval pause. Phase 6 of
+// (orderExecutionGraphNodeStatesByLayer) as the queue, the concurrency cap
+// and side-effect exclusivity. Phase 6 of
 // docs/adr/0001-langgraph-runtime.md deleted the native scheduling loop
 // (runExecutionGraph) that used to live here as the AGENT_RUNTIME=native
 // rollback; what it did is frozen as golden fixtures under
-// test/fixtures/graph-goldens/. replayExecutionGraphRun schedules nothing, so
-// it needs no scheduler.
+// test/fixtures/graph-goldens/. Phase 11 deleted what only the removed v3
+// unified graph used here: the approval pause of a parked node and the
+// scheduler-free replay of a settled graph (replayExecutionGraphRun).
 
 export {
   EXECUTION_GRAPH_NODE_STATUSES,
@@ -117,41 +111,16 @@ export const admitExecutionGraphRun = ({
   };
 };
 
-const pauseExecutionGraphRunForApproval = async ({ graph, pauseForApproval, state, states }) => {
-  // Every in-flight node has settled and checkpointed. The hook persists
-  // the gate against that checkpoint and throws the run's interrupt.
-  await pauseForApproval({
-    boundInputs: state.awaiting.boundInputs,
-    graph,
-    node: state.node,
-    nodeDocIds: state.awaiting.nodeDocIds,
-    nodeRuns: states.map(buildExecutionGraphNodeRun),
-    skill: state.skill,
-  });
-
-  const error = new Error("The approval pause did not interrupt the graph.");
-  error.code = "AGENT_UNIFIED_GRAPH_APPROVAL_UNAVAILABLE";
-  error.status = 409;
-  throw error;
-};
-
 /**
  * The end of a run once no node can be launched any more: the first fatal
- * error, then a pending AgentRunInterruptError (carrying every node run), then
- * the approval pause of a parked node (or its abandonment after a failure),
- * and otherwise the run result. The caller must have let every in-flight node
- * settle first.
- *
- * Synchronous on every path but the approval pause, which returns the
- * (always rejecting) promise of pauseForApproval: a scheduler that returns
- * this from its own async function settles in the turn its last node
- * settled.
+ * error, then a pending AgentRunInterruptError (carrying every node run), and
+ * otherwise the run result. The caller must have let every in-flight node
+ * settle first. Synchronous: a scheduler that returns this from its own async
+ * function settles in the turn its last node settled.
  */
 export const finishExecutionGraphRun = ({
-  context,
   control,
   graph,
-  pauseForApproval = null,
   states,
   statesByNodeId,
 }) => {
@@ -166,130 +135,5 @@ export const finishExecutionGraphRun = ({
     throw control.interrupt;
   }
 
-  const awaiting = states.filter(
-    (state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval
-  );
-
-  if (awaiting.length > 0) {
-    // A graph that already failed a node will not complete, so asking the
-    // user to approve more work in it would only defer the failure.
-    if (
-      control.aborted ||
-      states.some((state) => state.status === EXECUTION_GRAPH_NODE_STATUSES.failed)
-    ) {
-      for (const state of awaiting) {
-        recordExecutionGraphNodeSkip({
-          context,
-          reason: EXECUTION_GRAPH_SKIP_REASONS.abortedAfterFailure,
-          state,
-        });
-      }
-    } else {
-      if (typeof pauseForApproval !== "function" || awaiting.length !== 1) {
-        const error = new Error(
-          "An approval-gated graph node has no single durable approval pause."
-        );
-        error.code = "AGENT_UNIFIED_GRAPH_APPROVAL_UNAVAILABLE";
-        error.status = 409;
-        throw error;
-      }
-
-      return pauseExecutionGraphRunForApproval({
-        graph,
-        pauseForApproval,
-        state: awaiting[0],
-        states,
-      });
-    }
-  }
-
   return buildExecutionGraphRunResult({ graph, states, statesByNodeId });
-};
-
-/**
- * The result of a graph whose work is all settled, rebuilt without a
- * scheduler: every node is reused from `completedNodeRuns`, denied, or skipped
- * because of those (a false condition, a skipped dependency). Each pending
- * node is decided in the validator's layer order exactly as a scheduling pass
- * decides it, and every skip is recorded through recordSkippedSkill as a
- * scheduler records it. A node that would launch (or wait for one that
- * would) throws `refuseLaunch({ nodeId })` instead: nothing is launched, so
- * no step, budget, preflight or checkpoint hook is ever reached.
- *
- * For a settled graph this is the same result and the same skip records a
- * scheduler produces, which then launches nothing either: in layer order a
- * dependency is decided before its dependants, so one pass settles every
- * node. Takes runExecutionGraphOnLangGraph's graph options and returns its
- * result synchronously (a rejected one for a graph admission refuses).
- */
-export const replayExecutionGraphRun = ({
-  authorizedDocIds,
-  authorizedSkillIds = null,
-  completedNodeRuns = [],
-  deniedNodeIds = [],
-  docIds = [],
-  graph,
-  limits = EXECUTION_GRAPH_LIMITS,
-  maxConcurrency,
-  refuseLaunch,
-  registry,
-  // As runExecutionGraphOnLangGraph: createExecutionGraphNodeContext. Only
-  // recordSkippedSkill is ever called.
-  ...nodeOptions
-} = {}) => {
-  const { compiled, rejected, scopedDocIds } = admitExecutionGraphRun({
-    authorizedDocIds,
-    authorizedSkillIds,
-    docIds,
-    graph,
-    limits,
-    maxConcurrency,
-    registry,
-  });
-
-  if (rejected) {
-    return rejected;
-  }
-
-  const { nodeOutputs, states, statesByNodeId } = createExecutionGraphNodeStates({
-    completedNodeRuns,
-    deniedNodeIds,
-    graph,
-    registry,
-  });
-  const context = createExecutionGraphNodeContext({
-    ...nodeOptions,
-    authorizedDocIds: scopedDocIds,
-    docIds,
-    graph,
-  });
-
-  for (const state of orderExecutionGraphNodeStatesByLayer({ compiled, states })) {
-    if (state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
-      continue;
-    }
-
-    const { decision, reason } = decideExecutionGraphNode({
-      dependencyStatuses: (state.node.dependsOn ?? []).map(
-        (dependencyId) => statesByNodeId.get(dependencyId)?.status
-      ),
-      graphVersion: graph.version,
-      node: state.node,
-      nodeOutputs,
-    });
-
-    if (decision !== EXECUTION_GRAPH_SCHEDULE_DECISIONS.skip) {
-      throw refuseLaunch({ nodeId: state.node.nodeId });
-    }
-
-    recordExecutionGraphNodeSkip({ context, reason, state });
-  }
-
-  return finishExecutionGraphRun({
-    context,
-    control: createExecutionGraphRunControl(),
-    graph,
-    states,
-    statesByNodeId,
-  });
 };

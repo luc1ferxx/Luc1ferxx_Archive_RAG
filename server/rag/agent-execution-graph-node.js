@@ -3,22 +3,18 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeTrimmedText } from "../lib/normalize-text.js";
 import { releaseBudget, reserveBudget } from "./agent-budget.js";
 import {
-  EXECUTION_GRAPH_CHECKPOINT_VERSIONS,
   buildExecutionGraphNodeStepId,
   digestExecutionGraphTypedOutput,
 } from "./agent-execution-graph-checkpoint.js";
 import {
   EXECUTION_GRAPH_BINDING_SOURCES,
   EXECUTION_GRAPH_FAILURE_POLICIES,
-  EXECUTION_GRAPH_VERSIONS,
 } from "./agent-execution-graph.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
-import { toDependencyOutageError } from "./dependency-outage.js";
 import { throwIfRequestCancelled } from "./request-deadline.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
-import { AGENT_SKILL_IDS, buildFailedSkillResult } from "./skills/registry.js";
-import { hasConsistentDocumentRagGraphResult } from "./skills/document-rag-graph-result.js";
+import { buildFailedSkillResult } from "./skills/registry.js";
 import {
   EXECUTION_REQUEST_FIELD_TYPES,
   createSkillInputContractError,
@@ -35,7 +31,7 @@ import {
 // the concurrency cap and side-effect exclusivity; admission and the run tail
 // are agent-execution-graph-runner.js. Everything a node does once it is
 // chosen lives here: which inputs it may read, the input and output gates,
-// the safe point, the approval park, the budget reservation, the fenced step
+// the safe point, the budget reservation, the fenced step
 // lifecycle and the settle order (trace, then the durable checkpoint, then the
 // status a dependant can see). Until ADR 0001 phase 6 a native scheduler
 // called these same functions beside LangGraph, which is why they keep no
@@ -50,16 +46,14 @@ import {
 // same moment a closure variable used to be written, because a scheduler that
 // another node wakes in between must already see them.
 //
-// v1/v2 retain the `custom_skill` lifecycle identity. v3 uses a distinct
-// graph-node identity so heterogeneous stages cannot be mistaken for V1
-// custom-Skill steps by replay or recovery code.
+// Every node is a custom Skill and keeps the `custom_skill` lifecycle
+// identity. (The removed v3 unified graph, whose nodes were also documents,
+// Web and Capabilities, used a distinct `graph_node` identity and could park a
+// node at an approval gate; ADR 0001 phases 10 and 11 removed both.)
 
 const noop = () => {};
 
 export const EXECUTION_GRAPH_NODE_STATUSES = Object.freeze({
-  // A node whose preflight needs a user decision. It holds no lifecycle step
-  // and no budget; its dependants wait, independent nodes keep running.
-  awaitingApproval: "awaiting_approval",
   completed: "completed",
   failed: "failed",
   pending: "pending",
@@ -70,8 +64,6 @@ export const EXECUTION_GRAPH_NODE_STATUSES = Object.freeze({
 
 export const EXECUTION_GRAPH_SKIP_REASONS = Object.freeze({
   abortedAfterFailure: "aborted_after_failure",
-  // The user rejected the node's approval gate: it never ran and never will.
-  approvalDenied: "approval_denied",
   budgetExhausted: "budget_exhausted",
   conditionNotMet: "condition_not_met",
   dependencyFailed: "dependency_failed",
@@ -84,13 +76,9 @@ export const EXECUTION_GRAPH_RUN_STATUSES = Object.freeze({
   rejected: "rejected",
 });
 
-// What a scheduler does with a pending node on one pass. `wait` and `hold`
-// both leave the node pending; they differ only in why, which a scheduler
-// that cannot simply look again on the next pass needs to know.
+// What a scheduler does with a pending node on one pass. `wait` leaves the
+// node pending.
 export const EXECUTION_GRAPH_SCHEDULE_DECISIONS = Object.freeze({
-  // Every dependency settled, but a v3 graph has a pending approval interrupt:
-  // the node stays a clean pending boundary for the continuation.
-  hold: "hold",
   launch: "launch",
   // Settle the node as skipped with the decision's reason.
   skip: "skip",
@@ -99,11 +87,8 @@ export const EXECUTION_GRAPH_SCHEDULE_DECISIONS = Object.freeze({
 });
 
 // How one launch of a node ended. A launch that throws ends no other way: the
-// node is pending again and the error is fatal to the graph, except an outage
-// of the primary document answer, which throws after the node settled.
+// node is pending again and the error is fatal to the graph.
 export const EXECUTION_GRAPH_NODE_OUTCOMES = Object.freeze({
-  // Parked by its preflight: no step, no budget, no output.
-  awaitingApproval: "awaiting_approval",
   // An AgentRunInterruptError from inside the node: the node is pending again,
   // its reservation is back, and the error is on control.interrupt.
   interrupted: "interrupted",
@@ -151,19 +136,10 @@ const isQuestionBoundToNodeOutput = (node) =>
   node?.inputBindings?.question?.source ===
   EXECUTION_GRAPH_BINDING_SOURCES.node;
 
-const graphNodeIdentity = (graph, nodeId) => {
-  const heterogeneous = graph.version === EXECUTION_GRAPH_VERSIONS.v3;
-
-  return {
-    stepId: buildExecutionGraphNodeStepId({
-      checkpointVersion: heterogeneous
-        ? EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v2
-        : EXECUTION_GRAPH_CHECKPOINT_VERSIONS.v1,
-      nodeId,
-    }),
-    stepType: heterogeneous ? "graph_node" : "custom_skill",
-  };
-};
+const graphNodeIdentity = (nodeId) => ({
+  stepId: buildExecutionGraphNodeStepId({ nodeId }),
+  stepType: "custom_skill",
+});
 
 /**
  * Resolves a node's declared bindings into concrete values.
@@ -313,13 +289,6 @@ export const buildReusableExecutionGraphRuns = ({ completedNodeRuns, statesByNod
       throw invalidCompletedRun(completed.nodeId);
     }
 
-    if (
-      state.contract.id === AGENT_SKILL_IDS.documentRag &&
-      !hasConsistentDocumentRagGraphResult(result)
-    ) {
-      throw invalidCompletedRun(completed.nodeId);
-    }
-
     reusable.set(completed.nodeId, { output: validation.output, result });
   }
 
@@ -335,16 +304,13 @@ const settleSkip = (state, reason) => {
  * Builds the per-node state of one graph run, in declaration order.
  *
  * Each state is { contract, node, reason, result, skill, status, stepId,
- * stepType } (plus `awaiting` once a preflight parks it). Reusable completed
- * runs become `reused` with their validated output in `nodeOutputs`; denied
- * nodes become `skipped/approval_denied`. Throws
- * AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY for a run that cannot be reused or
- * a denied node that is unknown or no longer pending. The graph must already
- * have compiled against `registry`.
+ * stepType }. Reusable completed runs become `reused` with their validated
+ * output in `nodeOutputs`. Throws AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY
+ * for a run that cannot be reused. The graph must already have compiled
+ * against `registry`.
  */
 export const createExecutionGraphNodeStates = ({
   completedNodeRuns = [],
-  deniedNodeIds = [],
   graph,
   registry,
 } = {}) => {
@@ -355,7 +321,7 @@ export const createExecutionGraphNodeStates = ({
     result: null,
     skill: registry.get(node.skillId),
     status: EXECUTION_GRAPH_NODE_STATUSES.pending,
-    ...graphNodeIdentity(graph, node.nodeId),
+    ...graphNodeIdentity(node.nodeId),
   }));
   const statesByNodeId = new Map(states.map((state) => [state.node.nodeId, state]));
   const nodeOutputs = new Map();
@@ -368,19 +334,6 @@ export const createExecutionGraphNodeStates = ({
     state.result = result;
     state.status = EXECUTION_GRAPH_NODE_STATUSES.reused;
     nodeOutputs.set(nodeId, output);
-  }
-
-  // A rejected approval gate settles its node before scheduling starts: it
-  // spends nothing, starts no lifecycle step, and its dependants are skipped
-  // with it. Only a node that never ran can be denied.
-  for (const nodeId of Array.isArray(deniedNodeIds) ? deniedNodeIds : []) {
-    const state = statesByNodeId.get(nodeId);
-
-    if (!state || state.status !== EXECUTION_GRAPH_NODE_STATUSES.pending) {
-      throw invalidCompletedRun(nodeId);
-    }
-
-    settleSkip(state, EXECUTION_GRAPH_SKIP_REASONS.approvalDenied);
   }
 
   return { nodeOutputs, states, statesByNodeId };
@@ -444,7 +397,6 @@ export const isExecutionGraphNodeConditionMet = ({ node, nodeOutputs }) => {
 export const decideExecutionGraphNode = ({
   aborted = false,
   dependencyStatuses,
-  graphVersion,
   interrupted = false,
   node,
   nodeOutputs,
@@ -473,13 +425,6 @@ export const decideExecutionGraphNode = ({
 
   if (!dependencyStatuses.every((status) => SETTLED_OK.has(status))) {
     return { decision: EXECUTION_GRAPH_SCHEDULE_DECISIONS.wait, reason: null };
-  }
-
-  if (interrupted && graphVersion === EXECUTION_GRAPH_VERSIONS.v3) {
-    // A pre-execution approval gate leaves the heterogeneous graph at a
-    // clean pending node boundary. Do not fabricate skipped receipts for
-    // work that must remain eligible after the dedicated continuation.
-    return { decision: EXECUTION_GRAPH_SCHEDULE_DECISIONS.hold, reason: null };
   }
 
   if (aborted || interrupted) {
@@ -568,19 +513,16 @@ export const createExecutionGraphNodeContext = ({
     skillVersion: result?.skillVersion,
     ...detail,
   }),
-  capabilityRegistry,
   docIds = [],
   executeObservedSkill,
   graph,
   graphResumeClaimId = undefined,
   onNodeSettled = noop,
-  preflightNode = null,
   question,
   ragService,
   recordSkillResult = noop,
   recordSkippedSkill = noop,
   retrievalPlan,
-  services,
   sessionId,
   stepLifecycle,
   userId,
@@ -594,13 +536,11 @@ export const createExecutionGraphNodeContext = ({
     authorizedDocIdSet: new Set(Array.isArray(scopedDocIds) ? scopedDocIds : []),
     budgetState,
     buildSkillTraceDetail,
-    capabilityRegistry,
     docIds,
     executeObservedSkill,
     graph,
     graphResumeClaimId,
     onNodeSettled,
-    preflightNode,
     question,
     ragService,
     recordSkillResult,
@@ -614,7 +554,6 @@ export const createExecutionGraphNodeContext = ({
       retrievalPlan: retrievalPlan ?? undefined,
     },
     retrievalPlan,
-    services,
     sessionId,
     stepLifecycle: createExecutionGraphStepLifecycle({
       graphResumeClaimId,
@@ -761,15 +700,14 @@ export const prepareExecutionGraphNodeLaunch = ({ context, nodeOutputs, state })
 
 /**
  * The asynchronous half of a launch, from the safe point to the settled
- * status. It writes `state` (status, result, reason, awaiting), adds the
+ * status. It writes `state` (status, result, reason), adds the
  * node's validated output to `nodeOutputs` once it completed, and raises
  * control.aborted (a fail_fast failure) and control.interrupt (an
  * AgentRunInterruptError) at the moment they happen.
  *
  * Resolves to an EXECUTION_GRAPH_NODE_OUTCOMES value. Rejects with the error
- * that stops the graph: a cancelled request, a fence or checkpoint failure, a
- * non-interrupt error from the lifecycle (the node is pending again), or the
- * outage of the primary document answer (the node settled first).
+ * that stops the graph: a cancelled request, a fence or checkpoint failure, or
+ * a non-interrupt error from the lifecycle (the node is pending again).
  */
 export const executeExecutionGraphNodeLaunch = async ({
   context,
@@ -793,83 +731,30 @@ export const executeExecutionGraphNodeLaunch = async ({
     addTraceStep,
     budgetState,
     buildSkillTraceDetail,
-    capabilityRegistry,
     executeObservedSkill,
     graph,
-    graphResumeClaimId,
     onNodeSettled,
-    preflightNode,
     ragService,
     recordSkillResult,
     recordSkippedSkill,
-    services,
     sessionId,
     stepLifecycle: graphStepLifecycle,
     userId,
   } = context;
   let result;
   let budget = null;
-  let nodeRuntime = null;
-  // A preflight that refuses the resolved input (a Capability policy
-  // block, an out-of-scope value) fails this node like an invalid
-  // binding: a failed lifecycle step, no budget, no execution.
-  let preflightRejection = null;
 
   try {
     // A node boundary is a safe point: a cancelled request
-    // (request-deadline.js) launches nothing more -- no preflight, no
-    // approval gate, no budget, no lifecycle step. The node stays pending
-    // and the cancellation stops the graph like any fatal error.
+    // (request-deadline.js) launches nothing more -- no budget, no lifecycle
+    // step. The node stays pending and the cancellation stops the graph like
+    // any fatal error.
     throwIfRequestCancelled();
-
-    // An approval-required Capability must be checked at a clean node
-    // boundary: no lifecycle step or budget attempt may exist yet. The
-    // injected preflight may persist a graph-bound gate and interrupt;
-    // ordinary Skills leave this hook unused.
-    if (inputValidation.ok && typeof preflightNode === "function") {
-      nodeRuntime = await preflightNode({
-        accessScope,
-        boundInputs: inputValidation.output,
-        graph,
-        graphResumeClaimId,
-        node,
-        nodeDocIds,
-        persistedInput,
-        skill,
-      });
-
-      if (
-        nodeRuntime != null &&
-        (typeof nodeRuntime !== "object" || Array.isArray(nodeRuntime) ||
-          skill.kind !== "capability")
-      ) {
-        throw new Error("Only a trusted Capability preflight may provide node runtime grants.");
-      }
-
-      // The node needs a user decision. It is parked at a clean boundary:
-      // no lifecycle step, no budget, no output. Its dependants wait with
-      // it while independent nodes keep running; the pause itself is
-      // persisted only once nothing else can run (see pauseForApproval).
-      if (nodeRuntime?.awaitingApproval === true) {
-        state.awaiting = {
-          boundInputs: inputValidation.output,
-          nodeDocIds,
-          persistedInput,
-        };
-        state.status = EXECUTION_GRAPH_NODE_STATUSES.awaitingApproval;
-        return EXECUTION_GRAPH_NODE_OUTCOMES.awaitingApproval;
-      }
-
-      if (nodeRuntime?.rejectedInput instanceof Error) {
-        preflightRejection = nodeRuntime.rejectedInput;
-        nodeRuntime = null;
-      }
-    }
 
     // A malformed binding must not execute the skill or consume call
     // budget. The node still enters the lifecycle and fails under its
     // declared failure policy.
-    budget = inputValidation.ok && !preflightRejection && contract.budgetKey
+    budget = inputValidation.ok && contract.budgetKey
       ? reserveBudget(budgetState, contract.budgetKey, 1)
       : null;
 
@@ -891,14 +776,14 @@ export const executeExecutionGraphNodeLaunch = async ({
         // Enforce the input gate in the scheduler itself. Observability
         // adapters may be injected or replaced; none may receive an
         // invalid bound input or invoke the real Skill with it.
-        if (!inputValidation.ok || preflightRejection) {
+        if (!inputValidation.ok) {
           const invalidResult = buildFailedSkillResult(
             skill,
-            preflightRejection ?? createSkillInputContractError(inputValidation.errors)
+            createSkillInputContractError(inputValidation.errors)
           );
 
           // Preserve the per-Skill failure observation without treating a
-          // preflight rejection as an executed or budgeted call.
+          // refused input as an executed or budgeted call.
           recordSkippedSkill({
             budget: null,
             phase: "primary",
@@ -915,21 +800,15 @@ export const executeExecutionGraphNodeLaunch = async ({
           {
             ...resolvedInputs,
             accessScope,
-            ...(nodeRuntime?.capabilityApproval
-              ? { approval: nodeRuntime.capabilityApproval }
-              : {}),
-            capabilityRegistry,
             docIds: nodeDocIds,
             priorFindings: resolvedInputs.priorFindings,
             question: nodeQuestion,
             ragService,
             retrievalPlan: nodeRetrievalPlan,
-            services: nodeRuntime?.services ?? services,
             sessionId,
             userId,
-            // A node whose question is bound to an upstream output (the
-            // unified graph's follow-up reads its check's followUpQuestion)
-            // asks agent text, so it must not write conversation memory.
+            // A node whose question is bound to an upstream output asks
+            // agent text, so it must not write conversation memory.
             ...(isQuestionBoundToNodeOutput(node)
               ? { memoryWrites: false }
               : {}),
@@ -977,18 +856,6 @@ export const executeExecutionGraphNodeLaunch = async ({
             ? { text: observedResult.text }
             : {}),
         };
-
-        if (
-          contract.id === AGENT_SKILL_IDS.documentRag &&
-          !hasConsistentDocumentRagGraphResult(observedResult)
-        ) {
-          return buildFailedSkillResult(
-            skill,
-            createSkillOutputContractError([
-              "Document RAG graph evidence does not match its raw result",
-            ])
-          );
-        }
 
         return observedResult;
       },
@@ -1069,24 +936,6 @@ export const executeExecutionGraphNodeLaunch = async ({
   });
   state.status = settledStatus;
 
-  // The primary document answer (the unconditional, dependency-free
-  // document_rag node) failed because a dependency is down: the graph
-  // stops and the run answers with the outage (dependency-outage.js)
-  // rather than finalizing around the missing answer. The node itself
-  // settled and checkpointed as failed above.
-  if (
-    !result.ok &&
-    contract.id === AGENT_SKILL_IDS.documentRag &&
-    (node.dependsOn ?? []).length === 0 &&
-    !node.when
-  ) {
-    const outage = toDependencyOutageError(result.error);
-
-    if (outage) {
-      throw outage;
-    }
-  }
-
   return EXECUTION_GRAPH_NODE_OUTCOMES.settled;
 };
 
@@ -1120,8 +969,8 @@ export const buildRejectedExecutionGraphRun = ({ errors, graph }) => ({
 /**
  * The result of a graph whose every node reached a terminal status: node runs
  * and results in declaration order, `completed` when every node is benign
- * terminal (ok, a false condition, a denied approval, or skipped only behind
- * such a node), otherwise `partial`.
+ * terminal (ok, a false condition, or skipped only behind such a node),
+ * otherwise `partial`.
  */
 export const buildExecutionGraphRunResult = ({ graph, states, statesByNodeId }) => {
   const nodeRuns = states.map(buildExecutionGraphNodeRun);
@@ -1141,12 +990,9 @@ export const buildExecutionGraphRunResult = ({ graph, states, statesByNodeId }) 
       return false;
     }
 
-    // A false condition and a rejected approval are decisions, not failures:
-    // the graph completes without that node.
-    if (
-      state.reason === EXECUTION_GRAPH_SKIP_REASONS.conditionNotMet ||
-      state.reason === EXECUTION_GRAPH_SKIP_REASONS.approvalDenied
-    ) {
+    // A false condition is a decision, not a failure: the graph completes
+    // without that node.
+    if (state.reason === EXECUTION_GRAPH_SKIP_REASONS.conditionNotMet) {
       return true;
     }
 

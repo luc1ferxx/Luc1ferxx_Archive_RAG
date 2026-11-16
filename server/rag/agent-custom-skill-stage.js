@@ -422,8 +422,7 @@ export const runCustomSkillStage = async ({
   // whole
   // by every later CAS of the run (the finalizer's steps, completeRun) and
   // stored with the finished run, while nothing ever resumes a settled
-  // graph's thread (a replan or a recovery starts a fresh invocation, and a
-  // settled graph is replayed from the graph checkpoint without one). A
+  // graph's thread (a replan or a recovery starts a fresh invocation). A
   // running graph keeps its thread. On a run that holds no record (a graph
   // run without a graph checkpoint, and so without a checkpointer) the flag
   // changes nothing.
