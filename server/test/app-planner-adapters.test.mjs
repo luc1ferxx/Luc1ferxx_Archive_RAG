@@ -237,6 +237,10 @@ test("the background agent task path runs on the same governed planner and repla
     };
     const services = createAppServices(
       {
+        // One custom-Skill call more than the graph's two nodes spend: the
+        // replanner is asked only while the Skills' own budget can still pay
+        // for a patch node (agent-replanner.js hasSpendableBudget).
+        agentBudget: { maxCustomSkillCalls: 3 },
         agentRunStore: createInMemoryAgentRunStore(),
         dagPlannerAdapter,
         healthService: {
