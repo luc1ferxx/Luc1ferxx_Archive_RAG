@@ -20,13 +20,13 @@ const VALID_EFFECTS = new Set(Object.values(SKILL_EFFECTS));
  * Skill is rejected whole, and the stage reports the Skill as not run
  * (agent-custom-skill-stage.js).
  *
- * No other wired path runs one. The standalone retry and startup recovery of
- * a `custom_skill` step, which the chain's stored steps still used, were
- * deleted in ADR 0001 phase 9: a custom Skill runs only as a node of its
- * execution graph, and the replay guard refuses its step
- * (agent-run-graph-replay-guard.js). `rag/langgraph/tools.js` can wrap a
- * Skill as a LangChain tool, outside a graph node; nothing in production
- * hands those tools to a graph or an agent (only its own test uses them).
+ * Nothing else runs one. The standalone retry and startup recovery of a
+ * `custom_skill` step, which the chain's stored steps still used, were deleted
+ * in ADR 0001 phase 9: a custom Skill runs only as a node of its execution
+ * graph, and the replay guard refuses its step
+ * (agent-run-graph-replay-guard.js). The LangChain tool adapter that could
+ * call a Skill outside a graph node (rag/langgraph/tools.js, never wired into
+ * production) was deleted in ADR 0001 phase 12.
  */
 export const listAuthorizedAtomicCustomSkills = ({
   accessScope,

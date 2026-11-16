@@ -25,13 +25,12 @@
 //   - the abort signal: core copies RunnableConfig.signal into the call
 //     options (an explicit signal, a `timeout` turned into one, or, inside
 //     LangGraph, the run's own signal, which LangGraph aborts when a sibling
-//     task fails). It is not passed on, as the tool adapter does not pass it
-//     (tools.js): the ADR's drain decision keeps cancellation on the request
-//     deadline, which openai.js already reads from AsyncLocalStorage
-//     (withRequestSignal). Passed on, a sibling's failure aborted this call
-//     mid-flight, and a LangChain `timeout` (an abort named TimeoutError)
-//     reached the circuit breaker as an unavailable model: five short
-//     timeouts opened the circuit for every tenant of the process, and a
+//     task fails). It is not passed on: the ADR's drain decision keeps
+//     cancellation on the request deadline, which openai.js already reads from
+//     AsyncLocalStorage (withRequestSignal). Passed on, a sibling's failure
+//     aborted this call mid-flight, and a LangChain `timeout` (an abort named
+//     TimeoutError) reached the circuit breaker as an unavailable model: five
+//     short timeouts opened the circuit for every tenant of the process, and a
 //     sibling's AbortError closed a half-open circuit unanswered. A `timeout`
 //     call option is refused, since it would otherwise do nothing.
 //
