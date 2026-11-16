@@ -346,15 +346,42 @@ const abstain = ({ fingerprints, reason = null, reasonCode, replanCount, trigger
   trigger,
 });
 
-// Trace steps cannot pay for a node. Counting them would let a run that is out
-// of every call budget -- or out of tokens, cost, or time, which zeroes the
-// others but deliberately not traceSteps -- still spend a model call on a patch
-// that no node could execute.
-const hasSpendableBudget = (budgetRemaining) =>
-  !isRecord(budgetRemaining) ||
+const hasAnyCallBudget = (budgetRemaining) =>
   Object.entries(budgetRemaining).some(
     ([budgetKey, value]) => budgetKey !== "traceSteps" && Number(value) > 0
   );
+
+// A patch can only add nodes for the selected Skills (the validator enforces
+// that whitelist), and collectPendingBudgetShortfall charges each pending node
+// to its Skill's budget key. So the model is worth asking only while one of
+// those keys can still pay for a node. Trace steps never can, and neither can
+// a call budget no selectable Skill draws on (web search, research questions):
+// a run that has spent its custom-Skill calls would otherwise pay for a model
+// call whose patch the shortfall check then rejects. A run out of tokens, cost,
+// or time reports every call key as 0 and is refused here too. A Skill with no
+// budget key, or a key the caller does not report, is not limited by it -- the
+// same reading collectPendingBudgetShortfall applies.
+const hasSpendableBudget = ({ budgetRemaining, registry, selectedSkills }) => {
+  if (!isRecord(budgetRemaining)) {
+    return true;
+  }
+
+  const contracts = toArray(selectedSkills)
+    .map((skill) => getContract(registry, skill?.id))
+    .filter(Boolean);
+
+  if (contracts.length === 0) {
+    // No selectable Skill resolves, so no patch can validate; leave that to the
+    // validator's reason code rather than calling it a budget problem.
+    return hasAnyCallBudget(budgetRemaining);
+  }
+
+  return contracts.some(({ budgetKey }) => {
+    const remaining = budgetKey ? budgetRemaining[budgetKey] : undefined;
+
+    return !budgetKey || !Number.isFinite(remaining) || remaining > 0;
+  });
+};
 
 /**
  * Budget demanded by the nodes that have not already been paid for.
@@ -467,7 +494,7 @@ export const createReplanResult = async ({
     );
   }
 
-  if (!hasSpendableBudget(budgetRemaining)) {
+  if (!hasSpendableBudget({ budgetRemaining, registry, selectedSkills })) {
     return refuse(REPLAN_REASON_CODES.budgetExhausted, "No skill budget remains.");
   }
 
