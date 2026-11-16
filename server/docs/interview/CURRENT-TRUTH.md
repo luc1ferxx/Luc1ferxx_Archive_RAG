@@ -355,7 +355,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 观测报告：`recovery.skillGraphRejectedCount` 数整张被拒、没有执行的 custom Skill 图（`skill_graph_planned` 事件；复核之后不再算执行器准入时被拒、记为已执行的图），文本和 markdown 报告各多一行。它不是回落，不动两个必须为 0 的回落计数；没有门槛，没有新的评测检查，manifest 仍是 1.18.0。
   - 承载 agent tier 的进程在 listen 之后加载 LangGraph：单体（没有设 `AGENT_SERVICE_URL`）和 `ARCHIVE_RAG_ROLE=agent` 在 listen 之后后台导入外层计划的图模块（`warmAgentExecutionPlanRuntime`）。只导入，不编译、不运行图，不碰存储、模型、租户和 run；失败只记一条警告，第一个请求照旧自己导入；没有开关。api 边缘层、检索层、模型网关和 ingest worker 仍然不加载。
   - 测试缺口：两个执行器的回执检查各补了失败用例（正常节点交回的回执就是检查读的那份状态，只能借测试已经在用的 `Pregel.prototype.stream` 接缝删掉或改掉一个节点的回执）。reconcile 的 22 条守卫逐条删掉试过，原来有 8 条删掉也没有测试失败，现在每条都有只改它自己检查的那一项的用例。
-- **行为的变化**（默认配置下的请求、任务和已存的 run，答案都不变）：
+- **行为的变化**（这九项都不改变默认配置下请求、任务和已存 run 的答案；之后做的方案 B 会，见下面“留给用户决定的”）：
   - custom Skill 图的 `customSkillCalls` 用完、别的预算还剩、某个节点触发 replan。之前：调一次规划模型，补丁因预算不足被拒，以 `replan_budget_exhausted` 弃答。现在：不调模型，同样弃答，原因文字从 “Replan needs N customSkillCalls call(s) but only 0 remain.” 变成 “No skill budget remains.”。回答、Skill 结果、run 状态和 checkpoint 阶段不变。少了一种罕见情形：预算为 0 时模型给出只删除失败节点的补丁会被应用，失败的 Skill 结果因此从列表里消失；现在失败结果留在列表里。
   - `AGENT_PLANNER_ROLLOUT=deterministic` 或 `shadow` 下新规划的 custom Skill 图：规划记录（`skill_graph_planned` 事件、图 checkpoint、OTel 的 `agent.planner.fallback`）从 `fallback: true` 变成 `selected`，执行的图不变。
   - 承载 agent tier 的进程启动。之前：第一个 agent 请求导入 LangGraph（约 100–180 ms）。现在：listen 之后后台导入，日志多一行 `[agent] LangGraph loaded ahead of the first agent request (N ms).`。
@@ -367,7 +367,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变。两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”）。
   - `app-planner-adapters.test.mjs` 证明后台任务和 `/chat` 用同一个 replanner；它的两节点图用完了默认的两次 Skill 调用，按新规则 replanner 不再被问，所以给它 3 次，断言不变。全量里受新规则影响的只有这一个测试：第一次覆盖率门（92d97cd6）4,454 个测试里失败的 1 个就是它，ab98c509 修了。
 - **留给用户决定的**：
-  - 第一个 custom Skill 失败时要不要照样跑第二个（阶段 8 起的默认行为，见 3.49“失去、且没有替代的”）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）；删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。
+  - 第一个 custom Skill 失败时要不要照样跑第二个（阶段 8 起的默认行为，见 3.49“失去、且没有替代的”）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）；删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户回复“改成 B”，同一天做了**：失败的依赖只给下游提供可选输入、下游的 `when` 也不读它时，下游照常运行，这些输入留空；因依赖故障失败的依赖（否则第二个会再撞一次挂掉的模型或存储）、必填输入、纯顺序边、被跳过的依赖、`fail_fast` 之后的中止仍然阻塞。确定性图里第一个 Skill 失败时，第二个用原问题运行，调用 2 次，以它的结果回答（之前调用 1 次、弃答）；三个确定性评测与改动前一致，覆盖率门 4,459 个测试 0 失败。
   - 需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）
   - 规划器的灰度开关 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
 - **证据**（本机 Node 24.21.0）：
@@ -380,8 +380,8 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **独立复核**（2026-11-16，只读）：三个复核 agent 各看一面（生产改动是否正确、遗留引用和文档、测试能不能抓到回退），只跑一轮，没有多票验证，意见我逐条判断。三条中级都改了：replanner 的新规则在 token、费用或时间用完时反而会调模型（那时所有调用键都报为 0，新规则先按 Skill 看，选中的 Skill 没有预算键就放行），现在先判断还有没有任何调用预算，补了测试（上线的 4 个 custom Skill 都用 `customSkillCalls`，生产里很少遇到）；预热的测试只看日志行，默认加载器换成空函数也会打出成功日志，现在预热要确认加载到的模块导出 `runAgentExecutionPlanOnLangGraph`，agent 角色的默认预热有了自己的测试；AGENTS.md 和面试材料里的过时说法（`tools.js`、`evidence` 输出、整图被拒没有计数、第一个请求加载）。低级意见都改了，其中整图被拒的计数改成只数没执行的图。
 - **回退**：没有开关（预热也没有），只能 `git revert` 这一步的提交；run 和 checkpoint 的格式没有变，没有数据要处理。
 - **面试里的说法**：
-  - 一句话：阶段 11 之后剩下的九件小事一起收掉，默认配置下没有一个请求的答案变了；会改变答案的那件（第一个 custom Skill 失败时要不要照样跑第二个）留给用户决定。
-  - 被问“为什么不顺手把第一个 Skill 失败的行为也改了”：那会改变用户看到的答案，是产品决定，不是清理。调查给了三个选项，推荐 B（失败的依赖只喂可选输入时不阻塞，约 25 行）。
+  - 一句话：阶段 11 之后剩下的九件小事一起收掉，默认配置下没有一个请求的答案变了；会改变答案的那件（第一个 custom Skill 失败时要不要照样跑第二个）先交给用户决定，用户选了 B，随后单独做了。
+  - 被问“为什么不顺手把第一个 Skill 失败的行为也改了”：那会改变用户看到的答案，是产品决定，不是清理。调查给了三个选项，推荐 B（失败的依赖只喂可选输入时不阻塞，约 25 行）；用户选了 B，单独提交、单独验证、单独复核。
   - 被问“custom Skill 能不能绕过图被调用”：能这样做的唯一一处代码是 `rag/langgraph/tools.js`，从来没接进生产，这一步删了。
   - 被问冷启动：承载 agent tier 的进程在 listen 之后后台加载 LangGraph，第一个 agent 请求不再付约 100–180 ms；代价是进程一启动就多约 60 MB RSS，listen 之后约 100–180 ms 里到达的请求要等模块求值完。不经过 listen 的进程内调用方（例如直接调 `runAgentRag` 的评测 runner）仍在第一次调用时加载，这是读代码得出的。
   - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支现在只有测试走得到，删不删没定；`AGENT_PLANNER_ROLLOUT` 还在，它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
@@ -686,7 +686,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 默认预算（2 次调用）：答案和记录都不变。
   - 预算 1 次：答案不变（第一个 Skill 的答案、1 条引用、同样的 trace 步骤类型）。记录变了：被跳过的 Skill 没有结果，也不列在 `agentSkills` 里；预算提示多了"needed 1"；图事件从"被拒、回落 v1"变成"已执行、partial"。
   - 预算 0 次：同样的弃答。记录变了：预算提示从 2 条变 1 条，`agentSkills` 为空。
-  - 第一个 Skill 失败：默认路径不变（第二个 Skill 不运行，弃答；图成为默认以来一直如此）。只有 `off` 下的链不同，它照样用原问题跑第二个 Skill、用它的结果回答，这条路随链一起没有了。这一条是独立复核指出的，冻结提交没有钉住它，之后补进了测试。
+  - 第一个 Skill 失败：默认路径不变（第二个 Skill 不运行，弃答；图成为默认以来一直如此）。只有 `off` 下的链不同，它照样用原问题跑第二个 Skill、用它的结果回答，这条路随链一起没有了。这一条是独立复核指出的，冻结提交没有钉住它，之后补进了测试。（2026-11-16 起改了：用户选了方案 B，第二个 Skill 照样用原问题运行，见 3.53。）
   - 只选中一个 Skill 的请求没有 Skill 产出时，回答是固定的一句 "The custom skill could not complete the request."，不是弃答；预算 0 次时这句回答不变，核实不了文档时回答从链跑出的结果变成这一句。
   - 阶段核实不了文档（RAG 桩没有 `getDocument`）：**答案变了**，从链跑出的两段结论变成弃答；两个 Skill 记为 failed，trace 多一条 `skill_graph_rejected`。只有直接调用 `runAgentRag` 的调用方走得到，仓库里只有测试；`/chat` 走不到。
 - **评测套件的改动**：
@@ -700,7 +700,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - `shadow` 对照（链回答，旁边规划一张图来比较）。规划器自己的 shadow（`AGENT_PLANNER_ROLLOUT=shadow`）不受影响。
   - 统一图用例里链和 DAG 的并排对照。
   - 没有类型契约的 custom Skill：以前靠顺序链照跑，现在不运行。仓库里的四个 custom Skill 都有契约。
-  - 前一个 Skill 失败后照样跑后一个：只有链这样做；图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现，能用 `off` 换回链的表现这一点现在没有了。
+  - 前一个 Skill 失败后照样跑后一个：只有链这样做；图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现，能用 `off` 换回链的表现这一点现在没有了。（2026-11-16 起改了：方案 B，第二个 Skill 照样用原问题运行，见 3.53；因故障失败和被跳过的依赖仍然阻塞。）
 - **独立复核**（只读，范围是冻结、删除、清单版本三个提交和当时的文档）：没有高、中级问题；七条低级意见。
   - 改了的：代码注释和文档里“确定性图就是顺序链的图版本”说过头了，改成写明差别并加了测试；七处检查点的注释补上第三个开关；一个评测脚本和两个测试里已经无效的 `mode` 参数删掉；`docs/agent-rag.md` 把“默认配置下基本走不到”的两种情形指错了行；测试里补上跳过原因、`skill_graph_rejected` 的归类、只选中一个 Skill 的请求。
   - 没改、记录在案的：预算被调低又开着模型规划器时，被预算跳过的确定性图会多问一次 replanner（默认配置走不到）；恢复接口和界面仍然对图 run 里失败的 Skill 节点给出“重试失败步骤”，点了一定是 409（图成为默认以来就这样）；恢复评测和发布门里的步骤级信号用的是链当年那种步骤，只说明旧 run 还能恢复；图被整张拒绝在报告里没有单独的计数。（其中“重试失败步骤”的按钮和步骤级信号这两条，阶段 9 已经处理，见 3.50；另外两条没有变。2026-11-16 更新：另外两条阶段 12 也处理了，replanner 只在选中的 Skill 还付得起时才调模型，观测报告多了整图被拒的计数 `skillGraphRejectedCount`，见 3.53。）
@@ -721,7 +721,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 做法是先冻结顺序链的回答，再删除，两个提交分开；删除提交里能看到哪些期望变了。
   - 要主动说随它一起没有的东西：手动重试失败的 Skill 步骤这一项能力，和两个评测用例。
   - 不要说"行为完全没变"：阶段核实不了文档时，答案从两段结论变成了弃答，只是 `/chat` 走不到。
-  - 也不要说"确定性图等于原来的顺序链"：第一个 Skill 失败时，图不跑第二个，链会跑。
+  - 也不要说"确定性图等于原来的顺序链"：第一个 Skill 失败时，图不跑第二个，链会跑。（2026-11-16 起这一差别没有了，见 3.53 的方案 B；被跳过的依赖仍然阻塞，链没有这个概念。）
 
 ### 3.48 LangGraph 迁移阶段 7：外层计划也只走 LangGraph，原生循环删除（2026-11-13）
 

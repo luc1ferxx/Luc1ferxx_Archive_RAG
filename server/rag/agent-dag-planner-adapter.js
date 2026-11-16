@@ -241,15 +241,18 @@ const buildNodeId = (skillId, index, usedNodeIds) => {
  * binding. It plans what the deleted V1 sequential chain ran (the chain passed
  * earlier answers on inside a rewritten question string).
  *
- * It is not the chain when something does not run. A node bound to an earlier
- * node's findings depends on it, and the executor skips a node whose
- * dependency failed or was skipped (agent-execution-graph-node.js
- * decideExecutionGraphNode), whatever its failure policy. The chain ran the
- * next Skill anyway, on the original question. With the four shipped Skills,
- * which all accept priorFindings, a first Skill that fails therefore leaves
- * the second unrun. That has been the behaviour of every graph run since the
- * graph became the default (2026-09-25), not something the deletion of the
- * chain changed; test/agent-custom-skill-budget.test.mjs pins it.
+ * When a Skill fails, the next one still runs, on the original question,
+ * as the chain ran it: priorFindings is an optional input, and the executor
+ * does not skip a node for a failed dependency that feeds only optional inputs
+ * (agent-execution-graph-node.js decideExecutionGraphNode; the user's decision
+ * of 2026-11-16, ADR 0001 phase 12). From 2026-09-25 until then the second
+ * Skill was skipped and the run abstained. A Skill whose predecessor failed on
+ * a dependency outage (the model or storage is down) is still skipped, and the
+ * run ends with the outage; so is a Skill whose predecessor was skipped
+ * (budget), and every Skill after a failure when the graph aborts (fail_fast,
+ * which this graph does not use). test/agent-custom-skill-budget.test.mjs pins
+ * the failed, the outage and the budget-skipped cases; the fail_fast abort is
+ * pinned in test/agent-execution-graph-node.test.mjs and the runtime goldens.
  *
  * This stays a chain rather than a fan-out on purpose. It is the fallback that
  * runs when the V2 planner is unavailable or produced something illegal, and a
@@ -281,8 +284,11 @@ export const createDeterministicExecutionGraph = ({ selectedSkills = [] } = {}) 
 
     nodes.push({
       dependsOn: acceptsPriorFindings ? [previousNodeId] : [],
-      // `continue` keeps a failing node from aborting the nodes that do not
-      // depend on it. It does not rescue a node that does: see above.
+      // `continue` keeps a failing node from aborting the nodes after it. The
+      // next node binds its findings only as optional priorFindings, so it
+      // still runs without them (see above), unless the failure was a
+      // dependency outage. Under fail_fast it would be skipped as
+      // aborted_after_failure.
       failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
       inputBindings,
       nodeId,

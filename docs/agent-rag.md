@@ -139,7 +139,7 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 custom Skill DAG 由 LangGraph.js 调度：按 superstep 进入节点，进程内闸门（`rag/langgraph/concurrency-gate.js`）保持原生调度器的并发上限、副作用独占和队列顺序，单个 node 的执行、准入和收尾仍是原有模块的同一批函数，图 checkpoint 仍是恢复与复用的依据。原生调度器和 `AGENT_RUNTIME=native` 回退开关已在 ADR 0001 阶段 6（2026-10-16）按用户决定删除，提前结束了约束 12 的回退窗口；`AGENT_RUNTIME` 只接受未设置或 `langgraph`，其他值拒绝启动，恢复原生调度器只能 revert 阶段 6 的提交。删除前从原生一侧冻结的 golden（`server/test/fixtures/graph-goldens/`）守住图相关场景原来的等价；两个 PostgreSQL 集成套件的 native 跨进程运行没有冻结，见 ADR 阶段 6 的“失去、且没有替代的覆盖”。superstep 屏障带来的已知差异、取消用 drain 而不是请求 signal 的原因、写放大的处理，见 [ADR 0001](adr/0001-langgraph-runtime.md)。外层 V1 执行计划自 ADR 0001 阶段 7（2026-11-13）起也由 LangGraph 调度（`rag/langgraph/execution-plan-graph.js` 的底层 Pregel 图，不带 checkpointer，持久性仍是 run 的 step），`/chat/stream` 只剩 `streamAgentRun` 一条路径：用户决定 agent 只保留一种运行方式，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除（该变量只接受未设置或 `langgraph`，其他值拒绝启动）。此前的决定是外层计划长期留在原生循环（压测硬门不过）；这次是知情接受代价：进程内实测每次运行多约 0.3 ms CPU（0.605 → 0.894 ms，2026-11-13）；阶段 5 的端到端压测是并发 1、模型 0 ms 时每请求 CPU 5.68 → 6.68 ms（+17.6%，超过 10% 的门），这个门没有重测。
 
-调度队列是校验器的拓扑层序（Kahn 分层，层内按 node 声明顺序，`orderExecutionGraphNodeStatesByLayer`），因此同一张图的调度是可复现的，被并发上限或独占 node 压住的就绪 node 不会被后层 node 抢先；结果与 node run 仍按声明顺序返回。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。
+调度队列是校验器的拓扑层序（Kahn 分层，层内按 node 声明顺序，`orderExecutionGraphNodeStatesByLayer`），因此同一张图的调度是可复现的，被并发上限或独占 node 压住的就绪 node 不会被后层 node 抢先；结果与 node run 仍按声明顺序返回。只有依赖已满足、`parallelSafe`、彼此无冲突的只读 node 才会并发；并发上限由 runtime 收敛，调用方传入的 `maxConcurrency` 只能收紧不能放宽。预算在启动前原子预留，approval interrupt 会把预留退回，避免一次审批被计费两次。`failurePolicy` 为 `fail_fast` 的 node 失败后中止后续调度，`continue` 则只让下游 node 标记为 `dependency_failed` / `dependency_skipped`。例外（2026-11-16 用户的决定，ADR 0001 阶段 12）：失败的依赖只给下游提供可选输入（例如确定性图的 `priorFindings`）、下游的 `when` 也不读它时，下游照常运行，这些输入留空；所以第一个 Skill 失败时，第二个用原问题运行，和删掉的顺序链一样。因依赖故障（模型或存储挂了）失败的依赖、被跳过的依赖、必填输入、只表示先后的边、没有契约的 node 和 `fail_fast` 之后的中止仍然让下游跳过。
 
 ### 有界 replan
 
@@ -157,7 +157,7 @@ custom Skill DAG 由 LangGraph.js 调度：按 superstep 进入节点，进程�
 
 - 一旦有 node 花掉预算并写入 step，就不会再用另一套 plan 重跑：那会重复计费，并可能重复已发生的副作用。
 - 默认配置下前两种情形在 `/chat` 上基本走不到：每个意图最多选 2 个 custom Skill，调用预算正好 2 次；`/chat` 进 agent 之前已经用同一个 `getDocument` 查询核实过每个文档；四个 custom Skill 都声明了类型契约。第三种在模型规划器下会发生，此时本来就没有选中的 Skill，返回空结果。
-- 确定性图不等于当年的顺序链：后一个 node 绑定前一个 node 的结果，所以依赖它；前一个失败或被跳过时，后一个也被跳过（执行器对依赖没完成的 node 一律跳过，不管 `failurePolicy`）。链会照样用原问题跑后一个 Skill。图成为默认以来一直是这个表现。
+- 确定性图里后一个 node 通过可选的 `priorFindings` 绑定前一个 node 的结果。前一个失败时，后一个照样用原问题运行，和当年的顺序链一样（2026-11-16 用户的决定，ADR 0001 阶段 12 方案 B；2026-09-25 到那天之间，后一个被跳过、run 弃答）。两点仍和链不同：前一个因依赖故障（模型或存储挂了）失败时，后一个照旧跳过，run 以故障结束；前一个被跳过（例如预算）时，后一个也被跳过。
 - 没有 Skill 产出时，选中两个 Skill 的请求以“证据不足”弃答；只选中一个 Skill 的请求回答固定的一句 “The custom skill could not complete the request.”。
 - 一个 custom Skill 如果没有声明类型契约（`effects`、`inputSchema`、`outputSchema`、`requiresAccessScope`、必填且带范围的 `docIds`），就不在授权目录里，不会运行。
 - `AGENT_SKILL_GRAPH_ROLLOUT` 不再选择任何东西：未设置或 `guarded` 照常启动，`off`、`shadow` 和其他任何取值让进程拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。图事件里的 `mode` 仍然写 `guarded`，`fallback` 总是 `null`。

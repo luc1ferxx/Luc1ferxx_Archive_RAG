@@ -1057,8 +1057,13 @@ test("runExecutionGraphOnLangGraph does not strand a reservation when a node is 
 // Failure policy
 // ---------------------------------------------------------------------------
 
-test("runExecutionGraphOnLangGraph skips dependents of a failed node and reports the reason", async () => {
+// A failed dependency that feeds only optional inputs does not block its
+// dependant (the user's decision of 2026-11-16, ADR 0001 phase 12): the
+// dependant runs with those inputs unset. Until then risk_delta was skipped
+// with dependency_failed.
+test("runExecutionGraphOnLangGraph runs a dependent whose failed dependency fed only an optional input, without that input", async () => {
   const executed = [];
+  const priorFindingsSeen = [];
   const registry = createRegistry([
     createSkill({
       execute: async () => {
@@ -1068,8 +1073,9 @@ test("runExecutionGraphOnLangGraph skips dependents of a failed node and reports
       id: "compare_documents",
     }),
     createSkill({
-      execute: async () => {
+      execute: async (context) => {
         executed.push("risk");
+        priorFindingsSeen.push(context.priorFindings);
 
         return { citations: [], text: "risk" };
       },
@@ -1102,6 +1108,75 @@ test("runExecutionGraphOnLangGraph skips dependents of a failed node and reports
     ],
   });
 
+  const { lifecycle, outcome } = await runGraph({
+    budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
+    graph,
+    maxConcurrency: 3,
+    registry,
+  });
+
+  const byNodeId = new Map(outcome.nodeRuns.map((run) => [run.nodeId, run]));
+  const startedInput = new Map(
+    lifecycle.filter((entry) => entry.verb === "start").map((entry) => [entry.id, entry.input])
+  );
+
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.ok, false);
+  assert.equal(byNodeId.get("compare").status, "failed");
+  assert.equal(byNodeId.get("risk_delta").status, "completed");
+  assert.equal(byNodeId.get("risk_independent").status, "completed");
+  assert.deepEqual(executed.sort(), ["compare", "risk", "risk"]);
+  assert.deepEqual(priorFindingsSeen, [undefined, undefined]);
+  assert.equal(Object.hasOwn(startedInput.get("custom_skill:risk_delta"), "priorFindings"), false);
+});
+
+// What a failed dependency still blocks: a required input bound from it and an
+// edge that carries no binding (ordering only).
+test("runExecutionGraphOnLangGraph still skips a dependent that needs the failed node: required input, ordering-only edge", async () => {
+  const executed = [];
+  const registry = createRegistry([
+    createSkill({
+      execute: async () => {
+        executed.push("compare");
+        throw new Error("retrieval unavailable");
+      },
+      id: "compare_documents",
+    }),
+    createSkill({
+      execute: async () => {
+        executed.push("risk");
+
+        return { citations: [], text: "risk" };
+      },
+      id: "risk_review",
+    }),
+  ]);
+  const graph = createExecutionGraph({
+    nodes: [
+      node({
+        failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
+        nodeId: "compare",
+        skillId: "compare_documents",
+      }),
+      node({
+        dependsOn: ["compare"],
+        failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
+        inputBindings: {
+          docIds: requestField("docIds"),
+          question: nodeOutput("compare", "text"),
+        },
+        nodeId: "risk_required",
+        skillId: "risk_review",
+      }),
+      node({
+        dependsOn: ["compare"],
+        failurePolicy: EXECUTION_GRAPH_FAILURE_POLICIES.continue,
+        nodeId: "risk_ordered",
+        skillId: "risk_review",
+      }),
+    ],
+  });
+
   const { outcome } = await runGraph({
     budgetState: createAgentBudget({ maxCustomSkillCalls: 3 }),
     graph,
@@ -1111,13 +1186,12 @@ test("runExecutionGraphOnLangGraph skips dependents of a failed node and reports
 
   const byNodeId = new Map(outcome.nodeRuns.map((run) => [run.nodeId, run]));
 
-  assert.equal(outcome.status, "partial");
-  assert.equal(outcome.ok, false);
   assert.equal(byNodeId.get("compare").status, "failed");
-  assert.equal(byNodeId.get("risk_delta").status, "skipped");
-  assert.equal(byNodeId.get("risk_delta").reason, "dependency_failed");
-  assert.equal(byNodeId.get("risk_independent").status, "completed");
-  assert.deepEqual(executed.sort(), ["compare", "risk"]);
+  for (const nodeId of ["risk_required", "risk_ordered"]) {
+    assert.equal(byNodeId.get(nodeId).status, "skipped", nodeId);
+    assert.equal(byNodeId.get(nodeId).reason, "dependency_failed", nodeId);
+  }
+  assert.deepEqual(executed, ["compare"]);
 });
 
 test("runExecutionGraphOnLangGraph fail_fast stops nodes that have not started yet", async () => {
@@ -1590,8 +1664,12 @@ test("runExecutionGraphOnLangGraph persists the upstream-bound input with the st
   );
 });
 
+// The dependant binds the malformed node's text only as optional priorFindings,
+// so it still runs (ADR 0001 phase 12), on the request alone: the malformed
+// output never reaches it.
 test("runExecutionGraphOnLangGraph fails malformed success before a dependent can consume it", async () => {
   const executed = [];
+  const priorFindingsSeen = [];
   const registry = createRegistry([
     createSkill({
       execute: async () => {
@@ -1604,10 +1682,11 @@ test("runExecutionGraphOnLangGraph fails malformed success before a dependent ca
       rawExecute: true,
     }),
     createSkill({
-      execute: async () => {
+      execute: async (context) => {
         executed.push("risk");
+        priorFindingsSeen.push(context.priorFindings);
 
-        return { citations: [], text: "should not run" };
+        return { citations: [], text: "risk on the request alone" };
       },
       id: "risk_review",
     }),
@@ -1634,13 +1713,13 @@ test("runExecutionGraphOnLangGraph fails malformed success before a dependent ca
 
   const { lifecycle, outcome, trace, tracker } = await runGraph({ graph, registry });
 
-  assert.deepEqual(executed, ["compare"]);
+  assert.deepEqual(executed, ["compare", "risk"]);
+  assert.deepEqual(priorFindingsSeen, [undefined]);
   assert.equal(outcome.status, "partial");
   assert.equal(outcome.nodeRuns[0].status, "failed");
   assert.equal(outcome.nodeRuns[0].result.error.name, "SkillOutputContractError");
-  assert.equal(outcome.nodeRuns[1].status, "skipped");
-  assert.equal(outcome.nodeRuns[1].reason, "dependency_failed");
-  assert.deepEqual(lifecycle.map((entry) => entry.verb), ["start", "fail"]);
+  assert.equal(outcome.nodeRuns[1].status, "completed");
+  assert.deepEqual(lifecycle.map((entry) => entry.verb), ["start", "fail", "start", "complete"]);
   assert.equal(trace[0].status, "failed");
   assert.equal(tracker.getSkillObservations()[0].status, "failed");
 });

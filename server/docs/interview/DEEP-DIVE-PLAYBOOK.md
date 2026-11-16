@@ -303,7 +303,7 @@ routes/chat.js handleChatRequest
 - 阶段 10 的做法：先冻结再删除（test/agent-unified-graph-dial.test.mjs 钉新请求在开关每种取值下由谁回答，test/agent-stored-unified-graph-runs.test.mjs 钉已存的 v3 run 怎么处理；夹具是 v3 代码当时写下的 run 记录，代码删了测试照样跑）；原来只通过 v3 测到、代码却是共用的两条规则换了地方测（test/agent-cancellation.test.mjs、test/langgraph-request-context.test.mjs）；trajectory 17 → 15 个用例（76 → 63 项检查），planner 7 → 6 个（27 → 22 项），共有的用例删除前后逐字节一致；覆盖率闸门 4,479 个测试、0 失败（复核修正之后，本机 Node 24）；独立复核没有高级缺陷，找出两类夹具里没有的已存 run 会卡死（被启动恢复领取过的、失败或取消时图还在运行阶段的），都改了，夹具 8 → 12 种状态
 - 阶段 10 的代价要主动说：两种编排（Skill 只在文档答案通过证据检查之后运行、审批内容来自已验证的答案）、图内审批和它的 7 个跨进程 PostgreSQL 用例、v3 的真实模型规划评测、shadow 观测都没有了；开过 guarded 的部署里没结束的 v3 run 只能由人取消。阶段 10 当时没做完的那部分，阶段 11 做了（见下一条）；真实 PostgreSQL 上的已存 v3 run 和真实浏览器没有验证
 - 2026-11-15 阶段 11 是方案 A 的第二步（3.52）：删掉共用图模块里只有 v3 用过的代码（执行器里节点停在审批门和同一线程续跑、v3 图契约和 v2 checkpoint、run store 的图审批门、Capability 的图契约和图预检、只给 v3 用的 document_evidence_check），它们已经没有生产调用方；目标是行为不变，唯一的变化是任务级的 deny：它只能拒绝图审批门，现在是未知动作，回 400。没有另做冻结，阶段 10 冻结的已存 v3 run 测试和复核加的 deny 期望就是钉子；三个确定性评测与删除前逐字节一致；逐行比较删除前后的覆盖率，原来只在删掉的测试里被覆盖的规则补了测试；「RAG / AgentRAG core」一组 94.46% → 96.07%（目标 95%）。CI 的 Node 22 合并之后再看
-- 2026-11-16 阶段 12 收掉阶段 11 之后剩下的（3.53）：请求不再带批准、删掉从没接进生产的 tools.js、内置 Skill 去掉只有 v3 读过的图契约、replanner 付不起选中的 Skill 就不调模型、报告多了整图被拒的计数、承载 agent tier 的进程在 listen 之后预加载 LangGraph（代价约 +60 MB RSS）等九项；默认配置下没有请求的答案变，第一个 Skill 失败时要不要照样跑第二个留给用户
+- 2026-11-16 阶段 12 收掉阶段 11 之后剩下的（3.53）：请求不再带批准、删掉从没接进生产的 tools.js、内置 Skill 去掉只有 v3 读过的图契约、replanner 付不起选中的 Skill 就不调模型、报告多了整图被拒的计数、承载 agent tier 的进程在 listen 之后预加载 LangGraph（代价约 +60 MB RSS）等九项；默认配置下没有请求的答案变，第一个 Skill 失败时要不要照样跑第二个留给用户；用户选了 B，同日做了（失败的依赖只喂可选输入时不阻塞，第二个用原问题跑）
 - 局限：golden 只覆盖固定场景（在 Node 24 上生成，CI 的 Node 22 上通过）、两个 PG 集成套件 native 侧没冻结；阶段 7 没有跑新的压测；回退只能 git revert
 
 ### 5.5 Agent 跑到一半进程崩了怎么办？
