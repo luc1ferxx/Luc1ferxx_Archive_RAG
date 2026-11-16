@@ -768,11 +768,17 @@ const runAgentRagInScope = async ({
   replanAdapter = null,
   skillRegistry,
 }) => {
+  // The re-entered run's graph checkpoint, if it holds one: a run that does
+  // is refused by the re-entry fence below (updateRun's graphReentryGuard)
+  // or, settled, continued as a new run.
+  let reenteredGraph = null;
+
   if (requestedAgentRunId && agentRunService?.getExecutionGraphCheckpoint) {
     const loadedGraph = await agentRunService.getExecutionGraphCheckpoint({
       accessScope,
       runId: requestedAgentRunId,
     });
+    reenteredGraph = loadedGraph;
 
     // A run of the removed v3 unified graph parked at its approval gate: no
     // request can decide that gate or continue that graph any more. Refused
@@ -880,12 +886,18 @@ const runAgentRagInScope = async ({
   let reenteredRun = Boolean(requestedAgentRunId);
 
   if (requestedAgentRunId) {
-    await recordTaskApprovals({
-      accessScope,
-      agentRunService,
-      capabilityApprovals,
-      runId: requestedAgentRunId,
-    });
+    // Recorded only on a run the re-entry below can enter: a run that holds a
+    // graph checkpoint is fenced there (or, settled, continued as a new run),
+    // and an approval recorded first would leave that run running with its
+    // gate approved and its Capability never run.
+    if (!reenteredGraph) {
+      await recordTaskApprovals({
+        accessScope,
+        agentRunService,
+        capabilityApprovals,
+        runId: requestedAgentRunId,
+      });
+    }
 
     try {
       agentRun = await agentRunService?.updateRun?.({

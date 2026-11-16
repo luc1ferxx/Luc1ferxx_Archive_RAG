@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { createAgentBudget } from "../rag/agent-budget.js";
 import { runAgentRag } from "../rag/agent.js";
+import {
+  buildExecutionGraphCheckpointOwner,
+  createExecutionGraphCheckpoint,
+  updateExecutionGraphCheckpoint,
+} from "../rag/agent-execution-graph-checkpoint.js";
+import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
 import { AGENT_TASK_ACTIONS, createAgentTaskRunner, createAgentTaskService } from "../rag/agent-tasks.js";
 import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent-runs.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
@@ -223,5 +230,104 @@ test("a run whose completion is refused ends failed instead of staying running",
       (error) => error.code === "AGENT_RUN_ACTIVE_STEP_CONFLICT"
     );
     assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "failed");
+  });
+});
+
+
+// A run that holds a custom-Skill graph checkpoint is refused by the re-entry
+// fence whatever the request carries (a separate, open question: ADR 0001
+// phase 10's review). The task's approval must then write nothing, so the run
+// still waits at its gate and the chat page's approval endpoint can decide it.
+// Recording the approval before the fence left such a run running with its
+// gate approved and the Capability never run.
+test("a task's approval of a gate on a run that holds a graph checkpoint is fenced and writes nothing", async () => {
+  await withEnv(async () => {
+    const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+    const runId = "graph-then-web-gate";
+    const goal = "Review the contract and search the web for the launch date.";
+    const snapshot = createApprovalExecutionSnapshot({
+      accessScope,
+      capabilityId: "web.search",
+      capabilityVersion: "1.0.0",
+      executionInput: { question: goal },
+      inputPreview: { question: goal },
+    });
+    const gate = {
+      approvalObjectHash: snapshot.approvalObjectHash,
+      capabilityId: "web.search",
+      capabilityLabel: "Web Search",
+      capabilityVersion: "1.0.0",
+      id: `approval:web.search:1.0.0:${snapshot.approvalObjectHash.slice("sha256:".length)}`,
+      inputPreview: { question: goal },
+      snapshotVersion: snapshot.snapshotVersion,
+      status: "pending",
+      stepId: "3-capability_approval_gate",
+    };
+    const checkpoint = updateExecutionGraphCheckpoint(
+      createExecutionGraphCheckpoint({
+        graph: { nodes: [{ nodeId: "risk", skillId: "risk_review" }], revision: 0, version: "v1" },
+        owner: buildExecutionGraphCheckpointOwner({
+          accessScope,
+          budgetState: createAgentBudget(),
+          docIds: ["doc-1"],
+          question: goal,
+          selectedSkills: [],
+        }),
+      }),
+      { phase: "completed" }
+    );
+
+    await agentRunService.createRun({ accessScope, goal, runId, status: "running" });
+    await agentRunService.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
+    await agentRunService.completeRun({
+      accessScope,
+      approvalGates: [gate],
+      approvalSnapshots: [{
+        approvalObjectHash: snapshot.approvalObjectHash,
+        capabilityId: "web.search",
+        capabilityVersion: "1.0.0",
+        executionInput: snapshot.privateSnapshot.executionInput,
+        gateId: gate.id,
+        snapshotVersion: snapshot.snapshotVersion,
+      }],
+      runId,
+      status: "waiting_for_user",
+      steps: [{
+        approvalGateId: gate.id,
+        capabilityId: "web.search",
+        id: gate.stepId,
+        kind: "approval_gate",
+        label: "Capability Approval",
+        status: "paused",
+        type: "capability_approval_gate",
+      }],
+    });
+    const before = await agentRunService.getRun({ accessScope, runId });
+
+    await assert.rejects(
+      runAgentRag({
+        accessScope,
+        agentRunId: runId,
+        agentRunService,
+        capabilityApprovals: {
+          "web.search": {
+            approvalObjectHash: gate.approvalObjectHash,
+            approved: true,
+            decision: "approved",
+            gateId: gate.id,
+            source: "task_action",
+          },
+        },
+        docIds: [],
+        question: goal,
+        ragService: { getDocument: () => null, listDocuments: () => [] },
+        userId: accessScope.userId,
+        webChatService: async () => {
+          throw new Error("the Capability must not run");
+        },
+      }),
+      (error) => error.code === "AGENT_GRAPH_EXECUTION_FENCED" && error.status === 409
+    );
+    assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before);
   });
 });
