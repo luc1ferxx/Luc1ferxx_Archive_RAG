@@ -527,19 +527,8 @@ const resolvePausedPrimaryApprovalSteps = ({
   return nextSteps;
 };
 
-/**
- * The steps after an approval decision. By default (the run's approval
- * endpoint) the gate step completes, the paused step that asked for the
- * approval is delegated (skipped), and a `capability_call` step is queued
- * for the step executor to run the approved Capability. With
- * `continuedByReentry` (a background task's approval, which re-enters the run
- * and plans it again: agent.js) only the gate step completes; the paused step
- * stays paused for the re-entered plan to resume, and no Capability step is
- * queued.
- */
 export const applyApprovalActionToSteps = ({
   action,
-  continuedByReentry = false,
   gate = {},
   now = () => new Date().toISOString(),
   steps = [],
@@ -569,14 +558,6 @@ export const applyApprovalActionToSteps = ({
     });
     nextSteps = updateResult.steps;
     gateStep = updateResult.step;
-  }
-
-  if (continuedByReentry && normalizedAction === "approve") {
-    return {
-      capabilityStep: null,
-      gateStep,
-      steps: nextSteps,
-    };
   }
 
   if (["approve", "deny"].includes(normalizedAction)) {

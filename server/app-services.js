@@ -48,6 +48,7 @@ import { createRecommendationTaskService } from "./rag/recommendation-tasks.js";
 import { createDefaultTaskStore } from "./rag/task-store.js";
 import { createTaskService } from "./rag/tasks.js";
 import {
+  createAgentTaskIterationRunner,
   createAgentTaskRunner,
   createAgentTaskService,
 } from "./rag/agent-tasks.js";
@@ -211,7 +212,6 @@ export const buildChatResponse = async ({
   userId,
   accessScope,
   agentRunId,
-  capabilityApprovals,
   taskMemory,
   skillRegistry,
 }) => {
@@ -257,7 +257,6 @@ export const buildChatResponse = async ({
       userId,
       accessScope,
       agentRunId,
-      capabilityApprovals,
       taskMemory,
       executionPlannerAdapter,
       intentPlannerAdapter,
@@ -401,37 +400,41 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
     options.agentTaskRunner ??
     createAgentTaskRunner({
       capabilityRegistry,
-      runAgentTask: ({
-        accessScope,
-        agentRunId,
-        capabilityApprovals,
-        docIds,
-        question,
-        sessionId,
-        taskMemory,
-        userId,
-      }) =>
-        buildChatResponse({
+      // A task's approval goes through the run's approval path, the chat
+      // page's (rag/agent-tasks.js createAgentTaskIterationRunner); the step
+      // executor is built below and read only when a task runs.
+      runAgentTask: createAgentTaskIterationRunner({
+        approveRunGate: (options) => agentRunStepExecutor.applyApprovalAction(options),
+        runAgentRequest: ({
           accessScope,
-          agentBudget,
           agentRunId,
-          agentRunService,
-          arxivImportService,
-          capabilityApprovals,
-          capabilityRegistry,
-          dagPlannerAdapter: resolvedDagPlannerAdapter,
           docIds,
-          executionPlannerAdapter,
-          intentPlannerAdapter,
           question,
-          ragService,
-          replanAdapter: resolvedReplanAdapter,
           sessionId,
-          skillRegistry,
           taskMemory,
           userId,
-          webChatService,
-        }),
+        }) =>
+          buildChatResponse({
+            accessScope,
+            agentBudget,
+            agentRunId,
+            agentRunService,
+            arxivImportService,
+            capabilityRegistry,
+            dagPlannerAdapter: resolvedDagPlannerAdapter,
+            docIds,
+            executionPlannerAdapter,
+            intentPlannerAdapter,
+            question,
+            ragService,
+            replanAdapter: resolvedReplanAdapter,
+            sessionId,
+            skillRegistry,
+            taskMemory,
+            userId,
+            webChatService,
+          }),
+      }),
     });
   const jobRunners = {
     ...(arxivEnrichmentService.importJobRunner?.id

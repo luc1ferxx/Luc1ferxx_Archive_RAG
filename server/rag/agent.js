@@ -415,65 +415,6 @@ const withCapabilityApprovals = (capabilityRegistry, approvals = {}) => {
   };
 };
 
-// A background task's approval (agent-tasks.js `approve`) re-enters the run a
-// Capability gate paused, carrying that gate's binding. The decision is
-// recorded on the run first, through the same run-store method as the run's
-// approval endpoint (agent-runs.js applyApprovalAction: the binding checked
-// against the gate, the gate approved and its step completed, the
-// approval_gate_approved event), so the re-entered plan runs the approved
-// Capability and the run can complete. The paused step that asked for the
-// approval stays paused for the re-entered plan to resume
-// (`continuedByReentry`). A binding that does not match the pending gate is
-// refused there, before anything runs. A gate that is no longer pending
-// (decided on the run already) is left as it is.
-const recordTaskApprovals = async ({
-  accessScope,
-  agentRunService,
-  capabilityApprovals,
-  runId,
-}) => {
-  const approvals = Object.values(capabilityApprovals ?? {}).filter(
-    (approval) => approval?.approved === true && typeof approval.gateId === "string" && approval.gateId
-  );
-
-  if (
-    approvals.length === 0 ||
-    typeof agentRunService?.getRun !== "function" ||
-    typeof agentRunService?.applyApprovalAction !== "function"
-  ) {
-    return;
-  }
-
-  const run = await agentRunService.getRun({ accessScope, runId });
-
-  // Only a run still waiting at its gate takes the decision; one that ended
-  // is continued as a new run instead (agent-runs.js, settled re-entry).
-  if (run?.status !== AGENT_RUN_STATUSES.waitingForUser) {
-    return;
-  }
-
-  const pendingGateIds = new Set(
-    (Array.isArray(run?.approvalGates) ? run.approvalGates : [])
-      .filter((gate) => gate?.status === "pending")
-      .map((gate) => gate.id)
-  );
-
-  for (const approval of approvals) {
-    if (!pendingGateIds.has(approval.gateId)) {
-      continue;
-    }
-
-    await agentRunService.applyApprovalAction({
-      accessScope,
-      action: "approve",
-      continuedByReentry: true,
-      gateId: approval.gateId,
-      payload: { approvalObjectHash: approval.approvalObjectHash },
-      runId,
-    });
-  }
-};
-
 const createGraphResumeError = (reason) => {
   const error = new Error(`Execution graph cannot be resumed: ${reason}.`);
   error.code = "AGENT_GRAPH_CHECKPOINT_REQUIRES_RECOVERY";
@@ -775,17 +716,11 @@ const runAgentRagInScope = async ({
   replanAdapter = null,
   skillRegistry,
 }) => {
-  // The re-entered run's graph checkpoint, if it holds one: a run that does
-  // is refused by the re-entry fence below (updateRun's graphReentryGuard)
-  // or, settled, continued as a new run.
-  let reenteredGraph = null;
-
   if (requestedAgentRunId && agentRunService?.getExecutionGraphCheckpoint) {
     const loadedGraph = await agentRunService.getExecutionGraphCheckpoint({
       accessScope,
       runId: requestedAgentRunId,
     });
-    reenteredGraph = loadedGraph;
 
     // A run of the removed v3 unified graph parked at its approval gate: no
     // request can decide that gate or continue that graph any more. Refused
@@ -893,19 +828,6 @@ const runAgentRagInScope = async ({
   let reenteredRun = Boolean(requestedAgentRunId);
 
   if (requestedAgentRunId) {
-    // Recorded only on a run the re-entry below can enter: a run that holds a
-    // graph checkpoint is fenced there (or, settled, continued as a new run),
-    // and an approval recorded first would leave that run running with its
-    // gate approved and its Capability never run.
-    if (!reenteredGraph) {
-      await recordTaskApprovals({
-        accessScope,
-        agentRunService,
-        capabilityApprovals,
-        runId: requestedAgentRunId,
-      });
-    }
-
     try {
       agentRun = await agentRunService?.updateRun?.({
         accessScope,

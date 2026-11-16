@@ -8,20 +8,32 @@ import {
   createExecutionGraphCheckpoint,
   updateExecutionGraphCheckpoint,
 } from "../rag/agent-execution-graph-checkpoint.js";
-import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
-import { AGENT_TASK_ACTIONS, createAgentTaskRunner, createAgentTaskService } from "../rag/agent-tasks.js";
+import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import { createDocumentRagStepExecutor } from "../rag/agent-run-step-handlers/document-steps.js";
+import { createResearchQuestionStepExecutor } from "../rag/agent-run-step-handlers/research-steps.js";
+import {
+  AGENT_TASK_ACTIONS,
+  createAgentTaskIterationRunner,
+  createAgentTaskRunner,
+  createAgentTaskService,
+} from "../rag/agent-tasks.js";
 import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent-runs.js";
+import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
+import { createDefaultCapabilityRegistry } from "../rag/capabilities/index.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
 import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 
 // A background task that a Capability approval gate paused, approved through
 // the task (POST /tasks/:taskId/actions/approve; the Approve button of the
-// task card), end to end through the real agent: the task runner re-enters
-// the paused run with the gate's binding. The other task-approval tests stub
-// the agent; this one does not.
+// task card), end to end through the real agent and the real step executor,
+// wired as app-services.js wires them (createAgentTaskIterationRunner). The
+// task's approval decides the gate on the paused run through the chat page's
+// approval path: nothing is planned again. The other task-approval tests stub
+// the agent.
 
 const accessScope = { userId: "alice", workspaceId: "workspace-a" };
-const QUESTION = "Search the web for the current launch date";
+const DOCS = ["doc-a", "doc-b"];
+const WEB_QUESTION = "Search the web for the current launch date";
 
 const ENV = Object.freeze({
   AGENT_PLANNER_ROLLOUT: "deterministic",
@@ -44,44 +56,72 @@ const withEnv = async (callback) => {
   }
 };
 
+const createRagService = () => {
+  const calls = [];
+
+  return {
+    calls,
+    chat: async (docIds, question) => {
+      calls.push(question);
+      return {
+        abstained: false,
+        citations: [{ docId: docIds[0], excerpt: "The vendor requires 30 days written notice before renewal.", fileName: `${docIds[0]}.pdf`, pageNumber: 2 }],
+        text: "The vendor requires 30 days written notice before renewal. [Source 1]",
+      };
+    },
+    getDocument: (docId) => (DOCS.includes(docId) ? { docId, fileName: `${docId}.pdf` } : null),
+    listDocuments: () => DOCS.map((docId) => ({ docId, fileName: `${docId}.pdf` })),
+  };
+};
+
 const createHarness = ({ wrapRunService = (service) => service } = {}) => {
   const agentRunService = wrapRunService(
     createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() })
   );
   const webCalls = [];
+  const ragService = createRagService();
+  const webChatService = async (question) => {
+    webCalls.push(question);
+    return { citations: [], text: `Launch date found on the web for: ${question}` };
+  };
+  const capabilityRegistry = createDefaultCapabilityRegistry({ ragService, webChatService });
+  const stepExecutor = createAgentRunStepExecutor({
+    agentRunService,
+    capabilityRegistry,
+    executeDocumentRagStep: createDocumentRagStepExecutor({ ragService }),
+    executeResearchQuestionStep: createResearchQuestionStepExecutor({ ragService }),
+  });
+  const runAgentTask = createAgentTaskIterationRunner({
+    approveRunGate: (options) => stepExecutor.applyApprovalAction(options),
+    runAgentRequest: (request) =>
+      runAgentRag({ ...request, agentRunService, capabilityRegistry, ragService, webChatService }),
+  });
   const taskService = createTaskService({ taskStore: createInMemoryTaskStore() });
   const runner = createAgentTaskRunner({
+    capabilityRegistry,
     goalDeliverableService: {
       execute: async () => {
         throw new Error("no goal deliverable is requested");
       },
       prepare: async () => ({ specs: [], status: "not_requested" }),
     },
-    runAgentTask: (request) =>
-      runAgentRag({
-        ...request,
-        agentRunService,
-        ragService: { getDocument: () => null, listDocuments: () => [] },
-        webChatService: async (question) => {
-          webCalls.push(question);
-          return { citations: [], text: `Launch date found on the web for: ${question}` };
-        },
-      }),
+    runAgentTask,
   });
   const orchestrator = createJobOrchestrator({ runners: { [runner.id]: runner }, taskService });
   const agentTaskService = createAgentTaskService({
-    createTaskId: () => "approval-reentry",
+    createTaskId: () => "approval",
     jobOrchestrator: { scheduleTaskRun: () => {} },
     taskService,
   });
 
-  return { agentRunService, agentTaskService, orchestrator, taskService, webCalls };
+  return { agentRunService, agentTaskService, orchestrator, ragService, runAgentTask, taskService, webCalls };
 };
 
-const startPausedTask = async (harness) => {
+const startPausedTask = async (harness, { docIds = [], question = WEB_QUESTION } = {}) => {
   const created = await harness.agentTaskService.createTask({
     accessScope,
-    question: QUESTION,
+    docIds,
+    question,
     userId: accessScope.userId,
   });
 
@@ -90,59 +130,65 @@ const startPausedTask = async (harness) => {
   return harness.taskService.getInternalTask({ accessScope, taskId: created.id });
 };
 
-test("a task's approval of a Capability gate runs the Capability once and completes the task and its run", async () => {
-  await withEnv(async () => {
-    const harness = createHarness();
-    const paused = await startPausedTask(harness);
-    const gate = paused.payload.pending.approvalGates[0];
-    const runId = paused.payload.agentRunId;
-
-    assert.equal(paused.status, "waiting_for_user");
-    assert.equal(paused.requiredUserAction, AGENT_TASK_ACTIONS.approve.concat("_capability"));
-    assert.equal(harness.webCalls.length, 0);
-    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "waiting_for_user");
-
-    await harness.orchestrator.resumeTask({
-      accessScope,
-      action: AGENT_TASK_ACTIONS.approve,
-      payload: { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
-      runImmediately: false,
-      taskId: paused.id,
-    });
-    await harness.orchestrator.runTask({ accessScope, taskId: paused.id });
-
-    const task = await harness.taskService.getInternalTask({ accessScope, taskId: paused.id });
-    const run = await harness.agentRunService.getRun({ accessScope, runId });
-
-    assert.deepEqual(
-      { error: task.error ?? null, status: task.status },
-      { error: null, status: "completed" }
-    );
-    // The approved Web search ran once, in the run the gate paused.
-    assert.equal(harness.webCalls.length, 1);
-    assert.equal(task.result.agentRunId, runId);
-    assert.equal(run.status, "completed");
-    assert.deepEqual(run.approvalGates.map((entry) => entry.status), ["approved"]);
-    assert.deepEqual(
-      Object.fromEntries(
-        run.steps
-          .filter((step) => ["2-capability_approval_gate", "web_search:primary"].includes(step.id))
-          .map((step) => [step.id, step.status])
-      ),
-      { "2-capability_approval_gate": "completed", "web_search:primary": "completed" }
-    );
-    assert.deepEqual(
-      run.steps.filter((step) => step.status === "paused" || step.status === "running"),
-      []
-    );
-    assert.deepEqual(
-      run.events
-        .filter((event) => event.type === "approval_gate_approved")
-        .map((event) => ({ continuedByReentry: event.payload.continuedByReentry, gateId: event.payload.gateId })),
-      [{ continuedByReentry: true, gateId: gate.id }]
-    );
+const approveTask = async (harness, task, gate) => {
+  await harness.orchestrator.resumeTask({
+    accessScope,
+    action: AGENT_TASK_ACTIONS.approve,
+    payload: { approvalObjectHash: gate.approvalObjectHash, gateId: gate.id },
+    runImmediately: false,
+    taskId: task.id,
   });
-});
+  await harness.orchestrator.runTask({ accessScope, taskId: task.id });
+
+  return harness.taskService.getInternalTask({ accessScope, taskId: task.id });
+};
+
+const stepStatuses = (run) =>
+  Object.fromEntries(run.steps.map((step) => [step.id, step.status]));
+
+for (const { docIds, label, question } of [
+  { docIds: [], label: "a Web-only question", question: WEB_QUESTION },
+  // The document answer completes before the run stops at the Web gate. A
+  // task's approval used to plan the run again, which tried to restart that
+  // completed step (409 "Invalid agent run step status transition") and
+  // failed the task.
+  { docIds: DOCS, label: "a document answer and then a Web gate", question: "What is the latest notice period for renewal?" },
+]) {
+  test(`a task's approval after ${label} runs the Capability once and completes the task and its run`, async () => {
+    await withEnv(async () => {
+      const harness = createHarness();
+      const paused = await startPausedTask(harness, { docIds, question });
+      const gate = paused.payload.pending?.approvalGates?.[0];
+      const runId = paused.payload.agentRunId;
+
+      assert.equal(paused.status, "waiting_for_user");
+      assert.equal(paused.requiredUserAction, "approve_capability");
+      assert.equal(gate?.capabilityId, "web.search");
+      assert.equal(harness.webCalls.length, 0);
+      const documentCalls = harness.ragService.calls.length;
+
+      const task = await approveTask(harness, paused, gate);
+      const run = await harness.agentRunService.getRun({ accessScope, runId });
+
+      assert.deepEqual(
+        { error: task.error ?? null, status: task.status },
+        { error: null, status: "completed" }
+      );
+      assert.equal(task.result.agentRunId, runId);
+      assert.match(task.result.answer, /Launch date found on the web/);
+      assert.equal(harness.webCalls.length, 1);
+      // Nothing was planned again: no further document call.
+      assert.equal(harness.ragService.calls.length, documentCalls);
+      assert.equal(run.status, "completed");
+      assert.deepEqual(run.approvalGates.map((entry) => entry.status), ["approved"]);
+      assert.equal(
+        Object.values(stepStatuses(run)).some((status) => status === "paused" || status === "running"),
+        false
+      );
+      assert.equal(run.events.filter((event) => event.type === "approval_gate_approved").length, 1);
+    });
+  });
+}
 
 // The approval must be the gate's own: a stale or forged binding is refused
 // before the Capability runs, and the run keeps waiting at its gate.
@@ -155,10 +201,9 @@ test("a task's approval whose binding does not match the run's pending gate is r
     const before = await harness.agentRunService.getRun({ accessScope, runId });
 
     await assert.rejects(
-      runAgentRag({
+      harness.runAgentTask({
         accessScope,
         agentRunId: runId,
-        agentRunService: harness.agentRunService,
         capabilityApprovals: {
           [gate.capabilityId]: {
             approvalObjectHash: `sha256:${"0".repeat(64)}`,
@@ -168,81 +213,48 @@ test("a task's approval whose binding does not match the run's pending gate is r
             source: "task_action",
           },
         },
-        docIds: [],
-        question: QUESTION,
-        ragService: { getDocument: () => null, listDocuments: () => [] },
-        userId: accessScope.userId,
-        webChatService: async () => {
-          throw new Error("the Capability must not run");
-        },
       }),
       (error) => error.status === 409
     );
+    assert.equal(harness.webCalls.length, 0);
     assert.deepEqual(await harness.agentRunService.getRun({ accessScope, runId }), before);
   });
 });
 
-// A run whose completion is refused must not stay `running`: the agent's
-// failure path ends it.
-test("a run whose completion is refused ends failed instead of staying running", async () => {
+// A gate that is no longer waiting cannot be decided: a run that ended (here
+// canceled) refuses the approval, nothing runs, and the task fails with that
+// reason rather than starting the action again in a new run.
+test("a task's approval of a gate on a run that has ended is refused and nothing runs", async () => {
   await withEnv(async () => {
-    let refuseCompletion = false;
-    const harness = createHarness({
-      wrapRunService: (service) => ({
-        ...service,
-        completeRun: async (options) => {
-          if (refuseCompletion) {
-            const error = new Error("Agent run cannot become completed with a concurrent active step.");
-            error.code = "AGENT_RUN_ACTIVE_STEP_CONFLICT";
-            error.status = 409;
-            throw error;
-          }
-
-          return service.completeRun(options);
-        },
-      }),
-    });
+    const harness = createHarness();
     const paused = await startPausedTask(harness);
     const gate = paused.payload.pending.approvalGates[0];
     const runId = paused.payload.agentRunId;
 
-    refuseCompletion = true;
-    await assert.rejects(
-      runAgentRag({
-        accessScope,
-        agentRunId: runId,
-        agentRunService: harness.agentRunService,
-        capabilityApprovals: {
-          [gate.capabilityId]: {
-            approvalObjectHash: gate.approvalObjectHash,
-            approved: true,
-            decision: "approved",
-            gateId: gate.id,
-            source: "task_action",
-          },
-        },
-        docIds: [],
-        question: QUESTION,
-        ragService: { getDocument: () => null, listDocuments: () => [] },
-        userId: accessScope.userId,
-        webChatService: async () => ({ citations: [], text: "Launch date." }),
-      }),
-      (error) => error.code === "AGENT_RUN_ACTIVE_STEP_CONFLICT"
-    );
-    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "failed");
+    await harness.agentRunService.failRun({
+      accessScope,
+      error: new Error("Canceled by the user."),
+      runId,
+      status: "canceled",
+    });
+
+    const task = await approveTask(harness, paused, gate);
+
+    assert.equal(task.status, "failed");
+    assert.equal(task.error, "Agent run is not waiting for user input.");
+    assert.equal(harness.webCalls.length, 0);
+    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "canceled");
   });
 });
 
-
-// A run that holds a custom-Skill graph checkpoint is refused by the re-entry
-// fence whatever the request carries (a separate, open question: ADR 0001
-// phase 10's review). The task's approval must then write nothing, so the run
-// still waits at its gate and the chat page's approval endpoint can decide it.
-// Recording the approval before the fence left such a run running with its
-// gate approved and the Capability never run.
-test("a task's approval of a gate on a run that holds a graph checkpoint is fenced and writes nothing", async () => {
+// A run whose custom-Skill graph completed before the plan stopped at a later
+// gate holds a graph checkpoint, so re-entering it is fenced. A task's
+// approval used to re-enter it (409 AGENT_GRAPH_EXECUTION_FENCED); it now
+// decides the gate as the chat page does, which the replay guard allows for a
+// gate created after the graph's terminal event.
+test("a task's approval of a gate after a completed custom-Skill graph runs the Capability and completes the run", async () => {
   await withEnv(async () => {
-    const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+    const harness = createHarness();
     const runId = "graph-then-web-gate";
     const goal = "Review the contract and search the web for the launch date.";
     const snapshot = createApprovalExecutionSnapshot({
@@ -269,7 +281,7 @@ test("a task's approval of a gate on a run that holds a graph checkpoint is fenc
         owner: buildExecutionGraphCheckpointOwner({
           accessScope,
           budgetState: createAgentBudget(),
-          docIds: ["doc-1"],
+          docIds: ["doc-a"],
           question: goal,
           selectedSkills: [],
         }),
@@ -277,9 +289,21 @@ test("a task's approval of a gate on a run that holds a graph checkpoint is fenc
       { phase: "completed" }
     );
 
-    await agentRunService.createRun({ accessScope, goal, runId, status: "running" });
-    await agentRunService.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
-    await agentRunService.completeRun({
+    await harness.agentRunService.createRun({ accessScope, goal, runId, status: "running" });
+    await harness.agentRunService.saveExecutionGraphCheckpoint({ accessScope, checkpoint, runId });
+    await harness.agentRunService.appendRunEvent({
+      accessScope,
+      payload: {
+        executed: true,
+        fallback: null,
+        graph: { nodeIds: ["risk"], version: "v1" },
+        mode: "guarded",
+        status: "completed",
+      },
+      runId,
+      type: "skill_graph_planned",
+    });
+    await harness.agentRunService.completeRun({
       accessScope,
       approvalGates: [gate],
       approvalSnapshots: [{
@@ -302,32 +326,71 @@ test("a task's approval of a gate on a run that holds a graph checkpoint is fenc
         type: "capability_approval_gate",
       }],
     });
-    const before = await agentRunService.getRun({ accessScope, runId });
 
-    await assert.rejects(
-      runAgentRag({
-        accessScope,
-        agentRunId: runId,
-        agentRunService,
-        capabilityApprovals: {
-          "web.search": {
-            approvalObjectHash: gate.approvalObjectHash,
-            approved: true,
-            decision: "approved",
-            gateId: gate.id,
-            source: "task_action",
-          },
+    const response = await harness.runAgentTask({
+      accessScope,
+      agentRunId: runId,
+      capabilityApprovals: {
+        "web.search": {
+          approvalObjectHash: gate.approvalObjectHash,
+          approved: true,
+          decision: "approved",
+          gateId: gate.id,
+          source: "task_action",
         },
-        docIds: [],
-        question: goal,
-        ragService: { getDocument: () => null, listDocuments: () => [] },
-        userId: accessScope.userId,
-        webChatService: async () => {
-          throw new Error("the Capability must not run");
+      },
+    });
+    const run = await harness.agentRunService.getRun({ accessScope, runId });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.agentRunId, runId);
+    assert.match(response.body.agentAnswer, /Launch date found on the web/);
+    assert.equal(harness.webCalls.length, 1);
+    assert.equal(run.status, "completed");
+    assert.deepEqual(run.approvalGates.map((entry) => entry.status), ["approved"]);
+    // The graph checkpoint is left as it was.
+    assert.deepEqual(
+      (await harness.agentRunService.getExecutionGraphCheckpoint({ accessScope, runId })).checkpoint,
+      checkpoint
+    );
+  });
+});
+
+// A run whose completion is refused must not stay `running`: the agent's
+// failure path ends it.
+test("a run whose completion is refused ends failed instead of staying running", async () => {
+  await withEnv(async () => {
+    const harness = createHarness({
+      wrapRunService: (service) => ({
+        ...service,
+        completeRun: async () => {
+          const error = new Error("Agent run cannot become completed with a concurrent active step.");
+          error.code = "AGENT_RUN_ACTIVE_STEP_CONFLICT";
+          error.status = 409;
+          throw error;
         },
       }),
-      (error) => error.code === "AGENT_GRAPH_EXECUTION_FENCED" && error.status === 409
+    });
+    let runId = null;
+
+    await assert.rejects(
+      harness.runAgentTask({
+        accessScope,
+        docIds: DOCS,
+        question: "What notice period does the vendor require before renewal?",
+        userId: accessScope.userId,
+      }).catch(async (error) => {
+        runId = error.agentRunId ?? null;
+        throw error;
+      }),
+      (error) => error.code === "AGENT_RUN_ACTIVE_STEP_CONFLICT"
     );
-    assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before);
+
+    const runs = await harness.agentRunService.listRuns?.({ accessScope });
+    const stored = runId
+      ? await harness.agentRunService.getRun({ accessScope, runId })
+      : (runs?.runs ?? runs ?? [])[0];
+
+    assert.equal(stored?.status, "failed");
   });
 });
