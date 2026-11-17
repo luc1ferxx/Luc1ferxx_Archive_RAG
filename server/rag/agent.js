@@ -20,7 +20,6 @@ import {
 } from "./agent-intent-planner.js";
 import { prepareAgentRun } from "./agent-preparation-flow.js";
 import {
-  AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE,
   AGENT_RUN_STATUSES,
   createAgentRunCursor,
 } from "./agent-runs.js";
@@ -40,10 +39,6 @@ import {
   buildAgentRunStepsFromTrace,
 } from "./agent-run-steps.js";
 import { normalizeText } from "../lib/normalize-text.js";
-import {
-  isRemovedUnifiedGraphApprovalPause,
-  refuseRemovedUnifiedGraphRun,
-} from "./agent-removed-unified-graph.js";
 import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
 import { resolveAgentRunTermination } from "./dependency-outage.js";
@@ -411,8 +406,8 @@ const createGraphResumeError = (reason) => {
  * Continue only the persisted graph: the custom_skills stage of a run whose
  * stored outer plan is exactly that stage. In particular this does not call
  * the Intent Planner, query planner, preparation flow, or outer Execution
- * Planner. A startup worker must first own the persisted CAS claim and must
- * never use the general runAgentRag re-entry path for this job. A checkpoint
+ * Planner. A startup worker must first own the persisted CAS claim; runAgentRag
+ * cannot do this job, since it always answers in a new run. A checkpoint
  * of the removed v3 unified graph (agent-removed-unified-graph.js) is not a
  * custom-Skill graph and is refused by the check below.
  */
@@ -700,25 +695,6 @@ const runAgentRagInScope = async ({
   replanAdapter = null,
   skillRegistry,
 }) => {
-  if (requestedAgentRunId && agentRunService?.getExecutionGraphCheckpoint) {
-    const loadedGraph = await agentRunService.getExecutionGraphCheckpoint({
-      accessScope,
-      runId: requestedAgentRunId,
-    });
-
-    // A run of the removed v3 unified graph parked at its approval gate: no
-    // request can decide that gate or continue that graph any more. Refused
-    // unless the run has ended (an operator canceled it), which the re-entry
-    // below then continues as a new run.
-    if (isRemovedUnifiedGraphApprovalPause(loadedGraph?.checkpoint)) {
-      await refuseRemovedUnifiedGraphRun({
-        accessScope,
-        agentRunService,
-        runId: requestedAgentRunId,
-      });
-    }
-  }
-
   const taskMemoryContext = taskMemory
     ? buildAgentTaskPlanningContext(taskMemory)
     : null;
@@ -801,56 +777,27 @@ const runAgentRagInScope = async ({
   // it with the revision CAS instead of first re-reading the row the previous
   // write returned; see createAgentRunCursor.
   const runCursor = createAgentRunCursor();
-  const createFreshRun = () =>
-    agentRunService?.createRun?.({
+  const agentRun = await agentRunService?.createRun?.({
+    accessScope,
+    goal: question,
+    runCursor,
+    ...runSnapshot,
+  });
+  const agentRunId = agentRun?.runId ?? null;
+
+  // A request that names a run (a background task's `continue`) is a new
+  // request: it gets a new run, linked to the named one, which is never
+  // re-entered or written. Its stages record fixed step ids that the named
+  // run may already hold, and the task memory carries the context.
+  if (requestedAgentRunId && agentRunId) {
+    await agentRunService?.appendRunEvent?.({
       accessScope,
-      goal: question,
-      runCursor,
-      ...runSnapshot,
+      runId: agentRunId,
+      type: "run_continued",
+      payload: { previousRunId: requestedAgentRunId },
     });
-  let agentRun;
-  let reenteredRun = Boolean(requestedAgentRunId);
-
-  if (requestedAgentRunId) {
-    try {
-      agentRun = await agentRunService?.updateRun?.({
-        accessScope,
-        graphReentryGuard: true,
-        runCursor,
-        runId: requestedAgentRunId,
-        patch: {
-          ...runSnapshot,
-          status: AGENT_RUN_STATUSES.running,
-        },
-      });
-    } catch (error) {
-      // A settled run (agent-runs.js AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE: it
-      // ended, or its graph was finalized as a question for the user) is
-      // never re-entered: a continuation such as a task's `continue` after
-      // its iteration budget, or the user's answer to the question, is a new
-      // request, so it gets a new run; the task memory carries the context.
-      // The settled run is left untouched.
-      if (error?.code !== AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE) {
-        throw error;
-      }
-
-      agentRun = await createFreshRun();
-      reenteredRun = false;
-      await agentRunService?.appendRunEvent?.({
-        accessScope,
-        runId: agentRun?.runId,
-        type: "run_continued",
-        payload: {
-          previousRunId: requestedAgentRunId,
-          reason: error.reentryReason ?? "settled_unified_graph_run",
-        },
-      });
-    }
-  } else {
-    agentRun = await createFreshRun();
   }
 
-  const agentRunId = agentRun?.runId ?? (reenteredRun ? requestedAgentRunId : null) ?? null;
   // Tagged as soon as the run exists, so a run that later throws can still be
   // found from its trace.
   setActiveSpanAttributes({ "agent.run.id": agentRunId });
@@ -870,14 +817,6 @@ const runAgentRagInScope = async ({
       ragService,
       webChatService,
     });
-
-  if (reenteredRun && agentRunId) {
-    await agentRunService?.appendRunEvent?.({
-      accessScope,
-      runId: agentRunId,
-      type: "run_resumed",
-    });
-  }
 
   try {
     const preparationResult = await prepareAgentRun({
@@ -1205,7 +1144,6 @@ export const runAgentRag = (options = {}) =>
           "agent.document_count": Array.isArray(options.docIds)
             ? options.docIds.length
             : undefined,
-          "agent.run.resumed": Boolean(options.agentRunId),
           [GEN_AI_ATTRIBUTES.conversationId]: options.sessionId,
         },
         () => runAgentRagInScope(options)

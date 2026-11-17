@@ -44,12 +44,10 @@ import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.
 import {
   buildExecutionGraphNodeStepId,
   EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY,
-  EXECUTION_GRAPH_CHECKPOINT_VERSION,
   isExecutionGraphCheckpointIntact,
   updateExecutionGraphCheckpoint,
 } from "./agent-execution-graph-checkpoint.js";
 import { assertStandaloneGraphReplayAllowed } from "./agent-run-graph-replay-guard.js";
-import { isSettledRemovedUnifiedGraphRun } from "./agent-removed-unified-graph.js";
 import {
   isRetentionExpired,
   normalizeRetentionBatchLimit,
@@ -1293,58 +1291,6 @@ const getActiveAgentRunStep = (steps = []) =>
 const isRunMarkedForManualRecovery = (run) =>
   run?.result?.recovery?.mode === "manual";
 
-/**
- * Error code of a re-entry into a settled run: nothing is left to do in it, so
- * a request that continues it (a background task's `continue` or `approve`,
- * agent-tasks.js) is a new request with a new run (agent.js), and the settled
- * run is left as it is. The error carries why (`reentryReason`, the
- * `run_continued` event's reason):
- * - `settled_unified_graph_run`: a run of the removed v3 unified graph that
- *   ended or was finalized as a question (agent-removed-unified-graph.js);
- * - `run_ended`: any other run that completed, failed or was canceled (the
- *   run state machine never reopens one);
- * - `graph_finalized_as_question`: a run whose custom-Skill graph settled and
- *   that now waits for the user's answer with nothing else open.
- * Any other run with a graph checkpoint stays fenced (in flight, claimed,
- * handed to an operator, or waiting at an approval gate).
- */
-export const AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE = "AGENT_RUN_SETTLED_GRAPH_REENTRY";
-
-export const AGENT_RUN_SETTLED_REENTRY_REASONS = Object.freeze({
-  graphFinalizedAsQuestion: "graph_finalized_as_question",
-  runEnded: "run_ended",
-  settledUnifiedGraphRun: "settled_unified_graph_run",
-});
-
-// The custom-Skill graph settled (completed or partial) and the run waits for
-// the user's answer with nothing else open: no pending approval gate, no
-// resume claim. An operator's mark does not change that when the run was
-// already waiting for the user (AGENT_RUN_RECOVERY_MODE=manual, or startup
-// recovery's graph_finalization_requires_recovery, lists every such run).
-const isCustomSkillGraphFinalizedAsQuestion = ({ checkpoint, run }) =>
-  checkpoint?.version === EXECUTION_GRAPH_CHECKPOINT_VERSION &&
-  SETTLED_EXECUTION_GRAPH_CHECKPOINT_PHASES.has(checkpoint.phase) &&
-  !checkpoint.resumeClaim &&
-  isExecutionGraphCheckpointIntact(checkpoint) &&
-  run?.status === AGENT_RUN_STATUSES.waitingForUser &&
-  !toArray(run.approvalGates).some((gate) => gate?.status === "pending") &&
-  (!isRunMarkedForManualRecovery(run) ||
-    run.result?.recovery?.originalStatus === AGENT_RUN_STATUSES.waitingForUser);
-
-const getSettledReentryReason = ({ checkpoint, run }) => {
-  if (isSettledRemovedUnifiedGraphRun({ checkpoint, run })) {
-    return AGENT_RUN_SETTLED_REENTRY_REASONS.settledUnifiedGraphRun;
-  }
-
-  if (TERMINAL_AGENT_RUN_STATUSES.has(run?.status)) {
-    return AGENT_RUN_SETTLED_REENTRY_REASONS.runEnded;
-  }
-
-  return isCustomSkillGraphFinalizedAsQuestion({ checkpoint, run })
-    ? AGENT_RUN_SETTLED_REENTRY_REASONS.graphFinalizedAsQuestion
-    : null;
-};
-
 const createActiveRunStepCompletionConflictError = ({ status, step } = {}) => {
   const error = new Error(
     `Agent run cannot become ${status} with concurrent active step ${step.id} (${step.status}).`
@@ -1874,49 +1820,15 @@ export const createAgentRunService = ({
 
   async updateRun({
     accessScope = {},
-    graphReentryGuard = null,
     runCursor = null,
     runId,
     patch = {},
   } = {}) {
     const mutation = await mutateStoredRun({
       accessScope,
-      includeGraphCheckpoint: Boolean(graphReentryGuard),
-      maxRetries: graphReentryGuard ? DEFAULT_AGENT_RUN_MUTATION_RETRIES : 0,
       runCursor,
       runId,
-      mutate: (existingRun) => {
-        const checkpoint = existingRun.result?.[EXECUTION_GRAPH_CHECKPOINT_RESULT_KEY];
-        const settledReason = graphReentryGuard
-          ? getSettledReentryReason({ checkpoint, run: existingRun })
-          : null;
-
-        if (settledReason) {
-          // Decided on the same snapshot the fence below would read; the
-          // settled run is not written.
-          const error = new Error("A settled agent run is continued as a new run.");
-          error.code = AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE;
-          error.reentryReason = settledReason;
-          error.status = 409;
-          throw error;
-        }
-
-        if (graphReentryGuard && checkpoint) {
-          // A persisted graph belongs to the worker already executing it or
-          // to the dedicated graph recovery path. A second ordinary request
-          // cannot prove the first worker stopped, even when its request and
-          // Skill catalog happen to match. Fence it in the same CAS that would
-          // otherwise overwrite input/plan and later write run_resumed.
-          const error = new Error(
-            "Agent run re-entry requires the dedicated graph recovery path."
-          );
-          error.code = "AGENT_GRAPH_EXECUTION_FENCED";
-          error.status = 409;
-          throw error;
-        }
-
-        return { patch };
-      },
+      mutate: () => ({ patch }),
     });
 
     return mutation.run;

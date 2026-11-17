@@ -10,22 +10,24 @@ import {
 } from "../rag/agent-execution-graph-checkpoint.js";
 import { AGENT_TASK_ACTIONS, AGENT_TASK_RUNNER_ID, AGENT_TASK_TYPE, createAgentTaskRunner } from "../rag/agent-tasks.js";
 import {
-  AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE,
   createAgentRunService,
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
 import { TASK_STATUSES, createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 
-// A request that continues a run that is settled (it ended, or its
-// custom-Skill graph was finalized as a question for the user) gets a new
-// run: the run state machine never reopens an ended run, and a run that holds
-// a graph checkpoint is otherwise fenced. The user chose this on 2026-11-16
-// ("A: new run"). Before it, every such continuation failed: an ended run with
-// 409 "Invalid agent run status transition", one holding a custom-Skill
-// checkpoint with 409 AGENT_GRAPH_EXECUTION_FENCED. A background task's
-// `continue` after its iteration budget always continues the run its last
-// iteration ended, so the task card's Continue failed for every task.
+// A request that names a run (a background task's `continue`) gets a new run,
+// whatever state the named run is in, and the named run is left as it is; the
+// new run's run_continued event points at it. The user chose this for a
+// settled run (it ended, or its custom-Skill graph was finalized as a question
+// for the user) on 2026-11-16 ("A: new run"), and for every run on 2026-11-17.
+// Before the first, every continuation of a settled run failed: an ended run
+// with 409 "Invalid agent run status transition", one holding a custom-Skill
+// checkpoint with 409 AGENT_GRAPH_EXECUTION_FENCED, so the task card's
+// Continue after the iteration budget failed for every task. Before the
+// second, any other run was re-entered in place, which failed once a step of
+// it had completed (409 "Invalid agent run step status transition") or it
+// held a graph checkpoint (409 AGENT_GRAPH_EXECUTION_FENCED).
 
 const accessScope = { userId: "alice", workspaceId: "workspace-a" };
 const DOCS = ["doc-a", "doc-b"];
@@ -91,22 +93,23 @@ const createHarness = () => {
   return { agentRunService, orchestrator, ragService, store, taskService, webCalls };
 };
 
-// A task with an iteration budget of one and a next step left: its first
-// iteration ends a run and the task stops at the budget, waiting for Continue.
-const runTaskToItsBudget = async (harness, { docIds, question }) => {
+// A task with an iteration budget of one (unless given another) and a next
+// step left: its first iteration ends a run and the task stops at the budget,
+// waiting for Continue, or earlier at a question for the user.
+const runTaskToItsBudget = async (harness, { docIds, maxIterations = 1, question }) => {
   const taskId = "agent_goal:budget";
 
   await harness.taskService.upsertTask({
     accessScope,
     task: {
       id: taskId,
-      input: { docIds, maxIterations: 1, question, sessionId: "budget-session", userId: accessScope.userId },
+      input: { docIds, maxIterations, question, sessionId: "budget-session", userId: accessScope.userId },
       payload: {
         agentRunId: null,
         capabilityApprovals: {},
         docIds,
         iterations: [],
-        maxIterations: 1,
+        maxIterations,
         question,
         sessionId: "budget-session",
         taskMemory: { goal: question, nextCandidates: ["Summarize what is still open"] },
@@ -122,11 +125,11 @@ const runTaskToItsBudget = async (harness, { docIds, question }) => {
   return harness.taskService.getInternalTask({ accessScope, taskId });
 };
 
-const continueTask = async (harness, taskId) => {
+const continueTask = async (harness, taskId, payload = {}) => {
   await harness.orchestrator.resumeTask({
     accessScope,
     action: AGENT_TASK_ACTIONS.continue,
-    payload: {},
+    payload,
     runImmediately: false,
     taskId,
   });
@@ -161,7 +164,7 @@ for (const { docIds, label, question } of [
       assert.equal(continued.payload.agentRunId, newRun.runId);
       assert.deepEqual(
         newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
-        [{ previousRunId: firstRunId, reason: "run_ended" }]
+        [{ previousRunId: firstRunId }]
       );
       // The ended run is left as it was.
       assert.deepEqual(await harness.store.get({ accessScope, runId: firstRunId }), firstRun);
@@ -169,10 +172,10 @@ for (const { docIds, label, question } of [
   });
 }
 
-// What each stored state gets, decided by the run store in the same CAS as the
-// fence (updateRun with graphReentryGuard).
-test("the run store continues a settled run as a new run and keeps fencing an open graph", async () => {
-  const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
+// What a request that names a run gets, for each state the named run can be in.
+test("a request that names a run starts a new run whatever that run's state, and leaves it as it was", async () => {
+  const store = createInMemoryAgentRunStore();
+  const agentRunService = createAgentRunService({ agentRunStore: store });
   const goal = "Compare the two documents.";
   const graphCheckpoint = (phase) =>
     updateExecutionGraphCheckpoint(
@@ -214,79 +217,131 @@ test("the run store continues a settled run as a new run and keeps fencing an op
     });
     return runId;
   };
-  const reenter = async (runId) => {
-    const before = await agentRunService.getRun({ accessScope, runId });
-
-    try {
-      await agentRunService.updateRun({
+  const continueRun = async (runId) => {
+    const before = await store.get({ accessScope, runId });
+    const response = await withEnv(() =>
+      runAgentRag({
         accessScope,
-        graphReentryGuard: true,
-        patch: { goal, status: "running" },
-        runId,
-      });
-    } catch (error) {
-      assert.deepEqual(await agentRunService.getRun({ accessScope, runId }), before, runId);
-      return error.code === AGENT_RUN_SETTLED_GRAPH_REENTRY_CODE
-        ? `new run: ${error.reentryReason}`
-        : `refused: ${error.code ?? error.message}`;
-    }
+        agentRunId: runId,
+        agentRunService,
+        docIds: [],
+        question: "List the uploaded documents",
+        ragService: createRagService(),
+        userId: accessScope.userId,
+      })
+    );
+    const newRun = await store.get({ accessScope, runId: response.body.agentRunId });
 
-    return "re-entered";
+    assert.deepEqual(await store.get({ accessScope, runId }), before, runId);
+    assert.deepEqual(
+      newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
+      [{ previousRunId: runId }],
+      runId
+    );
+    return newRun.runId === runId ? "re-entered" : `new run: ${newRun.status}`;
   };
 
   const outcomes = {};
   for (const status of ["completed", "failed", "canceled"]) {
-    outcomes[`${status}, no graph`] = await reenter(await seed({ status }));
-    outcomes[`${status}, settled graph`] = await reenter(
+    outcomes[`${status}, no graph`] = await continueRun(await seed({ status }));
+    outcomes[`${status}, settled graph`] = await continueRun(
       await seed({ checkpoint: graphCheckpoint("completed"), status })
     );
   }
-  outcomes["waiting, no graph"] = await reenter(await seed({ status: "waiting_for_user" }));
-  outcomes["waiting, graph completed, nothing open"] = await reenter(
+  outcomes["waiting, no graph"] = await continueRun(await seed({ status: "waiting_for_user" }));
+  outcomes["waiting, graph completed, nothing open"] = await continueRun(
     await seed({ checkpoint: graphCheckpoint("completed"), status: "waiting_for_user" })
   );
-  outcomes["waiting, graph partial, nothing open"] = await reenter(
+  outcomes["waiting, graph partial, nothing open"] = await continueRun(
     await seed({ checkpoint: graphCheckpoint("partial"), status: "waiting_for_user" })
   );
-  outcomes["waiting, graph completed, listed for an operator while waiting"] = await reenter(
+  outcomes["waiting, graph completed, listed for an operator while waiting"] = await continueRun(
     await seed({
       checkpoint: graphCheckpoint("completed"),
       recovery: { mode: "manual", originalStatus: "waiting_for_user", reason: "graph_finalization_requires_recovery" },
       status: "waiting_for_user",
     })
   );
-  outcomes["waiting, graph completed, handed over from running"] = await reenter(
+  outcomes["waiting, graph completed, handed over from running"] = await continueRun(
     await seed({
       checkpoint: graphCheckpoint("completed"),
       recovery: { mode: "manual", originalStatus: "running", reason: "graph_finalization_requires_recovery" },
       status: "waiting_for_user",
     })
   );
-  outcomes["waiting, graph completed, at an approval gate"] = await reenter(
+  outcomes["waiting, graph completed, at an approval gate"] = await continueRun(
     await seed({ approvalGates: [pendingGate], checkpoint: graphCheckpoint("completed"), status: "waiting_for_user" })
   );
-  outcomes["running, graph running"] = await reenter(
+  outcomes["running, graph running"] = await continueRun(
     await seed({ checkpoint: graphCheckpoint("running"), status: "running" })
   );
-  outcomes["running, graph completed"] = await reenter(
+  outcomes["running, graph completed"] = await continueRun(
     await seed({ checkpoint: graphCheckpoint("completed"), status: "running" })
   );
 
   assert.deepEqual(outcomes, {
-    "completed, no graph": "new run: run_ended",
-    "completed, settled graph": "new run: run_ended",
-    "failed, no graph": "new run: run_ended",
-    "failed, settled graph": "new run: run_ended",
-    "canceled, no graph": "new run: run_ended",
-    "canceled, settled graph": "new run: run_ended",
-    "waiting, no graph": "re-entered",
-    "waiting, graph completed, nothing open": "new run: graph_finalized_as_question",
-    "waiting, graph partial, nothing open": "new run: graph_finalized_as_question",
-    "waiting, graph completed, listed for an operator while waiting": "new run: graph_finalized_as_question",
-    "waiting, graph completed, handed over from running": "refused: AGENT_GRAPH_EXECUTION_FENCED",
-    "waiting, graph completed, at an approval gate": "refused: AGENT_GRAPH_EXECUTION_FENCED",
-    "running, graph running": "refused: AGENT_GRAPH_EXECUTION_FENCED",
-    "running, graph completed": "refused: AGENT_GRAPH_EXECUTION_FENCED",
+    "completed, no graph": "new run: completed",
+    "completed, settled graph": "new run: completed",
+    "failed, no graph": "new run: completed",
+    "failed, settled graph": "new run: completed",
+    "canceled, no graph": "new run: completed",
+    "canceled, settled graph": "new run: completed",
+    "waiting, no graph": "new run: completed",
+    "waiting, graph completed, nothing open": "new run: completed",
+    "waiting, graph partial, nothing open": "new run: completed",
+    "waiting, graph completed, listed for an operator while waiting": "new run: completed",
+    "waiting, graph completed, handed over from running": "new run: completed",
+    "waiting, graph completed, at an approval gate": "new run: completed",
+    "running, graph running": "new run: completed",
+    "running, graph completed": "new run: completed",
+  });
+});
+
+// A task whose run stopped at a Web gate after its document step completed.
+// The user continues it with a new question instead of approving, and a new
+// run answers it. The request used to re-enter the waiting run, start its
+// completed document step again and fail the task with 409 "Invalid agent run
+// step status transition: completed -> running."
+test("Continue with a new question after a completed document step answers in a new run", async () => {
+  await withEnv(async () => {
+    const harness = createHarness();
+    const paused = await runTaskToItsBudget(harness, {
+      docIds: ["doc-a"],
+      maxIterations: 3,
+      question: "What is the latest notice period for renewal?",
+    });
+    const pausedRunId = paused.payload.agentRunId;
+    const pausedRun = await harness.store.get({ accessScope, runId: pausedRunId });
+
+    assert.equal(paused.requiredUserAction, "approve_capability");
+    assert.equal(pausedRun.status, "waiting_for_user");
+    assert.equal(pausedRun.steps.find((step) => step.id === "document_rag:primary")?.status, "completed");
+
+    const continued = await continueTask(harness, paused.id, {
+      question: "What does clause 4 say about liability?",
+    });
+
+    assert.deepEqual(
+      { error: continued.error ?? null, status: continued.status },
+      { error: null, status: TASK_STATUSES.completed }
+    );
+
+    // The second iteration answers the new question; a third takes the task's
+    // next step in a run of its own.
+    const answered = continued.payload.iterations[1];
+    const newRun = await harness.store.get({ accessScope, runId: answered.agentRunId });
+
+    assert.equal(answered.question, "What does clause 4 say about liability?");
+    assert.equal(answered.answer, "Clause 4 caps liability at fees paid. [Source 1]");
+    assert.notEqual(newRun.runId, pausedRunId);
+    assert.equal(newRun.status, "completed");
+    assert.deepEqual(
+      newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
+      [{ previousRunId: pausedRunId }]
+    );
+    // The waiting run is left as it was, still at its gate.
+    assert.deepEqual(await harness.store.get({ accessScope, runId: pausedRunId }), pausedRun);
+    assert.deepEqual(harness.webCalls, []);
   });
 });
 
@@ -338,7 +393,7 @@ test("a request that continues a run that has ended starts a new run, which asks
     assert.deepEqual(newRun.approvalGates.map((entry) => entry.status), ["pending"]);
     assert.deepEqual(
       newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
-      [{ previousRunId: runId, reason: "run_ended" }]
+      [{ previousRunId: runId }]
     );
     assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "canceled");
   });

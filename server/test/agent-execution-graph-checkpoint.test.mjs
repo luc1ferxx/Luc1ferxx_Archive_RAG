@@ -506,7 +506,8 @@ const createSkill = ({ calls, effects = SKILL_EFFECTS.readOnly, id }) => ({
   version: "1.0.0",
 });
 
-const createHarness = async ({ effects = SKILL_EFFECTS.readOnly } = {}) => {
+// A full request (runFullGraph) creates its run itself; a stage needs one.
+const createHarness = async ({ effects = SKILL_EFFECTS.readOnly, seedRun = true } = {}) => {
   const calls = [];
   const skills = [
     createSkill({ calls, effects, id: "compare_documents" }),
@@ -515,19 +516,21 @@ const createHarness = async ({ effects = SKILL_EFFECTS.readOnly } = {}) => {
   const registry = createSkillRegistry(skills);
   const store = createInMemoryAgentRunStore();
   const agentRunService = createAgentRunService({ agentRunStore: store });
-  await agentRunService.createRun({
-    accessScope,
-    goal: question,
-    input: { docIds, sessionId, userId },
-    plan: {
-      mode: plan.mode,
-      selectedSkills: skills.map((skill) => ({
-        skillId: skill.id,
-        skillVersion: skill.version,
-      })),
-    },
-    runId,
-  });
+  if (seedRun) {
+    await agentRunService.createRun({
+      accessScope,
+      goal: question,
+      input: { docIds, sessionId, userId },
+      plan: {
+        mode: plan.mode,
+        selectedSkills: skills.map((skill) => ({
+          skillId: skill.id,
+          skillVersion: skill.version,
+        })),
+      },
+      runId,
+    });
+  }
 
   const runStage = ({
     accessScope: nextScope = accessScope,
@@ -593,20 +596,17 @@ const withGuardedGraph = async (run) => {
   }
 };
 
-const runFullGraph = (harness, {
-  requestDocIds = docIds,
-  requestIntentId = AGENT_INTENT_IDS.compareRiskChain,
-  requestQuestion = question,
-  requestSessionId = sessionId,
-} = {}) => runAgentRag({
+const runFullGraph = (harness) => runAgentRag({
   accessScope,
-  agentRunId: runId,
-  agentRunService: harness.agentRunService,
+  // The request creates its own run, under the id the test watches.
+  agentRunService: Object.assign(Object.create(harness.agentRunService), {
+    createRun: (options) => harness.agentRunService.createRun({ ...options, runId }),
+  }),
   dagPlannerAdapter: {
     createExecutionGraph: () => ({ nodes: graphNodes }),
     id: "checkpoint_full_run_test_planner",
   },
-  docIds: requestDocIds,
+  docIds,
   executionPlannerAdapter: {
     createExecutionPlan: () => [
       { id: "custom_skills", condition: "selected_custom_skills" },
@@ -616,12 +616,12 @@ const runFullGraph = (harness, {
   intentPlannerAdapter: {
     id: "checkpoint_compare_risk_intent",
     selectIntentPlan: async () => ({
-      selectedIntentId: requestIntentId,
+      selectedIntentId: AGENT_INTENT_IDS.compareRiskChain,
     }),
   },
-  question: requestQuestion,
+  question,
   ragService: { getDocument: (docId) => ({ docId }) },
-  sessionId: requestSessionId,
+  sessionId,
   skillRegistry: harness.registry,
   userId,
 });
@@ -1364,7 +1364,7 @@ test("a startup claim fences an original worker before its next Skill call", asy
 
 test("full agent request loses a claim-before-step race without failing the recovery worker", async () => {
   await withGuardedGraph(async () => {
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite });
+    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
     const checkpointSaved = deferred();
     const releaseOriginal = deferred();
     const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
@@ -1426,166 +1426,11 @@ test("full agent request loses a claim-before-step race without failing the reco
   });
 });
 
-test("ordinary re-entry cannot join a live or claimed graph run", async () => {
-  await withGuardedGraph(async () => {
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite });
-    const checkpointSaved = deferred();
-    const releaseOriginal = deferred();
-    const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
-      harness.agentRunService
-    );
-    harness.agentRunService.saveExecutionGraphCheckpoint = async (args) => {
-      const saved = await originalSave(args);
-      if (args.checkpoint.phase === "running" && args.checkpoint.nodeRuns.length === 0) {
-        checkpointSaved.resolve();
-        await releaseOriginal.promise;
-      }
-      return saved;
-    };
-
-    const original = runFullGraph(harness);
-    await checkpointSaved.promise;
-    const currentSnapshot = await harness.agentRunService.getRun({ accessScope, runId });
-    await assert.rejects(
-      harness.agentRunService.updateRun({
-        accessScope,
-        graphReentryGuard: true,
-        patch: {
-          input: currentSnapshot.input,
-          plan: currentSnapshot.plan,
-          status: "running",
-        },
-        runId,
-      }),
-      { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
-    );
-    assert.deepEqual(
-      await harness.agentRunService.getRun({ accessScope, runId }),
-      currentSnapshot,
-      "even a matching ordinary request cannot join a possibly live graph worker"
-    );
-    await assert.rejects(runFullGraph(harness), {
-      code: "AGENT_GRAPH_EXECUTION_FENCED",
-      status: 409,
-    });
-    assert.deepEqual(
-      await harness.agentRunService.getRun({ accessScope, runId }),
-      currentSnapshot,
-      "a matching full request cannot enter the same live graph"
-    );
-    const beforeMismatch = await harness.agentRunService.getRun({ accessScope, runId });
-    await assert.rejects(
-      runFullGraph(harness, {
-        requestDocIds: ["doc-b", "doc-a"],
-        requestIntentId: AGENT_INTENT_IDS.compareDocuments,
-        requestQuestion: "Changed request",
-        requestSessionId: "changed-session",
-      }),
-      { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
-    );
-    assert.deepEqual(
-      await harness.agentRunService.getRun({ accessScope, runId }),
-      beforeMismatch,
-      "a changed request cannot overwrite the checkpoint owner's input, plan, or events"
-    );
-
-    const loaded = await harness.agentRunService.getExecutionGraphCheckpoint({
-      accessScope,
-      runId,
-    });
-    const claim = await harness.agentRunService.claimExecutionGraphResume({
-      accessScope,
-      checkpointDigest: loaded.checkpoint.digest,
-      runId,
-    });
-    assert.equal(claim.claimed, true);
-    const afterClaim = await harness.agentRunService.getRun({ accessScope, runId });
-    await assert.rejects(runFullGraph(harness), {
-      code: "AGENT_GRAPH_EXECUTION_FENCED",
-      status: 409,
-    });
-    assert.deepEqual(
-      await harness.agentRunService.getRun({ accessScope, runId }),
-      afterClaim,
-      "the claimed run cannot gain a run_resumed event or a changed plan/input"
-    );
-    assert.equal(
-      (await harness.agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }))
-        .checkpoint.digest,
-      claim.checkpoint.digest
-    );
-
-    releaseOriginal.resolve();
-    await assert.rejects(original, { code: "AGENT_GRAPH_EXECUTION_FENCED" });
-    const resumed = await resumeFullGraph(harness, claim.checkpoint);
-    assert.equal(resumed.status, 200);
-    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "completed");
-    assert.deepEqual(harness.calls.map((call) => call.id), [
-      "compare_documents",
-      "risk_review",
-    ]);
-  });
-});
-
-test("identical checkpoint creation admits only one graph worker", async () => {
-  await withGuardedGraph(async () => {
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite });
-    const firstAtCheckpoint = deferred();
-    const secondAtCheckpoint = deferred();
-    const releaseWinner = deferred();
-    const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
-      harness.agentRunService
-    );
-    let initialArrivals = 0;
-    harness.agentRunService.saveExecutionGraphCheckpoint = async (args) => {
-      if (args.checkpoint.phase !== "running" || args.checkpoint.nodeRuns.length !== 0) {
-        return originalSave(args);
-      }
-
-      const arrival = ++initialArrivals;
-      if (arrival === 1) firstAtCheckpoint.resolve();
-      if (arrival === 2) secondAtCheckpoint.resolve();
-      await secondAtCheckpoint.promise;
-
-      if (arrival === 1) {
-        const saved = await originalSave(args);
-        await releaseWinner.promise;
-        return saved;
-      }
-
-      return originalSave(args);
-    };
-
-    const delayedWorker = runFullGraph(harness);
-    await firstAtCheckpoint.promise;
-    const executingWorker = runFullGraph(harness);
-
-    try {
-      const response = await executingWorker;
-      assert.equal(response.status, 200);
-      const stored = await harness.agentRunService.getRun({ accessScope, runId });
-      assert.equal(stored.status, "completed");
-    } finally {
-      releaseWinner.resolve();
-    }
-
-    await assert.rejects(delayedWorker, {
-      code: "AGENT_GRAPH_EXECUTION_FENCED",
-      status: 409,
-    });
-    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "completed");
-    assert.deepEqual(harness.calls.map((call) => call.id), [
-      "compare_documents",
-      "risk_review",
-    ]);
-  });
-});
-
 test("claim racing final checkpoint save fences the old request and reuses settled Skills", async () => {
   await withGuardedGraph(() => withAgentExperienceMemoryEnabled(async () => {
     const experienceStore = createInMemoryAgentExperienceStore();
     configureAgentExperienceMemoryStore(experienceStore);
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite });
+    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
     const completedSaveEntered = deferred();
     const releaseSave = deferred();
     const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
@@ -1640,7 +1485,7 @@ test("terminal graph checkpoint refuses a competing claim without changing exper
   await withGuardedGraph(() => withAgentExperienceMemoryEnabled(async () => {
     const experienceStore = createInMemoryAgentExperienceStore();
     configureAgentExperienceMemoryStore(experienceStore);
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite });
+    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
     const finalizationEntered = deferred();
     const releaseFinalization = deferred();
     const originalComplete = harness.agentRunService.completeRun.bind(
