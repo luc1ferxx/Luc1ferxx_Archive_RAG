@@ -665,6 +665,360 @@ test("approved report artifact resume and nested retries create one stored artif
   assert.equal(artifactId, 3);
 });
 
+// A run parked at the gate of one Capability, with `goal` as the user's
+// question and `executionInput` as the input the approval binds (with the
+// preview the Capability's policy derives from it, for a real registry).
+const createCapabilityApprovalRun = async (agentRunService, {
+  capabilityId,
+  capabilityLabel,
+  executionInput,
+  goal,
+  inputPreview = executionInput,
+  runId = "run-capability-approval",
+} = {}) => {
+  const approval = buildApprovalFixture({
+    capabilityId,
+    capabilityLabel,
+    executionInput,
+    inputPreview,
+  });
+
+  await agentRunService.createRun({
+    accessScope,
+    goal,
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+  });
+  await agentRunService.completeRun({
+    accessScope,
+    approvalGates: [approval.gate],
+    approvalSnapshots: [approval.snapshot],
+    runId,
+    status: AGENT_RUN_STATUSES.waitingForUser,
+    steps: [
+      {
+        id: "2-capability_approval_gate",
+        type: "capability_approval_gate",
+        kind: "approval_gate",
+        label: "Capability Approval",
+        status: "paused",
+        approvalGateId: approval.gate.id,
+        capabilityId,
+      },
+    ],
+  });
+
+  return approval;
+};
+
+const approveCapabilityGate = ({ agentRunService, approval, capabilityRegistry, runId = "run-capability-approval" }) =>
+  createAgentRunStepExecutor({
+    agentRunService,
+    capabilityRegistry,
+  }).applyApprovalAction({
+    accessScope,
+    action: "approve",
+    gateId: approval.gate.id,
+    payload: {
+      approvalObjectHash: approval.gate.approvalObjectHash,
+    },
+    runId,
+  });
+
+const ARXIV_PAPERS = {
+  imported: {
+    absUrl: "https://arxiv.org/abs/2401.00001v1",
+    arxivId: "2401.00001v1",
+    docId: "doc-arxiv-1",
+    fileName: "arxiv-2401.00001.pdf",
+    pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+    status: "imported",
+    title: "Retrieval Augmented Generation for Archives",
+  },
+  skipped: {
+    absUrl: "https://arxiv.org/abs/2401.00002v1",
+    arxivId: "2401.00002v1",
+    docId: "doc-arxiv-2",
+    fileName: "arxiv-2401.00002.pdf",
+    pdfUrl: "https://arxiv.org/pdf/2401.00002v1",
+    status: "skipped",
+    title: "",
+  },
+};
+
+// The importer's result (arxiv-importer.js) carries counts and paper lists
+// and no text: the approval answers with the list, as the arXiv Skill did.
+test("an approved arXiv import answers with its papers in the language of the run's question", async () => {
+  const cases = [
+    {
+      goal: "Import 3 arXiv papers about retrieval augmented generation",
+      text: [
+        'Searched arXiv for "retrieval augmented generation". Found 3; imported 1, already indexed 1, failed 1.',
+        "1. Retrieval Augmented Generation for Archives (arXiv:2401.00001v1, docId: doc-arxiv-1)",
+        "2. arXiv:2401.00002v1 (arXiv:2401.00002v1, docId: doc-arxiv-2)",
+        "Failures:",
+        "1. Broken Paper: PDF download failed",
+      ].join("\n"),
+    },
+    {
+      goal: "帮我从 arXiv 抓取 3 篇关于 retrieval augmented generation 的论文",
+      text: [
+        '已从 arXiv 搜索主题 "retrieval augmented generation"，找到 3 篇；新导入 1 篇，已存在 1 篇，失败 1 篇。',
+        "1. Retrieval Augmented Generation for Archives（arXiv:2401.00001v1，docId: doc-arxiv-1）",
+        "2. arXiv:2401.00002v1（arXiv:2401.00002v1，docId: doc-arxiv-2）",
+        "失败项：",
+        "1. Broken Paper: PDF download failed",
+      ].join("\n"),
+    },
+  ];
+
+  for (const { goal, text } of cases) {
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const imports = [];
+    const approval = await createCapabilityApprovalRun(agentRunService, {
+      capabilityId: CAPABILITY_IDS.arxivImportTopic,
+      capabilityLabel: "arXiv Topic Import",
+      executionInput: {
+        maxResults: 3,
+        topic: "retrieval augmented generation",
+      },
+      goal,
+    });
+
+    const result = await approveCapabilityGate({
+      agentRunService,
+      approval,
+      capabilityRegistry: createDefaultCapabilityRegistry({
+        arxivImportService: {
+          importTopic: async ({ maxResults, topic }) => {
+            imports.push({ maxResults, topic });
+
+            return {
+              failedCount: 1,
+              failedPapers: [
+                {
+                  arxivId: "2401.00003v1",
+                  error: "PDF download failed",
+                  title: "Broken Paper",
+                },
+              ],
+              foundCount: 3,
+              importedCount: 1,
+              importedPapers: [ARXIV_PAPERS.imported],
+              requestedMaxResults: maxResults,
+              skippedCount: 1,
+              skippedPapers: [ARXIV_PAPERS.skipped],
+              topic,
+            };
+          },
+        },
+      }),
+    });
+    const capabilityStep = result.run.steps.find(
+      (step) => step.kind === "capability_call"
+    );
+
+    assert.deepEqual(imports, [{ maxResults: 3, topic: "retrieval augmented generation" }]);
+    assert.equal(result.response.agentMode, "arxiv_import");
+    assert.equal(result.response.agentAnswer, text, goal);
+    assert.equal(result.response.ragAnswer, text);
+    assert.deepEqual(result.response.ragSources, [
+      {
+        arxivId: "2401.00001v1",
+        title: "Retrieval Augmented Generation for Archives",
+        url: "https://arxiv.org/abs/2401.00001v1",
+        docId: "doc-arxiv-1",
+        fileName: "arxiv-2401.00001.pdf",
+      },
+      {
+        arxivId: "2401.00002v1",
+        title: "",
+        url: "https://arxiv.org/abs/2401.00002v1",
+        docId: "doc-arxiv-2",
+        fileName: "arxiv-2401.00002.pdf",
+      },
+    ]);
+    assert.equal(result.response.ragAbstained, false);
+    assert.deepEqual(capabilityStep.output, {
+      citationCount: 2,
+      text,
+    });
+    assert.equal(result.run.status, AGENT_RUN_STATUSES.completed);
+    assert.equal(result.run.result.answer, text);
+    assert.equal(result.run.result.citationCount, 2);
+    assert.equal(result.run.result.ragAbstained, false);
+  }
+});
+
+test("an approved arXiv import that found nothing abstains", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const approval = await createCapabilityApprovalRun(agentRunService, {
+    capabilityId: CAPABILITY_IDS.arxivImportTopic,
+    capabilityLabel: "arXiv Topic Import",
+    executionInput: {
+      maxResults: 3,
+      topic: "quantum archives",
+    },
+    goal: "Import arXiv papers about quantum archives",
+  });
+
+  const result = await approveCapabilityGate({
+    agentRunService,
+    approval,
+    capabilityRegistry: createDefaultCapabilityRegistry({
+      arxivImportService: {
+        importTopic: async ({ maxResults, topic }) => ({
+          failedCount: 0,
+          failedPapers: [],
+          foundCount: 0,
+          importedCount: 0,
+          importedPapers: [],
+          requestedMaxResults: maxResults,
+          skippedCount: 0,
+          skippedPapers: [],
+          topic,
+        }),
+      },
+    }),
+  });
+
+  assert.equal(
+    result.response.agentAnswer,
+    'Searched arXiv for "quantum archives". Found 0; imported 0, already indexed 0, failed 0.'
+  );
+  assert.deepEqual(result.response.ragSources, []);
+  assert.equal(result.response.ragAbstained, true);
+  assert.equal(result.run.result.ragAbstained, true);
+  assert.equal(result.run.result.citationCount, 0);
+});
+
+// Discovery's result is { documents, matches } (capabilities/documents.js).
+// The approval answers with the matches among the approved docIds, as the
+// discovery Skill did; no docIds keeps every match. The registry here returns
+// a match outside the docIds to show the step's own filter.
+test("an approved document discovery answers with the matches among the approved docIds", async () => {
+  const documents = [
+    {
+      docId: "doc-1",
+      fileName: "policy.pdf",
+      profile: {
+        entities: [],
+        summary: "Remote work policy and approval requirements.",
+        tags: ["remote work", "policy", "hr", "approval", "security"],
+      },
+    },
+    {
+      docId: "doc-2",
+      fileName: "handbook.pdf",
+      summary: "Remote work handbook.",
+      tags: ["remote work"],
+    },
+  ];
+  const cases = [
+    {
+      docIds: ["doc-2"],
+      text: [
+        "I found 1 likely matching document:",
+        "- handbook.pdf. Tags: remote work. Remote work handbook.",
+      ].join("\n"),
+    },
+    {
+      docIds: [],
+      text: [
+        "I found 2 likely matching documents:",
+        "- policy.pdf. Tags: remote work, policy, hr, approval. Remote work policy and approval requirements.",
+        "- handbook.pdf. Tags: remote work. Remote work handbook.",
+      ].join("\n"),
+    },
+    {
+      docIds: ["doc-9"],
+      text: "I could not find a strong matching document from the current workspace metadata.",
+    },
+  ];
+
+  for (const { docIds, text } of cases) {
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const question = "Which document covers remote work?";
+    const approval = await createCapabilityApprovalRun(agentRunService, {
+      capabilityId: CAPABILITY_IDS.documentDiscovery,
+      capabilityLabel: "Workspace Document Discovery",
+      executionInput: {
+        docIds,
+        question,
+      },
+      goal: question,
+    });
+    const calls = [];
+
+    const result = await approveCapabilityGate({
+      agentRunService,
+      approval,
+      capabilityRegistry: {
+        execute: async (capabilityId, payload) => {
+          calls.push({ capabilityId, input: payload.input });
+
+          return {
+            documents,
+            matches: documents.map((document, index) => ({
+              document,
+              score: 2 - index,
+            })),
+          };
+        },
+      },
+    });
+    const capabilityStep = result.run.steps.find(
+      (step) => step.kind === "capability_call"
+    );
+
+    assert.deepEqual(calls, [
+      {
+        capabilityId: CAPABILITY_IDS.documentDiscovery,
+        input: { docIds, question },
+      },
+    ]);
+    assert.equal(result.response.agentMode, "document_discovery");
+    assert.equal(result.response.agentAnswer, text, JSON.stringify(docIds));
+    assert.equal(result.response.ragAnswer, text);
+    assert.deepEqual(result.response.ragSources, []);
+    assert.equal(result.response.ragAbstained, false);
+    assert.deepEqual(capabilityStep.output, {
+      citationCount: 0,
+      text,
+    });
+  }
+});
+
+// Every other Capability answers with its result's text, or, without one,
+// "<label> completed.".
+test("an approved Capability whose result has no text answers that it completed", async () => {
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const approval = await createPendingApprovalRun(agentRunService);
+
+  const result = await approveCapabilityGate({
+    agentRunService,
+    approval,
+    capabilityRegistry: {
+      execute: async () => ({}),
+    },
+    runId: "run-approval",
+  });
+
+  assert.equal(result.response.agentMode, "web");
+  assert.equal(result.response.agentAnswer, "Web Search completed.");
+  assert.equal(result.response.mcpAnswer, "Web Search completed.");
+  assert.deepEqual(result.response.ragSources, []);
+  assert.equal(result.response.ragAbstained, false);
+});
+
 test("denied approval-capable primary steps cannot be retried through an unbound execution path", async () => {
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),

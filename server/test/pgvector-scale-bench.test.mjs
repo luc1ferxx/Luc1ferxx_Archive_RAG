@@ -6,6 +6,7 @@ import {
   buildVocabulary,
   clusterForDocument,
   cosineSimilarity,
+  createCapturingPgvectorRuntime,
   createCorpus,
   createGaussian,
   createSeededRandom,
@@ -616,4 +617,47 @@ test("summarizeBuildMessages reads the worker count and keeps notices", () => {
     { notices: [], parallelWorkers: 2 }
   );
   assert.deepEqual(summarizeBuildMessages([]), { notices: [], parallelWorkers: null });
+});
+
+// The recall and plan pass replays the app's dense search: the iterative-scan
+// setting rides as the search's prelude, so the capturing runtime must record
+// it and hand the options on, or the pass would measure the search without it.
+test("the recall pass's runtime records a dense search's prelude and passes it on", async () => {
+  const captured = [];
+  const sent = [];
+  const runtime = createCapturingPgvectorRuntime({
+    captured,
+    queryPostgres: async (sql, values, options) => {
+      sent.push({ options, sql, values });
+      return { rows: [] };
+    },
+    withPostgresTransaction: async (callback) =>
+      callback({
+        query: async (sql, values) => {
+          sent.push({ sql, values });
+          return { rows: [] };
+        },
+      }),
+  });
+  const prelude = [{ text: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] }];
+
+  await runtime.query("SELECT search", [1], { prelude, readOnly: true });
+  assert.deepEqual(captured, [
+    { sql: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] },
+    { sql: "SELECT search", values: [1] },
+  ]);
+  assert.deepEqual(sent, [{ options: { prelude, readOnly: true }, sql: "SELECT search", values: [1] }]);
+
+  // A caller's transaction client: the setting and the search, one by one.
+  captured.length = 0;
+  sent.length = 0;
+  await runtime.withTransaction(async (client) => {
+    await client.query("SELECT set_config($1, $2, true)", ["hnsw.iterative_scan", "relaxed_order"]);
+    return client.query("SELECT search", [2]);
+  });
+  assert.deepEqual(
+    captured.map((entry) => entry.sql),
+    ["SELECT set_config($1, $2, true)", "SELECT search"]
+  );
+  assert.equal(sent.length, 2);
 });

@@ -34,6 +34,7 @@ import {
   copyStructured,
   createSelfCheckEvidenceContext,
   getActiveSelfCheckEvidenceContext,
+  getClaimSupportInputId,
   isSelfCheckEvidenceContext,
   memoizeInEvidenceContext,
   notifyClaimSupportObserver,
@@ -42,9 +43,12 @@ import {
 
 /**
  * `evidenceContext` (self-check/evidence-context.js) shares exact memos across
- * calls that belong to one /chat; without one, each call gets its own. With
- * the same content key (answer text, citations with their evidence, comparison
- * summary, flags) a context returns a copy of the earlier result.
+ * calls that belong to one /chat, or to one streamed answer's drafts; without
+ * one, each call gets its own. With the same content key (answer text,
+ * citations with their evidence, comparison summary, flags) a context returns
+ * a copy of the earlier result, and a claim it has checked before against the
+ * same citations, summary and flags -- same text, section and source ranks --
+ * is not checked again.
  */
 export const evaluateClaimSupport = ({
   answerText = "",
@@ -63,18 +67,15 @@ export const evaluateClaimSupport = ({
     const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
     const inheritSourceLabels =
       !comparisonAnswer && isClaimSourceInheritanceEnabled();
-    const contentKey = context.enabled
-      ? buildClaimSupportContentKey({
-          answerText,
-          citations,
-          comparisonAnalysisSummary,
-          flags: [inflection, headingContext, inheritSourceLabels],
-        })
-      : null;
+    const inputId = getClaimSupportInputId({
+      citations,
+      comparisonAnalysisSummary,
+      flags: [inflection, headingContext, inheritSourceLabels],
+    });
 
     return memoizeInEvidenceContext(
       "claimSupport",
-      contentKey,
+      buildClaimSupportContentKey(inputId, answerText),
       () =>
         computeClaimSupport({
           answerText,
@@ -83,6 +84,7 @@ export const evaluateClaimSupport = ({
           headingContext,
           inflection,
           inheritSourceLabels,
+          inputId,
         }),
       copyStructured
     );
@@ -103,6 +105,7 @@ const computeClaimSupport = ({
   headingContext,
   inflection,
   inheritSourceLabels,
+  inputId,
 }) => {
   const claims = splitAnswerClaims(answerText, citations, {
     inheritSourceLabels,
@@ -137,8 +140,10 @@ const computeClaimSupport = ({
     };
   }
 
-  const supportedNoDifferenceClaimIndexes = new Set();
-  let checkedClaims = claims.map((claim, claimIndex) => {
+  // One claim's check reads the claim as split from the answer (its text,
+  // section and source ranks) and the input behind inputId, never the claims
+  // around it: the Differences pairing below is what reads its neighbours.
+  const checkClaim = (claim) => {
     const {
       text: claimText,
       section,
@@ -205,11 +210,6 @@ const computeClaimSupport = ({
       scopedCitations,
       sourceRanks,
     });
-
-    if (noDifferenceSupport?.supported) {
-      supportedNoDifferenceClaimIndexes.add(claimIndex);
-    }
-
     const relationSupport = combineRelationSupportChecks([
       noDifferenceSupport,
       contrastSupport,
@@ -238,6 +238,12 @@ const computeClaimSupport = ({
         )
       ) {
         return false;
+      }
+
+      // With one scoped citation this is the defaultSupport call again, with
+      // the same arguments: reuse its answer.
+      if (scopedCitations.length === 1 && scopedCitations[0] === citation) {
+        return defaultSupport.supported;
       }
 
       return evaluateClaimAgainstCitations({
@@ -271,7 +277,7 @@ const computeClaimSupport = ({
       )
     );
 
-    return {
+    const checkedClaim = {
       text: claimText,
       section,
       sectionId,
@@ -290,6 +296,28 @@ const computeClaimSupport = ({
       misattributedCitationIdentities,
       missingAnchors,
     };
+
+    return {
+      checkedClaim,
+      noDifferenceSupported: Boolean(noDifferenceSupport?.supported),
+    };
+  };
+  const supportedNoDifferenceClaimIndexes = new Set();
+  // So a context keeps a claim's check for a later one that splits the same
+  // claim from the same input, such as the next prefix of a streamed answer.
+  let checkedClaims = claims.map((claim, claimIndex) => {
+    const { checkedClaim, noDifferenceSupported } = memoizeInEvidenceContext(
+      "claimCheck",
+      buildClaimSupportContentKey(inputId, claim),
+      () => checkClaim(claim),
+      copyStructured
+    );
+
+    if (noDifferenceSupported) {
+      supportedNoDifferenceClaimIndexes.add(claimIndex);
+    }
+
+    return checkedClaim;
   });
   const differenceClaimIndexesBySection = new Map();
 

@@ -435,7 +435,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `RAG_SPARSE_COMMON_TERM_CAP` | `2000` | 开着剪枝时，只含常见词的查询（一个或几个词）每一轮最多取这么多候选：先取同时含全部常见词的 chunk，再取含任一常见词的，按物理顺序而不是相关度；常见词的文档频率之和不超过上限时，结果与穷举相同。`off`、`false`、`0` 或负数不设上限（这类查询按穷举打分），非数字按 2000。代价在召回：合成数据上单个常见词查询剪枝后 top-10 与穷举的重合 `ts_rank_cd` 0.32、BM25 0.29；QASPER 里这类题只有 3 + 19 道，对证据召回的影响等于没测。 |
 | `RAG_PGVECTOR_INDEX_TYPE` | `hnsw` | `hnsw` 或 `ivfflat`，都用 cosine 距离。 |
 | `RAG_PGVECTOR_HNSW_M` / `RAG_PGVECTOR_HNSW_EF_CONSTRUCTION` | `16` / `64` | HNSW 建索引参数。 |
-| `RAG_PGVECTOR_ITERATIVE_SCAN` | `relaxed_order` | 稠密检索对每次查询设置的 pgvector 迭代扫描模式：`relaxed_order`、`strict_order` 或 `off`。文档过滤在 HNSW 取回 `ef_search` 个候选之后才生效，所以不开迭代扫描时，走 HNSW 的过滤查询可能返回不满 topK 条；打开后会继续扫描索引，直到凑满 LIMIT 或达到 `hnsw.max_scan_tuples`（默认 20000）。`relaxed_order` 的输出顺序由外层 SQL 重新排好。设置和查询在同一个短事务里执行，每次查询多一次往返。需要 pgvector 0.8 以上，更老的版本自动保持原来的 SQL；IVFFlat 索引用 `ivfflat.iterative_scan`。`off` 是回退开关。 |
+| `RAG_PGVECTOR_ITERATIVE_SCAN` | `relaxed_order` | 稠密检索对每次查询设置的 pgvector 迭代扫描模式：`relaxed_order`、`strict_order` 或 `off`。文档过滤在 HNSW 取回 `ef_search` 个候选之后才生效，所以不开迭代扫描时，走 HNSW 的过滤查询可能返回不满 topK 条；打开后会继续扫描索引，直到凑满 LIMIT 或达到 `hnsw.max_scan_tuples`（默认 20000）。`relaxed_order` 的输出顺序由外层 SQL 重新排好。设置作为查询的前置语句，和查询在同一个隐式事务里一次往返发出（用 pg 的 native 绑定时退回 BEGIN … COMMIT）。需要 pgvector 0.8 以上，更老的版本自动保持原来的 SQL；IVFFlat 索引用 `ivfflat.iterative_scan`。`off` 是回退开关。 |
 | `RAG_PGVECTOR_IVFFLAT_LISTS` | `100` | IVFFlat `lists`。 |
 | `QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant 地址。 |
 | `QDRANT_API_KEY` | 空 | Qdrant API key。 |

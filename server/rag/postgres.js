@@ -726,8 +726,8 @@ export const runWithPrimaryReads = (callback) => primaryReadScope.run(true, call
 
 /**
  * Whether a statement marked readOnly here and now could go to a replica:
- * replicas configured, an enforced tenant, no transaction. The pgvector dense
- * search asks before choosing its one-round-trip form.
+ * replicas configured, an enforced tenant, no transaction. The pgvector
+ * searches ask before they build a replica freshness guard.
  */
 export const canRouteReadToReplica = () =>
   isReadReplicaRoutingEnabled() &&

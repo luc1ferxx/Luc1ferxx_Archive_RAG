@@ -21,8 +21,7 @@ import test from "node:test";
 // masking (assertMatchesGraphGolden; rewriting one is a decision, see
 // test/langgraph-support/graph-goldens.mjs). The scenarios the outer plan
 // owns: document QA with a follow-up retrieval, an abstention that falls
-// through to the Web stage with and without a standing approval, the
-// custom-Skill stage, a Capability approval (AgentRunInterruptError ->
+// through to the Web stage and parks at its gate, the custom-Skill stage, a Capability approval (AgentRunInterruptError ->
 // waiting_for_user, then the approval re-entry), a research brief, budget
 // exhaustion, a cancellation at a stage boundary (both reasons), a
 // cancellation surfaced by the drain after a stage settled, and a dependency
@@ -98,15 +97,9 @@ const { runAgentExecutionPlan } = agentExecutionPlanRunner;
 const { deterministicPlannerAdapter } = await import("../rag/agent-execution-plan.js");
 const { deterministicIntentPlannerAdapter } = await import("../rag/agent-intent-planner.js");
 const { runAgentRag } = await import("../rag/agent.js");
-// Imported after the hook too: it imports rag/agent.js and the Capability
-// registry, which must load through the redirect above.
-const { runAgentRagWithPreApprovedCapabilities } = await import(
-  "./pre-approved-capabilities-test-helpers.mjs"
-);
 const { AGENT_RUN_STATUSES, createAgentRunService, createInMemoryAgentRunStore } = await import(
   "../rag/agent-runs.js"
 );
-const { CAPABILITY_IDS } = await import("../rag/capabilities/index.js");
 const config = await import("../rag/config.js");
 const { DependencyOutageError } = await import("../rag/dependency-outage.js");
 const { LANGSMITH_TRACING_ENABLED_CODE } = await import("../rag/langgraph/langsmith-guard.js");
@@ -429,8 +422,8 @@ const createRagService = ({ chat } = {}) => ({
   listDocuments: () => [{ docId: "doc-1", fileName: "policy.pdf" }],
 });
 
-const askAgent = ({ agentRunService, preApproved, ragService, ...overrides }) => {
-  const request = {
+const askAgent = ({ agentRunService, ragService, ...overrides }) =>
+  runAgentRag({
     accessScope: ACCESS_SCOPE,
     agentRunService,
     docIds: ["doc-1"],
@@ -444,12 +437,7 @@ const askAgent = ({ agentRunService, preApproved, ragService, ...overrides }) =>
       throw new Error("Web search must not run.");
     },
     ...overrides,
-  };
-
-  return preApproved
-    ? runAgentRagWithPreApprovedCapabilities({ ...request, preApproved })
-    : runAgentRag(request);
-};
+  });
 
 const listRuns = async (agentRunService) =>
   (await agentRunService.listRuns({ accessScope: ACCESS_SCOPE })).runs;
@@ -515,7 +503,11 @@ test("a research brief equals the native loop's golden", async () => {
   ]);
 });
 
-test("an abstention falls through to the Web stage as the golden records: without a standing approval the run parks at the gate, with one Web answers", async () => {
+// Web search asks the user first and a request carries no approval, so an
+// abstention that falls through to the Web stage parks the run at its gate;
+// the approved capability_call step answers
+// (rag/agent-run-step-handlers/capability-steps.js).
+test("an abstention falls through to the Web stage as the golden records: the run parks at the gate", async () => {
   const abstaining = async (docIds, question) => ({
     abstained: true,
     citations: [],
@@ -524,7 +516,7 @@ test("an abstention falls through to the Web stage as the golden records: withou
     text: "The documents do not say.",
   });
 
-  const withoutApproval = await runDirectScenario(({ agentRunService }) =>
+  const run = await runDirectScenario(({ agentRunService }) =>
     askAgent({
       agentRunService,
       ragService: createRagService({ chat: abstaining }),
@@ -534,47 +526,15 @@ test("an abstention falls through to the Web stage as the golden records: withou
     })
   );
 
-  assert.equal(withoutApproval.outcome.error, null);
-  assert.equal(withoutApproval.outcome.response.body.agentMode, "clarification");
+  assert.equal(run.outcome.error, null);
+  assert.equal(run.outcome.response.body.agentMode, "clarification");
   assert.equal(
-    withoutApproval.outcome.response.body.clarification.reason,
+    run.outcome.response.body.clarification.reason,
     "capability_approval_required"
   );
-  assert.equal(withoutApproval.outcome.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
-  assertMatchesNativeGolden("direct-abstention-without-approval", withoutApproval);
-  assertScheduledOnLangGraph(withoutApproval);
-
-  let webCalls = 0;
-  const withApproval = await runDirectScenario(({ agentRunService }) =>
-    askAgent({
-      agentRunService,
-      preApproved: {
-        [CAPABILITY_IDS.webSearch]: {
-          approved: true,
-          decision: "approved",
-          source: "test_approval",
-        },
-      },
-      ragService: createRagService({ chat: abstaining }),
-      webChatService: async () => {
-        webCalls += 1;
-        return { text: "Remote work requires manager approval, says the web." };
-      },
-    })
-  );
-
-  assert.equal(withApproval.outcome.error, null);
-  assert.equal(withApproval.outcome.response.status, 200);
-  assert.equal(withApproval.outcome.response.body.agentMode, "document_web");
-  assert.ok(
-    withApproval.outcome.runs[0].steps.some(
-      (step) => step.id === "web_search:primary" && step.status === "completed"
-    ),
-    "the Web step ran"
-  );
-  assert.equal(webCalls, 1);
-  assertMatchesNativeGolden("direct-abstention-with-approval", withApproval);
-  assertScheduledOnLangGraph(withApproval);
+  assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.waitingForUser);
+  assertMatchesNativeGolden("direct-abstention-without-approval", run);
+  assertScheduledOnLangGraph(run);
 });
 
 test("a dependency outage ends the run as the golden records: the thrown 503, the failed run and its retryable error", async () => {

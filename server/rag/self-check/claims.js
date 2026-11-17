@@ -25,9 +25,9 @@ import {
   uniqueValues,
 } from "./text.js";
 import {
+  createStructuralClaimLabelTest,
   getDocumentAttributionTerms,
   getGenericDocumentAttributionTerms,
-  isStructuralClaimLabel,
   isStructuralSectionHeading,
 } from "./attribution.js";
 import { stripClauseConnectives } from "./modality.js";
@@ -159,6 +159,7 @@ export const splitAnswerStructure = (
   let currentSectionLabel = "";
   let nextSectionId = 1;
   const rawNodes = [];
+  const isStructuralClaimLabel = createStructuralClaimLabelTest(citations);
 
   for (const line of String(answerText ?? "").split(/\n+/g)) {
     if (isStructuralSectionHeading(line)) {
@@ -199,7 +200,7 @@ export const splitAnswerStructure = (
       continue;
     }
 
-    if (isStructuralClaimLabel({ value: line, citations })) {
+    if (isStructuralClaimLabel(line)) {
       continue;
     }
 
@@ -252,7 +253,7 @@ export const splitAnswerStructure = (
       continue;
     }
 
-    if (isStructuralClaimLabel({ value: node.rawText, citations })) {
+    if (isStructuralClaimLabel(node.rawText)) {
       continue;
     }
 

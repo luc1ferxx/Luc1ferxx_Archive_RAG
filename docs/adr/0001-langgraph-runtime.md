@@ -1,6 +1,6 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。阶段 8（2026-11-13）：用户决定删除 custom Skill 阶段的 V1 顺序链和选择它的 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，agent 里不再有不走 LangGraph 的路径，见“阶段 8 结果”。阶段 10（2026-11-14）：用户决定删除 v3 统一图和选择它的 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow`，回答一个请求只剩外层执行计划一种方式，见“阶段 10 结果”。阶段 11（2026-11-15）：删除共用图模块里只有 v3 用过的代码（节点停在审批门和同一线程续跑、v3 图契约、v2 checkpoint、run store 的图审批门、任务级 `deny` 等），见“阶段 11 结果”。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。阶段 8（2026-11-13）：用户决定删除 custom Skill 阶段的 V1 顺序链和选择它的 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，agent 里不再有不走 LangGraph 的路径，见“阶段 8 结果”。阶段 10（2026-11-14）：用户决定删除 v3 统一图和选择它的 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow`，回答一个请求只剩外层执行计划一种方式，见“阶段 10 结果”。阶段 11（2026-11-15）：删除共用图模块里只有 v3 用过的代码（节点停在审批门和同一线程续跑、v3 图契约、v2 checkpoint、run store 的图审批门、任务级 `deny` 等），见“阶段 11 结果”。阶段 13（2026-11-17）：需审批的内置 Skill 只走到审批门，批准后的 arXiv 导入和文档发现由 `capability_call` 步骤用格式化的结果作答，外层计划里只有测试走得到的内联分支已删除，见“阶段 13 结果”。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
 
@@ -1306,13 +1306,13 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 测试
 
-- 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变。两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准（任务的决定走审批路径，同一个文件里另有测试）；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”；任务批准已结束的 run 在 `agent-task-approval-reentry.test.mjs` 里被拒）。
+- 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变。（阶段 13 删掉了这条直接执行的路径和这个辅助文件，这些测试改为断言停在审批门上，或经审批路径作答。）两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准（任务的决定走审批路径，同一个文件里另有测试）；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”；任务批准已结束的 run 在 `agent-task-approval-reentry.test.mjs` 里被拒）。
 - `app-planner-adapters.test.mjs` 证明后台任务和 `/chat` 用同一个 replanner；它的两节点图用完了默认的两次 Skill 调用，按新规则 replanner 不再被问，所以给它 3 次，断言不变。全量里受新规则影响的只有这一个测试。
 
 ### 留给用户决定的
 
 - **第一个 custom Skill 失败时要不要照样跑第二个**（阶段 8 起的默认行为）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）。删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户选了 B，已做**，见本节最后的“用户决定”。
-- **需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。** Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）
+- **需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。** Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）**2026-11-17 数过之后用户选了删除（方案 A），见阶段 13。**
 - **规划器的灰度开关**（`AGENT_PLANNER_ROLLOUT`：默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
 
 ### 证据
@@ -1358,6 +1358,72 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 低级，改了：表里 `fail_fast` 那一行说宽了（只有下游只绑可选输入时原因才变）；阶段 8 的几处“失去”和面试材料没有加阶段 12 的注；阶段 12 的“答案不变”要限定到那九项；注释说一个测试文件钉住了它没有钉住的情形。
   - 低级，接受并记录：上面“已知的副作用”。
   - 复核确认没有问题的：判断按 `dependsOn` 的下标逐个依赖做，`compile-execution-graph.js` 是唯一的生产调用方，四处决定点都拿到契约；多个依赖时一个可选地失败、一个还在跑会等待；同一依赖的重复绑定要全部可选；`fail_fast` 的中止在节点结算之前就置位；新启动的节点照常预留预算；启动恢复和 checkpoint 对账不受影响；节点拿到的正好是请求的输入，持久化的步骤输入里没有 `priorFindings`。
+
+## 阶段 13 结果：批准后的回答，删掉只有测试走得到的内联分支（2026-11-17）
+
+### 决定
+
+- 2026-11-16 的优化排查把两件事一起数了：一是批准 arXiv 导入或文档发现之后，回答只有一句 “<名称> completed.”；二是阶段 12 记下的、需审批的 Capability 在外层计划里直接执行成功之后的分支（见阶段 12“留给用户决定的”）。只有测试走得到的代码共 38 处、约 250 行，分布在 7 个文件里。
+- 给用户的选项：A 删掉这些分支，把整理结果的代码挪到批准后执行的那一步；B 批准后回到外层计划合成答案，估计 400–800 行，还要加回阶段 10–11 删掉的审批续跑。推荐 A。用户 2026-11-17 选了这一批（“审批回答和校验性能”），按 A 做。
+- 同一个分支还做了 claim 检查和检索的性能修改，与本 ADR 无关，记在 `docs/evaluation.md` 2026-11-17 一节。
+
+### 改了什么
+
+1. **批准后的回答。** `capability_call` 步骤作答时，arXiv 导入和文档发现不再回 “<名称> completed.”。`buildCapabilityAnswer`（`capability-steps.js`）按 Capability 选答案；这两种的格式化在 `agent-run-step-handlers/capability-answers.js`，是原来 Skill 里的 `formatArxivImportAnswer`、`buildDiscoveryAnswer` 原样挪过来的，只有一份。
+   - arXiv 导入：回答找到、导入、已存在和失败的篇数和论文列表，语言跟随 run 的 goal（问题）。新导入和已存在的论文作为来源；一篇都没找到时算拒答。
+   - 文档发现：回答批准时 docIds 范围内的匹配文档。
+   - step 输出、run 结果和响应用同一个答案。其他 Capability 照旧用自己返回的文本，没有文本时仍回 “<名称> completed.”。
+2. **需审批的内置 Skill 只走到门上。** arXiv 导入、workspace action、Web 搜索、文档发现四个 Skill 的执行体在 Capability 调用处结束（`executeGatedCapability`）。调用要么抛出审批中断，要么策略在门之前拒掉输入。万一调用返回了，Skill 以 “<capabilityId> requires approval and runs only from the approved capability_call step.” 失败。这是不变式，不是回落；只有非默认的 registry 会走到。
+3. **删掉只有测试走得到的分支。** 38 处里删了 36 处，另外删了跟着变成死代码的部分：
+   - 四个 runner 里只有成功时才用的输出；
+   - finalization 里用 Web 结果合成答案的部分；
+   - 响应状态里恒为真的条件，以及因此没人用的 `shouldRunWeb` 参数（`agent.js` 少传一个参数）；
+   - `resolveAgentMode`；
+   - workspace action 自己算的 artifact 幂等键（批准后的步骤一直自己算）。
+   - 留下的 2 处是 `agent-synthesis.js` 和 `agent-response-builder.js` 里 `agentMode === "document_web"` 的判断。排查把它们算进去了，但生产走得到：Web 因预算用完或在门之前失败而没跑时，run 仍以 document_web 模式用文档答案收尾。新加的 finalization 测试钉住这种情形，新旧代码上都通过。
+4. `test/pre-approved-capabilities-test-helpers.mjs` 和 golden `direct-abstention-with-approval.json` 删除。生产代码净删 117 行（删 444 行，加 327 行，其中 78 行是挪过来的格式化代码）。
+
+### 行为的变化
+
+| 情形 | 之前 | 现在 |
+| --- | --- | --- |
+| 批准 arXiv 导入 | “arXiv Topic Import completed.”，0 个来源 | 导入结果和论文列表，来源是新导入和已存在的论文；一篇都没找到时拒答 |
+| 批准文档发现 | “Workspace Document Discovery completed.” | 批准时 docIds 范围内的匹配文档列表 |
+| 批准 Web 搜索、task / summary / organize / 外部导入、报告导出 | Capability 自己的文本 | 不变 |
+| 请求停在门上、预算跳过、门之前失败、没有 registry、action 解析不出 | — | 不变：21 个场景的步骤、trace、Skill 结果和返回值前后完全相同 |
+| 需审批的 Capability 调用没有停在门上就返回了（只有非默认 registry） | 外层计划用结果作答 | Skill 失败，回答 “… unavailable: <不变式错误>” |
+
+- **已知的差别，接受**（复核指出）：后台任务在同一个 run 里续接一个新问题时，run 的 goal 还是最初的问题，所以批准 arXiv 导入后的回答语言跟随最初的问题。以前的内联 Skill 用的是这次请求的问题。要改，就得把问题放进审批快照，审批哈希会变，所以没有做。
+- 两种回答在 step 输出里保留换行，其他 Capability 的 step 文本仍压成一行。
+
+### 测试
+
+- `agent-primary-run-persistence`：4 个测试里 3 个改为断言停在门上的步骤（Web、文档发现、arXiv）；Web 搜索失败的那个改用在门之前就失败的 registry，保留它原来的用途。
+- `agent-skills`：内联 arXiv 测试改成端到端（停在门上，批准，中文论文列表和来源，导入参数）；加了四个 Skill 的不变式测试；复核之后又加了停在门上时已扣 arXiv 预算的断言。
+- `langgraph-execution-plan-graph`：去掉带批准的一半和它的 golden，不带批准的一半和 golden 不变。
+- step executor：批准后 arXiv（中文、英文、没找到）和文档发现（docIds 过滤）的回答，以及 “<名称> completed.” 的回退；前三个在 e23a83f6 上失败。
+- runner：复核之后加了 arXiv 预算用完时跳过的测试，与 Web 的那个对应。
+- 另有约 9 个假 Skill 单元测试跟着改（6 个文件）。
+
+### 证据
+
+- **回答与旧 Skill 逐字节一致。** 14 个场景（8 个 arXiv、6 个文档发现）比较了 agentAnswer、ragAnswer、step 输出、来源、拒答、run 结果，全部相同；复核又用 32 个场景比较格式化结果，0 处不同。批准后重试（`prepareRetry`）给出同样的回答。
+- **仍然走得到的路径不变。** 上表 21 个场景在 e23a83f6 和分支上记录的结果，JSON 完全相同。
+- **三个确定性 agent 评测**：trajectory 15/15（63 项检查）、recovery-observability 8/8（27 项）、planner 6/6（22 项）通过；`quality:current` 在 d2d3e475 的干净 worktree 上通过。
+- **覆盖率门**（d2d3e475，一次性 PostgreSQL 18 + pgvector）：4,508 个测试，4,501 通过、7 跳过、0 失败；全局行覆盖 92.33%，“RAG / AgentRAG core” 一组 96.21%。复核修正之后（57562850，同样的环境）：4,511 个测试，4,504 通过、7 跳过、0 失败；全局行覆盖 92.34%，“RAG / AgentRAG core” 一组 96.27%（pass）。复核修正只动了流式草稿、规模压测和测试，评测走不到，`quality:current` 没有在修正后重跑。
+- **没有验证的**：真实浏览器；真实模型和真实 arXiv。
+
+### 独立复核（2026-11-17）
+
+四个只读复核 agent 各看一面：审批回答和删除、claim 检查的 memo、检索、测试和遗留。中高级发现各由另一个 agent 尝试反驳，我逐条判断。审批回答和删除这一面没有中高级发现。
+
+- **审批相关，低级，改了**：arXiv 导入的预算没有测试了。唯一的断言在删掉的内联测试里；把扣预算改成空操作，所有套件仍然通过。补了上面两个测试。
+- **审批相关，低级，接受**：arXiv 回答的语言跟随 run 最初的问题，见“行为的变化”。
+- **性能部分**（详见 `docs/evaluation.md`）：
+  - 中级，改了：流式草稿的 memo 留着每个前缀的整段结果，内存随句数平方增长，400 句约 70 MB。现在每个前缀查完就丢掉，400 句约 1 MB。
+  - 中级，改了：pgvector 规模压测的 recall 一轮，没有把稠密检索的前置语句传下去，测到的是不开迭代扫描的 recall 和执行计划。
+  - 低级，接受：子查询预取在问题本身向量化失败、或向量缓存设得比一次请求的查询数还小的时候，会多算向量。
+- **文档，改了**：AGENTS.md、`docs/agent-rag.md`、`docs/configuration.md`、本 ADR 阶段 12 两处和面试材料里过时的说法。
 
 ## 后果
 

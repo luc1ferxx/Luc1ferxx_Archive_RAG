@@ -1,6 +1,7 @@
 import { AGENT_RUN_STEP_KINDS, AGENT_RUN_STEP_STATUSES } from "../agent-run-steps.js";
 import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { buildCapabilityArtifactIdempotencyKey } from "../capabilities/artifacts.js";
+import { formatCapabilityAnswer } from "./capability-answers.js";
 import { runRetriableStep } from "./retriable-step-runner.js";
 import {
   buildAgentTraceFromRunSteps,
@@ -49,38 +50,61 @@ const getRootStepId = ({ run = {}, step = {} } = {}) => {
   return rootStepId;
 };
 
-export const getCapabilityResultText = (result = {}, gate = {}) =>
+const getCapabilityResultText = (result = {}, gate = {}) =>
   normalizeText(result.text) ||
   normalizeText(result.value?.text) ||
   `${gate.capabilityLabel ?? gate.capabilityId ?? "Capability"} completed.`;
 
-export const getCapabilityResultCitations = (result = {}) =>
+const getCapabilityResultCitations = (result = {}) =>
   Array.isArray(result.citations)
     ? result.citations
     : Array.isArray(result.value?.citations)
       ? result.value.citations
       : [];
 
+/**
+ * What an approved Capability answers with: { text, citations, abstained }.
+ * arXiv import and document discovery return data and answer as their Skills
+ * answered (capability-answers.js; `question` is the run's goal and `input`
+ * the approved execution input); every other Capability answers with its
+ * result's text and citations, or "<label> completed." when it has no text.
+ */
+export const buildCapabilityAnswer = ({
+  capabilityId,
+  capabilityLabel,
+  input,
+  question,
+  result = {},
+} = {}) =>
+  formatCapabilityAnswer({ capabilityId, input, question, result }) ?? {
+    abstained: Boolean(result.abstained ?? result.value?.abstained),
+    citations: getCapabilityResultCitations(result),
+    text: getCapabilityResultText(result, { capabilityId, capabilityLabel }),
+  };
+
 export const buildCapabilityResumeResponse = ({
   capabilityId,
   capabilityResult,
   gate,
+  input,
   run,
   step,
 } = {}) => {
   const effectiveCapabilityId =
     capabilityId || gate?.capabilityId || step?.capabilityId;
-  const answer = getCapabilityResultText(capabilityResult, {
+  const answer = buildCapabilityAnswer({
     capabilityId: effectiveCapabilityId,
     capabilityLabel: gate?.capabilityLabel ?? step?.label,
+    input,
+    question: run?.goal,
+    result: capabilityResult,
   });
-  const citations = getCapabilityResultCitations(capabilityResult);
   const agentMode = getCapabilityAgentMode(effectiveCapabilityId);
   const steps = run?.steps ?? [];
   const agentTrace = buildAgentTraceFromRunSteps(steps);
 
   return {
-    agentAnswer: answer,
+    agentAnswer: answer.text,
     agentMode,
     agentRunId: run?.runId ?? null,
     agentRunStatus: run?.status ?? null,
@@ -104,16 +128,14 @@ export const buildCapabilityResumeResponse = ({
       mcp: null,
       rag: null,
     },
-    mcpAnswer: agentMode === "web" ? answer : "Web search not used.",
-    ragAbstained: Boolean(
-      capabilityResult.abstained ?? capabilityResult.value?.abstained
-    ),
-    ragAnswer: answer,
+    mcpAnswer: agentMode === "web" ? answer.text : "Web search not used.",
+    ragAbstained: answer.abstained,
+    ragAnswer: answer.text,
     ragEvidenceSummary: null,
     ragGapPlan: null,
     ragMemoryApplied: false,
     ragResolvedQuestion: run?.goal ?? "",
-    ragSources: citations,
+    ragSources: answer.citations,
     researchBrief: null,
   };
 };
@@ -150,18 +172,25 @@ const executeCapabilityBackedStep = async ({
     run,
     step,
   });
+  // The step's output, the run's result and the response all answer with the
+  // same text and citations.
+  const buildAnswer = (result) =>
+    buildCapabilityAnswer({
+      capabilityId,
+      capabilityLabel: gate?.capabilityLabel ?? step.label,
+      input,
+      question: run.goal,
+      result,
+    });
 
   return runRetriableStep({
     accessScope,
     agentMode: getCapabilityAgentMode(capabilityId),
     agentRunService,
-    buildCompletedPatch: ({ result }) => ({
+    buildCompletedPatch: ({ citations, result }) => ({
       output: {
-        citationCount: getCapabilityResultCitations(result).length,
-        text: getCapabilityResultText(result, {
-          capabilityId,
-          capabilityLabel: gate?.capabilityLabel ?? step.label,
-        }),
+        citationCount: citations.length,
+        text: buildAnswer(result).text,
       },
     }),
     buildFailedPatch: ({ error }) => ({
@@ -177,6 +206,7 @@ const executeCapabilityBackedStep = async ({
         capabilityId,
         capabilityResult: result,
         gate,
+        input,
         run: runAfterStep,
         step,
       }),
@@ -194,7 +224,7 @@ const executeCapabilityBackedStep = async ({
           },
         },
       }),
-    getCitations: getCapabilityResultCitations,
+    getCitations: (result) => buildAnswer(result).citations,
     input,
     run,
     step,

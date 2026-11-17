@@ -1,10 +1,7 @@
 import { consumeBudget } from "./agent-budget.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
-import {
-  buildStepError,
-  buildTextCitationStepOutput,
-} from "./agent-step-io.js";
+import { buildStepError } from "./agent-step-io.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
@@ -54,13 +51,18 @@ export const runWebSearchSkill = async ({
     };
   }
 
+  // Web search asks the user first, and a request carries no approval: the
+  // Skill's approval interrupt pauses this step and the run (runLifecycleStep
+  // rethrows it), and the approved capability_call step searches and answers
+  // (agent-run-step-handlers/capability-steps.js). The result here is a failed
+  // Skill: input the Capability's policy refused, no registry, or the Skill's
+  // own invariant error (skills/built-ins.js).
   const webInput = {
     question,
   };
   const webResult = await runLifecycleStep({
     buildError: (result) =>
       buildStepError(result, "Unable to answer from web search."),
-    buildOutput: buildTextCitationStepOutput,
     execute: () =>
       executeObservedSkill(
         webSearchSkill,
@@ -88,15 +90,13 @@ export const runWebSearchSkill = async ({
     id: WEB_SEARCH_PRIMARY_STEP_ID,
     type: "web_search",
     label: "Web Search",
-    status: webResult.ok ? "completed" : "failed",
-    summary: webResult.ok
-      ? "Web search returned supplemental context."
-      : `Web search failed: ${serializeError(
-          webResult.error,
-          "Unable to answer from web search."
-        )}`,
+    status: "failed",
+    summary: `Web search failed: ${serializeError(
+      webResult.error,
+      "Unable to answer from web search."
+    )}`,
     input: webInput,
-    output: buildTextCitationStepOutput(webResult),
+    output: null,
     error: buildStepError(webResult, "Unable to answer from web search."),
     detail: buildSkillTraceDetail(webResult),
   });

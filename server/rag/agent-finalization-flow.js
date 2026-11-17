@@ -28,11 +28,6 @@ import {
   hasCompatibleEvidenceIdentity,
 } from "./citations.js";
 
-export const resolveAgentMode = ({ plan, ragResult, webResult } = {}) =>
-  ragResult?.ok && ragResult.value.abstained && webResult?.ok
-    ? "document_web"
-    : plan.mode;
-
 export const selectPrimaryCustomResult = (customSkillResults = []) =>
   customSkillResults.find((result) => result.ok);
 
@@ -101,7 +96,6 @@ const rebaseGraphEvidence = ({
   customSkillResults = [],
   ragResult,
   researchBrief,
-  webResult,
   withRetrievedEvidence = false,
 } = {}) => {
   const customResults = withRetrievedEvidence
@@ -114,14 +108,6 @@ const rebaseGraphEvidence = ({
         text: ragResult.value?.text ?? ragResult.text ?? "",
       }
     : null;
-  const webInput = webResult?.ok
-    ? {
-        citations: webResult.citations ?? webResult.value?.citations ?? [],
-        retrievedContexts:
-          webResult.retrievedContexts ?? webResult.value?.retrievedContexts ?? [],
-        text: webResult.text ?? webResult.value?.text ?? "",
-      }
-    : null;
   const researchInput = researchBrief
     ? withRetrievedEvidence
       ? attachResearchEvidence(researchBrief)
@@ -131,12 +117,10 @@ const rebaseGraphEvidence = ({
     ...customResults,
     ...(researchInput ? [researchInput] : []),
     ...(ragInput ? [withRetrievedEvidence ? attachResultRetrievedEvidence(ragInput) : ragInput] : []),
-    ...(webInput ? [withRetrievedEvidence ? attachResultRetrievedEvidence(webInput) : webInput] : []),
   ];
   const results = rebaseEvidenceResults(inputs).results;
   const customCount = customResults.length;
   const researchOffset = researchInput ? 1 : 0;
-  const ragOffset = ragInput ? 1 : 0;
 
   return {
     customResults: results.slice(0, customCount),
@@ -144,7 +128,6 @@ const rebaseGraphEvidence = ({
       ? rebaseResearchFindings(researchBrief, results[customCount])
       : null,
     rag: ragInput ? results[customCount + researchOffset] : null,
-    web: webInput ? results[customCount + researchOffset + ragOffset] : null,
   };
 };
 
@@ -180,7 +163,6 @@ export const selectRagSources = ({
   includeCustomEvidence = false,
   ragResult,
   researchBrief,
-  webResult,
 } = {}) => {
   const customSources = customSkillResults
     .filter((result) => result.ok)
@@ -191,7 +173,6 @@ export const selectRagSources = ({
       ...customSources,
       ...(researchBrief ? researchBrief.citations ?? [] : []),
       ...(ragResult?.ok ? ragResult.value?.citations ?? [] : []),
-      ...(webResult?.ok ? webResult.citations ?? webResult.value?.citations ?? [] : []),
     ];
   }
 
@@ -201,10 +182,6 @@ export const selectRagSources = ({
 
   if (ragResult?.ok) {
     return ragResult.value.citations ?? [];
-  }
-
-  if (webResult?.ok) {
-    return webResult.citations ?? webResult.value?.citations ?? [];
   }
 
   return customSources;
@@ -231,26 +208,23 @@ export const finalizeAgentRun = async ({
   recordWorkingMemoryClaimSupport,
   recordWorkingMemoryGaps,
   researchBrief,
-  shouldRunWeb,
   skippedWebBecauseBudget,
   trace,
   webResult,
   workingMemory,
 } = {}) => {
-  const agentMode = resolveAgentMode({
-    plan,
-    ragResult,
-    webResult,
-  });
+  // The Web stage never answers here: Web search asks the user first, and the
+  // approved capability_call step searches and answers (agent-web-runner.js).
+  // A Web result is a failed one, which only the response reports.
+  const agentMode = plan.mode;
   const rebased = customSkillGraphExecuted
-    ? rebaseGraphEvidence({ customSkillResults, ragResult, researchBrief, webResult })
+    ? rebaseGraphEvidence({ customSkillResults, ragResult, researchBrief })
     : { customResults: rebaseEvidenceResults(customSkillResults).results };
   const rebasedEvidence = customSkillGraphExecuted
     ? rebaseGraphEvidence({
         customSkillResults,
         ragResult,
         researchBrief,
-        webResult,
         withRetrievedEvidence: true,
       })
     : {
@@ -278,18 +252,6 @@ export const finalizeAgentRun = async ({
         },
       }
     : ragResult;
-  const effectiveWebResult = rebased.web
-    ? {
-        ...webResult,
-        citations: rebased.web.citations,
-        text: rebased.web.text,
-        value: {
-          ...(webResult.value ?? {}),
-          citations: rebased.web.citations,
-          text: rebased.web.text,
-        },
-      }
-    : webResult;
   const primaryCustomResult = selectPrimaryCustomResult(
     rebasedCustomSkillResults
   );
@@ -304,7 +266,6 @@ export const finalizeAgentRun = async ({
     includeCustomEvidence: customSkillGraphExecuted,
     ragResult: effectiveRagResult,
     researchBrief: effectiveResearchBrief,
-    webResult: effectiveWebResult,
   });
   const verificationSources = effectiveResearchBrief
     ? effectiveResearchBrief.evidenceCitations ?? ragSources
@@ -313,8 +274,6 @@ export const finalizeAgentRun = async ({
         citations: ragSources,
         retrievedContexts: ragResult.value?.retrievedContexts ?? [],
       })
-    : webResult?.ok
-    ? ragSources
     : selectRagSources({
         customSkillResults: rebasedCustomEvidenceResults,
       });
@@ -323,17 +282,12 @@ export const finalizeAgentRun = async ({
         ...selectRagSources({ customSkillResults: rebasedCustomEvidenceResults }),
         ...(rebasedEvidence.research?.citations ?? []),
         ...(rebasedEvidence.rag?.citations ?? []),
-        ...(rebasedEvidence.web?.citations ?? []),
       ]
     : verificationSources;
   const baseAgentAnswer = buildSynthesisAnswer({
-    plan: {
-      ...plan,
-      mode: agentMode,
-    },
+    plan,
     actionAnswer,
     ragResult: effectiveRagResult,
-    webResult: effectiveWebResult,
     customSkillResults: rebasedCustomSkillResults,
     customSkillGraphExecuted,
     arxivImportAnswer,
@@ -346,14 +300,13 @@ export const finalizeAgentRun = async ({
     primaryCustomResult,
     ragSources,
     researchBrief: effectiveResearchBrief,
-    webResult: effectiveWebResult,
   });
   const customComparisonResult = rebasedCustomSkillResults.find(
     (result) => result.ok && getComparisonAnalysisSummary(result)
   );
   const comparisonAnalysisSummary = customComparisonResult
     ? getComparisonAnalysisSummary(customComparisonResult)
-    : !primaryCustomResult && !effectiveResearchBrief && effectiveRagResult?.ok && !effectiveWebResult?.ok
+    : !primaryCustomResult && !effectiveResearchBrief && effectiveRagResult?.ok
     ? effectiveRagResult.value.comparisonAnalysisSummary ?? null
     : null;
   const verifyMixedResearchGraph = Boolean(
@@ -389,7 +342,6 @@ export const finalizeAgentRun = async ({
     agentMode,
     primaryCustomResult,
     researchBrief: effectiveResearchBrief,
-    webResult,
   })
     ? runFinalAnswerVerification({
         addTraceStep,
@@ -409,7 +361,6 @@ export const finalizeAgentRun = async ({
         recordWorkingMemoryClaimSupport,
         recordWorkingMemoryGaps,
         researchBrief: verifyMixedResearchGraph ? null : effectiveResearchBrief,
-        webResult: effectiveWebResult,
       })
     : {
         check: null,
@@ -509,8 +460,6 @@ export const finalizeAgentRun = async ({
             (effectiveRagResult?.ok ? effectiveRagResult.value?.retrievedContexts : null) ??
             primaryCustomResult?.retrievedContexts ??
             primaryCustomResult?.value?.retrievedContexts ??
-            effectiveWebResult?.retrievedContexts ??
-            effectiveWebResult?.value?.retrievedContexts ??
             [],
         claimSupport: finalizer.claimSupport,
       })
@@ -547,14 +496,13 @@ export const finalizeAgentRun = async ({
     ragResult: effectiveRagResult,
     ragSources: publicRagSources,
     researchBrief: effectiveResearchBrief,
-    shouldRunWeb,
     skippedWebBecauseBudget,
     trace,
     agentSkills,
     agentObservability,
     finalAnswerSourceRankMap: finalAnswerProjection?.sourceRankMap,
     workingMemory,
-    webResult: effectiveWebResult,
+    webResult,
   });
 
   await recordAgentTrace({

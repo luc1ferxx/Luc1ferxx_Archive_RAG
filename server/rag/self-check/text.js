@@ -752,10 +752,20 @@ export const extractNumericConstraintTexts = (value = "") =>
     )
   );
 
+// normalizeSearchText by exact input in the active evidence context: a claim
+// check normalises the same claim, alias, label and evidence sentence strings
+// once per citation and per claim.
+export const normalizeSearchTextInContext = (value) =>
+  typeof value === "string"
+    ? memoizeInEvidenceContext("normalizeSearchText", value, () =>
+        normalizeSearchText(value)
+      )
+    : normalizeSearchText(value);
+
 export const includesNormalizedPhrase = (text = "", phrase = "") =>
   (() => {
-    const normalizedText = normalizeSearchText(text);
-    const normalizedPhrase = normalizeSearchText(phrase);
+    const normalizedText = normalizeSearchTextInContext(text);
+    const normalizedPhrase = normalizeSearchTextInContext(phrase);
 
     if (!normalizedPhrase) {
       return false;

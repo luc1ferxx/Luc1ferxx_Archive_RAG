@@ -180,23 +180,14 @@ const createDefaultSelectedSkills = (callOrder) => [
     id: AGENT_SKILL_IDS.inventory,
     label: "Workspace Inventory",
   }),
+  // Discovery and Web search call gated Capabilities, which never answer
+  // inside the outer plan. Here their policies refuse the input: each stage
+  // fails, and every stage after it still runs.
   createSkill({
     execute: async () => {
       callOrder.push(AGENT_SKILL_IDS.documentDiscovery);
 
-      return {
-        text: "Discovery answer.",
-        value: {
-          text: "Discovery answer.",
-          matches: [
-            {
-              document: {
-                docId: "doc-1",
-              },
-            },
-          ],
-        },
-      };
+      throw new Error("Discovery input refused.");
     },
     id: AGENT_SKILL_IDS.documentDiscovery,
     label: "Document Discovery",
@@ -243,7 +234,11 @@ const createDefaultSelectedSkills = (callOrder) => [
   }),
   createSkill({
     budgetKey: "webSearchCalls",
-    execute: async ({ webChatService }) => webChatService(),
+    execute: async () => {
+      callOrder.push(AGENT_SKILL_IDS.webSearch);
+
+      throw new Error("Web search input refused.");
+    },
     id: AGENT_SKILL_IDS.webSearch,
     label: "Web Search",
   }),
@@ -604,11 +599,15 @@ test("execution plan runner preserves the default skill execution order", async 
     AGENT_SKILL_IDS.webSearch,
   ]);
   assert.equal(result.inventoryAnswer, "Inventory answer.");
-  assert.equal(result.discoveryAnswer, "Discovery answer.");
+  assert.equal(
+    result.discoveryAnswer,
+    "Document discovery unavailable: Discovery input refused."
+  );
   assert.equal(result.customSkillResults[0].skillId, "custom_review");
   assert.equal(result.documentRagSkill.id, AGENT_SKILL_IDS.documentRag);
   assert.equal(result.ragResult.skillId, AGENT_SKILL_IDS.documentRag);
   assert.equal(result.webResult.skillId, AGENT_SKILL_IDS.webSearch);
+  assert.equal(result.webResult.ok, false);
   assert.equal(result.shouldRunWeb, true);
   assert.deepEqual(
     harness.trace.map((step) => step.type),

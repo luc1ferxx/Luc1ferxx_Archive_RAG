@@ -1715,7 +1715,7 @@ test("a refresh reads the requesting tenant's documents only, and callers that a
   rows.set("doc-a2", { docId: "doc-a2", fileName: "a2.pdf", ownerUserId: "alice", workspaceId: "ws-a" });
   rows.set("doc-b2", { docId: "doc-b2", fileName: "b2.pdf", ownerUserId: "bob", workspaceId: "ws-b" });
 
-  const results = await Promise.all([
+  await Promise.all([
     refreshDocumentRegistry(ALICE),
     refreshDocumentRegistry(ALICE),
     refreshDocumentRegistry(ALICE),
@@ -1726,7 +1726,7 @@ test("a refresh reads the requesting tenant's documents only, and callers that a
     [ALICE, ALICE],
     "alice's scope only: the first caller's listing, and one shared by the two that arrived while it ran"
   );
-  assert.deepEqual(results[0].map((document) => document.docId).sort(), ["doc-a", "doc-a2"]);
+  assert.deepEqual(listDocuments(ALICE).map((document) => document.docId).sort(), ["doc-a", "doc-a2"]);
   assert.ok(getDocument("doc-b", BOB), "bob's entries wait for bob's own refresh");
   assert.equal(getDocument("doc-b2", BOB), null);
 
@@ -2003,28 +2003,32 @@ test("a refresh requested while an older listing runs waits for one that starts 
   await initializeDocumentRegistry();
   listings.length = 0;
 
+  // What the map lists the moment a caller's refresh resolves, as the caller
+  // (GET /documents) reads it.
+  const listedWhenRefreshed = async (refreshing) => {
+    await refreshing;
+    return listDocuments().map((document) => document.docId);
+  };
+
   // Someone's GET /documents is listing the store on this instance...
   gate = createGate();
   const held = gate;
-  const older = refreshDocumentRegistry();
+  const older = listedWhenRefreshed(refreshDocumentRegistry());
 
   await held.startedPromise;
 
   // ...when another instance commits an upload and answers 201, and the
   // uploader's own GET /documents reaches this instance (auth off: one scope).
   rows.set("doc-new", aliceRow("doc-new"));
-  const mine = refreshDocumentRegistry();
-  const another = refreshDocumentRegistry();
+  const mine = listedWhenRefreshed(refreshDocumentRegistry());
+  const another = listedWhenRefreshed(refreshDocumentRegistry());
 
   held.release();
 
   const [olderListing, myListing, anotherListing] = await Promise.all([older, mine, another]);
 
-  assert.deepEqual(olderListing.map((document) => document.docId), ["doc-a"]);
-  assert.ok(
-    myListing.some((document) => document.docId === "doc-new"),
-    "a caller never gets a listing that started before it arrived"
-  );
+  assert.deepEqual(olderListing, ["doc-a"]);
+  assert.ok(myListing.includes("doc-new"), "a caller never gets a listing that started before it arrived");
   assert.deepEqual(anotherListing, myListing);
   assert.deepEqual(listings, [["doc-a"], ["doc-a", "doc-new"]], "the two later callers share one listing");
 });

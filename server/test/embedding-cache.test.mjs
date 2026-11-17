@@ -6,6 +6,7 @@ import {
   describeEmbeddingFlights,
   embedQueryCached,
   getQueryVectorEmbeddingSpace,
+  prefetchQueryEmbeddings,
   resetEmbeddingCache,
 } from "../rag/embedding-cache.js";
 import { buildEmbeddingSpace } from "../rag/vector-store-pgvector-versions.js";
@@ -576,6 +577,127 @@ test("concurrent embeddings of one text from two tenants are two flights, so one
   assert.equal(a.meter.used.modelCalls, 1);
   assert.equal(b.meter.used.modelCalls, 1);
   assert.deepEqual(describeEmbeddingFlights(), []);
+});
+
+// prefetchQueryEmbeddings: a request's planned retrieval queries start
+// embedding before retrieval asks for them (document-rag-execution.js).
+
+test("a prefetch embeds each text once as the request that asked: its later calls join the flight or hit the cache, and its run pays once per text", async (t) => {
+  const held = createHeldProvider();
+  configureOpenAIProvider(held.provider);
+
+  const request = { cancellation: createRequestCancellation(), meter: createRunUsage({ limits: NO_CEILINGS }), scope: ALICE };
+
+  t.after(() => {
+    request.cancellation.dispose();
+    held.release();
+  });
+
+  assert.equal(
+    asRequest(request, () => prefetchQueryEmbeddings(["notice period", "monthly fee", "notice period"])),
+    undefined
+  );
+  await waitUntil(() => held.seen.length === 2, "both texts reached the model");
+  assert.deepEqual(held.seen.map((call) => call.query), ["notice period", "monthly fee"], "each text once");
+  assert.deepEqual(describeEmbeddingFlights(), [{ waiters: 1 }, { waiters: 1 }]);
+
+  // Retrieval asks for one while it is in flight: same tenant, same flight.
+  const joined = asRequest(request, () => embedQueryCached("notice period"));
+
+  await waitUntil(() => describeEmbeddingFlights()[0]?.waiters === 2, "the call joined the prefetch's flight");
+  held.release();
+  assert.deepEqual(await joined, FAKE_VECTOR);
+  await waitUntil(() => describeEmbeddingFlights().length === 0, "both flights settled");
+
+  // The other is cached by the time retrieval asks for it.
+  assert.deepEqual(await asRequest(request, () => embedQueryCached("monthly fee")), FAKE_VECTOR);
+  assert.equal(held.seen.length, 2, "no second model call for either text");
+  assert.equal(request.meter.used.modelCalls, 2, "the request's run pays each call once");
+  assert.deepEqual(
+    held.seen.map((call) => [call.tenant, call.signal, call.deadline]),
+    [
+      [ALICE, null, null],
+      [ALICE, null, null],
+    ],
+    "detached calls signed as the request's tenant"
+  );
+});
+
+test("a prefetch waits with its request's signal: a cancelled request stops the call, which caches nothing and is charged to nobody", async (t) => {
+  const held = createHeldProvider();
+  configureOpenAIProvider(held.provider);
+
+  const request = { cancellation: createRequestCancellation(), meter: createRunUsage({ limits: NO_CEILINGS }), scope: ALICE };
+
+  t.after(() => {
+    request.cancellation.dispose();
+    held.release();
+  });
+
+  asRequest(request, () => prefetchQueryEmbeddings(["abandoned prefetch"]));
+  await waitUntil(() => held.seen.length === 1, "the call reached the model");
+  assert.deepEqual(describeEmbeddingFlights(), [{ waiters: 1 }]);
+
+  request.cancellation.cancel();
+  await waitUntil(() => describeEmbeddingFlights().length === 0, "its only caller left and the call was stopped");
+  held.release();
+
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(describeEmbeddingCache().entries, 0);
+  assert.equal(request.meter.used.modelCalls, 0);
+});
+
+test("a failed prefetch raises no unhandled rejection and caches nothing: the later call embeds the text again", async (t) => {
+  let calls = 0;
+  const unhandled = [];
+  const onUnhandledRejection = (reason) => unhandled.push(reason);
+
+  configureOpenAIProvider({
+    completeText: async () => "answer",
+    embedQuery: async () => {
+      calls += 1;
+
+      if (calls === 1) {
+        throw new Error("transient failure");
+      }
+
+      return [...FAKE_VECTOR];
+    },
+    embedTexts: async (texts) => texts.map(() => FAKE_VECTOR),
+  });
+  process.on("unhandledRejection", onUnhandledRejection);
+  t.after(() => process.off("unhandledRejection", onUnhandledRejection));
+
+  prefetchQueryEmbeddings(["flaky text"]);
+  await waitUntil(() => calls === 1 && describeEmbeddingFlights().length === 0, "the prefetch failed");
+
+  for (let turn = 0; turn < 10; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(unhandled, []);
+  assert.equal(describeEmbeddingCache().entries, 0, "a failure is not cached");
+  assert.deepEqual(await embedQueryCached("flaky text"), FAKE_VECTOR);
+  assert.equal(calls, 2, "the later call made a model call of its own");
+});
+
+test("with the cache off a prefetch makes no model call: every call would embed on its own", async () => {
+  const { calls, provider } = createCallTracker();
+  configureOpenAIProvider(provider);
+
+  await withEnv({ RAG_EMBEDDING_CACHE_ENABLED: "false" }, async () => {
+    prefetchQueryEmbeddings(["cache off text"]);
+
+    for (let turn = 0; turn < 10; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.deepEqual(calls, []);
+    assert.deepEqual(describeEmbeddingFlights(), []);
+  });
 });
 
 // RAG_EMBEDDING_CACHE_SCOPE=tenant: a cache hit answers without a model call,

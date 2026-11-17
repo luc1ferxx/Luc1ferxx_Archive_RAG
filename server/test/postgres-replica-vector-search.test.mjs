@@ -30,12 +30,14 @@ import { createFakeVersionDatabase } from "./pgvector-version-fake-database.mjs"
 // Database-free tests of what the pgvector searches hand rag/postgres.js when
 // read replicas are configured: a tenant search over documents this process's
 // registry knows is marked read-only with a freshness guard naming each
-// document's content version and the pointer generation it searched under;
-// the dense route's iterative-scan setting then travels as the statement's
-// prelude instead of a transaction. Anything else (no replicas, no tenant, a
-// document the registry does not know, a caller's transaction client) is the
-// primary path exactly as before. postgres-replica-routing.test.mjs covers
-// what postgres.js does with the mark.
+// document's content version and the pointer generation it searched under.
+// Anything else (no replicas, no tenant, a document the registry does not
+// know, a caller's transaction client) carries no mark and stays on the
+// primary. Either way the dense route's iterative-scan setting travels as the
+// statement's prelude, never in a transaction of its own; only on a caller's
+// transaction client is it a statement before the search.
+// postgres-replica-routing.test.mjs covers what postgres.js does with the
+// mark.
 
 const MODEL = "replica-embed";
 const ENV_KEYS = [
@@ -52,6 +54,9 @@ const DOCUMENTS = [
   { contentVersion: 1, docId: "doc-2", fileName: "doc-2.pdf", ownerUserId: "alice", workspaceId: "ws-a" },
 ];
 const DENSE = { docIds: ["doc-1", "doc-2"], queryText: "alpha", queryVector: [1, 0, 0, 0], topK: 2 };
+const ITERATIVE_SCAN_PRELUDE = [
+  { text: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] },
+];
 const SPARSE = { docIds: ["doc-1", "doc-2"], queryText: "alpha budget", topK: 2 };
 
 let savedEnv;
@@ -151,9 +156,7 @@ test("a tenant's dense search goes out guarded, with the iterative scan setting 
 
   assert.match(search.sql, /WITH nearest AS MATERIALIZED/);
   assertGuard(search.options);
-  assert.deepEqual(search.options.prelude, [
-    { text: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] },
-  ]);
+  assert.deepEqual(search.options.prelude, ITERATIVE_SCAN_PRELUDE);
   assert.equal(transactions, 0, "one round trip instead of BEGIN / set_config / search / COMMIT");
 });
 
@@ -277,10 +280,10 @@ test("a version whose snapshot the cache did not keep stays on the primary inste
   assert.equal(raced, 2);
   assert.equal(cachedGeneration, 1, "the cache still held the old pointer when the search went out");
   assert.match(searches[0].sql, /FROM rag_document_chunks_v2 WHERE/);
-  assert.equal(
+  assert.deepEqual(
     searches[0].options,
-    undefined,
-    "a guard at generation 1 would let a replica that has not replayed the switch to version 2 answer"
+    { prelude: ITERATIVE_SCAN_PRELUDE },
+    "no read-only mark: a guard at generation 1 would let a replica that has not replayed the switch to version 2 answer"
   );
 });
 
@@ -317,13 +320,17 @@ test("a document this process's registry does not know keeps the search on the p
   await asAlice(() => searchPgvectorDocuments({ ...DENSE, docIds: ["doc-1", "doc-elsewhere"] }));
   await asAlice(() => searchPgvectorSparseDocuments({ ...SPARSE, docIds: ["doc-1", "doc-elsewhere"] }));
 
-  assert.ok(searches.every((search) => search.options === undefined));
-  assert.equal(transactions, 1, "the dense search keeps its own transaction");
+  assert.deepEqual(
+    searches.map((search) => search.options),
+    [{ prelude: ITERATIVE_SCAN_PRELUDE }, undefined],
+    "no read-only mark; the dense search's setting is still its prelude"
+  );
+  assert.equal(transactions, 0, "the primary's dense search is one round trip too");
 });
 
-test("an owner search, a caller's transaction client and an unset configuration are the primary path unchanged", async () => {
+test("an owner search, a caller's transaction client and an unset configuration carry no read-only mark", async () => {
   await searchPgvectorDocuments(DENSE);
-  assert.equal(searches.at(-1).options, undefined, "no tenant");
+  assert.deepEqual(searches.at(-1).options, { prelude: ITERATIVE_SCAN_PRELUDE }, "no tenant");
 
   const clientStatements = [];
 
@@ -346,6 +353,9 @@ test("an owner search, a caller's transaction client and an unset configuration 
   transactions = 0;
   await asAlice(() => searchPgvectorDocuments(DENSE));
   await asAlice(() => searchPgvectorSparseDocuments(SPARSE));
-  assert.ok(searches.every((search) => search.options === undefined));
-  assert.equal(transactions, 1);
+  assert.deepEqual(
+    searches.map((search) => search.options),
+    [{ prelude: ITERATIVE_SCAN_PRELUDE }, undefined]
+  );
+  assert.equal(transactions, 0);
 });

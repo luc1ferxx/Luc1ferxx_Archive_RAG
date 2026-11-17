@@ -34,7 +34,7 @@ import {
   buildConfidenceTrace,
   buildResultTrace,
 } from "./observability.js";
-import { embedHydeQueryVector, embedQueryCached } from "./embedding-cache.js";
+import { embedHydeQueryVector, embedQueryCached, prefetchQueryEmbeddings } from "./embedding-cache.js";
 import {
   describeQueryExpansionErrorCode,
   expandQaQuestion,
@@ -862,20 +862,34 @@ const buildRetrievalInputs = async ({
       ? agentRetrievalPlan.retrievalQueries
       : retrievalQueries;
   const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
+  const retrievalRemote = isRetrievalRemote();
+  const semanticCacheEnabled = isSemanticCacheEnabled();
   // With remote retrieval the retrieval tier embeds every query it searches;
   // the vector is needed here only for the semantic answer cache's lookup,
   // and is then embedded through this process's own embedding path (the
   // model gateway when one is configured), in the space the index serves.
-  const queryVector =
-    isRetrievalRemote() && !isSemanticCacheEnabled()
-      ? null
-      : await embedQueryCached(resolvedQuery);
+  const queryEmbedding =
+    retrievalRemote && !semanticCacheEnabled ? null : embedQueryCached(resolvedQuery);
+
+  // In process with the semantic cache off, retrieval embeds every planned
+  // query right after this (retrieve*ForQueriesInProcess). Their embeddings
+  // start now, next to the question's, so retrieval finds them done or in
+  // flight instead of starting them only once the question's is back. A
+  // remote tier embeds its own queries, and a semantic cache hit would leave
+  // them unused.
+  if (!retrievalRemote && !semanticCacheEnabled) {
+    prefetchQueryEmbeddings(
+      plannedRetrievalQueries
+        .map((retrievalQuery) => retrievalQuery.query)
+        .filter((queryText) => queryText !== resolvedQuery)
+    );
+  }
 
   return {
     agentRetrievalPlan,
     evidenceRequirements,
     plannedRetrievalQueries,
-    queryVector,
+    queryVector: await queryEmbedding,
     retrievalOptions,
     route,
   };

@@ -8,19 +8,13 @@ import {
 import {
   buildCapabilityResumeResponse,
   createDefaultAgentRunStepHandlerRegistry,
-  getCapabilityResultCitations,
-  getCapabilityResultText,
 } from "./agent-run-step-handlers/index.js";
 import { recordRagTrace } from "./observability.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const normalizeAction = (action) => normalizeText(action).toLowerCase();
 
-export {
-  buildCapabilityResumeResponse,
-  getCapabilityResultCitations,
-  getCapabilityResultText,
-};
+export { buildCapabilityResumeResponse };
 
 const findApprovalGate = ({ gateId = "", run } = {}) => {
   const normalizedGateId = normalizeText(gateId);

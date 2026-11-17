@@ -1,6 +1,11 @@
 import test, { after, describe } from "node:test";
 import assert from "node:assert/strict";
+import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
 import { runAgentRag } from "../rag/agent.js";
+import {
+  createAnswerDraftReleaser,
+  runWithAnswerDraftChannel,
+} from "../rag/answer-drafts.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 import {
   createSelfCheckEvidenceContext,
@@ -15,7 +20,9 @@ import {
 import {
   extractNumericOccurrences,
   normalizeNumericSyntax,
+  normalizeSearchTextInContext,
 } from "../rag/self-check/text.js";
+import { normalizeSearchText } from "../rag/text-utils.js";
 
 // The evidence context is an exact memo: evaluateClaimSupport must return the
 // same result with it, without it (a disabled context), and with one context
@@ -229,6 +236,190 @@ test("numeric normalisation is memoised by exact input, never skipping a second 
   assert.equal(table.get(once), twice);
   assert.notEqual(memoised[0], memoised[1]);
   assert.notEqual(memoised[0][0], memoised[1][0]);
+});
+
+test("search-text normalisation is memoised in the active context by exact string input", () => {
+  const context = createSelfCheckEvidenceContext();
+  const value = "Remote-Work  Policy (2024).pdf";
+  const memoised = runWithSelfCheckEvidenceContext(context, () => [
+    normalizeSearchTextInContext(value),
+    normalizeSearchTextInContext(value),
+    normalizeSearchTextInContext(undefined),
+  ]);
+
+  // Outside the context the call is not counted, or kept, in it.
+  assert.equal(normalizeSearchTextInContext(value), normalizeSearchText(value));
+
+  const { hits, misses } = getSelfCheckEvidenceContextStats(context);
+
+  assert.deepEqual(memoised, [normalizeSearchText(value), normalizeSearchText(value), ""]);
+  assert.deepEqual([misses.normalizeSearchText, hits.normalizeSearchText], [1, 1]);
+  // Anything but a string is normalised as before, failing where it failed.
+  assert.throws(() => normalizeSearchText(null), TypeError);
+  assert.throws(
+    () => runWithSelfCheckEvidenceContext(context, () => normalizeSearchTextInContext(null)),
+    TypeError
+  );
+});
+
+const unmemoisedClaimSupport = (input) =>
+  evaluateClaimSupport({
+    ...input,
+    evidenceContext: createSelfCheckEvidenceContext({ enabled: false }),
+  });
+
+test("a claim checked before against the same input is not checked again", () => {
+  const context = createSelfCheckEvidenceContext();
+  const claim = "Remote work requires manager approval before the first remote day. [Source 1]";
+  // [claims checked, claim checks reused] so far in the context.
+  const check = (answerText, citations = [POLICY_CITATION]) => {
+    const memoised = evaluateClaimSupport({ answerText, citations, evidenceContext: context });
+    const { hits, misses } = getSelfCheckEvidenceContextStats(context);
+
+    assert.deepStrictEqual(memoised, unmemoisedClaimSupport({ answerText, citations }));
+    return [misses.claimCheck, hits.claimCheck ?? 0];
+  };
+
+  assert.deepEqual(check(claim), [1, 0]);
+  // In a longer answer the claim is reused and only the new one is checked.
+  assert.deepEqual(
+    check(`${claim}\nEmployees receive a stipend of 500 dollars per year. [Source 1]`),
+    [2, 1]
+  );
+  // The same words under a section, with other source labels, or against
+  // other evidence are another claim check.
+  assert.deepEqual(check(`Summary:\n${claim}`), [3, 1]);
+  assert.deepEqual(check(claim.replace("[Source 1]", "[Source 1] [Source 2]")), [4, 1]);
+  assert.deepEqual(
+    check(claim, [{ ...POLICY_CITATION, excerpt: "Onsite work is required." }]),
+    [5, 1]
+  );
+});
+
+const STREAMED_LINES = [
+  "Remote work requires manager approval before the first remote day. [Source 1]",
+  "Employees receive a stipend of 500 dollars per year. [Source 1]",
+  "The notice period is thirty (30) days. [Source 1]",
+  "The stipend is paid monthly. [Source 1]",
+];
+
+// One attempt of a streamed answer, in five-character pieces; returns the text.
+const streamAttempt = (options, lines) => {
+  const text = lines.join("\n");
+
+  options.onAttemptStart();
+  for (let index = 0; index < text.length; index += 5) {
+    options.onTextDelta(text.slice(index, index + 5));
+  }
+
+  return text;
+};
+
+// Every claim check a draft releaser makes, with [claims in the answer, claims
+// checked, claim checks reused] in its memo right after it.
+const recordDraftClaimChecks = async (action) => {
+  const checks = [];
+
+  setClaimSupportObserverForTests((input, result) => {
+    const { hits, misses } = getSelfCheckEvidenceContextStats(input.evidenceContext);
+
+    checks.push({
+      // Whole results the memo holds as this check returns (its own included).
+      claimSupportEntries: input.evidenceContext?.tables.get("claimSupport")?.size ?? 0,
+      context: input.evidenceContext,
+      counts: [result.claims.length, misses.claimCheck ?? 0, hits.claimCheck ?? 0],
+      input,
+      result,
+    });
+  });
+
+  try {
+    await runWithAgentEventSink(() => {}, () => runWithAnswerDraftChannel(action));
+  } finally {
+    setClaimSupportObserverForTests(replay);
+  }
+
+  return checks;
+};
+
+test("a streamed answer's drafts check each claim once across the growing prefixes", async () => {
+  const checks = await recordDraftClaimChecks(async () => {
+    const drafts = createAnswerDraftReleaser({ citations: [POLICY_CITATION] });
+
+    drafts.finish(streamAttempt(drafts.completionOptions, STREAMED_LINES));
+  });
+
+  // A check per completed line and one in finish(), all through one memo:
+  // each adds one claim, checked once, and reuses every claim before it.
+  assert.equal(new Set(checks.map((check) => check.context)).size, 1);
+  assert.deepEqual(
+    checks.map((check) => check.counts),
+    [
+      [1, 1, 0],
+      [2, 2, 1],
+      [3, 3, 3],
+      [4, 4, 6],
+    ]
+  );
+  for (const { input, result } of checks) {
+    assert.deepStrictEqual(result, unmemoisedClaimSupport(input));
+  }
+});
+
+// A long streamed answer (a model that keeps writing) must not keep every
+// prefix's whole result: that would hold memory growing with the square of
+// the answer's length, and no later prefix reads an earlier prefix's result.
+test("a streamed answer's drafts keep their claims' checks, not each prefix's whole result", async () => {
+  const lines = Array.from(
+    { length: 24 },
+    (_, index) => `Employees receive a stipend of ${index + 1} dollars per year. [Source 1]`
+  );
+  const checks = await recordDraftClaimChecks(async () => {
+    const drafts = createAnswerDraftReleaser({ citations: [POLICY_CITATION] });
+
+    drafts.finish(streamAttempt(drafts.completionOptions, lines));
+  });
+  const [{ context }] = checks;
+
+  assert.equal(checks.length, lines.length);
+  // Each check finds only its own whole result in the memo, and the last one
+  // is gone once its drafts are decided; every claim's check stays.
+  assert.deepEqual(
+    checks.map((check) => check.claimSupportEntries),
+    lines.map(() => 1)
+  );
+  assert.equal(context.tables.has("claimSupport"), false);
+  assert.equal(context.tables.get("claimCheck").size, lines.length);
+  for (const { input, result } of checks) {
+    assert.deepStrictEqual(result, unmemoisedClaimSupport(input));
+  }
+});
+
+test("a retried attempt checks its drafts' claims with a fresh memo", async () => {
+  const checks = await recordDraftClaimChecks(async () => {
+    const drafts = createAnswerDraftReleaser({ citations: [POLICY_CITATION] });
+
+    // The first attempt fails in its third line; the retry starts over.
+    streamAttempt(drafts.completionOptions, [...STREAMED_LINES.slice(0, 2), "The noti"]);
+    drafts.finish(streamAttempt(drafts.completionOptions, STREAMED_LINES.slice(0, 2)));
+  });
+
+  // The retry's first prefix is the first attempt's first prefix again, yet
+  // it is checked anew: nothing carries over from the failed attempt.
+  assert.equal(checks.length, 4);
+  assert.equal(checks[0].input.answerText, checks[2].input.answerText);
+  assert.equal(checks[0].context, checks[1].context);
+  assert.equal(checks[2].context, checks[3].context);
+  assert.notEqual(checks[0].context, checks[2].context);
+  assert.deepEqual(
+    checks.map((check) => check.counts),
+    [
+      [1, 1, 0],
+      [2, 2, 1],
+      [1, 1, 0],
+      [2, 2, 1],
+    ]
+  );
 });
 
 test("numeric fact comparison gets fresh facts on every call", () => {

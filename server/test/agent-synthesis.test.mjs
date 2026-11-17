@@ -8,7 +8,10 @@ import {
 import { SKILL_CHAIN_MODE } from "../rag/agent-planner.js";
 import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 
-test("agent synthesis combines document and web outputs for document_web mode", () => {
+// Web search never answers inside the outer plan (it asks for approval and
+// answers from the approved capability_call step), so a document_web plan
+// whose Web search was skipped for budget answers from its documents.
+test("agent synthesis answers a document_web plan from its documents", () => {
   const answer = buildSynthesisAnswer({
     plan: {
       mode: "document_web",
@@ -19,18 +22,9 @@ test("agent synthesis combines document and web outputs for document_web mode", 
         text: " Document answer. ",
       },
     },
-    webResult: {
-      ok: true,
-      value: {
-        text: " Web answer. ",
-      },
-    },
   });
 
-  assert.equal(
-    answer,
-    "Document evidence:\nDocument answer.\n\nWeb context:\nWeb answer."
-  );
+  assert.equal(answer, "Document answer.");
 });
 
 test("agent synthesis joins successful skill-chain outputs in execution order", () => {
@@ -134,13 +128,10 @@ test("agent synthesis finalizes cited evidence-bearing agent answers", () => {
   );
   assert.equal(
     shouldFinalizeAgentAnswer({
-      agentMode: "web",
-      webResult: {
-        ok: true,
-      },
+      agentMode: "document_web",
       ragSources: [
         {
-          url: "https://example.com",
+          docId: "doc-1",
         },
       ],
     }),

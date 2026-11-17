@@ -37,6 +37,7 @@ import {
   isRefutedQuotedClaim,
   normalizeEvidenceText,
   normalizeNumericAnchor,
+  normalizeSearchTextInContext,
   normalizeSemanticText,
   stripNumericValueSurfaces,
   stripClaimLeadLabel,
@@ -160,12 +161,15 @@ const hasReversedRelationTerms = (claimText = "", supportText = "") => {
   });
 };
 
-export const buildClaimTerms = ({
+// The claim's terms. Every filter reads the claim alone except the last
+// (selectClaimTerms), which keeps a comparison scaffold word only when the
+// evidence segment has it, so evaluateClaimAgainstCitations builds this once
+// per claim and applies that filter to each segment.
+const buildClaimTerms = ({
   claimText,
   scopedCitations,
   documentLabelCitations = scopedCitations,
   forceComparisonClaim = false,
-  supportTerms,
 }) => {
   const factualClaimText = stripClaimLeadLabel(claimText);
   const citedDocCount = getCitationDocIds(scopedCitations).size;
@@ -197,8 +201,10 @@ export const buildClaimTerms = ({
   const hasNumericConstraint = extractClaimAnchors(factualClaimText).some(
     (anchor) => anchor.type === "numeric_constraint"
   );
-
-  return extractFactTerms(
+  let modalityClaim = null;
+  const isModalityClaim = () =>
+    (modalityClaim ??= getModalityLabels(factualClaimText).length > 0);
+  const terms = extractFactTerms(
     stripNumericValueSurfaces(stripClauseConnectives(factualClaimText))
   ).filter((term) => {
     if (
@@ -211,7 +217,7 @@ export const buildClaimTerms = ({
     if (
       (MODALITY_CLAIM_TERMS.has(term) ||
         chineseModalitySurfaceTerms.has(term)) &&
-      getModalityLabels(factualClaimText).length > 0
+      isModalityClaim()
     ) {
       return false;
     }
@@ -223,17 +229,21 @@ export const buildClaimTerms = ({
       return false;
     }
 
-    if (hasNumericConstraint && NUMERIC_CONSTRAINT_SURFACE_TERMS.has(term)) {
-      return false;
-    }
-
-    return !(
-      comparisonClaim &&
-      !supportTerms.has(term) &&
-      COMPARISON_SCAFFOLD_TERMS.has(term)
-    );
+    return !(hasNumericConstraint && NUMERIC_CONSTRAINT_SURFACE_TERMS.has(term));
   });
+
+  return { comparisonClaim, terms };
 };
+
+const selectClaimTerms = ({ comparisonClaim, terms }, supportTerms) =>
+  terms.filter(
+    (term) =>
+      !(
+        comparisonClaim &&
+        !supportTerms.has(term) &&
+        COMPARISON_SCAFFOLD_TERMS.has(term)
+      )
+  );
 
 const getNumericAnchorBindingGroups = ({
   anchor,
@@ -531,12 +541,12 @@ export const evaluateClaimAgainstCitations = ({
   // claim is numeric (above) or quotes it as it stands: equal to it, or a run
   // of its words ("the records have many terminologies, so only annotators
   // ... are qualified" spans two clauses of the sentence it is taken from).
-  const normalizedFactualClaim = normalizeSearchText(factualClaimText);
+  const normalizedFactualClaim = normalizeSearchTextInContext(factualClaimText);
   const parentSupportSegments = buildCitationSupportSentences(citations).filter(
     (sentence) =>
       numericParentEligible ||
       (normalizedFactualClaim.length > 0 &&
-        ` ${normalizeSearchText(sentence)} `.includes(
+        ` ${normalizeSearchTextInContext(sentence)} `.includes(
           ` ${normalizedFactualClaim} `
         ))
   );
@@ -595,6 +605,15 @@ export const evaluateClaimAgainstCitations = ({
         ...extractMeaningfulTokens(factualInputClaim),
       ])
     : [];
+  const claimTermCandidates =
+    evaluationSegments.length > 0
+      ? buildClaimTerms({
+          claimText: factualInputClaim,
+          documentLabelCitations,
+          forceComparisonClaim,
+          scopedCitations: citations,
+        })
+      : null;
   const segmentChecks = evaluationSegments.map((segment) => {
     const exactEvidenceMatch = exactEvidenceSupportKeys.has(
       normalizeExactEvidenceMatchText(segment)
@@ -612,13 +631,7 @@ export const evaluateClaimAgainstCitations = ({
         }
       }
     }
-    const claimTerms = buildClaimTerms({
-      claimText: factualInputClaim,
-      documentLabelCitations,
-      forceComparisonClaim,
-      scopedCitations: citations,
-      supportTerms,
-    });
+    const claimTerms = selectClaimTerms(claimTermCandidates, supportTerms);
     const missingAnchors = anchors
       .filter(
         (anchor) => {

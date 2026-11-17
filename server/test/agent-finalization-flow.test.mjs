@@ -2,50 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   finalizeAgentRun,
-  resolveAgentMode,
   selectPrimaryCustomResult,
   selectRagSources,
 } from "../rag/agent-finalization-flow.js";
-
-test("finalization flow resolves document_web mode only when document abstains and web succeeds", () => {
-  assert.equal(
-    resolveAgentMode({
-      plan: {
-        mode: "document",
-      },
-      ragResult: {
-        ok: true,
-        value: {
-          abstained: true,
-        },
-      },
-      webResult: {
-        ok: true,
-        value: {
-          text: "Web answer.",
-        },
-      },
-    }),
-    "document_web"
-  );
-  assert.equal(
-    resolveAgentMode({
-      plan: {
-        mode: "document",
-      },
-      ragResult: {
-        ok: true,
-        value: {
-          abstained: false,
-        },
-      },
-      webResult: {
-        ok: true,
-      },
-    }),
-    "document"
-  );
-});
 
 test("finalization flow selects sources from research, document, then custom skills", () => {
   assert.deepEqual(
@@ -156,7 +115,6 @@ test("finalization flow finalizes cited document answers and records agent trace
     recordAgentTrace: async (event) => recordedAgentTraces.push(event),
     recordWorkingMemoryClaimSupport: (record) => claimSupportRecords.push(record),
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -173,6 +131,80 @@ test("finalization flow finalizes cited document answers and records agent trace
   assert.equal(claimSupportRecords[0].phase, "final");
   assert.equal(recordedAgentTraces[0].agentMode, "document");
   assert.equal(recordedAgentTraces[0].status, 200);
+});
+
+// Web search never answers inside the outer plan (it asks for approval), so a
+// document_web plan whose Web search was skipped for budget, or failed before
+// its gate, answers from its documents and is finalized like a document
+// answer.
+test("finalization flow answers a document_web plan without Web results from its documents", async () => {
+  for (const { mcpAnswer, skippedWebBecauseBudget, webResult } of [
+    {
+      mcpAnswer: "Web search not used: agent budget exhausted.",
+      skippedWebBecauseBudget: true,
+      webResult: null,
+    },
+    {
+      mcpAnswer: "Web search unavailable: Capability registry unavailable.",
+      skippedWebBecauseBudget: false,
+      webResult: {
+        ok: false,
+        error: new Error("Capability registry unavailable."),
+      },
+    },
+  ]) {
+    const trace = [];
+    const response = await finalizeAgentRun({
+      addTraceStep: (step) => trace.push(step),
+      buildAgentObservability: ({ agentMode }) => ({ agentMode }),
+      customSkillResults: [],
+      customSkills: [],
+      documentRagSkill: {
+        id: "document_rag",
+        version: "1.0.0",
+        label: "Document RAG",
+      },
+      getAgentSkills: () => [],
+      getBudgetSnapshot: () => ({}),
+      plan: {
+        mode: "document_web",
+      },
+      question: "What does remote work require?",
+      ragResult: {
+        ok: true,
+        value: {
+          text: "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
+          citations: [
+            {
+              docId: "doc-1",
+              excerpt: "Remote work requires manager approval.",
+            },
+          ],
+          memoryApplied: false,
+          resolvedQuery: "What does remote work require?",
+          abstained: false,
+        },
+      },
+      recordAgentTrace: async () => {},
+      recordWorkingMemoryClaimSupport: () => {},
+      researchBrief: null,
+      skippedWebBecauseBudget,
+      trace,
+      webResult,
+      workingMemory: {},
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.agentMode, "document_web");
+    assert.match(response.body.agentAnswer, /manager approval/);
+    assert.doesNotMatch(response.body.agentAnswer, /500 dollars/i);
+    assert.equal(response.body.ragAnswer, response.body.agentAnswer);
+    assert.equal(response.body.mcpAnswer, mcpAnswer);
+    assert.deepEqual(
+      trace.map((step) => step.type),
+      ["synthesis", "answer_finalizer"]
+    );
+  }
 });
 
 test("guarded graph and document RAG evidence get distinct global source ranks", async () => {
@@ -228,7 +260,6 @@ test("guarded graph and document RAG evidence get distinct global source ranks",
     recordAgentTrace: async () => {},
     recordWorkingMemoryClaimSupport: () => {},
     recordWorkingMemoryGaps: () => {},
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -289,7 +320,6 @@ test("guarded graph keeps research brief findings and verifies their rebased evi
         abstained: false,
       }],
     },
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -420,7 +450,6 @@ test("finalization flow exposes the same continuously rebased evidence projectio
     },
     recordWorkingMemoryClaimSupport: () => {},
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -519,7 +548,6 @@ test("finalization flow preserves comparison conclusions backed by the matching 
     recordAgentTrace: async () => {},
     recordWorkingMemoryClaimSupport: () => {},
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -601,7 +629,6 @@ test("finalization flow preserves comparison conclusions from a later custom ski
     recordWorkingMemoryClaimSupport: () => {},
     recordWorkingMemoryGaps: () => {},
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -686,7 +713,6 @@ test("finalization hydrates rebased custom source ranks without exposing full ev
     recordWorkingMemoryClaimSupport: () => {},
     recordWorkingMemoryGaps: () => {},
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -736,7 +762,6 @@ test("finalization fails closed when a custom answer has no checkable evidence",
     recordWorkingMemoryClaimSupport: () => {},
     recordWorkingMemoryGaps: () => {},
     researchBrief: null,
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,
@@ -835,7 +860,6 @@ test("finalization flow verifies and finalizes research brief answers", async ()
         },
       ],
     },
-    shouldRunWeb: false,
     skippedWebBecauseBudget: false,
     trace,
     webResult: null,

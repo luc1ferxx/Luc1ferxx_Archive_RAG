@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runAgentRag } from "../rag/agent.js";
-import { runAgentRagWithPreApprovedCapabilities } from "./pre-approved-capabilities-test-helpers.mjs";
+import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
 import {
   configureAgentExperienceMemoryStore,
   createInMemoryAgentExperienceStore,
@@ -26,6 +26,7 @@ import {
   CUSTOM_SKILL_IDS,
   createBuiltInSkillRegistry,
   createDefaultSkillRegistry,
+  executeAgentSkill,
   validateSkillContract,
 } from "../rag/skills/registry.js";
 import {
@@ -540,54 +541,62 @@ test("agent rag pauses arxiv import behind a capability approval gate", async ()
     response.body.agentTrace.map((step) => step.type),
     ["plan", "capability_approval_gate"]
   );
+  // Reaching the gate spends the run's arXiv budget, so a run cannot open
+  // more import gates than maxArxivPaperFetches allows.
+  assert.equal(response.body.agentObservability.budget.used.arxivPaperFetches, 1);
+  assert.equal(response.body.agentObservability.budget.limits.maxArxivPaperFetches, 1);
 });
 
-test("agent rag imports arxiv papers after approved capability boundary", async () => {
+// The request pauses at the arXiv gate; the approval runs the import and
+// answers with the papers, in the language of the question.
+test("agent rag imports arxiv papers once their approval gate is approved", async () => {
   const accessScope = {
     userId: "alice",
     workspaceId: "workspace-a",
   };
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
   const imports = [];
-  const response = await runAgentRagWithPreApprovedCapabilities({
-    accessScope,
-    arxivImportService: {
-      importTopic: async ({ accessScope: receivedScope, maxResults, topic }) => {
-        imports.push({
-          accessScope: receivedScope,
-          maxResults,
-          topic,
-        });
+  const arxivImportService = {
+    importTopic: async ({ accessScope: receivedScope, maxResults, topic }) => {
+      imports.push({
+        accessScope: receivedScope,
+        maxResults,
+        topic,
+      });
 
-        return {
-          topic,
-          requestedMaxResults: maxResults,
-          foundCount: 1,
-          importedCount: 1,
-          skippedCount: 0,
-          failedCount: 0,
-          importedPapers: [
-            {
-              arxivId: "2401.00001v1",
-              title: "Retrieval Augmented Generation for Archives",
-              absUrl: "https://arxiv.org/abs/2401.00001v1",
-              pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
-              docId: "doc-arxiv",
-              fileName: "arxiv-2401.00001.pdf",
-              status: "imported",
-            },
-          ],
-          skippedPapers: [],
-          failedPapers: [],
-        };
-      },
+      return {
+        topic,
+        requestedMaxResults: maxResults,
+        foundCount: 1,
+        importedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        importedPapers: [
+          {
+            arxivId: "2401.00001v1",
+            title: "Retrieval Augmented Generation for Archives",
+            absUrl: "https://arxiv.org/abs/2401.00001v1",
+            pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+            docId: "doc-arxiv",
+            fileName: "arxiv-2401.00001.pdf",
+            status: "imported",
+          },
+        ],
+        skippedPapers: [],
+        failedPapers: [],
+      };
     },
-    preApproved: {
-      [CAPABILITY_IDS.arxivImportTopic]: {
-        approved: true,
-        decision: "approved",
-        source: "test_approval",
-      },
-    },
+  };
+  const capabilityRegistry = createDefaultCapabilityRegistry({
+    arxivImportService,
+  });
+  const paused = await runAgentRag({
+    accessScope,
+    agentRunService,
+    arxivImportService,
+    capabilityRegistry,
     docIds: [],
     question: "帮我从 arXiv 抓取 2 篇关于 retrieval augmented generation 的论文",
     ragService: {
@@ -599,27 +608,118 @@ test("agent rag imports arxiv papers after approved capability boundary", async 
       text: "web should not run",
     }),
   });
+  const [gate] = paused.body.approvalGates;
 
-  assert.equal(response.status, 200);
-  assert.equal(response.body.agentMode, "arxiv_import");
-  assert.match(response.body.agentAnswer, /已从 arXiv 搜索主题/);
-  assert.equal(imports.length, 1);
-  assert.deepEqual(imports[0].accessScope, accessScope);
-  assert.equal(imports[0].maxResults, 2);
-  assert.equal(imports[0].topic, "retrieval augmented generation");
-  assert.deepEqual(
-    response.body.agentTrace.map((step) => step.type),
-    ["plan", "arxiv_import", "synthesis"]
+  assert.equal(paused.body.clarification.reason, "capability_approval_required");
+  assert.equal(gate.capabilityId, CAPABILITY_IDS.arxivImportTopic);
+  assert.equal(imports.length, 0);
+
+  const approved = await createAgentRunStepExecutor({
+    agentRunService,
+    capabilityRegistry,
+  }).applyApprovalAction({
+    accessScope,
+    action: "approve",
+    gateId: gate.id,
+    payload: {
+      approvalObjectHash: gate.approvalObjectHash,
+    },
+    runId: paused.body.agentRunId,
+  });
+
+  assert.deepEqual(imports, [
+    {
+      accessScope,
+      maxResults: 2,
+      topic: "retrieval augmented generation",
+    },
+  ]);
+  assert.equal(approved.run.status, AGENT_RUN_STATUSES.completed);
+  assert.equal(approved.response.agentMode, "arxiv_import");
+  assert.equal(
+    approved.response.agentAnswer,
+    [
+      '已从 arXiv 搜索主题 "retrieval augmented generation"，找到 1 篇；新导入 1 篇，已存在 0 篇，失败 0 篇。',
+      "1. Retrieval Augmented Generation for Archives（arXiv:2401.00001v1，docId: doc-arxiv）",
+    ].join("\n")
   );
+  assert.deepEqual(approved.response.ragSources, [
+    {
+      arxivId: "2401.00001v1",
+      title: "Retrieval Augmented Generation for Archives",
+      url: "https://arxiv.org/abs/2401.00001v1",
+      docId: "doc-arxiv",
+      fileName: "arxiv-2401.00001.pdf",
+    },
+  ]);
+  assert.equal(approved.response.ragAbstained, false);
+});
 
-  const observation = response.body.agentObservability.skills.find(
-    (skill) => skill.skillId === AGENT_SKILL_IDS.arxivImport
-  );
+// The four built-in Skills whose Capability asks the user first end at that
+// Capability call. A registry that answers without pausing (no gate) fails
+// the Skill with the invariant instead of answering from the result.
+test("a gated built-in Skill whose Capability returns without pausing fails with the invariant error", async () => {
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const registry = createBuiltInSkillRegistry();
+  const cases = [
+    [
+      AGENT_SKILL_IDS.arxivImport,
+      CAPABILITY_IDS.arxivImportTopic,
+      { question: "Import arXiv papers about retrieval augmented generation" },
+    ],
+    [
+      AGENT_SKILL_IDS.workspaceAction,
+      CAPABILITY_IDS.summaryCreate,
+      {
+        docIds: ["doc-1"],
+        plan: { actionCapabilityId: CAPABILITY_IDS.summaryCreate },
+        question: "Save a summary of the policy.",
+      },
+    ],
+    [
+      AGENT_SKILL_IDS.webSearch,
+      CAPABILITY_IDS.webSearch,
+      { question: "Search the web for the launch date." },
+    ],
+    [
+      AGENT_SKILL_IDS.documentDiscovery,
+      CAPABILITY_IDS.documentDiscovery,
+      { docIds: [], question: "Which document covers remote work?" },
+    ],
+  ];
 
-  assert.equal(observation.status, "completed");
-  assert.equal(observation.budgetKey, "arxivPaperFetches");
-  assert.equal(observation.budgetUsed, 1);
-  assert.equal(observation.budgetLimit, 1);
+  for (const [skillId, capabilityId, context] of cases) {
+    const calls = [];
+    const result = await executeAgentSkill(registry.get(skillId), {
+      accessScope,
+      capabilityRegistry: {
+        execute: async (calledCapabilityId, payload) => {
+          calls.push({ calledCapabilityId, payload });
+
+          return {
+            citations: [],
+            matches: [],
+            text: "Answered without a gate.",
+          };
+        },
+      },
+      ...context,
+    });
+
+    assert.equal(result.ok, false, skillId);
+    assert.equal(
+      result.error.message,
+      `${capabilityId} requires approval and runs only from the approved capability_call step.`
+    );
+    assert.equal(result.text, "");
+    assert.deepEqual(
+      calls.map(({ calledCapabilityId, payload }) => [calledCapabilityId, payload.approval]),
+      [[capabilityId, undefined]]
+    );
+  }
 });
 
 test("agent rag pauses on capability approval gates without executing the capability", async () => {
