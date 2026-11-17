@@ -180,7 +180,7 @@ Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Ski
 
 外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`。启动恢复不重放这三类 step（它不单独重放任何 step），中断的转人工；没有 replay metadata 的旧记录按 step type 给原因码。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
 
-**会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。
+**会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。长期偏好只从明确的指令里提取（“以后用中文回答”“reply in English”“回答简短一点”等）；问题里只是提到语言或长短（“中国供应商的回复”“short-term borrowings”）不会存成偏好。
 
 - 写入：主 `document_rag` 调用（用户的问题，一条用户 turn 加一条助手 turn，加上问题里说明的偏好）及其重试；research brief 在子问题都跑完后，经 `ragService.recordConversationTurn` 记一次（用户问题加 brief 文本）。
 - 不写入：V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、每个 `research_question` 子调用、这两类 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
@@ -421,7 +421,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 `POST /chat/stream` 推送两类中间事件，最后的 `result` 与 `/chat` 完全一致：
 
 - `trace_step`：每记录一步 trace 推一个精简摘要（`agent-event-stream.js`）。
-- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。同一次模型调用的各个前缀共用一个校验 memo，已经校验过的句子直接取结果，所以每写完一句只校验新写的句子。重试或切换备用模型时推 `answer_draft_reset`，memo 也重新开始。
+- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。同一次模型调用的各个前缀共用一个校验 memo，已经校验过的句子直接取结果，所以每写完一句只校验新写的句子。重试或切换备用模型时推 `answer_draft_reset`，memo 也重新开始。模型流中途报错，或者既没有 `finish_reason` 也没有 `[DONE]` 就断开，算这次调用失败并重试，不会把半截文本当答案。
 
 草稿只在 agent 用 `runWithAnswerDraftChannel` 包住的主文档检索里、且有流式客户端时产生；`/chat`、后台任务、评测、Skill 内部的模型调用和补检索都不产生草稿。草稿不是最终答案：自检失败后文档循环会补检索、可能换成补检索的答案或改为澄清，finalizer 也可能重写整段，所以界面把草稿标成"已通过证据校验，最终答案可能调整"，收到 `result` 后整体替换。保证是"不展示未经校验的内容"，不是"不撤回"。
 
