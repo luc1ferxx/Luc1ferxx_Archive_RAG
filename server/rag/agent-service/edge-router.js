@@ -98,14 +98,10 @@ const MAX_PENDING_EVENT_BYTES = 16 * 1024 * 1024;
  * Every route the agent tier serves, with the check the edge runs before
  * forwarding it: the monolith's own validators (routes/chat.js,
  * routes/tasks.js), so the edge refuses past the same input bounds. It mirrors
- * routes/chat.js and routes/tasks.js; a test fails
- * when either gains a route this table does not forward. `idempotent: false`
- * marks a GET that is not a read: GET /chat runs the agent (a run record,
- * session and long-term memory writes), so it is never sent to a second
- * replica, whatever the first one answered.
+ * routes/chat.js and routes/tasks.js; a test fails when either gains a route
+ * this table does not forward.
  */
 export const AGENT_EDGE_ROUTES = Object.freeze([
-  { idempotent: false, method: "get", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat", validate: validateChatRequest },
   { method: "post", path: "/chat/stream", stream: true, validate: validateChatRequest },
   { method: "get", path: "/tasks", validate: validateTaskListRequest },
@@ -175,10 +171,10 @@ const pickRequestHeaders = (req) => {
 const readForwardBody = (req) =>
   METHODS_WITHOUT_BODY.has(req.method) || req.body === undefined ? undefined : req.body;
 
-// Node accepts a raw backslash in the request target (GET /chat?question=C:\x),
-// which fetch would turn into a slash in the path and service-client.js
-// refuses; percent-encoded it reaches the agent's routes and query parser as
-// the same backslash the monolith reads.
+// Node accepts a raw backslash in the request target
+// (GET /agent-runs?status=C:\x), which fetch would turn into a slash in the
+// path and service-client.js refuses; percent-encoded it reaches the agent's
+// routes and query parser as the same backslash the monolith reads.
 const toForwardPath = (originalUrl) => String(originalUrl ?? "").replace(/\\/gu, "%5C");
 
 // service-client.js refuses such a path with a TypeError; answering 400 here
@@ -468,7 +464,7 @@ export const createAgentEdgeRouter = ({
     };
   };
 
-  const forward = async (req, res, { claims, idempotent, route }) => {
+  const forward = async (req, res, { claims, route }) => {
     const path = toForwardPath(req.originalUrl);
 
     if (!isForwardablePath(path)) {
@@ -490,7 +486,6 @@ export const createAgentEdgeRouter = ({
               body: readForwardBody(req),
               claims: buildForwardClaims(req, claims),
               headers: pickRequestHeaders(req),
-              idempotent,
               method: req.method,
               path,
               signal: watcher.signal,
@@ -613,7 +608,7 @@ export const createAgentEdgeRouter = ({
 
       return route.stream
         ? forwardStream(req, res, { route: route.path })
-        : forward(req, res, { idempotent: route.idempotent, route: route.path });
+        : forward(req, res, { route: route.path });
     });
   }
 

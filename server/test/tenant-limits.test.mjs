@@ -141,7 +141,12 @@ test("every route of RBAC_ROUTE_TABLE gets its cost class", () => {
 
   // The classes the part names, spelled out.
   assert.equal(classifyTenantLimitRequest("POST", "/chat").costClass, "chat");
-  assert.equal(classifyTenantLimitRequest("GET", "/chat").costClass, "chat");
+  // Asking is POST only: GET /chat is no route, so it costs the default.
+  assert.deepEqual(classifyTenantLimitRequest("GET", "/chat"), {
+    costClass: "default",
+    countsAsRun: false,
+    route: null,
+  });
   assert.equal(classifyTenantLimitRequest("POST", "/chat/stream").costClass, "chat");
   assert.equal(classifyTenantLimitRequest("POST", "/agent-tasks").costClass, "chat");
   assert.equal(classifyTenantLimitRequest("POST", "/upload").costClass, "ingest");

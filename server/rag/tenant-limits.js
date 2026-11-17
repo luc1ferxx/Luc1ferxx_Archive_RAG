@@ -73,7 +73,6 @@ export const TENANT_CONCURRENCY_RETRY_AFTER_SECONDS = 5;
 // actions that resume such work (an approval continues a run's graph, a step
 // retry reruns a step, a task action or a trigger dispatch starts a task).
 export const TENANT_CHAT_CLASS_ROUTES = Object.freeze([
-  "GET /chat",
   "POST /chat",
   "POST /chat/stream",
   "POST /agent-tasks",
@@ -114,7 +113,6 @@ export const TENANT_DESTRUCTIVE_CLASS_ROUTES = Object.freeze([
 // The requests TENANT_MAX_CONCURRENT_RUNS counts: the ones that run the agent
 // while the client waits.
 export const TENANT_CONCURRENT_RUN_ROUTES = Object.freeze([
-  "GET /chat",
   "POST /chat",
   "POST /chat/stream",
   "POST /agent-runs/:runId/actions/:action",

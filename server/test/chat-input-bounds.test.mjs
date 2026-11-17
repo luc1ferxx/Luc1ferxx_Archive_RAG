@@ -263,33 +263,40 @@ test("a docIds entry, docId or sessionId of the wrong type is a 400, not a crash
   });
 });
 
-test("GET /chat and POST /chat/stream apply the same bounds", async () => {
+test("POST /chat and POST /chat/stream apply the same bounds; GET /chat is no route", async () => {
   await withChatServer(async ({ answered, baseUrl, post }) => {
     process.env.CHAT_MAX_QUESTION_CHARS = "20";
     process.env.CHAT_MAX_DOC_IDS = "1";
 
+    await assertBadRequest(await post({ question: "q".repeat(21) }), /at most 20 characters/);
     await assertBadRequest(
-      await fetch(`${baseUrl}/chat?question=${encodeURIComponent("q".repeat(21))}`),
-      /at most 20 characters/
-    );
-    await assertBadRequest(
-      await fetch(`${baseUrl}/chat?question=hello&docIds=a,b`),
+      await post({ docIds: "a,b", question: "hello" }),
       /Too many docIds: the limit is 1/
     );
-    // Repeated keys arrive as an array.
     await assertBadRequest(
-      await fetch(`${baseUrl}/chat?question=hello&docIds=a&docIds=b`),
+      await post({ docIds: ["a", "b"], question: "hello" }),
       /Too many docIds: the limit is 1/
     );
-    // An object from bracket notation is not a list of ids.
+    // An object is not a list of ids.
     await assertBadRequest(
-      await fetch(`${baseUrl}/chat?question=hello&docIds[x]=a`),
+      await post({ docIds: { x: "a" }, question: "hello" }),
       /comma-separated string or a list of strings/
     );
 
-    let response = await fetch(`${baseUrl}/chat?question=hello&docIds=a`);
+    let response = await post({ docIds: ["a"], question: "hello" });
     assert.equal(response.status, 200);
     assert.deepEqual(answered.at(-1).docIds, ["a"]);
+
+    // Asking is POST only: a GET of /chat, with or without a question in the
+    // query, is a 404 and never reaches the agent.
+    const answeredBefore = answered.length;
+
+    for (const target of ["/chat?question=hello&docIds=a", "/chat"]) {
+      response = await fetch(`${baseUrl}${target}`);
+      assert.equal(response.status, 404, target);
+      await response.text();
+    }
+    assert.equal(answered.length, answeredBefore);
 
     // The stream refuses with a JSON 400 before any event is sent.
     await assertBadRequest(await post({ question: "q".repeat(21) }, "/chat/stream"), /at most 20 characters/);
@@ -310,7 +317,7 @@ test("the edge of a split deployment validates /chat with the same function", ()
 
   assert.deepEqual(
     chatRoutes.map((route) => `${route.method} ${route.path}`).sort(),
-    ["get /chat", "post /chat", "post /chat/stream"]
+    ["post /chat", "post /chat/stream"]
   );
   for (const route of chatRoutes) {
     assert.equal(route.validate, validateChatRequest, `${route.method} ${route.path}`);

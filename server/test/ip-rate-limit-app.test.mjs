@@ -146,7 +146,6 @@ test("every route that starts or resumes agent work shares the chat-class limit"
 
     for (const route of [
       "POST /agent-tasks",
-      "GET /chat?question=hi",
       "POST /chat",
       // Case and a trailing slash reach the same route in Express.
       "POST /CHAT/STREAM/",
@@ -163,6 +162,12 @@ test("every route that starts or resumes agent work shares the chat-class limit"
     await expectStatus(baseUrl, "POST /upload/chunk", 401);
     await expectStatus(baseUrl, "DELETE /documents/doc-1", 401);
     await expectStatus(baseUrl, "GET /agent-runs", 401);
+
+    // GET /chat is no route (asking is POST only): only the global limit
+    // counts it.
+    const getChat = await expectStatus(baseUrl, "GET /chat?question=hi", 401);
+
+    assert.equal(getChat.headers.get("ratelimit-limit"), "300");
   });
 });
 

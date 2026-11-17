@@ -241,11 +241,11 @@ export const createApp = async (options = {}) => {
       exposedHeaders: ["Content-Disposition"],
     })
   );
-  // CORS only decides what a page may read; a simple cross-site POST (or an
-  // <img> at GET /chat) still runs. The guard refuses those, and, while API
-  // auth is off, any browser request naming a host that is not loopback or an
-  // ALLOWED_ORIGINS host (DNS rebinding). Ahead of the static frontend, the
-  // probes and the rate limiters; requests without browser headers pass.
+  // CORS only decides what a page may read; a simple cross-site POST still
+  // runs. The guard refuses those, and, while API auth is off, any browser
+  // request naming a host that is not loopback or an ALLOWED_ORIGINS host
+  // (DNS rebinding). Ahead of the static frontend, the probes and the rate
+  // limiters; requests without browser headers pass.
   app.use(createCrossSiteGuard({ allowedOrigins }));
   // The single-container deployment (Dockerfile) serves the built frontend
   // from the API origin. Static files carry no archive data, so they are
