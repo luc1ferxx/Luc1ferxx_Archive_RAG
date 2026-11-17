@@ -61,15 +61,11 @@ test("LangChain packages are pinned to exact versions in package.json and the lo
     isLangChainPackage(name)
   );
 
+  // langchain and @langchain/openai are imported nowhere, so they are not
+  // dependencies (which also keeps the openai SDK they pulled in out of the image).
   assert.deepEqual(
     pinned.map(([name]) => name).sort(),
-    [
-      "@langchain/core",
-      "@langchain/langgraph",
-      "@langchain/langgraph-checkpoint",
-      "@langchain/openai",
-      "langchain",
-    ]
+    ["@langchain/core", "@langchain/langgraph", "@langchain/langgraph-checkpoint"]
   );
 
   for (const [name, version] of pinned) {
