@@ -48,7 +48,8 @@ let savedEnv;
 let clock = null;
 let replicaResponder = () => undefined;
 
-// Monitor polls answer from either server; statements fall to the responder.
+// Monitor polls answer from either server; the replica's responder sees every
+// statement first.
 const POLL_ANSWERS = {
   primary: (text) =>
     /pg_current_wal_flush_lsn/.test(text) ? { command: "SELECT 1", fields: ["lsn"], rows: [["0/3000060"]] } : undefined,
@@ -67,7 +68,7 @@ const statementRows = (text) =>
 before(async () => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   primary = await startFakePostgres((text) => POLL_ANSWERS.primary(text) ?? statementRows(text));
-  replica = await startFakePostgres((text) => POLL_ANSWERS.replica(text) ?? replicaResponder(text) ?? statementRows(text));
+  replica = await startFakePostgres((text) => replicaResponder(text) ?? POLL_ANSWERS.replica(text) ?? statementRows(text));
 
   for (const key of ENV_KEYS) {
     delete process.env[key];
@@ -351,6 +352,61 @@ test("a replica that goes down never fails a read: fallbacks, then an open circu
   snapshot = modules.replicas.getReplicaRoutingSnapshot();
   assert.equal(snapshot.replicas[0].circuit.state, "closed", "the probe succeeded");
   assert.deepEqual(snapshot.reads, { primary: 3, replica: 1 });
+});
+
+// The replica goes away (a restart, a failover) while a statement matching
+// `pattern` is in flight there: every connection to it drops mid-query.
+// Returns a function that brings it back.
+const dropReplicaDuring = (pattern) => {
+  let stopping = null;
+
+  replicaResponder = (text) => {
+    if (!stopping && pattern.test(text)) {
+      stopping = replica.stop();
+    }
+  };
+
+  return async () => {
+    if (stopping) {
+      await stopping;
+      await replica.restart();
+    }
+  };
+};
+
+test("a replica connection that drops mid-read falls back to the primary and the process stays up", async () => {
+  await primeMonitor();
+  const restore = dropReplicaDuring(/FROM rag_documents/);
+
+  try {
+    const result = await asTenant(() => modules.postgres.queryPostgres(STATEMENT, [["doc-1"]], { readOnly: true }));
+
+    assert.deepEqual(result.rows, [{ doc_id: "doc-1" }]);
+
+    const snapshot = modules.replicas.getReplicaRoutingSnapshot();
+
+    assert.equal(snapshot.fallbacks.replica_unavailable, 1);
+    assert.deepEqual(snapshot.reads, { primary: 1, replica: 0 });
+  } finally {
+    await restore();
+  }
+});
+
+test("a replica connection that drops mid-poll marks it unreachable, and the next poll finds it again", async () => {
+  clock = { now: 10_000 };
+  await modules.replicas.configureReadReplicaRouting({ now: () => clock.now });
+  const restore = dropReplicaDuring(/pg_last_wal_replay_lsn/);
+
+  try {
+    await modules.replicas.pollReadReplicasNow();
+    assert.equal(modules.replicas.getReplicaRoutingSnapshot().replicas[0].state, "unreachable");
+  } finally {
+    await restore();
+  }
+
+  clock.now += 600_000;
+  await modules.replicas.pollReadReplicasNow();
+  assert.equal(modules.replicas.getReplicaRoutingSnapshot().replicas[0].state, "streaming");
 });
 
 test("with POSTGRES_READ_REPLICA_URLS unset a marked read is exactly the primary's tenant pipeline", async () => {

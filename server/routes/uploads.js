@@ -245,6 +245,9 @@ export const createUploadsRouter = (services) => {
 
   const upload = multer({
     storage,
+    // Browsers, curl and undici send the file name as raw UTF-8 bytes; multer
+    // 2 would read them as latin1 ("合同.pdf" refused, "résumé.pdf" mangled).
+    defParamCharset: "utf8",
     limits: {
       // multer 2 rejects a file only when it exceeds fileSize (1.x did so at
       // fileSize), so the limit is the public maximum itself.

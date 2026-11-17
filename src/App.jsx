@@ -110,7 +110,7 @@ const App = () => {
     sessionId,
     setActiveTurnIndex,
     setIsLoading,
-    updateConversationTurn,
+    updateTurnByRunId,
     userId,
   } = useChatSession();
   const {
@@ -233,7 +233,7 @@ const App = () => {
     refreshAgentRunRecovery,
     setIsLoading,
     setSelectedSource,
-    updateConversationTurn,
+    updateTurnByRunId,
     t,
   });
 

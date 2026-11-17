@@ -3044,6 +3044,56 @@ test("agent task runner can continue after iteration budget is exhausted", async
   );
 });
 
+test("agent task runner runs an approval whose gate arrived on the last allowed iteration", async () => {
+  const gate = {
+    approvalObjectHash: APPROVAL_OBJECT_HASH,
+    capabilityId: "web.search",
+    id: "approval:web.search:1.0.0",
+    status: "pending",
+  };
+  const calls = [];
+  const runner = createAgentTaskRunner({
+    runAgentTask: async (request) => {
+      calls.push(request);
+
+      return calls.length === 1
+        ? {
+            status: 200,
+            body: {
+              agentMode: "clarification",
+              agentRunId: "run-limit",
+              approvalGates: [gate],
+              clarification: { needed: true, question: "Approve Web Search?", reason: "capability_approval_required" },
+            },
+          }
+        : {
+            status: 200,
+            body: { agentAnswer: "Answer with approved web evidence.", agentMode: "web", agentRunId: "run-limit" },
+          };
+    },
+  });
+  let task = { id: "agent_goal:limit", input: { maxIterations: 1, question: "Search the web for the launch date." } };
+
+  task = { ...task, ...(await runner.run({ accessScope, task })) };
+  assert.equal(task.requiredUserAction, "approve_capability");
+
+  task = {
+    ...task,
+    ...(await runner.resume({
+      action: AGENT_TASK_ACTIONS.approve,
+      payload: { approvalObjectHash: APPROVAL_OBJECT_HASH, gateId: gate.id },
+      task,
+    })),
+  };
+  task = { ...task, ...(await runner.run({ accessScope, task })) };
+
+  assert.equal(task.status, TASK_STATUSES.completed);
+  assert.equal(task.result.answer, "Answer with approved web evidence.");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].agentRunId, "run-limit");
+  assert.equal(calls[1].capabilityApprovals["web.search"].gateId, gate.id);
+});
+
 // Regression: a goal that asks for a follow-up task without any report wording
 // used to build a `follow_up_task:task.create` deliverable with `priority: ""`.
 // The real task.create Capability declares `priority` as a string, so the

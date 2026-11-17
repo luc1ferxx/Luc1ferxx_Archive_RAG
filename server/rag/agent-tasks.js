@@ -694,7 +694,12 @@ export const createAgentTaskRunner = ({
       });
     }
 
-    while (payload.iterations.length < payload.maxIterations) {
+    // An approval runs even when its gate arrived on the last allowed
+    // iteration; the iteration that runs it clears capabilityApprovals.
+    while (
+      payload.iterations.length < payload.maxIterations ||
+      Object.values(payload.capabilityApprovals).some((approval) => approval?.approved === true)
+    ) {
       assertClaimActive?.();
       const researchTaskPhase = getResearchTaskIterationPhase(payload.researchTask);
       const requestedAgentRunId =

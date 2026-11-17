@@ -44,9 +44,9 @@ export const getSharedRedisClient = () => {
 
   if (!client) {
     client = createSharedRedisClient(getRedisUrl());
-    firstConnection = waitUntilReady(client, 2000);
-    // Settled either way; a rejection only means "fall back until connected".
-    firstConnection.catch(() => {});
+    // Resolves either way: a client still connecting after 2 s fails its
+    // commands fast (callers fall back) and is used as soon as it connects.
+    firstConnection = waitUntilReady(client, 2000).catch(() => {});
   }
 
   return client;

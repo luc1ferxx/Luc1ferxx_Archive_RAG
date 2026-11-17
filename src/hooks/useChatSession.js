@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { requestSessionClear } from "../archiveApi";
 import {
   createSessionId,
@@ -10,10 +10,13 @@ import {
 
 export const useChatSession = () => {
   const [conversation, setConversation] = useState([]);
+  const conversationRef = useRef(conversation);
   const [activeTurnIndex, setActiveTurnIndex] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState(() => readStoredSessionId());
   const [userId] = useState(() => readStoredUserId());
+
+  conversationRef.current = conversation;
 
   useEffect(() => {
     persistSessionId(sessionId);
@@ -61,10 +64,22 @@ export const useChatSession = () => {
     [conversation.length]
   );
 
-  const updateConversationTurn = useCallback((turnIndex, updater) => {
+  // A run's result lands after an await, when New chat, a removed document or
+  // a cleared workspace may have emptied the conversation and a new question
+  // taken the run's old position: the turn is found by run id, and false
+  // means it is gone.
+  const updateTurnByRunId = useCallback((runId, updater) => {
+    const turnIndex = conversationRef.current.findIndex(
+      (turn) => turn.answer?.agentRunId === runId
+    );
+
+    if (turnIndex < 0) {
+      return false;
+    }
+
     setConversation((prev) =>
-      prev.map((turn, index) => {
-        if (index !== turnIndex) {
+      prev.map((turn) => {
+        if (turn.answer?.agentRunId !== runId) {
           return turn;
         }
 
@@ -72,6 +87,7 @@ export const useChatSession = () => {
       })
     );
     setActiveTurnIndex(turnIndex);
+    return true;
   }, []);
 
   const currentTurn = useMemo(
@@ -93,7 +109,7 @@ export const useChatSession = () => {
     sessionId,
     setActiveTurnIndex,
     setIsLoading,
-    updateConversationTurn,
+    updateTurnByRunId,
     userId,
   };
 };

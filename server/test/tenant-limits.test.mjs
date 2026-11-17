@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import test from "node:test";
 
 import express from "express";
@@ -15,7 +16,12 @@ import express from "express";
 import { getTrustProxySetting } from "../rag/config.js";
 import { getActiveDatabaseTenant, runWithDatabaseTenant } from "../rag/postgres-tenant.js";
 import { RBAC_ROUTE_TABLE } from "../rag/rbac.js";
-import { createSharedRedisClient } from "../rag/shared-state.js";
+import {
+  createSharedRedisClient,
+  getSharedRedisClient,
+  resetSharedState,
+  whenSharedStateReady,
+} from "../rag/shared-state.js";
 import {
   classifyTenantLimitRequest,
   createTenantConcurrencyLimiter,
@@ -348,6 +354,104 @@ test("a real Redis client that cannot connect falls back without failing a reque
     assert.equal(limiter.describe().shared.fallbacks, 3);
   } finally {
     redis.disconnect();
+  }
+});
+
+// The name and length of the first complete command (a RESP array of bulk
+// strings) in `text`, or null while it is incomplete.
+const readRespCommand = (text) => {
+  const header = /^\*(\d+)\r\n/u.exec(text);
+
+  if (!header) {
+    return null;
+  }
+
+  let offset = header[0].length;
+  let name = null;
+
+  for (let index = 0; index < Number(header[1]); index += 1) {
+    const bulk = /^\$(\d+)\r\n/u.exec(text.slice(offset));
+    const start = offset + (bulk?.[0].length ?? 0);
+    const end = start + Number(bulk?.[1]);
+
+    if (!bulk || end + 2 > text.length) {
+      return null;
+    }
+
+    name ??= text.slice(start, end).toUpperCase();
+    offset = end + 2;
+  }
+
+  return { length: offset, name };
+};
+
+// Just enough of a Redis server for ioredis: OK to every command (its
+// connection handshake included), 1 to EVAL; QUIT closes the connection.
+const createFakeRedisServer = () =>
+  createTcpServer((socket) => {
+    let pending = "";
+
+    socket.on("data", (chunk) => {
+      pending += chunk.toString("latin1");
+
+      for (let command = readRespCommand(pending); command; command = readRespCommand(pending)) {
+        pending = pending.slice(command.length);
+        socket.write(command.name === "EVAL" ? ":1\r\n" : "+OK\r\n");
+
+        if (command.name === "QUIT") {
+          socket.end();
+        }
+      }
+    });
+  });
+
+test("a Redis that comes up after the first 2 s wait is shared as soon as it connects", { timeout: 20_000 }, async () => {
+  const redisServer = createFakeRedisServer();
+
+  // A free port, closed again until Redis "starts".
+  redisServer.listen(0, "127.0.0.1");
+  await once(redisServer, "listening");
+
+  const { port } = redisServer.address();
+  const saved = { RAG_SHARED_STATE: process.env.RAG_SHARED_STATE, REDIS_URL: process.env.REDIS_URL };
+
+  await new Promise((resolve) => redisServer.close(resolve));
+  process.env.RAG_SHARED_STATE = "redis";
+  process.env.REDIS_URL = `redis://127.0.0.1:${port}`;
+
+  try {
+    // As at start-up: the process-wide client starts connecting, and the
+    // first wait for it gives up after 2 s.
+    const limiter = createTenantRateLimiter({
+      enabled: true,
+      limits: { chat: 5, default: 5, destructive: 5, ingest: 5 },
+    });
+
+    await whenSharedStateReady();
+
+    redisServer.listen(port, "127.0.0.1");
+    await once(redisServer, "listening");
+
+    const client = getSharedRedisClient();
+
+    if (client.status !== "ready") {
+      await once(client, "ready");
+    }
+
+    await whenSharedStateReady();
+    assert.deepEqual(await limiter.admit("chat", "workspace:acme"), { ok: true });
+    assert.deepEqual(limiter.describe().shared, { fallbacks: 0, lastError: null, provider: "redis" });
+  } finally {
+    await resetSharedState();
+    await new Promise((resolve) => redisServer.close(resolve));
+
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   }
 });
 

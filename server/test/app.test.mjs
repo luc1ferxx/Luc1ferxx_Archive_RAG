@@ -4744,6 +4744,23 @@ test("document file route handles full responses, invalid ranges, and stream err
     assert.equal(response.status, 416);
     assert.equal(response.headers.get("content-range"), "bytes */18");
 
+    // A suffix range is the last N bytes: all of them when N is the larger.
+    for (const [range, contentRange, text] of [
+      ["bytes=-5", "bytes 13-17/18", "ument"],
+      ["bytes=-100", "bytes 0-17/18", "%PDF-test-document"],
+    ]) {
+      response = await fetch(`${server.baseUrl}/documents/doc-1/file`, { headers: { Range: range } });
+      assert.equal(response.status, 206, range);
+      assert.equal(response.headers.get("content-range"), contentRange);
+      assert.equal(await response.text(), text);
+    }
+
+    for (const range of ["bytes=-0", "bytes=-"]) {
+      response = await fetch(`${server.baseUrl}/documents/doc-1/file`, { headers: { Range: range } });
+      assert.equal(response.status, 416, range);
+      assert.equal(response.headers.get("content-range"), "bytes */18");
+    }
+
     response = await fetch(`${server.baseUrl}/documents/missing/file`);
     assert.equal(response.status, 404);
 

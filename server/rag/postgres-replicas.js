@@ -468,15 +468,25 @@ const pollPoolOptions = (url, config) => ({
 
 const pollQuery = async (pool, text) => {
   const client = await pool.connect();
+  let failure;
+  // As in withPooledClient (rag/postgres.js): a server that drops the
+  // connection mid-poll makes the checked-out client emit 'error', which
+  // with no listener would end the process. The poll fails instead, and the
+  // connection is destroyed.
+  const onClientError = (error) => {
+    failure = error;
+  };
+
+  client.on("error", onClientError);
 
   try {
-    const result = await client.query(text);
-
-    client.release();
-    return result;
+    return await client.query(text);
   } catch (error) {
-    client.release(error);
+    failure = error;
     throw error;
+  } finally {
+    client.removeListener("error", onClientError);
+    client.release(failure);
   }
 };
 

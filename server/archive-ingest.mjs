@@ -30,7 +30,7 @@ import {
   getUploadDocumentFormats,
   isAcceptedUploadFileName,
 } from "./routes/helpers.js";
-import { isPostgresDatabaseConfigured } from "./rag/config.js";
+import { isPostgresDatabaseConfigured, isRagIngestDedupEnabled } from "./rag/config.js";
 import { runAsDatabaseSystem } from "./rag/postgres-tenant.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 import { stopTenantUsageLedger } from "./rag/tenant-usage.js";
@@ -68,10 +68,15 @@ Zero infrastructure
   PostgreSQL. Without it this command writes to PostgreSQL, exactly like the web
   workbench does.
 
+Duplicates
+  As on POST /upload, a file whose bytes the same owner and workspace already
+  stored is not stored again: the command prints that document with
+  "duplicate": true.
+  RAG_INGEST_DEDUP=false stores every file as a new document.
+
 Caveats
-  There is no duplicate detection: ingesting the same file twice produces two
-  documents with different ids. Ingesting concurrently with the web server can
-  interleave writes to the shared index files, so prefer one writer at a time.
+  Ingesting concurrently with the web server can interleave writes to the
+  shared index files, so prefer one writer at a time.
 `;
 
 const OPTIONS_WITH_VALUES = new Set(["--user-id", "--workspace-id"]);
@@ -229,6 +234,7 @@ const main = async () => {
     try {
       const { fileName, format } = await validateDocument(filePath, formats);
       const document = await ingestDocument({
+        deduplicate: isRagIngestDedupEnabled(),
         docId: randomUUID(),
         filePath,
         fileName,
@@ -247,6 +253,7 @@ const main = async () => {
             pageCount: document.pageCount,
             chunkCount: document.chunkCount,
             storageBackend: document.storageBackend,
+            ...(document.duplicate ? { duplicate: true } : {}),
           },
           null,
           2

@@ -28,8 +28,8 @@ import {
   getAccessTokenExpiresAt,
   getIdToken,
   getStoredRefreshToken,
+  handleUnauthorizedResponse,
   hasOidcAccessToken,
-  refreshAccessToken,
   setOidcTokens,
   setTokenHandlers,
 } from "./tokenStore";
@@ -127,8 +127,10 @@ export const AuthProvider = ({
 
     const delay = Math.max(MIN_REFRESH_DELAY_MS, expiresAt - now() - REFRESH_LEAD_MS);
 
+    // A refresh that fails has dropped the tokens, so it ends the session the
+    // way an unrecoverable 401 does: signed out and a new login.
     refreshTimerRef.current = setTimeout(() => {
-      void refreshAccessToken();
+      void handleUnauthorizedResponse();
     }, delay);
   }, [clearRefreshTimer, now]);
 
