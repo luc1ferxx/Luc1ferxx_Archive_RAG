@@ -370,7 +370,7 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
       {
         API_AUTH_ENABLED: "true",
         API_AUTH_JWT_ENABLED: "true",
-        API_AUTH_JWT_HS256_SECRET: "jwt-secret",
+        API_AUTH_JWT_HS256_SECRET: "infra-contract-jwt-secret-of-32-chars-plus",
         API_AUTH_JWT_SECRET: undefined,
         API_AUTH_REQUIRE_WORKSPACE: "true",
         API_AUTH_TOKEN: "",
@@ -384,6 +384,29 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
         assert.equal(report.checks.apiAuth.status, "ok");
         assert.deepEqual(report.checks.apiAuth.modes, ["jwt"]);
         assert.equal(report.checks.apiAuth.workspaceRequired, true);
+      }
+    );
+
+    // A secret under 32 characters (here under the legacy name) is an error,
+    // as it refuses the start; the report never names the secret.
+    await withEnv(
+      {
+        API_AUTH_ENABLED: "true",
+        API_AUTH_JWT_ENABLED: "true",
+        API_AUTH_JWT_HS256_SECRET: undefined,
+        API_AUTH_JWT_SECRET: "jwt-secret",
+        API_AUTH_TOKEN: "local-token",
+        API_AUTH_TOKENS: "",
+        OPENAI_API_KEY: "test-key",
+        VECTOR_STORE_PROVIDER: "local",
+      },
+      async () => {
+        const report = await buildHealthReport();
+
+        assert.equal(report.status, "error");
+        assert.equal(report.checks.apiAuth.status, "error");
+        assert.match(report.checks.apiAuth.message, /API_AUTH_JWT_HS256_SECRET or API_AUTH_JWT_SECRET is shorter than 32 characters/);
+        assert.equal(JSON.stringify(report).includes("jwt-secret"), false);
       }
     );
 
@@ -647,7 +670,7 @@ test("API auth middleware contract preserves public paths and scoped principals"
     {
       API_AUTH_ENABLED: "true",
       API_AUTH_JWT_ENABLED: "true",
-      API_AUTH_JWT_HS256_SECRET: "jwt-secret",
+      API_AUTH_JWT_HS256_SECRET: "infra-contract-jwt-secret-of-32-chars-plus",
       API_AUTH_JWT_SECRET: undefined,
       API_AUTH_TOKEN: undefined,
       API_AUTH_TOKENS: undefined,
@@ -662,7 +685,7 @@ test("API auth middleware contract preserves public paths and scoped principals"
           sub: "jwt-user",
           workspaces: ["workspace-a", "workspace-b"],
         },
-        secret: "jwt-secret",
+        secret: "infra-contract-jwt-secret-of-32-chars-plus",
       });
       const allowedResult = runAuthMiddleware({
         headers: {

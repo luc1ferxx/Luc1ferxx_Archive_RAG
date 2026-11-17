@@ -222,7 +222,7 @@ const FAILING_REPORT = Object.freeze({
 });
 const THROWN_MESSAGE = "health failed at 10.0.0.5:5432";
 
-const JWT_SECRET = "health-access-test-secret";
+const JWT_SECRET = "health-access-test-secret-of-32-chars-plus";
 const JWT_ENV = {
   API_AUTH_JWT_AUDIENCE: "archive-rag",
   API_AUTH_JWT_ENABLED: "true",

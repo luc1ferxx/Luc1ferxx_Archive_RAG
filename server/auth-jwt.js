@@ -11,6 +11,7 @@ import {
   getApiAuthRevokedJtis,
   getApiAuthRevokedTokenHashes,
 } from "./rag/config.js";
+import { MIN_SERVICE_KEY_SECRET_LENGTH } from "./rag/service-identity.js";
 import { normalizeTrimmedText as normalizeText } from "./lib/normalize-text.js";
 
 const JWT_ALGORITHM = "HS256";
@@ -22,6 +23,18 @@ class JwtAuthError extends Error {
     this.status = status;
   }
 }
+
+/**
+ * Whether an HS256 secret (trimmed, as the verifier uses it) is missing or
+ * shorter than the floor the internal service keys already have
+ * (rag/service-identity.js). One captured token is enough to guess a short
+ * secret offline, and a guessed secret signs tokens with any roles and
+ * permissions, which come straight from the claims. The verifier refuses to
+ * use such a secret, createApp refuses to start with it (auth.js) and the
+ * apiAuth health check reports it (health.js).
+ */
+export const isJwtSecretTooShort = (secret = getApiAuthJwtSecret()) =>
+  normalizeText(secret).length < MIN_SERVICE_KEY_SECRET_LENGTH;
 
 const toList = (value) => {
   if (Array.isArray(value)) {
@@ -121,12 +134,41 @@ const hasAudience = (payloadAudience, expectedAudience) => {
   return toList(payloadAudience).map(normalizeText).includes(expected);
 };
 
+// RFC 7519 NumericDate: a JSON number. Anything else (a string, null, a
+// boolean) is refused rather than coerced: Number("soon") is NaN, which no
+// comparison rejects, so such a token never expired. The rule rag/oidc.js
+// applies to OIDC tokens.
+const toNumericDate = (value, claim) => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new JwtAuthError(`Invalid JWT ${claim} claim.`);
+  }
+
+  return value;
+};
+
+// exp is required, as for OIDC tokens: without it a token stays valid for
+// ever, so a leaked one works until someone revokes its jti or hash by hand.
+// nbf and iat are optional but must be numbers when present. No clock skew is
+// added, so a future iat is only type-checked, never refused.
 const verifyTimestampClaims = ({ nowSeconds, payload }) => {
-  if (payload.exp !== undefined && Number(payload.exp) <= nowSeconds) {
+  const exp = toNumericDate(payload.exp, "exp");
+  const nbf = toNumericDate(payload.nbf, "nbf");
+
+  toNumericDate(payload.iat, "iat");
+
+  if (exp === undefined) {
+    throw new JwtAuthError("JWT has no expiry.");
+  }
+
+  if (exp <= nowSeconds) {
     throw new JwtAuthError("JWT is expired.");
   }
 
-  if (payload.nbf !== undefined && Number(payload.nbf) > nowSeconds) {
+  if (nbf !== undefined && nbf > nowSeconds) {
     throw new JwtAuthError("JWT is not active yet.");
   }
 };
@@ -154,6 +196,13 @@ export const verifyJwtAuthToken = (
     throw new JwtAuthError("JWT auth is enabled, but no JWT secret is configured.", {
       status: 500,
     });
+  }
+
+  if (isJwtSecretTooShort(normalizedSecret)) {
+    throw new JwtAuthError(
+      `JWT auth is enabled, but the JWT secret is shorter than ${MIN_SERVICE_KEY_SECRET_LENGTH} characters.`,
+      { status: 500 }
+    );
   }
 
   const [encodedHeader, encodedPayload, signature] = normalizedToken.split(".");

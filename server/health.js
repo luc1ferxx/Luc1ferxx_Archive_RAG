@@ -1,6 +1,7 @@
 import { constants as fsConstants } from "fs";
 import { access, mkdir } from "fs/promises";
 
+import { isJwtSecretTooShort } from "./auth-jwt.js";
 import {
   getAdminAuditEventsPostgresTable,
   getAdminAuditRetentionDays,
@@ -88,6 +89,7 @@ import { getOpenAIApiKey } from "./rag/openai.js";
 import { getRagDataDirectory } from "./rag/storage.js";
 import { AGENT_SERVICE_PING_PATH } from "./rag/agent-service/contract.js";
 import { createServiceClient } from "./rag/service-client.js";
+import { MIN_SERVICE_KEY_SECRET_LENGTH } from "./rag/service-identity.js";
 import {
   describeServiceTopology,
   getServiceUrls,
@@ -186,6 +188,16 @@ const checkApiAuthHealth = async () => {
       workspaceRequired: configStatus.workspaceRequired,
       message:
         "API authentication JWT mode is enabled, but API_AUTH_JWT_HS256_SECRET or API_AUTH_JWT_SECRET is missing.",
+    });
+  }
+
+  // The same rule refuses the start (auth.js assertApiAuthTokenConfiguration),
+  // so /ready and a start agree.
+  if (configStatus.jwtEnabled && isJwtSecretTooShort()) {
+    return buildEntry("error", {
+      modes: configStatus.modes,
+      workspaceRequired: configStatus.workspaceRequired,
+      message: `API authentication JWT mode is enabled, but API_AUTH_JWT_HS256_SECRET or API_AUTH_JWT_SECRET is shorter than ${MIN_SERVICE_KEY_SECRET_LENGTH} characters.`,
     });
   }
 
