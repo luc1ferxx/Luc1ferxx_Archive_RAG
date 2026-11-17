@@ -338,6 +338,27 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 
 pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 
+## 跨站请求、CORS 和按 IP 限流
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `ALLOWED_ORIGINS` | 空（`server/.env.example` 写的是 `http://localhost:3000`） | 逗号分隔的浏览器来源，例如 `https://archive.example.com`。CORS 只对这些来源放行，跨站检查也用这份列表。为空时只放行本机来源（`localhost`、`127.0.0.1`、`[::1]`，任意端口）；以前为空时对任意来源放行。 |
+| `RATE_LIMIT_ENABLED` | `false`（`server/.env.example` 写的是 `true`） | 是否按客户端 IP 限流，窗口是 1 分钟。 |
+| `RATE_LIMIT_GLOBAL_MAX` | `300` | 每个 IP 每分钟的请求总数，所有路由都算。 |
+| `RATE_LIMIT_CHAT_MAX` | `30` | chat 类：`/chat`、`/chat/stream`、`POST /agent-tasks`，以及任务动作、触发器派发、agent run 的动作、步骤重试和恢复动作，也就是所有会启动或续跑 agent 的请求。 |
+| `RATE_LIMIT_UPLOAD_MAX` | `120` | ingest 类：直传和分片上传（每个分片算一次）、上传状态查询、替换文档、从回收站恢复、两条 arXiv 导入。 |
+| `RATE_LIMIT_DESTRUCTIVE_MAX` | `5` | 批量删除：`POST /documents/clear` 和 `POST /admin/tenants/erase`。单个 DELETE（删一篇文档、关一个会话，界面每点一次发一个）只受全局上限，和以前一样。 |
+
+按 IP 限流和 `TENANT_RATE_LIMIT_*`（见下面的“多租户治理”）用同一份路由分类（`server/rag/tenant-limits.js`），两套计数各算各的，一套按客户端 IP，一套按租户；唯一的差别是按租户限流把每个 DELETE 都算作 destructive。以前按 IP 限流只认 `/chat`、`/upload`、`/documents/clear`、`/admin/tenants/erase` 四个路径前缀，`POST /agent-tasks`、任务和 agent run 的动作、DELETE 等只受全局上限约束。
+
+跨站检查没有开关，只看浏览器发来的请求（带 `Origin` 或 `Sec-Fetch-Site` 头）；curl、脚本、MCP、层间调用和探针不带这两个头，不受影响：
+
+- 改数据的请求（GET、HEAD、OPTIONS 以外的方法，以及会启动 agent 的 GET `/chat`）：带 `Origin` 时，它必须与 API 同源或在 `ALLOWED_ORIGINS` 里，`null` 来源一律拒绝；不带 `Origin` 而 `Sec-Fetch-Site` 是 `cross-site` 时也拒绝。拒绝返回 403 `CROSS_SITE_REQUEST_REFUSED`。这样，用户在同一个浏览器里打开的其他网页就不能借本机服务清空文档、上传文件或发起提问。
+- 鉴权关闭时（本地默认），浏览器请求的 `Host` 还必须是本机地址或 `ALLOWED_ORIGINS` 里某个来源的主机名，否则返回 403 `HOST_NOT_ALLOWED`，用来挡 DNS rebinding。要用局域网地址或别的域名在浏览器里访问，先开启鉴权（见 [deployment.md](deployment.md) 的“有意在局域网开放”），或把那个来源写进 `ALLOWED_ORIGINS`。
+- 同源判断比较 `Origin` 的主机和请求的 `Host`；设了 `TRUST_PROXY` 时用反向代理传来的 `X-Forwarded-Host`。
+
+`GET /health` 和 `/ready` 不鉴权、也在限流之前，所以同时到达的请求合并成一次检查，结果再复用 1 秒，高频探测不会占满数据库连接。
+
 ## 多租户治理
 
 第 3、4 阶段新增的设置。除特别注明外，默认都是关闭或不限，不设置时行为与之前一致。把这些开关和第 1、2 阶段的开关全部打开的完整示例是 `deploy/demo/hardened.env`（只用于演示，token 和密码是公开的演示值），用法见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
@@ -468,11 +489,11 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `API_AUTH_ENABLED` | `false` | 是否启用 API token 鉴权。 |
-| `API_AUTH_TOKEN` | 空 | 单用户/本地开发 token。 |
+| `API_AUTH_TOKEN` | 空 | 单用户/本地开发 token。鉴权开启时不能是 `server/.env.example` 里公开的占位值 `change-me-for-local-dev`。 |
 | `API_AUTH_TOKENS` | 空 | 多用户 token 映射。 |
 | `API_AUTH_REQUIRE_WORKSPACE` | `false` | 鉴权请求是否必须解析出 workspace scope；多租户部署建议设为 `true`。没有 workspace 列表的平台身份在平台管理路由（`TENANTLESS_PLATFORM_PATHS`：`/admin/workspaces`、`/admin/tenants/*`、`/admin/usage`、`/admin/audit`、`/admin/status` 等）上不受此限制，健康探针的权限判断也不要求 workspace；`GET /auth/me` 对任何凭据都不要求，并在开启时返回 `workspaceRequired: true`，前端据此不提供"不选工作区"、默认选第一个 workspace；其他路由照常要求。 |
 | `API_AUTH_JWT_ENABLED` | `false` | 是否允许 `Authorization: Bearer <jwt>` 走 HS256 JWT 验证。静态 token 仍优先匹配。 |
-| `API_AUTH_JWT_HS256_SECRET` / `API_AUTH_JWT_SECRET` | 空 | JWT HS256 secret；`API_AUTH_JWT_ENABLED=true` 时必须配置。 |
+| `API_AUTH_JWT_HS256_SECRET` / `API_AUTH_JWT_SECRET` | 空 | JWT HS256 secret；`API_AUTH_JWT_ENABLED=true` 时必须配置，且至少 32 个字符。 |
 | `API_AUTH_JWT_ISSUER` | 空 | 可选 issuer 校验，对应 JWT `iss`。 |
 | `API_AUTH_JWT_AUDIENCE` | 空 | 可选 audience 校验，对应 JWT `aud`。 |
 | `API_AUTH_JWT_USER_CLAIM` | `sub` | 映射为 `accessScope.userId` 的 claim path。支持点号路径。 |
@@ -486,6 +507,8 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 鉴权开启后，`GET /health`、`/ready`、`/livez` 仍然公开、状态码不变，但只有单个共享的 `API_AUTH_TOKEN` 或持有 `admin.status.read` 的调用方才拿到完整报告，其他人只拿到 `{status}`，并带 `Cache-Control: no-store`。认证之后的所有 API 响应都带 `Cache-Control: private, no-store` 和按身份头（Authorization、x-api-key、x-workspace-id、x-user-id）的 `Vary`。
 
 鉴权开启后，一个请求如果既没有 user 也没有 workspace，会被返回 403（“This request needs a user or workspace scope”）。典型情况是 `API_AUTH_TOKENS` 里允许多个 workspace、又没有 userId 的 token，请求时没带 `x-workspace-id`。以前这种请求会被当成“所有租户”，能列出、读取并清空所有人的文档。有两个例外：一是单个共享的 `API_AUTH_TOKEN`（单租户模式，行为不变）；二是 `GET /admin/status`、`GET /admin/audit`、`GET /admin/index-versions`、`GET /auth/me` 和 `POST /admin/actions/:action`，但只对没有 workspace 列表的平台 admin token 放行，这些路由另有 admin 权限检查。另外，`API_AUTH_TOKENS` 里一个既没有 userId、workspaceId、workspaces，也没有 roles、permissions，又没开 `allowClientUserId` 的条目，会让服务拒绝启动（`API_AUTH_TOKEN_WITHOUT_SCOPE`）。
+
+鉴权开启时，还有两种配置会让服务拒绝启动：`API_AUTH_TOKEN` 或 `API_AUTH_TOKENS` 里的某个 token 仍是公开的占位值 `change-me-for-local-dev`（`API_AUTH_TOKEN_PLACEHOLDER`）；开了 `API_AUTH_JWT_ENABLED`，而 HS256 secret 没配或短于 32 个字符（`API_AUTH_JWT_SECRET_TOO_SHORT`，与内部服务密钥的下限相同；以前没配时服务照样启动，只在健康检查里报错）。HS256 JWT 必须带数字形式的 `exp`：缺 `exp`，或 `exp`、`nbf`、`iat` 不是数字，都返回 401，和 OIDC 的校验一致。以前缺 `exp` 的 token 永不过期。
 
 多人部署可以继续使用 `API_AUTH_TOKENS`：
 
