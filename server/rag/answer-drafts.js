@@ -9,6 +9,7 @@ import {
   normalizeGroundedClaimSupportForHeadings,
 } from "./grounded-answer-finalizer.js";
 import { evaluateClaimSupport } from "./self-check/evaluate.js";
+import { createSelfCheckEvidenceContext } from "./self-check/evidence-context.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { guardAnswerLinks } from "./prompt-injection-screen.js";
 import { startsWithNotInEvidenceVerdict } from "./answer-verdict.js";
@@ -93,6 +94,9 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
   let buffer = "";
   let checkedPrefixLength = 0;
   let decidedClaimCount = 0;
+  // Each prefix check splits the claims before it again; this attempt's memo
+  // returns their earlier checks, so only the new sentence is checked.
+  let evidenceContext = createSelfCheckEvidenceContext();
 
   const release = (answerText) => {
     // A reply opening with the not-in-evidence marker becomes an abstention;
@@ -106,6 +110,7 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
         evaluateClaimSupport({
           answerText: normalizeGroupedSourceLabels(answerText),
           citations,
+          evidenceContext,
         })
       );
 
@@ -145,6 +150,7 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
         buffer = "";
         checkedPrefixLength = 0;
         decidedClaimCount = 0;
+        evidenceContext = createSelfCheckEvidenceContext();
 
         if (channel.releasedCount > 0) {
           channel.releasedCount = 0;

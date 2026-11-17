@@ -165,6 +165,56 @@ test("a retry drops the drafts a failed attempt already sent", async () => {
   assert.equal(events.at(-1).draft.index, 0, "numbering restarts after a reset");
 });
 
+const ORDER_FORM_CITATION = {
+  docId: "contract-2",
+  excerpt:
+    "Either party may terminate the order form with 60 days written notice. Late invoices accrue interest of 1.5 percent per month.",
+  fileName: "order-form.pdf",
+  pageNumber: 1,
+};
+
+// Each prefix check reuses the claims an earlier prefix already checked. The
+// drafts stay the ones each prefix's own check gives: the section heading and
+// the file-name line are not drafted, the Paris claim, the fee one source does
+// not back and the wrong rate are held back, the claim repeated under another
+// section is drafted again, and the last sentence, which ends without its full
+// stop, is drafted by finish().
+test("a sectioned answer streams the same drafts whatever size its pieces are", async () => {
+  const answer = [
+    "## Key terms",
+    "The agreement renews every 12 months. [Source 1]",
+    "The contract was signed in Paris. [Source 1]",
+    "The monthly fee is 12.5 thousand dollars. [Source 1, Source 2]",
+    "services-agreement.pdf",
+    "Either party may terminate the order form with 60 days written notice. [Source 2]",
+    "## Risks",
+    "The agreement renews every 12 months. [Source 1]",
+    "Late invoices accrue interest of 2 percent per month. [Source 2]",
+    "Late invoices accrue interest of 1.5 percent per month [Source 2]",
+  ].join("\n");
+
+  for (const pieceLength of [1, 6, answer.length]) {
+    const { events } = await captureEvents(() =>
+      runWithAnswerDraftChannel(async () => {
+        const drafts = createAnswerDraftReleaser({ citations: [CITATION, ORDER_FORM_CITATION] });
+        stream(drafts.completionOptions, answer, pieceLength);
+        drafts.finish(answer);
+      })
+    );
+
+    assert.deepEqual(
+      events,
+      [
+        "The agreement renews every 12 months. [Source 1]",
+        "Either party may terminate the order form with 60 days written notice. [Source 2]",
+        "The agreement renews every 12 months. [Source 1]",
+        "Late invoices accrue interest of 1.5 percent per month. [Source 2]",
+      ].map((text, index) => ({ draft: { index, text }, type: "answer_draft" })),
+      `pieces of ${pieceLength}`
+    );
+  }
+});
+
 const startStreamingServer = async (respond) => {
   const requests = [];
   const server = http.createServer((request, response) => {

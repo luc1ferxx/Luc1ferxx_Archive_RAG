@@ -14,8 +14,11 @@
 // (haveSameNumericOccurrences writes roleTerms onto the facts it builds).
 //
 // A context lives as long as its owner: evaluateClaimSupport creates one per
-// call, and the document loop creates one per /chat and hands it to the
-// finalizer through the ragResult it returns. There is no process-wide cache.
+// call, the document loop creates one per /chat and hands it to the
+// finalizer through the ragResult it returns, and a streaming answer's draft
+// releaser (answer-drafts.js) creates one per model attempt, so each growing
+// prefix it checks reuses the claims checked before. There is no process-wide
+// cache.
 //
 // The active context is a module variable rather than AsyncLocalStorage
 // because evaluateClaimSupport is synchronous: it is set for the duration of
@@ -201,33 +204,9 @@ const serializeExact = (value, seen) => {
   }
 };
 
-/**
- * The content key of one claim check: answer text, every citation field (the
- * attached evidence included), which citations are the same object (the check
- * tells repeated references apart by index), the comparison summary, and the
- * three flags evaluateClaimSupport reads.
- */
-export const buildClaimSupportContentKey = ({
-  answerText,
-  citations,
-  comparisonAnalysisSummary,
-  flags,
-} = {}) => {
-  if (!Array.isArray(citations)) {
-    return null;
-  }
-
+const serializeExactOrNull = (value) => {
   try {
-    return serializeExact(
-      {
-        answerText,
-        citationIdentity: citations.map((citation) => citations.indexOf(citation)),
-        citations,
-        comparisonAnalysisSummary,
-        flags,
-      },
-      new Set()
-    );
+    return serializeExact(value, new Set());
   } catch (error) {
     if (error === UNSERIALIZABLE) {
       return null;
@@ -236,6 +215,50 @@ export const buildClaimSupportContentKey = ({
     throw error;
   }
 };
+
+let nextClaimSupportInputId = 1;
+
+/**
+ * An id for what every claim of one claim check reads: every citation field
+ * (the attached evidence included), which citations are the same object (the
+ * check tells repeated references apart by index), the comparison summary, and
+ * the three flags evaluateClaimSupport reads. The active context gives the
+ * same exact input the same id, so the keys below carry a small id instead of
+ * the citations' text. Null without an enabled context or when the input
+ * cannot be serialised exactly.
+ */
+export const getClaimSupportInputId = ({
+  citations,
+  comparisonAnalysisSummary,
+  flags,
+} = {}) => {
+  if (!activeContext?.enabled || !Array.isArray(citations)) {
+    return null;
+  }
+
+  const inputKey = serializeExactOrNull({
+    citationIdentity: citations.map((citation) => citations.indexOf(citation)),
+    citations,
+    comparisonAnalysisSummary,
+    flags,
+  });
+
+  return inputKey === null
+    ? null
+    : memoizeInEvidenceContext(
+        "claimSupportInput",
+        inputKey,
+        () => nextClaimSupportInputId++
+      );
+};
+
+/**
+ * The content key of one claim check (the input id and the answer text) or of
+ * one claim's check within it (the input id and the claim as split from the
+ * answer: its text, section and source ranks). Null without an input id.
+ */
+export const buildClaimSupportContentKey = (inputId, value) =>
+  typeof inputId === "number" ? serializeExactOrNull([inputId, value]) : null;
 
 // Test seam: called with the input and the result of every evaluateClaimSupport
 // call, so a test can check memoised results against an unmemoised run.
