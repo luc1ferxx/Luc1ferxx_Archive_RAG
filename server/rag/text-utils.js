@@ -122,20 +122,26 @@ export const normalizeWhitespace = (value = "") =>
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 
+// Words are letters, marks and digits of every script, so Cyrillic, Greek,
+// Arabic, Korean, kana and accented Latin ("Kündigungsfrist") are words too:
+// with an ASCII-only alphabet a question or claim in those scripts had no
+// terms, and the QA gate and the claim check passed it unread. Han characters
+// stay one token each, as before; ASCII and U+4E00-U+9FFF text tokenizes as it
+// always did.
 export const normalizeToken = (value = "") =>
   value
     .toLowerCase()
-    .replace(/^[^a-z0-9\u4e00-\u9fff]+/i, "")
-    .replace(/[^a-z0-9\u4e00-\u9fff]+$/i, "");
+    .replace(/^[^\p{L}\p{M}\p{N}]+/u, "")
+    .replace(/[^\p{L}\p{M}\p{N}]+$/u, "");
 
 export const normalizeSearchText = (value = "") =>
   normalizeWhitespace(value)
     .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fff]+/gi, " ")
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
     .trim();
 
 export const tokenize = (value = "") =>
-  (value.match(/[A-Za-z0-9]+|[\u4e00-\u9fff]/g) ?? [])
+  (value.match(/\p{Script=Han}|(?:(?!\p{Script=Han})[\p{L}\p{M}\p{N}])+/gu) ?? [])
     .map((token) => normalizeToken(token))
     .filter(Boolean);
 

@@ -10,6 +10,7 @@ import {
 import {
   assessComparisonConfidence,
   assessQaConfidence,
+  computeResultQueryTermCoverage,
   findQueryTermSubstitution,
   selectQaContext,
   toRerankProbability,
@@ -292,6 +293,45 @@ test("single-document QA gets no semantic bypass of its coverage floor", async (
 
       assert.equal(assessment.confident, false);
       assert.equal(assessment.usableResults.length, 0);
+    }
+  );
+});
+
+// A question the tokenizer could not read (it knew ASCII and U+4E00-U+9FFF
+// only) had no terms: the stores scored keywordScore null, the gate took that
+// as enough coverage and admitted any chunk on its dense score.
+test("QA gate reads a Russian question: an off-topic Russian chunk is not enough", async () => {
+  await withEnv(
+    {
+      RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
+      RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_QA_DENSE_RESCUE: undefined,
+      RAG_QA_MIN_RERANK_PROBABILITY: undefined,
+      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
+    },
+    async () => {
+      const queryText = "Какой срок уведомления о расторжении договора?";
+      // keywordScore as the stores compute it for this question.
+      const chunk = (id, text) => {
+        const result = makeResult({ id, text, score: 0.62 });
+
+        return { ...result, keywordScore: computeResultQueryTermCoverage(result, queryText) };
+      };
+
+      assert.equal(
+        assessQaConfidence({
+          queryText,
+          results: [chunk("off-topic", "Оплата производится ежеквартально банковским переводом.")],
+        }).confident,
+        false
+      );
+      assert.equal(
+        assessQaConfidence({
+          queryText,
+          results: [chunk("on-topic", "Срок уведомления о расторжении договора составляет 30 дней.")],
+        }).confident,
+        true
+      );
     }
   );
 });

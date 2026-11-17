@@ -274,7 +274,7 @@ export const buildTsQuery = (queryText) => {
 
   // OR semantics: a chunk matching any query term is a candidate and
   // ts_rank_cd orders by how many it covers. Tokens are already reduced to
-  // [a-z0-9] runs and single CJK characters, but quote them anyway.
+  // lowercase letter/digit runs and single Han characters, but quote them anyway.
   return {
     tokens,
     tsQuery: tokens.map((token) => `'${token.replace(/'/g, "''")}'`).join(" | "),

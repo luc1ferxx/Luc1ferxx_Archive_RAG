@@ -5408,6 +5408,29 @@ test("claim check symmetry: a word with digits inside it is one term on both sid
   assert.deepEqual(otherReference.claims[0].missingAnchors, ["term:bibref21"]);
 });
 
+// A claim in a script the tokenizer did not read (it knew ASCII and
+// U+4E00-U+9FFF only) had no terms, so any claim citing a source passed.
+test("claim check reads Cyrillic: a fabricated Russian claim is refused, a quoted one kept", () => {
+  const sentence = "Любая сторона может расторгнуть договор с письменным уведомлением за 30 дней.";
+
+  assert.equal(checkQuotedSentence(`${sentence} [Source 1]`, sentence).unsupportedClaimCount, 0);
+  assert.equal(
+    checkQuotedSentence("Только генеральный директор может расторгнуть договор. [Source 1]", sentence)
+      .unsupportedClaimCount,
+    1
+  );
+
+  // A number inside a word of another script is one term on both sides too.
+  for (const quoted of [
+    "직원은 연간 15일의 유급 휴가를 받는다.",
+    "Le locataire paie le loyer avant le 5ème jour du mois.",
+  ]) {
+    const result = checkQuotedSentence(`${quoted} [Source 1]`, quoted);
+
+    assert.equal(result.unsupportedClaimCount, 0, JSON.stringify(result.claims));
+  }
+});
+
 test("claim check symmetry: a connective the evidence clause split consumes is no claim term", () => {
   const sentence = "The largest knowledge bases are often incomplete.";
   const supported = checkQuotedSentence(
