@@ -180,6 +180,34 @@ const NUMERIC_OPTIONS = Object.freeze({
 // own LIMIT or hands the limit to an owner-run rank function: ts_rank_cd for
 // tenant sparse searches (migration 014) or the sparse search function
 // (migration 030: BM25, and pruned searches of either scoring).
+/**
+ * The pgvector runtime of the recall and plan pass: it records every statement
+ * the app sends and runs each exactly as the default runtime would. A dense
+ * search sends its iterative-scan set_config as its statement's prelude
+ * (rag/vector-store-pgvector.js runIterativeDenseSearch), or on a caller's
+ * transaction client just before it; both are recorded, so the EXPLAIN and the
+ * recall see the app's own setting, and the options go on to queryPostgres.
+ */
+export const createCapturingPgvectorRuntime = ({ captured, queryPostgres, withPostgresTransaction }) => ({
+  query: (sql, values = [], options = {}) => {
+    for (const step of options?.prelude ?? []) {
+      captured.push({ sql: step.text, values: step.values ?? [] });
+    }
+
+    captured.push({ sql, values });
+    return queryPostgres(sql, values, options);
+  },
+  withTransaction: (callback) =>
+    withPostgresTransaction((client) =>
+      callback({
+        query: (sql, values = []) => {
+          captured.push({ sql, values });
+          return client.query(sql, values);
+        },
+      })
+    ),
+});
+
 export const isSearchStatement = (sql) =>
   /chunk_id/.test(sql) && (/\bLIMIT\b/.test(sql) || /_sparse_rank\(/.test(sql) || /_sparse_search\(/.test(sql));
 
@@ -1584,23 +1612,13 @@ const main = async () => {
       const recalls = Object.fromEntries(RECALL_SERIES.map((series) => [series, []]));
       const plans = {};
 
-      // The iterative-scan setting and the dense search run in one
-      // transaction; capture both so the EXPLAIN replays the setting too.
-      pgvector.configurePgvectorRuntime({
-        query: (sql, values = []) => {
-          captured.push({ sql, values });
-          return postgres.queryPostgres(sql, values);
-        },
-        withTransaction: (callback) =>
-          postgres.withPostgresTransaction((client) =>
-            callback({
-              query: (sql, values = []) => {
-                captured.push({ sql, values });
-                return client.query(sql, values);
-              },
-            })
-          ),
-      });
+      pgvector.configurePgvectorRuntime(
+        createCapturingPgvectorRuntime({
+          captured,
+          queryPostgres: postgres.queryPostgres,
+          withPostgresTransaction: postgres.withPostgresTransaction,
+        })
+      );
 
       try {
         const timedQueries = queries.slice(options.warmup);
