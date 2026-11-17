@@ -24,10 +24,6 @@ export const getRagDataDirectory = () => ragDataDirectory;
 export const getRagDataPath = (...segments) =>
   path.join(getRagDataDirectory(), ...segments);
 
-export const ensureRagDataDirectorySync = () => {
-  mkdirSync(getRagDataDirectory(), { recursive: true });
-};
-
 export const readJsonFileSync = (filePath, fallbackValue) => {
   try {
     return JSON.parse(readFileSync(filePath, "utf8"));

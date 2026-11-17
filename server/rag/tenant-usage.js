@@ -416,8 +416,6 @@ export const configureTenantUsageLedger = (ledger) => {
 export const recordTenantUsage = (tenant, values, options) =>
   getTenantUsageLedger().record(tenant, values, options);
 
-export const flushTenantUsage = () => getTenantUsageLedger().flush();
-
 export const stopTenantUsageLedger = () => (defaultLedger ? defaultLedger.stop() : undefined);
 
 /**

@@ -183,8 +183,6 @@ const STEP_REPLAY_SAFETY_MATRIX = Object.freeze({
   }),
 });
 
-export const getStepReplaySafetyMatrix = () => STEP_REPLAY_SAFETY_MATRIX;
-
 export const listStepReplaySafetyPolicies = () =>
   Object.values(STEP_REPLAY_SAFETY_MATRIX);
 

@@ -975,9 +975,6 @@ export const searchDocumentsPerDocumentWithRoutes = async ({
   };
 };
 
-export const searchDocumentsPerDocument = async (args) =>
-  (await searchDocumentsPerDocumentWithRoutes(args)).resultsByDocument;
-
 export const resetVectorStore = () => {
   // Reset every backend's in-process state, not only the active one: tests and
   // the archive MCP bridge switch providers at runtime and expect a cold start.

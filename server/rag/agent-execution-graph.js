@@ -833,7 +833,3 @@ export const compileExecutionGraph = (options = {}) => {
     order: layers.flat(),
   };
 };
-
-export const getExecutionGraphNode = (graph, nodeId) =>
-  toArray(graph?.nodes).find((node) => normalizeNodeId(node) === normalizeText(nodeId)) ??
-  null;

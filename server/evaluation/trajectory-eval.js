@@ -1,7 +1,5 @@
 export { createDefaultTrajectoryCases } from "./trajectory/cases/index.js";
 export {
-  CATEGORY_LABELS as TRAJECTORY_CATEGORY_LABELS,
-  DEFAULT_ACCESS_SCOPE as TRAJECTORY_DEFAULT_ACCESS_SCOPE,
   buildTrajectoryCheck,
   finishTrajectoryCase,
   runTrajectoryCaseSafely,

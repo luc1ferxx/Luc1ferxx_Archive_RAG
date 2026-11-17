@@ -324,13 +324,6 @@ const rawCellText = (cell, { date1904 = false } = {}) => {
   }
 };
 
-/** A cell's text: its displayed text, else its value, whitespace collapsed; "" for none. */
-export const readCellText = (cell, options = {}) => {
-  const raw = rawCellText(cell, options);
-
-  return raw === null ? "" : normalizeLineText(raw);
-};
-
 // Coalesced, sorted column intervals [[from, to], ...]: overlapping and
 // adjacent ones merged, so a lookup is one binary search.
 const coalesceIntervals = (intervals) => {

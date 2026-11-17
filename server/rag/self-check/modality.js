@@ -1,10 +1,7 @@
-import { extractMeaningfulTokens } from "../text-utils.js";
 import {
   ALLOW_MODALITY_PATTERN,
   CLAIM_PREDICATE_PATTERN,
-  COMPARISON_SCAFFOLD_TERMS,
   DOUBLE_NEGATIVE_REQUIREMENT_PATTERN,
-  MODALITY_CLAIM_TERMS,
   MODALITY_CLAUSE_SPLIT_PATTERN,
   NEGATED_PERMISSION_PATTERN,
   NEGATED_PROHIBITION_PATTERN,
@@ -13,7 +10,7 @@ import {
   RECOMMEND_MODALITY_PATTERN,
   REQUIRE_MODALITY_PATTERN,
 } from "./patterns.js";
-import { normalizeSemanticText, uniqueValues } from "./text.js";
+import { normalizeSemanticText } from "./text.js";
 
 const PROTECTED_NUMERIC_RANGE_AND = "\uE001";
 const NUMERIC_ATOM_SOURCE = "[+-]?\\$?\\d+(?:,\\d{3})*(?:\\.\\d+)?%?";
@@ -150,23 +147,3 @@ export const splitModalityClauses = (value = "") =>
 // "but", and a claim term made of one could never be found there.
 export const stripClauseConnectives = (value = "") =>
   String(value ?? "").replace(MODALITY_CLAUSE_SPLIT_PATTERN, " ");
-
-export const getModalityClaimTerms = ({
-  claimText = "",
-  anchor,
-  documentAttributionTerms = new Set(),
-} = {}) => {
-  const matchingClauses = splitModalityClauses(claimText).filter((clause) =>
-    getModalityLabels(clause).includes(anchor)
-  );
-  const scopedText = matchingClauses.length > 0
-    ? matchingClauses.join(" ")
-    : claimText;
-
-  return uniqueValues(extractMeaningfulTokens(scopedText)).filter(
-    (term) =>
-      !MODALITY_CLAIM_TERMS.has(term) &&
-      !COMPARISON_SCAFFOLD_TERMS.has(term) &&
-      !documentAttributionTerms.has(term)
-  );
-};
