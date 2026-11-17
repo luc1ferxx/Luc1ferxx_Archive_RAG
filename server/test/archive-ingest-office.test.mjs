@@ -5,7 +5,8 @@
 // .pptx and a PDF side by side and records each one's MIME type and located
 // chunks; a refused file says why with its code and the rest still ingest;
 // RAG_DOCUMENT_FORMATS=pdf restores the PDF-only checks and messages; an
-// invalid setting ends the command before any file is read.
+// invalid setting ends the command before any file is read; run again over
+// the same file it stores nothing new (RAG_INGEST_DEDUP).
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -156,4 +157,13 @@ test("archive-ingest refuses an invalid RAG_DOCUMENT_FORMATS before it reads any
   assert.match(run.stderr, /RAG_DOCUMENT_FORMATS must be a comma list of pdf, docx, pptx, xlsx/);
   assert.doesNotMatch(run.stderr, /Failed: /);
   assert.equal(run.stdout, "");
+});
+
+test("archive-ingest run again over the same file answers with the stored document as a duplicate", async () => {
+  const first = await runArchiveIngest(["policy.pdf"]);
+  const again = await runArchiveIngest(["policy.pdf"], { RAG_DATA_DIRECTORY: first.dataDirectory });
+
+  assert.equal(again.status, 0, `${again.stdout}\n${again.stderr}`);
+  assert.deepEqual(JSON.parse(again.stdout), { ...JSON.parse(first.stdout), duplicate: true });
+  assert.equal((await readJsonFile(path.join(first.dataDirectory, "documents.json"))).length, 1);
 });
