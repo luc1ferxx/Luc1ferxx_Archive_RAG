@@ -64,7 +64,9 @@ export const TENANT_CONCURRENCY_LIMITED_CODE = "TENANT_CONCURRENCY_LIMITED";
 export const TENANT_CONCURRENCY_RETRY_AFTER_SECONDS = 5;
 
 // Route patterns in RBAC_ROUTE_TABLE's syntax ("METHOD /express/path"); a
-// test checks that each one names a route of that table.
+// test checks that each one names a route of that table. The per-IP limiter
+// (app.js, RATE_LIMIT_ENABLED) picks its limit by the same classes, so these
+// lists decide both.
 //
 // chat: every route that starts or continues agent work, which is what calls
 // the model: /chat, /chat/stream and /agent-tasks, plus the run and task
@@ -85,12 +87,14 @@ export const TENANT_CHAT_CLASS_ROUTES = Object.freeze([
 // ingest: everything that brings document bytes in (direct and chunked
 // uploads, one request per chunk; a document replace; an arXiv import, which
 // downloads and ingests a PDF), and a restore from the trash, which parses
-// and embeds a stored PDF again.
+// and embeds a stored PDF again. The upload-session status read is here too:
+// the per-IP limiter always counted every /upload path with the uploads.
 export const TENANT_INGEST_CLASS_ROUTES = Object.freeze([
   "POST /upload",
   "POST /upload/init",
   "POST /upload/chunk",
   "POST /upload/complete",
+  "GET /upload/status",
   "PUT /documents/:docId",
   "POST /documents/:docId/restore",
   "POST /arxiv/import",
@@ -99,8 +103,13 @@ export const TENANT_INGEST_CLASS_ROUTES = Object.freeze([
 
 // destructive: every DELETE (documents, memory, the memory clear, sessions),
 // decided by the method so a new DELETE route is covered without an entry
-// here, plus the routes below.
-export const TENANT_DESTRUCTIVE_CLASS_ROUTES = Object.freeze(["POST /documents/clear"]);
+// here, plus the routes below: the documents clear and the tenant erase
+// (admin, but it deletes a whole tenant's data, so it keeps the destructive
+// per-IP limit it always had).
+export const TENANT_DESTRUCTIVE_CLASS_ROUTES = Object.freeze([
+  "POST /documents/clear",
+  "POST /admin/tenants/erase",
+]);
 
 // The requests TENANT_MAX_CONCURRENT_RUNS counts: the ones that run the agent
 // while the client waits.

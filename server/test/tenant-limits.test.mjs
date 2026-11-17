@@ -149,9 +149,12 @@ test("every route of RBAC_ROUTE_TABLE gets its cost class", () => {
   assert.equal(classifyTenantLimitRequest("PUT", "/documents/doc-1").costClass, "ingest");
   assert.equal(classifyTenantLimitRequest("DELETE", "/documents/doc-1").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("POST", "/documents/clear").costClass, "destructive");
+  assert.equal(classifyTenantLimitRequest("POST", "/admin/tenants/erase").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("DELETE", "/memory").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("GET", "/documents").costClass, "default");
-  assert.equal(classifyTenantLimitRequest("GET", "/upload/status").costClass, "default");
+  assert.equal(classifyTenantLimitRequest("GET", "/admin/tenants/export").costClass, "default");
+  // Every path the per-IP /upload limiter used to cover stays with the uploads.
+  assert.equal(classifyTenantLimitRequest("GET", "/upload/status").costClass, "ingest");
 });
 
 test("the class follows the route Express runs: case, a trailing slash, HEAD, unknown paths", () => {

@@ -37,7 +37,11 @@ import {
 } from "./upload-session-store.js";
 import { assertRbacConfiguration, createRbacMiddleware } from "./rag/rbac.js";
 import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
-import { createTenantLimits } from "./rag/tenant-limits.js";
+import {
+  classifyTenantLimitRequest,
+  createTenantLimits,
+  TENANT_LIMIT_CLASSES,
+} from "./rag/tenant-limits.js";
 import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
 import { stripInternalServiceHeadersMiddleware } from "./rag/service-identity.js";
 import {
@@ -330,30 +334,34 @@ export const createApp = async (options = {}) => {
         max: toRateLimitMax(process.env.RATE_LIMIT_GLOBAL_MAX, 300),
       })
     );
-    app.use(
-      "/chat",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_CHAT_MAX, 30),
-      })
-    );
-    app.use(
-      "/upload",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_UPLOAD_MAX, 120),
-      })
-    );
-    app.use(
-      "/documents/clear",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
-      })
-    );
-    app.use(
-      "/admin/tenants/erase",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
-      })
-    );
+    // On top of the global limit, each request is counted under its cost
+    // class, decided from the route table exactly as the per-tenant limiter
+    // decides it (classifyTenantLimitRequest, rag/tenant-limits.js), so every
+    // route that starts or resumes agent work, brings document bytes in or
+    // destroys data is covered, a new one included, with no path list here.
+    // One counter per class and client IP; `default` has no limiter of its own.
+    const classRateLimiters = new Map([
+      [
+        TENANT_LIMIT_CLASSES.chat,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_CHAT_MAX, 30) }),
+      ],
+      [
+        TENANT_LIMIT_CLASSES.ingest,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_UPLOAD_MAX, 120) }),
+      ],
+      [
+        TENANT_LIMIT_CLASSES.destructive,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5) }),
+      ],
+    ]);
+
+    app.use((req, res, next) => {
+      const limiter = classRateLimiters.get(
+        classifyTenantLimitRequest(req.method, req.path).costClass
+      );
+
+      return limiter ? limiter(req, res, next) : next();
+    });
   }
 
   app.use(requireApiAuth);
