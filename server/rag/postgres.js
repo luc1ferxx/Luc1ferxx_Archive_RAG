@@ -521,10 +521,19 @@ const withPooledClient = async (callback, getPool = getPostgresPool) => {
 const withReplicaClient = async (pool, callback) => {
   const client = await pool.connect();
   const lease = { discard: false };
+  // As in withPooledClient: a replica that drops the connection mid-read (a
+  // restart, a failover) would otherwise end the process; the read fails
+  // with pg's own error and falls back.
+  const onClientError = () => {
+    lease.discard = true;
+  };
+
+  client.on("error", onClientError);
 
   try {
     return await callback(client, lease);
   } finally {
+    client.removeListener("error", onClientError);
     client.release(
       lease.discard ? new Error("PostgreSQL connection discarded after an unfinished transaction.") : undefined
     );

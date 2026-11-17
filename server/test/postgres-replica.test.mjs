@@ -100,6 +100,8 @@ const createNodes = () => {
             throw new Error(`unexpected poll: ${text}`);
           },
           release: () => {},
+          on() {},
+          removeListener() {},
         };
       },
       end: async () => {
