@@ -6251,7 +6251,7 @@ test("createApp recovers finalization claims and cleans expired upload sessions 
   assert.ok(app);
 });
 
-test("FRONTEND_BUILD_DIRECTORY serves the built UI ahead of API auth, and the API still needs a token", async (t) => {
+test("FRONTEND_BUILD_DIRECTORY serves the built UI ahead of API auth, the API still needs a token, and no other site may frame either", async (t) => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-frontend-build-"));
   const saved = Object.fromEntries(
     ["API_AUTH_ENABLED", "API_AUTH_TOKEN", "FRONTEND_BUILD_DIRECTORY"].map((key) => [key, process.env[key]])
@@ -6290,4 +6290,12 @@ test("FRONTEND_BUILD_DIRECTORY serves the built UI ahead of API auth, and the AP
   assert.equal(page.status, 200);
   assert.match(await page.text(), /<title>Archive RAG<\/title>/);
   assert.equal((await fetch(`${server.baseUrl}/documents`)).status, 401);
+
+  // A page on another site that frames the workbench could click "Clear
+  // workspace" for the user: the page and every API answer say SAMEORIGIN.
+  const documents = await fetch(`${server.baseUrl}/documents`, { headers: { "x-api-key": "ui-test-token" } });
+
+  assert.equal(documents.status, 200);
+  assert.equal(page.headers.get("x-frame-options"), "SAMEORIGIN");
+  assert.equal(documents.headers.get("x-frame-options"), "SAMEORIGIN");
 });
