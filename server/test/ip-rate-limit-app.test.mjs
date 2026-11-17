@@ -192,22 +192,30 @@ test("uploads, upload chunks, replaces, restores and arXiv imports share the ing
   });
 });
 
-test("every DELETE, the documents clear and the tenant erase share the destructive-class limit", async () => {
+test("the documents clear and the tenant erase share the destructive-class limit; a single DELETE does not", async () => {
   await withApp(limitEnv({ RATE_LIMIT_DESTRUCTIVE_MAX: "2" }), async (baseUrl) => {
-    await expectStatus(baseUrl, "DELETE /documents/doc-1", 401);
-    await expectStatus(baseUrl, "DELETE /memory/memory-1", 401);
+    await expectStatus(baseUrl, "POST /documents/clear", 401);
+    await expectStatus(baseUrl, "POST /admin/tenants/erase", 401);
 
+    for (const route of ["POST /documents/clear", "POST /admin/tenants/erase"]) {
+      await expectLimited(baseUrl, route, 2);
+    }
+
+    // One DELETE per deleted document or closed session (what the UI sends):
+    // only the global limit counts it, as before the classes.
     for (const route of [
+      "DELETE /documents/doc-1",
       "DELETE /documents/doc-2",
+      "DELETE /memory/memory-1",
       "DELETE /memory",
       "DELETE /sessions/session-1",
       "DELETE /admin/workspaces/acme/members/alice",
-      "POST /documents/clear",
-      "POST /admin/tenants/erase",
-      // Decided by the method, so a DELETE no route answers counts too.
       "DELETE /no-such-route",
     ]) {
-      await expectLimited(baseUrl, route, 2);
+      const response = await send(baseUrl, route);
+
+      assert.notEqual(response.status, 429, route);
+      assert.equal(response.headers.get("ratelimit-limit"), "300", route);
     }
 
     await expectStatus(baseUrl, "GET /admin/tenants/export", 401);

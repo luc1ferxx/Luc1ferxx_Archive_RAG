@@ -7,7 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { noStoreTenantData } from "./routes/helpers.js";
-import { allowLoopbackOrigin, createCrossSiteGuard } from "./cross-site-guard.js";
+import { createCrossSiteGuard, LOOPBACK_ORIGIN_PATTERN } from "./cross-site-guard.js";
 import {
   assertApiAuthTokenConfiguration,
   bindDatabaseTenant,
@@ -40,6 +40,7 @@ import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
 import {
   classifyTenantLimitRequest,
   createTenantLimits,
+  TENANT_DESTRUCTIVE_CLASS_ROUTES,
   TENANT_LIMIT_CLASSES,
 } from "./rag/tenant-limits.js";
 import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
@@ -119,7 +120,9 @@ export const createApp = async (options = {}) => {
   // RBAC_MODE / RBAC_POLICY_JSON / RBAC_POLICY_FILE / RBAC_DEFAULT_ROLE are
   // validated before anything starts: a bad policy refuses the start.
   assertRbacConfiguration();
-  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start.
+  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start; with
+  // auth on, so do the public placeholder token and an HS256 secret shorter
+  // than 32 characters.
   assertApiAuthTokenConfiguration();
   // An unknown POSTGRES_TENANT_CONTEXT refuses the start here rather than at
   // the first query (every query reads it again).
@@ -215,7 +218,7 @@ export const createApp = async (options = {}) => {
 
   if (!rateLimitEnabled) {
     console.warn(
-      "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to protect /chat, uploads, and destructive endpoints."
+      "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to limit, per client IP, every request that runs the agent, every upload and the bulk deletes."
     );
   }
 
@@ -234,7 +237,7 @@ export const createApp = async (options = {}) => {
   );
   app.use(
     cors({
-      origin: allowedOrigins.length > 0 ? allowedOrigins : allowLoopbackOrigin,
+      origin: allowedOrigins.length > 0 ? allowedOrigins : LOOPBACK_ORIGIN_PATTERN,
       exposedHeaders: ["Content-Disposition"],
     })
   );
@@ -340,6 +343,11 @@ export const createApp = async (options = {}) => {
     // route that starts or resumes agent work, brings document bytes in or
     // destroys data is covered, a new one included, with no path list here.
     // One counter per class and client IP; `default` has no limiter of its own.
+    // The per-IP destructive budget (RATE_LIMIT_DESTRUCTIVE_MAX, default 5) is
+    // for the bulk wipes TENANT_DESTRUCTIVE_CLASS_ROUTES lists (the documents
+    // clear, the tenant erase). A single DELETE, which the UI sends once per
+    // deleted document or closed session, stays under the global limit as it
+    // always was; the per-tenant limiter still counts it as destructive.
     const classRateLimiters = new Map([
       [
         TENANT_LIMIT_CLASSES.chat,
@@ -355,10 +363,14 @@ export const createApp = async (options = {}) => {
       ],
     ]);
 
+    const bulkDestructiveRoutes = new Set(TENANT_DESTRUCTIVE_CLASS_ROUTES);
+
     app.use((req, res, next) => {
-      const limiter = classRateLimiters.get(
-        classifyTenantLimitRequest(req.method, req.path).costClass
-      );
+      const { costClass, route } = classifyTenantLimitRequest(req.method, req.path);
+      const limiter =
+        costClass === TENANT_LIMIT_CLASSES.destructive && !bulkDestructiveRoutes.has(route)
+          ? null
+          : classRateLimiters.get(costClass);
 
       return limiter ? limiter(req, res, next) : next();
     });

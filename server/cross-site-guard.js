@@ -86,10 +86,13 @@ export const isLoopbackOrigin = (origin) => {
   return parsed !== null && isLoopbackHostname(parsed.hostname);
 };
 
-/** cors's `origin` option while ALLOWED_ORIGINS is empty: loopback pages only. */
-export const allowLoopbackOrigin = (origin, callback) => {
-  callback(null, isLoopbackOrigin(origin));
-};
+/**
+ * cors's `origin` option while ALLOWED_ORIGINS is empty: loopback pages only.
+ * A RegExp, not a callback: cors then answers every request as it does for a
+ * list, Vary: Origin included, where a callback answering false skips cors
+ * entirely for that request.
+ */
+export const LOOPBACK_ORIGIN_PATTERN = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/iu;
 
 /**
  * The ALLOWED_ORIGINS entries (app.js parses them) as the guard reads them:
