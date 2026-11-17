@@ -69,10 +69,43 @@ const preventSharedCaching = (res) => {
 
 const toStatusOnly = (body) => ({ status: body?.status });
 
-export const createSystemRouter = (services) => {
+// /health and /ready answer any caller without a key, and one report runs
+// about fifteen checks, several of them a database round trip, so a flood of
+// probes must not become a flood of reports. The probes that arrive while a
+// report is being built share that build, and the last report built answers
+// every probe for this long after it finished. A build that threw answers the
+// probes that waited on it and is never served again.
+export const HEALTH_REPORT_REUSE_MS = 1000;
+
+// `now` is a monotonic clock in milliseconds (tests pass their own), so a
+// wall-clock step backwards cannot keep an old report alive.
+export const createSystemRouter = (services, { now = () => performance.now() } = {}) => {
   const router = Router();
   const { healthService } = services;
   const serviceRole = readServiceRole();
+  let lastBuilt = null;
+  let inFlight = null;
+
+  // The memo holds the whole report; each request still decides below how
+  // much of it the caller may see.
+  const readHealthReport = () => {
+    if (lastBuilt && now() - lastBuilt.at < HEALTH_REPORT_REUSE_MS) {
+      return lastBuilt.report;
+    }
+
+    // The async wrapper turns a synchronous throw into a rejection, so the
+    // finally below always runs after inFlight is set and always clears it.
+    inFlight ??= (async () => healthService.buildHealthReport())()
+      .then((report) => {
+        lastBuilt = { at: now(), report };
+        return report;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+
+    return inFlight;
+  };
 
   // Liveness only: the process is up and serving HTTP. It checks nothing else,
   // so an orchestrator restarts a hung process without restarting one whose
@@ -91,7 +124,7 @@ export const createSystemRouter = (services) => {
     preventSharedCaching(res);
 
     try {
-      const report = await healthService.buildHealthReport();
+      const report = await readHealthReport();
       return res.json(detailed ? report : toStatusOnly(report));
     } catch (error) {
       const body = {
@@ -109,7 +142,7 @@ export const createSystemRouter = (services) => {
     preventSharedCaching(res);
 
     try {
-      const report = await healthService.buildHealthReport();
+      const report = await readHealthReport();
 
       return res
         .status(report.status === "ok" ? 200 : 503)
