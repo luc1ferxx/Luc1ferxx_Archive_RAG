@@ -337,6 +337,28 @@ export const embedQueryCached = async (query, { space = null } = {}) => {
 };
 
 /**
+ * Starts embedding `queries` for a caller that will ask embedQueryCached for
+ * each of them shortly (document-rag-execution.js: a request's planned
+ * retrieval queries), so that each later call joins the flight or hits the
+ * cache instead of only starting the embedding then. Called in the caller's
+ * own context: each prefetch waits on its flight with the request's signal and
+ * run meter, under its database tenant, exactly as the later call does.
+ * Nothing is returned or thrown: a failed or cancelled prefetch caches
+ * nothing (a flight caches only a vector), so the later call embeds again.
+ * With the cache off every call embeds on its own and a prefetch would only
+ * add model calls, so it does nothing.
+ */
+export const prefetchQueryEmbeddings = (queries) => {
+  if (!isQueryEmbeddingCacheEnabled()) {
+    return;
+  }
+
+  for (const query of new Set(queries)) {
+    embedQueryCached(query).catch(() => {});
+  }
+};
+
+/**
  * HyDE's dense query vector (RAG_QA_QUERY_EXPANSION=hyde, rag/query-expansion.js):
  * the normalized mean of `queryText`'s query embedding (this cache's, so the
  * question is embedded once) and `passage`'s document embedding, both in the
