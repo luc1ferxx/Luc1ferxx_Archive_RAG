@@ -458,7 +458,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 
 - 客户端负载均衡：选在途请求最少的副本，同数时轮转；连接失败或返回 502/503/504 的副本标记不健康 5 s，只在还有健康副本时才跳过它
 - 一次调用里每个副本最多试一次；连接没建立（比如 ECONNREFUSED）时，任何方法都可以换副本；字节已经发出去，就只有幂等请求（GET/HEAD/OPTIONS）才换
-- GET /chat 显式标 idempotent:false：它会跑 agent、写 run 记录和会话记忆；审查时发现它曾经被当成普通 GET，在第二个副本上又跑了一遍
+- GET /chat 显式标 idempotent:false：它会跑 agent、写 run 记录和会话记忆；审查时发现它曾经被当成普通 GET，在第二个副本上又跑了一遍。2026-11-17 起 GET /chat 已删除（跨站 `<img>` 能触发它），提问只有 POST
 - 网关客户端设 unavailableStatuses: []：网关返回 503 说明的是模型不可用，换个网关副本只会把模型再重试一遍
 - SSE：入口按事件边界转发；客户端断开就取消上游；上游中途断了，补一个 error（SERVICE_STREAM_INTERRUPTED，status 502；超时是 SERVICE_TIMEOUT，status 504）再加 done
 - 前端用 fetch + ReadableStream 自己解析 SSE，不用 EventSource，因为要发 POST body 和鉴权头

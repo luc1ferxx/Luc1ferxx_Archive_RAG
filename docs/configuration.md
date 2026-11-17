@@ -328,7 +328,7 @@ Workspace artifacts 是 agent 生成结果的独立存储层，不进入文档 r
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `CHAT_MAX_QUESTION_CHARS` | `8000` | `/chat`、GET `/chat`、`/chat/stream` 问题的最大长度（去掉首尾空白后），超过返回 400。 |
+| `CHAT_MAX_QUESTION_CHARS` | `8000` | `/chat`、`/chat/stream` 问题的最大长度（去掉首尾空白后），超过返回 400。 |
 | `CHAT_MAX_DOC_IDS` | 进程内检索：不限；配了 `RETRIEVAL_SERVICE_URL` 或 `AGENT_SERVICE_URL`：`1000` | 每个请求最多的 docId 数，`0` 为不限。前端会把当前范围内的所有文档都发过来，所以单体默认不设上限；拆分部署默认与检索层自己的 `RETRIEVAL_SERVICE_MAX_DOC_IDS` 一致，转发给 agent 层的 api 边缘也用 `1000`，在边缘就拒绝 agent 层会拒绝的请求，而不是转发过去。 |
 | `CHAT_MAX_ID_CHARS` | `256` | 单个 docId 和 sessionId 的最大长度。任务、触发器和 agent run 路由的 id（路径参数、gateId、sessionId、userId、幂等键及其 `x-idempotency-key` / `x-request-id` 头、列表过滤参数）也用它。 |
 | `TASK_MAX_PAYLOAD_BYTES` | `262144`（256 KiB） | 任务、触发器、agent run 路由里自由格式 JSON 的上限：动作的请求体、触发器的 event/input/request、`/agent-tasks` 除 docIds 以外的部分，按 JSON 序列化后的 UTF-8 字节数计，`0` 不限（2 MB 的解析上限仍在）。嵌套超过 32 层一律拒绝。`/agent-tasks` 的问题按 `CHAT_MAX_QUESTION_CHARS`、docIds 按 `CHAT_MAX_DOC_IDS` / `CHAT_MAX_ID_CHARS` 限制，`userPreferences` 最多 64 条、每条不超过问题长度。超限返回 400 `{ error }`，与 `/chat` 相同；拆分部署的 api 边缘用同一套校验，在转发前拒绝。 |
@@ -342,20 +342,20 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `ALLOWED_ORIGINS` | 空（`server/.env.example` 写的是 `http://localhost:3000`） | 逗号分隔的浏览器来源，例如 `https://archive.example.com`。CORS 只对这些来源放行，跨站检查也用这份列表。为空时只放行本机来源（`localhost`、`127.0.0.1`、`[::1]`，任意端口）；以前为空时对任意来源放行。 |
+| `ALLOWED_ORIGINS` | 空（`server/.env.example` 写的是 `http://localhost:3000`） | 逗号分隔的前端来源，例如 `https://archive.example.com`。CORS 只对这些来源放行，跨站检查也用这份列表。为空时只放行本机来源（`localhost`、`127.0.0.1`、`[::1]`，任意端口）；以前为空时对任意来源放行。放在反向代理后面时，把对外地址写进来（见下面的跨站检查）。 |
 | `RATE_LIMIT_ENABLED` | `false`（`server/.env.example` 写的是 `true`） | 是否按客户端 IP 限流，窗口是 1 分钟。 |
-| `RATE_LIMIT_GLOBAL_MAX` | `300` | 每个 IP 每分钟的请求总数，所有路由都算。 |
-| `RATE_LIMIT_CHAT_MAX` | `30` | chat 类：`/chat`、`/chat/stream`、`POST /agent-tasks`，以及任务动作、触发器派发、agent run 的动作、步骤重试和恢复动作，也就是所有会启动或续跑 agent 的请求。 |
+| `RATE_LIMIT_GLOBAL_MAX` | `300` | 每个 IP 每分钟的请求总数。探针（`/health`、`/ready`、`/livez`）、`/auth/config` 和静态前端挂在限流之前，不算在内，其他路由都算。 |
+| `RATE_LIMIT_CHAT_MAX` | `30` | chat 类：`POST /chat`、`/chat/stream`、`POST /agent-tasks`，以及任务动作、触发器派发、agent run 的动作、步骤重试和恢复动作，也就是所有会启动或续跑 agent 的请求。 |
 | `RATE_LIMIT_UPLOAD_MAX` | `120` | ingest 类：直传和分片上传（每个分片算一次）、上传状态查询、替换文档、从回收站恢复、两条 arXiv 导入。 |
-| `RATE_LIMIT_DESTRUCTIVE_MAX` | `5` | 批量删除：`POST /documents/clear` 和 `POST /admin/tenants/erase`。单个 DELETE（删一篇文档、关一个会话，界面每点一次发一个）只受全局上限，和以前一样。 |
+| `RATE_LIMIT_DESTRUCTIVE_MAX` | `5` | 批量删除：`POST /documents/clear` 和 `POST /admin/tenants/erase`。单个 DELETE（删一篇文档、关一个会话、清空长期记忆的 `DELETE /memory`）只受全局上限，和以前一样。 |
 
-按 IP 限流和 `TENANT_RATE_LIMIT_*`（见下面的“多租户治理”）用同一份路由分类（`server/rag/tenant-limits.js`），两套计数各算各的，一套按客户端 IP，一套按租户；唯一的差别是按租户限流把每个 DELETE 都算作 destructive。以前按 IP 限流只认 `/chat`、`/upload`、`/documents/clear`、`/admin/tenants/erase` 四个路径前缀，`POST /agent-tasks`、任务和 agent run 的动作、DELETE 等只受全局上限约束。
+按 IP 限流和 `TENANT_RATE_LIMIT_*`（见下面的“多租户治理”）用同一份路由分类（`server/rag/tenant-limits.js`），两套计数各算各的，一套按客户端 IP，一套按租户；唯一的差别是按租户限流把每个 DELETE 都算作 destructive。以前按 IP 限流只认 `/chat`、`/upload`、`/documents/clear`、`/admin/tenants/erase` 四个路径前缀，`POST /agent-tasks`、任务和 agent run 的动作、替换和恢复文档、arXiv 导入等只受全局上限约束。
 
-跨站检查没有开关，只看浏览器发来的请求（带 `Origin` 或 `Sec-Fetch-Site` 头）；curl、脚本、MCP、层间调用和探针不带这两个头，不受影响：
+跨站检查没有开关，分两部分：
 
-- 改数据的请求（GET、HEAD、OPTIONS 以外的方法，以及会启动 agent 的 GET `/chat`）：带 `Origin` 时，它必须与 API 同源或在 `ALLOWED_ORIGINS` 里，`null` 来源一律拒绝；不带 `Origin` 而 `Sec-Fetch-Site` 是 `cross-site` 时也拒绝。拒绝返回 403 `CROSS_SITE_REQUEST_REFUSED`。这样，用户在同一个浏览器里打开的其他网页就不能借本机服务清空文档、上传文件或发起提问。
-- 鉴权关闭时（本地默认），浏览器请求的 `Host` 还必须是本机地址或 `ALLOWED_ORIGINS` 里某个来源的主机名，否则返回 403 `HOST_NOT_ALLOWED`，用来挡 DNS rebinding。要用局域网地址或别的域名在浏览器里访问，先开启鉴权（见 [deployment.md](deployment.md) 的“有意在局域网开放”），或把那个来源写进 `ALLOWED_ORIGINS`。
-- 同源判断比较 `Origin` 的主机和请求的 `Host`；设了 `TRUST_PROXY` 时用反向代理传来的 `X-Forwarded-Host`。
+- 浏览器发来的改数据请求（带 `Origin` 或 `Sec-Fetch-Site` 头，方法不是 GET、HEAD、OPTIONS）：带 `Origin` 时，它必须与 API 同源或在 `ALLOWED_ORIGINS` 里，`null` 来源一律拒绝；不带 `Origin` 而 `Sec-Fetch-Site` 是 `cross-site` 时也拒绝。拒绝返回 403 `CROSS_SITE_REQUEST_REFUSED`。浏览器对 GET、HEAD 以外的请求都带 `Origin`，所以用户在同一个浏览器里打开的其他网页不能借本机服务清空文档、上传文件或发起提问；提问只有 POST（`/chat`、`/chat/stream`），没有会改数据的 GET。curl、脚本、MCP、层间调用和探针不带这两个头，不受这条影响。
+- 鉴权关闭时（本地默认），每个请求的 `Host` 都必须是本机名（`localhost`、`127.0.0.1`、`[::1]`）、IP 地址或 `ALLOWED_ORIGINS` 里某个来源的主机名，否则返回 403 `HOST_NOT_ALLOWED`，用来挡 DNS rebinding：重新解析到 127.0.0.1 的攻击页面只能用它自己的域名，它的同源 GET 不带 `Origin`，浏览器对非本机的 http 地址也不发 `Sec-Fetch-*` 头，所以这条检查不分是不是浏览器。要用别的域名访问（局域网主机名、反向代理的域名），开启鉴权（见 [deployment.md](deployment.md) 的“有意在局域网开放”）。
+- 同源判断比较 `Origin` 的主机和请求的 `Host`；设了 `TRUST_PROXY` 时用反向代理传来的 `X-Forwarded-Host`。放在反向代理后面时，把对外地址（例如 `https://archive.example.com`）写进 `ALLOWED_ORIGINS`：nginx 默认把 `Host` 改成上游地址，不写进去，页面发出的每个写请求都会得到 403 `CROSS_SITE_REQUEST_REFUSED`。
 
 `GET /health` 和 `/ready` 不鉴权、也在限流之前，所以同时到达的请求合并成一次检查，结果再复用 1 秒，高频探测不会占满数据库连接。
 
@@ -373,7 +373,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | `WORKSPACES_POSTGRES_TABLE` / `WORKSPACE_MEMBERS_POSTGRES_TABLE` | `rag_workspaces` / `rag_workspace_members` | 注册表的两张表。用 `npm run tenant:registry` 或 `/admin/workspaces` 接口管理（权限 `admin.tenants.read|write`，角色 `admin.tenant_manager`）。 |
 | `TENANT_RATE_LIMIT_ENABLED` | `false` | 认证之后按租户（workspace，没有时按用户，再没有按 IP）和成本类别限流，超出返回 429 `TENANT_RATE_LIMITED`。`RAG_SHARED_STATE=redis` 时跨实例共享。 |
 | `TENANT_RATE_LIMIT_WINDOW_MS` | `60000` | 固定窗口长度。 |
-| `TENANT_RATE_LIMIT_CHAT_MAX` / `_INGEST_MAX` / `_DESTRUCTIVE_MAX` / `_DEFAULT_MAX` | `120` / `600` / `60` / `1200` | 每个窗口各类请求的上限（destructive 包括所有 DELETE 和清空文档）；`0` 关闭该类限制。 |
+| `TENANT_RATE_LIMIT_CHAT_MAX` / `_INGEST_MAX` / `_DESTRUCTIVE_MAX` / `_DEFAULT_MAX` | `120` / `600` / `60` / `1200` | 每个窗口各类请求的上限（destructive 包括所有 DELETE、清空文档和租户删除 `POST /admin/tenants/erase`；ingest 包括各种上传、上传状态查询、替换和恢复文档、arXiv 导入）；`0` 关闭该类限制。 |
 | `TENANT_MAX_CONCURRENT_RUNS` | `0` | 每个租户在本进程同时运行的 agent 请求数上限，超出返回 429 `TENANT_CONCURRENCY_LIMITED`。 |
 | `TRUST_PROXY` | 空 | 交给 Express 的 `trust proxy`：跳数、`true`/`false` 或地址列表，非法值拒绝启动。`true` 会把客户端自己能写的 X-Forwarded-For 当成真实 IP，建议用跳数或列表。 |
 | `RAG_LLM_MAX_QUEUE` | `0` | 每个租户在一个模型调用 guard 上最多排队的调用数，超出返回 429 `MODEL_CALL_QUEUE_FULL`。排队本身已默认按租户公平轮转，单租户时与以前一致。 |
@@ -489,7 +489,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `API_AUTH_ENABLED` | `false` | 是否启用 API token 鉴权。 |
-| `API_AUTH_TOKEN` | 空 | 单用户/本地开发 token。鉴权开启时不能是 `server/.env.example` 里公开的占位值 `change-me-for-local-dev`。 |
+| `API_AUTH_TOKEN` | 空 | 单用户/本地开发 token。`server/.env.example` 里留空；用 `API_AUTH_TOKENS`、JWT 或 OIDC 时保持为空。以前的示例带过公开的占位值 `change-me-for-local-dev`，鉴权开启时它会让服务拒绝启动。 |
 | `API_AUTH_TOKENS` | 空 | 多用户 token 映射。 |
 | `API_AUTH_REQUIRE_WORKSPACE` | `false` | 鉴权请求是否必须解析出 workspace scope；多租户部署建议设为 `true`。没有 workspace 列表的平台身份在平台管理路由（`TENANTLESS_PLATFORM_PATHS`：`/admin/workspaces`、`/admin/tenants/*`、`/admin/usage`、`/admin/audit`、`/admin/status` 等）上不受此限制，健康探针的权限判断也不要求 workspace；`GET /auth/me` 对任何凭据都不要求，并在开启时返回 `workspaceRequired: true`，前端据此不提供"不选工作区"、默认选第一个 workspace；其他路由照常要求。 |
 | `API_AUTH_JWT_ENABLED` | `false` | 是否允许 `Authorization: Bearer <jwt>` 走 HS256 JWT 验证。静态 token 仍优先匹配。 |
@@ -508,7 +508,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 
 鉴权开启后，一个请求如果既没有 user 也没有 workspace，会被返回 403（“This request needs a user or workspace scope”）。典型情况是 `API_AUTH_TOKENS` 里允许多个 workspace、又没有 userId 的 token，请求时没带 `x-workspace-id`。以前这种请求会被当成“所有租户”，能列出、读取并清空所有人的文档。有两个例外：一是单个共享的 `API_AUTH_TOKEN`（单租户模式，行为不变）；二是 `GET /admin/status`、`GET /admin/audit`、`GET /admin/index-versions`、`GET /auth/me` 和 `POST /admin/actions/:action`，但只对没有 workspace 列表的平台 admin token 放行，这些路由另有 admin 权限检查。另外，`API_AUTH_TOKENS` 里一个既没有 userId、workspaceId、workspaces，也没有 roles、permissions，又没开 `allowClientUserId` 的条目，会让服务拒绝启动（`API_AUTH_TOKEN_WITHOUT_SCOPE`）。
 
-鉴权开启时，还有两种配置会让服务拒绝启动：`API_AUTH_TOKEN` 或 `API_AUTH_TOKENS` 里的某个 token 仍是公开的占位值 `change-me-for-local-dev`（`API_AUTH_TOKEN_PLACEHOLDER`）；开了 `API_AUTH_JWT_ENABLED`，而 HS256 secret 没配或短于 32 个字符（`API_AUTH_JWT_SECRET_TOO_SHORT`，与内部服务密钥的下限相同；以前没配时服务照样启动，只在健康检查里报错）。HS256 JWT 必须带数字形式的 `exp`：缺 `exp`，或 `exp`、`nbf`、`iat` 不是数字，都返回 401，和 OIDC 的校验一致。以前缺 `exp` 的 token 永不过期。
+鉴权开启时，还有两种配置会让服务拒绝启动：`API_AUTH_TOKEN` 或 `API_AUTH_TOKENS` 里的某个 token 仍是旧版 `server/.env.example` 带的公开占位值 `change-me-for-local-dev`（`API_AUTH_TOKEN_PLACEHOLDER`；只用 `API_AUTH_TOKENS`、JWT 或 OIDC 时把 `API_AUTH_TOKEN` 清空即可）；开了 `API_AUTH_JWT_ENABLED`，而 HS256 secret 没配或短于 32 个字符（`API_AUTH_JWT_SECRET_TOO_SHORT`，与内部服务密钥的下限相同；以前没配时服务照样启动，只在健康检查里报错）。HS256 JWT 必须带数字形式的 `exp`：缺 `exp`，或 `exp`、`nbf`、`iat` 不是数字，都返回 401，和 OIDC 的校验一致。以前缺 `exp` 的 token 永不过期。
 
 多人部署可以继续使用 `API_AUTH_TOKENS`：
 

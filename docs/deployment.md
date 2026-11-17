@@ -28,7 +28,7 @@ docker compose --profile app up -d --build
 - **为什么默认只绑本机**：默认配置不适合放到网络上：PostgreSQL 是超级用户 `postgres`，密码也是 `postgres`；Redis 没有密码；API 默认不开鉴权。而在 Linux 上，Docker 发布的端口会绕过 ufw / firewalld，防火墙规则挡不住。
 - **有意在局域网开放**：所有发布的端口都绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`）。按下面的顺序做：
   1. 设数据库密码。`POSTGRES_PASSWORD` 同时用于 `postgres` 服务和 compose 里所有的数据库地址，不设时仍是 `postgres`。密码会原样拼进连接 URL，所以只用 URL 安全的字符，例如 `openssl rand -hex 24` 生成的值。
-  2. 在 `server/.env` 里开启 API 鉴权（`API_AUTH_ENABLED=true`，加上 `API_AUTH_TOKENS`，见 [configuration.md](configuration.md)；或者用 OIDC，见下面的"OIDC 登录和 RBAC"）。`API_AUTH_TOKEN` 不能保留示例里的 `change-me-for-local-dev`，HS256 secret 至少 32 个字符，否则服务拒绝启动。
+  2. 在 `server/.env` 里开启 API 鉴权（`API_AUTH_ENABLED=true`，加上 `API_AUTH_TOKENS`，见 [configuration.md](configuration.md)；或者用 OIDC，见下面的"OIDC 登录和 RBAC"）。旧的 `server/.env` 里如果还有 `API_AUTH_TOKEN=change-me-for-local-dev`（以前的示例带的公开值），清空它或换成长随机值；HS256 secret 至少 32 个字符。否则服务拒绝启动。
   3. 带上这两个变量启动：
 
      ```bash
@@ -37,8 +37,8 @@ docker compose --profile app up -d --build
      ```
 
   `0.0.0.0` 表示所有网卡；只想在一块网卡上开放时，写那块网卡的地址（例如 `192.168.1.20`）。
-- **浏览器从哪个地址访问**：鉴权关闭时，浏览器只能用本机地址（`localhost`、`127.0.0.1`）访问，用局域网地址或别的域名访问会得到 403 `HOST_NOT_ALLOWED`（挡 DNS rebinding）；先开启鉴权，或把那个来源写进 `ALLOWED_ORIGINS`。前端和 API 不同源时，前端的来源也要写进 `ALLOWED_ORIGINS`，否则改数据的请求会得到 403 `CROSS_SITE_REQUEST_REFUSED`。见 [configuration.md](configuration.md) 的“跨站请求、CORS 和按 IP 限流”。
-- **这个变量对所有发布的端口一起生效**：开放 app 时，5432 的 PostgreSQL 和（启用时）6379 的 Redis 也会对外。Redis 仍然没有密码。只想开放应用时，保持默认的 `127.0.0.1`，在宿主机上用反向代理（nginx、Caddy 等）转发到 `127.0.0.1:5001`。
+- **用什么地址访问**：鉴权关闭时，服务只认本机名（`localhost`、`127.0.0.1`、`[::1]`）和 IP 地址，用其他域名访问会得到 403 `HOST_NOT_ALLOWED`（挡 DNS rebinding）；要用域名访问，就开启鉴权（上面第 2 步）。前端和 API 不同源时，前端的来源要写进 `ALLOWED_ORIGINS`，否则改数据的请求会得到 403 `CROSS_SITE_REQUEST_REFUSED`。见 [configuration.md](configuration.md) 的“跨站请求、CORS 和按 IP 限流”。
+- **这个变量对所有发布的端口一起生效**：开放 app 时，5432 的 PostgreSQL 和（启用时）6379 的 Redis 也会对外。Redis 仍然没有密码。只想开放应用时，保持默认的 `127.0.0.1`，在宿主机上用反向代理（nginx、Caddy 等）转发到 `127.0.0.1:5001`；这时同样要开启鉴权，并把对外地址（例如 `https://archive.example.com`）写进 `ALLOWED_ORIGINS`：nginx 默认把 `Host` 改成 `127.0.0.1:5001`，不写进去，页面发出的每个写请求都会被当成跨站，得到 403。
 - **`POSTGRES_PASSWORD` 只在数据卷第一次初始化时生效**：`pgdata` 卷已经存在时，改这个变量不会改掉库里的密码，应用会因为密码不对连不上。已有数据时先在库里改密码（`docker compose exec postgres psql -U postgres -c "ALTER USER postgres PASSWORD '<新密码>'"`），再用同一个值带上 `POSTGRES_PASSWORD` 重启。不在容器里跑后端（`npm run server`）时，`server/.env` 里 `POSTGRES_DATABASE_URL` 的密码也要一起改。
 
 ### 模型配置
