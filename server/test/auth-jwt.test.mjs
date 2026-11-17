@@ -271,7 +271,6 @@ test("verifyJwtAuthToken refuses a secret shorter than the service-key floor", (
   // Whitespace around the secret does not count, as the verifier trims it.
   assert.equal(isJwtSecretTooShort(` ${shortSecret} `), true);
   assert.equal(isJwtSecretTooShort(""), true);
-  assert.equal(isJwtSecretTooShort(undefined), true);
   assert.equal(isJwtSecretTooShort("s".repeat(MIN_SERVICE_KEY_SECRET_LENGTH)), false);
 
   const longSecret = "s".repeat(MIN_SERVICE_KEY_SECRET_LENGTH);

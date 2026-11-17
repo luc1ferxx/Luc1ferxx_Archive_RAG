@@ -726,9 +726,11 @@ const resolveRefusalLedgerScope = async (req, accessScope = {}, decision = {}) =
   return tenant.userId ? { userId: tenant.userId, workspaceId: "" } : null;
 };
 
-// The API_AUTH_TOKEN value server/.env.example ships. Anyone who has read the
-// repository knows it, and as the single shared token it may also act for any
-// user (x-user-id), so with API auth on it is no credential at all.
+// The API_AUTH_TOKEN value server/.env.example shipped until 2026-11-17 (it
+// now ships the variable empty), so many server/.env copies still carry it.
+// Anyone who has read the repository knows it, and as the single shared token
+// it may also act for any user (x-user-id), so with API auth on it is no
+// credential at all.
 const API_AUTH_TOKEN_PLACEHOLDER = "change-me-for-local-dev";
 
 const isApiAuthTokenPlaceholder = (token) =>
@@ -737,7 +739,8 @@ const isApiAuthTokenPlaceholder = (token) =>
 /**
  * With API auth on, refuses the start (createApp calls this) when:
  * - API_AUTH_TOKEN, or the token of an API_AUTH_TOKENS entry, is the public
- *   placeholder of server/.env.example (API_AUTH_TOKEN_PLACEHOLDER). A
+ *   placeholder older copies of server/.env.example carry
+ *   (API_AUTH_TOKEN_PLACEHOLDER). A
  *   placeholder API_AUTH_TOKEN is refused even while API_AUTH_TOKENS takes
  *   precedence, since emptying API_AUTH_TOKENS would make it the credential;
  * - HS256 JWT mode is on and its secret is missing or shorter than
@@ -770,7 +773,7 @@ export const assertApiAuthTokenConfiguration = () => {
 
   if (placeholderSource) {
     const error = new Error(
-      `${placeholderSource} the public placeholder from server/.env.example, which anyone who has read the repository can present. Set a long random token instead (for example the output of: openssl rand -hex 32).`
+      `${placeholderSource} the public placeholder older copies of server/.env.example carried, which anyone who has read the repository can present. Empty it (API_AUTH_TOKEN=) when API_AUTH_TOKENS, JWT or OIDC carry the credentials, or set a long random token (for example the output of: openssl rand -hex 32).`
     );
     error.code = "API_AUTH_TOKEN_PLACEHOLDER";
     throw error;

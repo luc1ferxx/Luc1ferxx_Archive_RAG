@@ -2,14 +2,19 @@
 //
 // API auth is off by default, so any request that reaches the server acts. A
 // browser sends a page's requests without asking its user: a "simple"
-// cross-site request (a form POST, a text/plain or multipart fetch, an <img>
-// pointing at GET /chat) needs no CORS preflight, so CORS never stops it -- it
-// only stops the page reading the answer. A DNS-rebinding page
-// (attacker.example re-resolved to 127.0.0.1) is even same-origin to the
-// browser, so it can read too. This guard refuses both, for browser requests
-// only: a request with neither Origin nor Sec-Fetch-Site (curl, Node's fetch,
-// the MCP server, service-to-service calls, probes) passes untouched, because
-// only a browser can be made to send a request its user never meant.
+// cross-site request (a form POST, a text/plain or multipart fetch) needs no
+// CORS preflight, so CORS never stops it -- it only stops the page reading the
+// answer. A DNS-rebinding page (attacker.example re-resolved to 127.0.0.1) is
+// even same-origin to the browser, so it can read too. Two checks:
+// - While auth is off, every request must name this server by a loopback
+//   name, an IP address or an ALLOWED_ORIGINS host. A rebinding page can only
+//   use a DNS name it controls, and its same-origin GETs carry no Origin; a
+//   browser sends no Sec-Fetch-* header to an http URL that is not localhost,
+//   so this check cannot wait for a browser header.
+// - A browser request (Origin or Sec-Fetch-Site) that changes data must come
+//   from the request's own origin or an ALLOWED_ORIGINS one. Browsers send
+//   Origin on every request but GET and HEAD, so a cross-site write is caught
+//   on any URL; no GET changes data (GET /chat is gone for this reason).
 
 import { isApiAuthEnabled } from "./rag/config.js";
 
@@ -27,7 +32,7 @@ const HOST_PATTERN = /^(\[[0-9a-f:.]+\]|[a-z0-9._-]+)(?::(\d{1,5}))?$/u;
 const CROSS_SITE_MESSAGE =
   "Cross-site request refused: a page on another origin may not send this request. If it is your own frontend, add its origin (scheme://host:port) to ALLOWED_ORIGINS.";
 const HOST_NOT_ALLOWED_MESSAGE =
-  "Host not allowed: with API authentication disabled, a browser may reach this server only as localhost, 127.0.0.1 or [::1] (this blocks DNS rebinding). Enable API authentication (API_AUTH_ENABLED=true) or add the origin you open it on to ALLOWED_ORIGINS.";
+  "Host not allowed: with API authentication disabled, this server answers only to localhost, 127.0.0.1, [::1], an IP address or a host named in ALLOWED_ORIGINS (this blocks DNS rebinding). To reach it under another name, enable API authentication (API_AUTH_ENABLED=true); see docs/deployment.md.";
 
 /**
  * An http(s) origin as {origin, protocol, hostname, port}, or null for the
@@ -80,6 +85,17 @@ export const parseHost = (value) => {
 export const isLoopbackHostname = (hostname) =>
   LOOPBACK_HOSTNAMES.has(String(hostname ?? "").toLowerCase());
 
+// An IPv4 address (as URL serializes it: 127.1 -> 127.0.0.1) or a bracketed
+// IPv6 one. A rebinding page needs a DNS name it controls, so an address is
+// never one: probes on a pod IP and LAN clients by address keep working.
+const IPV4_PATTERN = /^\d{1,3}(?:\.\d{1,3}){3}$/u;
+
+export const isIpAddressHostname = (hostname) => {
+  const text = String(hostname ?? "");
+
+  return IPV4_PATTERN.test(text) || (text.startsWith("[") && text.endsWith("]"));
+};
+
 export const isLoopbackOrigin = (origin) => {
   const parsed = parseOrigin(origin);
 
@@ -127,7 +143,9 @@ export const isAllowedHost = (host, allowed) => {
 
   return (
     parsed !== null &&
-    (isLoopbackHostname(parsed.hostname) || allowed.hostnames.has(parsed.hostname))
+    (isLoopbackHostname(parsed.hostname) ||
+      isIpAddressHostname(parsed.hostname) ||
+      allowed.hostnames.has(parsed.hostname))
   );
 };
 
@@ -161,53 +179,34 @@ const getTrustedForwardedHost = (req) => {
 export const getRequestHost = (req) =>
   getTrustedForwardedHost(req) || String(req.headers?.host ?? "").trim();
 
-/**
- * Every method but GET, HEAD and OPTIONS, and GET /chat, which starts an agent
- * run (a run record, session and memory writes). Express answers HEAD with a
- * GET handler and matches paths case-insensitively with an optional trailing
- * slash, so HEAD /chat, /CHAT and /chat/ count too.
- */
-export const isStateChangingRequest = (req) => {
-  const method = String(req.method ?? "").toUpperCase();
-
-  if (!SAFE_METHODS.has(method)) {
-    return true;
-  }
-
-  return (
-    method !== "OPTIONS" &&
-    String(req.path ?? "").toLowerCase().replace(/\/+$/u, "") === "/chat"
-  );
-};
+/** Every method but GET, HEAD and OPTIONS: no GET route changes data. */
+export const isStateChangingRequest = (req) =>
+  !SAFE_METHODS.has(String(req.method ?? "").toUpperCase());
 
 const refuse = (res, code, error) => {
   res.status(403).json({ code, error });
 };
 
 /**
- * Mounted right after cors in createApp. For a browser request (Origin or
- * Sec-Fetch-Site present; Node's fetch sends Sec-Fetch-Mode, so that one is
- * no sign of a browser):
+ * Mounted right after cors in createApp, ahead of the static frontend, the
+ * probes and every route:
  * - while API auth is off (read per request, as requireApiAuth does), every
- *   host it names must be loopback or an ALLOWED_ORIGINS hostname, else 403
- *   HOST_NOT_ALLOWED. With auth on a rebinding page holds no credential, and
- *   docs/deployment.md requires auth before the server leaves localhost.
- * - a state-changing request must come from the request's own origin or an
- *   allowed one (never "null"); without Origin, Sec-Fetch-Site: cross-site is
- *   refused. Else 403 CROSS_SITE_REQUEST_REFUSED.
+ *   host a request names must be loopback, an IP address or an ALLOWED_ORIGINS
+ *   hostname, else 403 HOST_NOT_ALLOWED. Every request, not only one with a
+ *   browser header: a rebinding page's same-origin GET carries none. With auth
+ *   on, a rebinding page holds no credential (tokens travel in headers the
+ *   page cannot read from the real origin), and docs/deployment.md requires
+ *   auth before the server answers to other names.
+ * - a browser request (Origin or Sec-Fetch-Site present; Node's fetch sends
+ *   Sec-Fetch-Mode, so that one is no sign of a browser) that changes data
+ *   must come from the request's own origin or an allowed one (never "null");
+ *   without Origin, Sec-Fetch-Site: cross-site is refused. Else 403
+ *   CROSS_SITE_REQUEST_REFUSED.
  */
 export const createCrossSiteGuard = ({ allowedOrigins = [] } = {}) => {
   const allowed = compileAllowedOrigins(allowedOrigins);
 
   return (req, res, next) => {
-    const origin = req.headers.origin;
-    const fetchSite = req.headers["sec-fetch-site"];
-
-    if (origin === undefined && fetchSite === undefined) {
-      next();
-      return;
-    }
-
     if (!isApiAuthEnabled()) {
       // A trusted X-Forwarded-Host is checked as well as the Host header, so a
       // page that reaches the server directly cannot pass by naming a loopback
@@ -221,7 +220,10 @@ export const createCrossSiteGuard = ({ allowedOrigins = [] } = {}) => {
       }
     }
 
-    if (isStateChangingRequest(req)) {
+    const origin = req.headers.origin;
+    const fetchSite = req.headers["sec-fetch-site"];
+
+    if ((origin !== undefined || fetchSite !== undefined) && isStateChangingRequest(req)) {
       const accepted =
         origin === undefined
           ? String(fetchSite).trim().toLowerCase() !== "cross-site"

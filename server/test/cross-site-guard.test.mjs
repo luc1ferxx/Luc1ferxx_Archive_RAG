@@ -1,11 +1,12 @@
 // The cross-site guard (cross-site-guard.js) as createApp mounts it. A browser
 // request (Origin or Sec-Fetch-Site) that would change data from another site
-// is refused, and so, while API auth is off, is a browser request naming a
-// host that is neither loopback nor an ALLOWED_ORIGINS host (DNS rebinding).
+// is refused, and so, while API auth is off, is any request naming a host that
+// is neither loopback, an IP address nor an ALLOWED_ORIGINS host (DNS
+// rebinding; a rebinding page's same-origin GET carries no browser header).
 // Requests without browser headers, the Vite dev frontend, the
 // single-container frontend, a listed split-origin frontend, the PDF preview
 // iframe and probes pass. With ALLOWED_ORIGINS empty, CORS reflects loopback
-// pages only.
+// pages only and still sends Vary: Origin.
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -21,6 +22,7 @@ import {
   getRequestHost,
   isAllowedHost,
   isAllowedOrigin,
+  isIpAddressHostname,
   isLoopbackOrigin,
   isSameOrigin,
   isStateChangingRequest,
@@ -235,37 +237,9 @@ test("a cross-site simple request cannot clear the archive or upload into it", a
   });
 });
 
-test("GET /chat starts an agent run, so a cross-site GET or HEAD of it is refused; reads are not", async () => {
+test("a cross-site read passes the guard; CORS keeps the answer from the page", async () => {
   await withGuardedApp({}, async ({ send }) => {
-    let response = await send({
-      headers: { origin: ATTACKER, "sec-fetch-site": "cross-site" },
-      path: "/chat?question=hello",
-    });
-    assertRefused(response, CROSS_SITE_REQUEST_REFUSED, "GET /chat with a foreign Origin");
-
-    // An <img src=".../chat?question=..."> sends no Origin.
-    for (const [method, requestPath] of [
-      ["GET", "/chat?question=hello"],
-      ["GET", "/CHAT/?question=hello"],
-      ["HEAD", "/chat?question=hello"],
-    ]) {
-      response = await send({
-        headers: { "sec-fetch-site": "cross-site" },
-        method,
-        path: requestPath,
-      });
-      assert.equal(response.status, 403, `${method} ${requestPath}`);
-    }
-
-    // The dev frontend passes the guard and reaches the route's own check.
-    response = await send({
-      headers: { origin: VITE_DEV, "sec-fetch-site": "same-site" },
-      path: "/chat",
-    });
-    assert.equal(response.status, 400);
-
-    // A read from another site passes the guard; CORS keeps the answer from the page.
-    response = await send({
+    const response = await send({
       headers: { origin: ATTACKER, "sec-fetch-site": "cross-site" },
       path: "/documents",
     });
@@ -374,18 +348,39 @@ test("ALLOWED_ORIGINS replaces the loopback default: listed origins pass, null n
   );
 });
 
-test("DNS rebinding: with auth off a browser must name a loopback or ALLOWED_ORIGINS host", async () => {
+test("DNS rebinding: with auth off every request must name a loopback, IP-address or ALLOWED_ORIGINS host", async () => {
   await withGuardedApp({}, async ({ calls, port, send }) => {
     const rebound = `attacker.example:${port}`;
 
-    // The rebinding page is same-origin to the browser: no Origin on a GET.
-    let response = await send({
+    // The rebinding page is same-origin to the browser: its GETs carry no
+    // Origin, and a browser sends no Sec-Fetch-* header to an http URL that is
+    // not localhost, so the request looks like curl's.
+    let response = await send({ headers: { host: rebound }, path: "/documents" });
+    assertRefused(response, HOST_NOT_ALLOWED, "rebound read, no browser header");
+    assert.match(response.json.error, /API_AUTH_ENABLED=true/u);
+
+    for (const requestPath of ["/health", "/ready", "/auth/config", "/documents/doc-1/file"]) {
+      response = await send({ headers: { host: rebound }, path: requestPath });
+      assertRefused(response, HOST_NOT_ALLOWED, `rebound ${requestPath}`);
+    }
+
+    response = await send({
       headers: { host: rebound, "sec-fetch-site": "same-origin" },
       path: "/documents",
     });
-    assertRefused(response, HOST_NOT_ALLOWED, "rebound read");
-    assert.match(response.json.error, /API_AUTH_ENABLED=true/u);
-    assert.match(response.json.error, /ALLOWED_ORIGINS/u);
+    assertRefused(response, HOST_NOT_ALLOWED, "rebound read with Sec-Fetch-Site");
+
+    // Addresses are never a rebinding page's host: a probe on a pod IP, a LAN
+    // client by address, 0.0.0.0 and mapped IPv6 pass the host check.
+    for (const host of [
+      `10.0.0.7:${port}`,
+      `192.168.1.20:${port}`,
+      `0.0.0.0:${port}`,
+      `[::ffff:127.0.0.1]:${port}`,
+    ]) {
+      response = await send({ headers: { host }, path: "/documents" });
+      assert.equal(response.status, 200, host);
+    }
 
     response = await send({
       headers: {
@@ -412,12 +407,19 @@ test("DNS rebinding: with auth off a browser must name a loopback or ALLOWED_ORI
     });
     assert.equal(response.status, 200, "an ALLOWED_ORIGINS hostname");
 
-    response = await send({
-      headers: { host: "api.example.test", "sec-fetch-site": "same-origin" },
-      path: "/documents",
-    });
+    response = await send({ headers: { host: "api.example.test" }, path: "/documents" });
     assertRefused(response, HOST_NOT_ALLOWED, "an unlisted hostname");
   });
+
+  // The static frontend is behind the check too.
+  await withGuardedApp(
+    {},
+    async ({ port, send }) => {
+      const response = await send({ headers: { host: `attacker.example:${port}` }, path: "/" });
+      assertRefused(response, HOST_NOT_ALLOWED, "rebound frontend");
+    },
+    { serveFrontend: true }
+  );
 
   // With auth on the check is off: the rebinding page holds no credential.
   await withGuardedApp(AUTH_ENV, async ({ port, send }) => {
@@ -510,17 +512,20 @@ test("the single-container frontend is served and may write from the API origin"
   );
 });
 
-test("CORS with ALLOWED_ORIGINS empty reflects loopback pages only", async () => {
+test("CORS with ALLOWED_ORIGINS empty reflects loopback pages only, and every answer varies on Origin", async () => {
   await withGuardedApp({}, async ({ send }) => {
     for (const origin of [VITE_DEV, "http://127.0.0.1:5173", "http://[::1]:3000"]) {
       const response = await send({ headers: { origin }, path: "/documents" });
       assert.equal(response.headers["access-control-allow-origin"], origin, origin);
       assert.match(response.headers["access-control-expose-headers"], /Content-Disposition/u);
+      assert.match(response.headers.vary ?? "", /\bOrigin\b/u, origin);
     }
 
-    for (const origin of [ATTACKER, "http://localhost.attacker.example", "null"]) {
-      const response = await send({ headers: { origin }, path: "/documents" });
-      assert.equal(response.headers["access-control-allow-origin"], undefined, origin);
+    for (const origin of [ATTACKER, "http://localhost.attacker.example", "null", undefined]) {
+      const response = await send({ headers: origin ? { origin } : {}, path: "/documents" });
+      assert.equal(response.headers["access-control-allow-origin"], undefined, String(origin));
+      // A shared cache must not hand one origin's answer to another.
+      assert.match(response.headers.vary ?? "", /\bOrigin\b/u, String(origin));
     }
 
     const preflight = (origin) =>
@@ -576,6 +581,13 @@ test("origin and host helpers", () => {
   assert.equal(isAllowedOrigin("null", listed), false);
   assert.equal(isAllowedHost("frontend.example.test:8443", listed), true);
   assert.equal(isAllowedHost("[::1]:5001", loopbackOnly), true);
+  assert.equal(isAllowedHost("10.0.0.7:5001", loopbackOnly), true);
+  assert.equal(isAllowedHost("127.1:5001", loopbackOnly), true);
+  assert.equal(isAllowedHost("127.0.0.1.nip.io:5001", loopbackOnly), false);
+  assert.equal(isAllowedHost("localtest.me", loopbackOnly), false);
+  assert.equal(isIpAddressHostname("192.168.1.20"), true);
+  assert.equal(isIpAddressHostname("[::ffff:7f00:1]"), true);
+  assert.equal(isIpAddressHostname("1.2.3.4.example"), false);
   assert.equal(isAllowedHost("attacker.example@localhost", loopbackOnly), false);
   assert.equal(isAllowedHost("localhost/attacker", loopbackOnly), false);
   assert.equal(isAllowedHost(undefined, loopbackOnly), false);
@@ -586,9 +598,6 @@ test("origin and host helpers", () => {
     ["POST", "/documents/clear"],
     ["DELETE", "/documents/doc-1"],
     ["PATCH", "/anything"],
-    ["GET", "/chat"],
-    ["HEAD", "/chat"],
-    ["GET", "/Chat/"],
   ]) {
     assert.equal(isStateChangingRequest(request(method, requestPath)), true, `${method} ${requestPath}`);
   }
@@ -597,7 +606,9 @@ test("origin and host helpers", () => {
     ["GET", "/documents"],
     ["HEAD", "/documents/doc-1/file"],
     ["OPTIONS", "/chat"],
-    ["GET", "/chat/history"],
+    // No GET changes data: GET /chat, which started an agent run, is gone.
+    ["GET", "/chat"],
+    ["HEAD", "/chat"],
   ]) {
     assert.equal(isStateChangingRequest(request(method, requestPath)), false, `${method} ${requestPath}`);
   }

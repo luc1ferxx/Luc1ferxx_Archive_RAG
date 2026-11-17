@@ -469,10 +469,10 @@ test("createApp refuses an API_AUTH_TOKENS entry that can act for no tenant", as
 
 test("createApp refuses the public placeholder token and a short HS256 secret", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tenant-gate-credentials-"));
-  // The value server/.env.example ships, read from the file so the check and
-  // the example cannot drift apart.
+  // The value server/.env.example shipped until it shipped the variable empty;
+  // server/.env copies made before still carry it.
   const exampleEnv = await readFile(new URL("../.env.example", import.meta.url), "utf8");
-  const placeholder = /^API_AUTH_TOKEN=(.*)$/mu.exec(exampleEnv)?.[1]?.trim();
+  const placeholder = "change-me-for-local-dev";
   const isRefusal = (code) => (error) => {
     assert.equal(error.code, code);
     return true;
@@ -485,7 +485,8 @@ test("createApp refuses the public placeholder token and a short HS256 secret", 
     ...secrets,
   });
 
-  assert.equal(placeholder, "change-me-for-local-dev");
+  // The example ships no credential any more.
+  assert.equal(/^API_AUTH_TOKEN=(.*)$/mu.exec(exampleEnv)?.[1]?.trim(), "");
 
   try {
     // The placeholder as the single shared token, which may act for any user.
