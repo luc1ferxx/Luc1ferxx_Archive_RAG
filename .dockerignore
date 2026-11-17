@@ -16,4 +16,8 @@ server/evaluation/generated
 # torch); COPY server/ would bake them into the app image.
 server/evaluation/.venv*
 server/evaluation/results
+# The server's tests (about 11 MB) and interview notes: nothing the image runs
+# (node server.js, the demo's fake model) reads them.
+server/test
+server/docs
 .playwright-mcp
