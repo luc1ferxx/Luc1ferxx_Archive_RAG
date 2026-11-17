@@ -4,14 +4,18 @@ import test from "node:test";
 import { isAgentRunInterrupt } from "../rag/agent-interrupts.js";
 import { createCapabilityRegistry } from "../rag/capabilities/index.js";
 import {
-  CONNECTOR_REPLAY_STEP_TYPE,
-  TEST_CONNECTOR_CAPABILITY_ID,
-  TEST_CONNECTOR_ID,
   createConnectorRegistry,
   createDefaultConnectorRegistry,
-  createTestConnectorSpec,
+} from "../rag/connectors/registry.js";
+import {
+  CONNECTOR_REPLAY_STEP_TYPE,
   validateAgentConnectorSpec,
-} from "../rag/connectors/index.js";
+} from "../rag/connectors/schema.js";
+import {
+  TEST_CONNECTOR_CAPABILITY_ID,
+  TEST_CONNECTOR_ID,
+  createTestConnectorSpec,
+} from "./fixtures/test-connector.mjs";
 
 const accessScope = {
   userId: "alice",

@@ -4,17 +4,21 @@ import test from "node:test";
 import { AGENT_TASK_RUNNER_ID } from "../rag/agent-task-contract.js";
 import { RESEARCH_DOSSIER_WORKFLOW_ID } from "../rag/agent-workflows/built-ins/research-dossier.js";
 import {
-  AGENT_TRIGGER_APPROVAL_MODES,
-  AGENT_TRIGGER_MODES,
   RESEARCH_DOSSIER_TRIGGER_ID,
-  compactAgentTriggerSpec,
+  createResearchDossierTriggerSpec,
+} from "../rag/agent-triggers/built-ins/research-dossier.js";
+import {
   createAgentTriggerRegistry,
   createBuiltInAgentTriggers,
   createDefaultAgentTriggerRegistry,
-  createResearchDossierTriggerSpec,
+} from "../rag/agent-triggers/registry.js";
+import {
+  AGENT_TRIGGER_APPROVAL_MODES,
+  AGENT_TRIGGER_MODES,
+  compactAgentTriggerSpec,
   renderAgentTriggerTemplate,
   validateAgentTriggerSpec,
-} from "../rag/agent-triggers/index.js";
+} from "../rag/agent-triggers/schema.js";
 
 const buildEventTriggerSpec = (overrides = {}) => ({
   ...createResearchDossierTriggerSpec(),
