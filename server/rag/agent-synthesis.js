@@ -16,19 +16,21 @@ export const buildDirectAnswerModes = ({ customSkills = [] } = {}) =>
     ...customSkills.map((skill) => skill.id),
   ]);
 
+// Synthesis reads no Web result: Web search answers only from its approved
+// capability_call step, never inside the outer plan (agent-web-runner.js). A
+// document_web plan whose Web search was skipped for budget answers from its
+// documents.
 export const shouldFinalizeAgentAnswer = ({
   agentMode,
   primaryCustomResult,
   ragSources = [],
   researchBrief,
-  webResult,
 } = {}) =>
   Boolean(
     ragSources.length > 0 &&
       (agentMode === "document" ||
         agentMode === "document_web" ||
         agentMode === "research_brief" ||
-        (agentMode === "web" && webResult?.ok) ||
         agentMode === SKILL_CHAIN_MODE ||
         researchBrief ||
         (primaryCustomResult && agentMode === primaryCustomResult.skillId))
@@ -40,7 +42,6 @@ export const buildSynthesisAnswer = ({
   actionAnswer,
   arxivImportAnswer,
   ragResult,
-  webResult,
   customSkillResults = [],
   inventoryAnswer,
   discoveryAnswer,
@@ -62,7 +63,6 @@ export const buildSynthesisAnswer = ({
         ...completedResults,
         ...researchFindings,
         ...(ragResult?.ok ? [normalizeText(ragResult.value.text)] : []),
-        ...(webResult?.ok ? [normalizeText(webResult.value.text)] : []),
       ].filter(Boolean).join("\n\n");
     }
   }
@@ -105,22 +105,8 @@ export const buildSynthesisAnswer = ({
     return discoveryAnswer;
   }
 
-  if (ragResult?.ok && webResult?.ok) {
-    return [
-      "Document evidence:",
-      normalizeText(ragResult.value.text),
-      "",
-      "Web context:",
-      normalizeText(webResult.value.text),
-    ].join("\n");
-  }
-
   if (ragResult?.ok) {
     return normalizeText(ragResult.value.text);
-  }
-
-  if (webResult?.ok) {
-    return normalizeText(webResult.value.text);
   }
 
   return "The agent could not complete the request because all selected tools failed.";

@@ -133,7 +133,6 @@ export const createAgentExecutionPlanStages = ({
   accessScope,
   addBudgetLimitTrace,
   addTraceStep,
-  agentRunId,
   authorizedCustomSkills = null,
   arxivImportService,
   budgetState,
@@ -222,7 +221,6 @@ export const createAgentExecutionPlanStages = ({
       state.actionAnswer = await runWorkspaceActionSkill({
         accessScope,
         addTraceStep,
-        agentRunId,
         buildSkillTraceDetail,
         capabilityRegistry,
         docIds,

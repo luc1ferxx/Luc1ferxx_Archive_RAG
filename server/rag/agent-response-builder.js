@@ -164,7 +164,6 @@ export const buildAgentResponse = ({
   ragResult,
   ragSources,
   researchBrief,
-  shouldRunWeb,
   skippedWebBecauseBudget,
   trace,
   agentSkills,
@@ -213,19 +212,17 @@ export const buildAgentResponse = ({
         ? Boolean(primaryCustomResult.abstained)
         : null;
   const ragAbstained = finalizer?.abstained ? true : rawRagAbstained;
+  // A Web result is a failed one or none: Web search answers only from its
+  // approved capability_call step, never inside the outer plan
+  // (agent-web-runner.js), so it never stands in for a failed document answer.
   const status =
-    !directAnswerModes.has(plan.mode) &&
-    !ragResult?.ok &&
-    (shouldRunWeb ? !webResult?.ok : true)
-      ? 502
-      : 200;
+    !directAnswerModes.has(plan.mode) && !ragResult?.ok ? 502 : 200;
   const finalizerAppliesToRagAnswer =
     finalizer &&
     (customSkillGraphExecuted ||
       agentMode === "document" ||
       agentMode === "document_web" ||
       agentMode === "research_brief" ||
-      agentMode === "web" ||
       agentMode === SKILL_CHAIN_MODE ||
       (primaryCustomResult && agentMode === primaryCustomResult.skillId));
 
@@ -256,15 +253,13 @@ export const buildAgentResponse = ({
       ragEvidenceSummary: ragResult?.ok
         ? ragResult.value.evidenceSummary ?? null
         : null,
-      mcpAnswer: webResult?.ok
-        ? webResult.value.text
-        : webResult?.ok === false
-          ? `Web search unavailable: ${webError}`
-          : skippedWebBecauseBudget
-            ? "Web search not used: agent budget exhausted."
-          : directAnswerModes.has(plan.mode)
-            ? "Web search not used for this direct agent skill."
-            : "Web search not used: document evidence was sufficient.",
+      mcpAnswer: webResult?.ok === false
+        ? `Web search unavailable: ${webError}`
+        : skippedWebBecauseBudget
+          ? "Web search not used: agent budget exhausted."
+        : directAnswerModes.has(plan.mode)
+          ? "Web search not used for this direct agent skill."
+          : "Web search not used: document evidence was sufficient.",
       errors: {
         rag: ragError,
         mcp: webError,

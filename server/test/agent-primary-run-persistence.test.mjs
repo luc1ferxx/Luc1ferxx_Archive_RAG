@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runAgentRag } from "../rag/agent.js";
-import { runAgentRagWithPreApprovedCapabilities } from "./pre-approved-capabilities-test-helpers.mjs";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { runDocumentRagLoop } from "../rag/agent-document-loop.js";
 import { createAgentRunStepLifecycle } from "../rag/agent-run-step-lifecycle.js";
@@ -16,6 +15,7 @@ import {
   createInMemoryAgentRunStore,
 } from "../rag/agent-runs.js";
 import { AGENT_RUN_STEP_STATUSES } from "../rag/agent-run-steps.js";
+import { DEFAULT_ARXIV_MAX_RESULTS } from "../rag/arxiv-client.js";
 import { CAPABILITY_IDS } from "../rag/capabilities/index.js";
 import { SKILL_EFFECTS, SKILL_IDEMPOTENCY } from "../rag/skills/skill-contract.js";
 
@@ -494,19 +494,15 @@ test("research brief persists lifecycle-backed research question steps", async (
   assert.ok(eventTypes.indexOf("step_failed") < eventTypes.indexOf("run_completed"));
 });
 
-test("approved web search persists a tool step that needs approval to replay", async () => {
+// Web search, document discovery and arXiv import ask the user first: the
+// request pauses each at its gate, with the step paused and its input held by
+// the gate (the approved capability_call step runs the Capability).
+test("web search persists a paused tool step that needs approval to replay", async () => {
   const agentRunService = createRunService();
   const webQuestion = "Search the web for the current launch date.";
-  const response = await runAgentRagWithPreApprovedCapabilities({
+  const response = await runAgentRag({
     accessScope,
     agentRunService,
-    preApproved: {
-      [CAPABILITY_IDS.webSearch]: {
-        approved: true,
-        decision: "approved",
-        source: "test_approval",
-      },
-    },
     docIds: [],
     question: webQuestion,
     ragService: {
@@ -514,47 +510,43 @@ test("approved web search persists a tool step that needs approval to replay", a
     },
     sessionId: "session-1",
     userId: "alice",
-    webChatService: async (askedQuestion) => {
-      assert.equal(askedQuestion, webQuestion);
-
-      return {
-        citations: [
-          {
-            title: "Launch note",
-            url: "https://example.test/launch",
-          },
-        ],
-        text: "The launch date is current as of today.",
-      };
+    webChatService: async () => {
+      throw new Error("Web search should not run before its approval.");
     },
   });
 
   const run = await getRunForResponse({ agentRunService, response });
   const webStep = getStep(run, "web_search:primary");
+  const [gate] = response.body.approvalGates;
   const safety = buildStepReplaySafetyAssessment({
     step: webStep,
   });
 
   assert.equal(response.status, 200);
+  assert.equal(response.body.clarification.reason, "capability_approval_required");
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(gate.capabilityId, CAPABILITY_IDS.webSearch);
+  assert.deepEqual(gate.inputPreview, { question: webQuestion });
   assert.equal(webStep.type, "web_search");
-  assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.completed);
-  assert.equal(webStep.input.question, webQuestion);
-  assert.equal(webStep.output.citationCount, 1);
+  assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.paused);
+  assert.equal(webStep.input, null);
+  assert.equal(webStep.detail.approvalGate.id, gate.id);
   assert.equal(countSteps(run, "web_search:primary"), 1);
   assert.ok(safety.reasonCodes.includes("requires_approval"));
 });
 
+// A Capability call that fails before its gate (its policy refused the
+// input, say; here the registry throws) fails the Skill, and the step keeps
+// the error's message.
 test("web search failed Result persists structured error message", async () => {
   const agentRunService = createRunService();
   const webQuestion = "Search the web for the current launch date.";
-  const response = await runAgentRagWithPreApprovedCapabilities({
+  const response = await runAgentRag({
     accessScope,
     agentRunService,
-    preApproved: {
-      [CAPABILITY_IDS.webSearch]: {
-        approved: true,
-        decision: "approved",
-        source: "test_approval",
+    capabilityRegistry: {
+      execute: async () => {
+        throw new Error("Capability registry unavailable.");
       },
     },
     docIds: [],
@@ -565,7 +557,7 @@ test("web search failed Result persists structured error message", async () => {
     sessionId: "session-1",
     userId: "alice",
     webChatService: async () => {
-      throw new Error("Search provider unavailable.");
+      throw new Error("Web search should not run.");
     },
   });
 
@@ -575,7 +567,7 @@ test("web search failed Result persists structured error message", async () => {
   assert.equal(response.status, 502);
   assert.equal(webStep.type, "web_search");
   assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.failed);
-  assert.equal(webStep.error.message, "Search provider unavailable.");
+  assert.equal(webStep.error.message, "Capability registry unavailable.");
   assert.notEqual(webStep.error.message, "[object Object]");
 });
 
@@ -608,19 +600,12 @@ test("inventory persists workspace scope and stable step id", async () => {
   assert.equal(countSteps(run, "inventory:primary"), 1);
 });
 
-test("document discovery persists question, docIds, and stable step id", async () => {
+test("document discovery persists a paused step and gates its question and docIds", async () => {
   const agentRunService = createRunService();
   const discoveryQuestion = "Which document covers remote work policy?";
-  const response = await runAgentRagWithPreApprovedCapabilities({
+  const response = await runAgentRag({
     accessScope,
     agentRunService,
-    preApproved: {
-      [CAPABILITY_IDS.documentDiscovery]: {
-        approved: true,
-        decision: "approved",
-        source: "test_approval",
-      },
-    },
     docIds: [],
     question: discoveryQuestion,
     ragService: {
@@ -645,57 +630,33 @@ test("document discovery persists question, docIds, and stable step id", async (
 
   const run = await getRunForResponse({ agentRunService, response });
   const discoveryStep = getStep(run, "document_discovery:primary");
+  const [gate] = response.body.approvalGates;
 
   assert.equal(response.status, 200);
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(gate.capabilityId, CAPABILITY_IDS.documentDiscovery);
+  assert.deepEqual(gate.inputPreview, {
+    docIds: [],
+    question: discoveryQuestion,
+  });
   assert.equal(discoveryStep.type, "document_discovery");
-  assert.equal(discoveryStep.status, AGENT_RUN_STEP_STATUSES.completed);
-  assert.deepEqual(discoveryStep.input.docIds, []);
-  assert.equal(discoveryStep.input.question, discoveryQuestion);
-  assert.equal(discoveryStep.output.matchCount, 1);
+  assert.equal(discoveryStep.status, AGENT_RUN_STEP_STATUSES.paused);
+  assert.equal(discoveryStep.input, null);
+  assert.equal(discoveryStep.detail.approvalGate.id, gate.id);
   assert.equal(countSteps(run, "document_discovery:primary"), 1);
 });
 
-test("approved arxiv import persists sanitized topic and stable step id", async () => {
+test("arxiv import persists a paused step and gates its sanitized topic", async () => {
   const agentRunService = createRunService();
   const imports = [];
-  const response = await runAgentRagWithPreApprovedCapabilities({
+  const response = await runAgentRag({
     accessScope,
     agentRunService,
     arxivImportService: {
-      importTopic: async ({ accessScope: scopedAccess, maxResults, topic }) => {
-        imports.push({
-          accessScope: scopedAccess,
-          maxResults,
-          topic,
-        });
+      importTopic: async (request) => {
+        imports.push(request);
 
-        return {
-          failedCount: 0,
-          failedPapers: [],
-          foundCount: 1,
-          importedCount: 1,
-          importedPapers: [
-            {
-              absUrl: "https://arxiv.org/abs/2401.00001v1",
-              arxivId: "2401.00001v1",
-              docId: "doc-arxiv",
-              fileName: "arxiv-2401.00001.pdf",
-              status: "imported",
-              title: "Retrieval Augmented Generation for Archives",
-            },
-          ],
-          requestedMaxResults: maxResults,
-          skippedCount: 0,
-          skippedPapers: [],
-          topic,
-        };
-      },
-    },
-    preApproved: {
-      [CAPABILITY_IDS.arxivImportTopic]: {
-        approved: true,
-        decision: "approved",
-        source: "test_approval",
+        return {};
       },
     },
     docIds: [],
@@ -712,18 +673,23 @@ test("approved arxiv import persists sanitized topic and stable step id", async 
 
   const run = await getRunForResponse({ agentRunService, response });
   const arxivStep = getStep(run, "arxiv_import:primary");
+  const [gate] = response.body.approvalGates;
   const safety = buildStepReplaySafetyAssessment({
     step: arxivStep,
   });
 
   assert.equal(response.status, 200);
-  assert.equal(imports.length, 1);
-  assert.equal(imports[0].topic, "retrieval augmented generation");
+  assert.equal(imports.length, 0);
+  assert.equal(run.status, AGENT_RUN_STATUSES.waitingForUser);
+  assert.equal(gate.capabilityId, CAPABILITY_IDS.arxivImportTopic);
+  assert.deepEqual(gate.inputPreview, {
+    maxResults: DEFAULT_ARXIV_MAX_RESULTS,
+    topic: "retrieval augmented generation",
+  });
   assert.equal(arxivStep.type, "arxiv_import");
-  assert.equal(arxivStep.status, AGENT_RUN_STEP_STATUSES.completed);
-  assert.equal(arxivStep.input.topic, "retrieval augmented generation");
-  assert.equal(arxivStep.input.maxResults, imports[0].maxResults);
-  assert.equal(arxivStep.output.importedCount, 1);
+  assert.equal(arxivStep.status, AGENT_RUN_STEP_STATUSES.paused);
+  assert.equal(arxivStep.input, null);
+  assert.equal(arxivStep.detail.approvalGate.id, gate.id);
   assert.equal(countSteps(run, "arxiv_import:primary"), 1);
   assert.ok(safety.reasonCodes.includes("external_write"));
 });

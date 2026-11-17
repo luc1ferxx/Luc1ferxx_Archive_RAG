@@ -44,8 +44,6 @@ const buildInterruptStepDetail = (error = {}) => ({
   interruptType: error.type ?? null,
 });
 
-const CJK_PATTERN = /[\u3400-\u9fff]/;
-
 const ARXIV_COMMAND_PATTERN =
   /\b(arxiv|paper|papers|pdfs?|publications?|preprints?|fetch|download|import|ingest|collect|search|topic|about|on|for|latest|recent|top)\b|论文|文章|预印本|抓取|下载|导入|收集|搜索|检索|主题|方向|关于|有关|最新|最近|篇/gi;
 
@@ -190,58 +188,6 @@ export const buildWorkspaceActionSkillInput = ({
   };
 };
 
-const formatPaperLine = (paper, index, language) => {
-  const id = paper.arxivId ? `arXiv:${paper.arxivId}` : "arXiv";
-  const doc = paper.docId ? `docId: ${paper.docId}` : "not indexed";
-
-  if (language === "zh") {
-    return `${index + 1}. ${paper.title || id}（${id}，${doc}）`;
-  }
-
-  return `${index + 1}. ${paper.title || id} (${id}, ${doc})`;
-};
-
-const formatArxivImportAnswer = ({ question, result }) => {
-  const language = CJK_PATTERN.test(question) ? "zh" : "en";
-  const completedPapers = [
-    ...(result.importedPapers ?? []),
-    ...(result.skippedPapers ?? []),
-  ];
-  const lines = completedPapers.map((paper, index) =>
-    formatPaperLine(paper, index, language)
-  );
-
-  if (language === "zh") {
-    return [
-      `已从 arXiv 搜索主题 "${result.topic}"，找到 ${result.foundCount} 篇；新导入 ${result.importedCount} 篇，已存在 ${result.skippedCount} 篇，失败 ${result.failedCount} 篇。`,
-      ...lines,
-      ...(result.failedPapers?.length
-        ? [
-            "失败项：",
-            ...result.failedPapers.map(
-              (paper, index) =>
-                `${index + 1}. ${paper.title || paper.arxivId}: ${paper.error}`
-            ),
-          ]
-        : []),
-    ].join("\n");
-  }
-
-  return [
-    `Searched arXiv for "${result.topic}". Found ${result.foundCount}; imported ${result.importedCount}, already indexed ${result.skippedCount}, failed ${result.failedCount}.`,
-    ...lines,
-    ...(result.failedPapers?.length
-      ? [
-          "Failures:",
-          ...result.failedPapers.map(
-            (paper, index) =>
-              `${index + 1}. ${paper.title || paper.arxivId}: ${paper.error}`
-          ),
-        ]
-      : []),
-  ].join("\n");
-};
-
 const requireCapabilityRegistry = (capabilityRegistry, capabilityId) => {
   if (!capabilityRegistry?.execute) {
     throw new Error(
@@ -250,6 +196,24 @@ const requireCapabilityRegistry = (capabilityRegistry, capabilityId) => {
   }
 
   return capabilityRegistry;
+};
+
+// The Capabilities of the arXiv import, workspace action, Web search and
+// discovery Skills ask the user first (approvalPolicy user_confirmation), and
+// a request carries no approval: the call throws the approval interrupt and
+// the run pauses at the gate, or the policy refuses the input before that.
+// Once the gate is approved, the capability_call step runs the Capability and
+// answers (agent-run-step-handlers/capability-steps.js). A call that returns
+// anyway fails the Skill; nothing here answers from its result.
+const executeGatedCapability = async (capabilityRegistry, capabilityId, payload) => {
+  await requireCapabilityRegistry(capabilityRegistry, capabilityId).execute(
+    capabilityId,
+    payload
+  );
+
+  throw new Error(
+    `${capabilityId} requires approval and runs only from the approved capability_call step.`
+  );
 };
 
 // What an Office document's pageCount counts: rag/document-loader.js makes a
@@ -290,35 +254,6 @@ const buildInventoryAnswer = (documents) => {
       documents.length === 1 ? "" : "s"
     }:`,
     ...documents.map((document, index) => `${index + 1}. ${getDocumentLabel(document)}`),
-  ].join("\n");
-};
-
-const getProfile = (document = {}) =>
-  document.profile && typeof document.profile === "object"
-    ? document.profile
-    : {
-        summary: document.summary ?? "",
-        tags: document.tags ?? [],
-        entities: document.entities ?? [],
-      };
-
-const buildDiscoveryAnswer = (matches) => {
-  if (matches.length === 0) {
-    return "I could not find a strong matching document from the current workspace metadata.";
-  }
-
-  return [
-    `I found ${matches.length} likely matching document${
-      matches.length === 1 ? "" : "s"
-    }:`,
-    ...matches.map(({ document }) => {
-      const profile = getProfile(document);
-      const tags = (profile.tags ?? []).slice(0, 4);
-      const tagText = tags.length > 0 ? ` Tags: ${tags.join(", ")}.` : "";
-      const summaryText = profile.summary ? ` ${profile.summary}` : "";
-
-      return `- ${document.fileName}.${tagText}${summaryText}`;
-    }),
   ].join("\n");
 };
 
@@ -456,53 +391,18 @@ const createArxivImportSkill = () => ({
     question,
   }) => {
     const { maxResults, topic } = buildArxivImportSkillInput(question);
-    const result = await requireCapabilityRegistry(
-      capabilityRegistry,
-      CAPABILITY_IDS.arxivImportTopic
-    ).execute(CAPABILITY_IDS.arxivImportTopic, {
-      accessScope,
-      input: {
-        maxResults,
-        topic,
-      },
-    });
-    const citations = [
-      ...(result.importedPapers ?? []),
-      ...(result.skippedPapers ?? []),
-    ].map((paper) => ({
-      arxivId: paper.arxivId,
-      title: paper.title,
-      url: paper.absUrl,
-      docId: paper.docId,
-      fileName: paper.fileName,
-    }));
 
-    return {
-      value: result,
-      text: formatArxivImportAnswer({
-        question,
-        result,
-      }),
-      citations,
-      abstained: result.foundCount === 0,
-      traceDetail: {
-        topic: result.topic,
-        requestedMaxResults: result.requestedMaxResults,
-        foundCount: result.foundCount,
-        importedCount: result.importedCount,
-        skippedCount: result.skippedCount,
-        failedCount: result.failedCount,
-        papers: [
-          ...(result.importedPapers ?? []),
-          ...(result.skippedPapers ?? []),
-        ].map((paper) => ({
-          arxivId: paper.arxivId,
-          title: paper.title,
-          docId: paper.docId,
-          status: paper.status,
-        })),
-      },
-    };
+    return executeGatedCapability(
+      capabilityRegistry,
+      CAPABILITY_IDS.arxivImportTopic,
+      {
+        accessScope,
+        input: {
+          maxResults,
+          topic,
+        },
+      }
+    );
   },
 });
 
@@ -533,7 +433,6 @@ const createWorkspaceActionSkill = () => ({
     docIds,
     plan,
     question,
-    services,
   }) => {
     const actionInput = buildWorkspaceActionSkillInput({
       docIds,
@@ -545,24 +444,14 @@ const createWorkspaceActionSkill = () => ({
       throw new Error("Workspace action capability could not be resolved.");
     }
 
-    const value = await requireCapabilityRegistry(
+    return executeGatedCapability(
       capabilityRegistry,
-      actionInput.capabilityId
-    ).execute(actionInput.capabilityId, {
-      accessScope,
-      input: actionInput.input,
-      services,
-    });
-
-    return {
-      value,
-      text: value.text,
-      citations: value.citations ?? [],
-      abstained: false,
-      traceDetail: {
-        capabilityId: actionInput.capabilityId,
-      },
-    };
+      actionInput.capabilityId,
+      {
+        accessScope,
+        input: actionInput.input,
+      }
+    );
   },
 });
 
@@ -588,24 +477,13 @@ const createWebSearchSkill = () => ({
       summary: "Use web context only after document evidence is checked.",
     },
   ],
-  execute: async ({ accessScope, capabilityRegistry, question }) => {
-    const value = await requireCapabilityRegistry(
-      capabilityRegistry,
-      CAPABILITY_IDS.webSearch
-    ).execute(CAPABILITY_IDS.webSearch, {
+  execute: async ({ accessScope, capabilityRegistry, question }) =>
+    executeGatedCapability(capabilityRegistry, CAPABILITY_IDS.webSearch, {
       accessScope,
       input: {
         question,
       },
-    });
-
-    return {
-      value,
-      text: value.text,
-      citations: value.citations ?? [],
-      abstained: false,
-    };
-  },
+    }),
 });
 
 const createInventorySkill = () => ({
@@ -676,37 +554,18 @@ const createDocumentDiscoverySkill = () => ({
     capabilityRegistry,
     docIds,
     question,
-  }) => {
-    const discovery = await requireCapabilityRegistry(
+  }) =>
+    executeGatedCapability(
       capabilityRegistry,
-      CAPABILITY_IDS.documentDiscovery
-    ).execute(CAPABILITY_IDS.documentDiscovery, {
-      accessScope,
-      input: {
-        docIds,
-        question,
-      },
-    });
-    const selectedDocIds = new Set(docIds);
-    const matches = (discovery.matches ?? []).filter(
-      ({ document }) =>
-        selectedDocIds.size === 0 || selectedDocIds.has(document?.docId)
-    );
-    const text = buildDiscoveryAnswer(matches);
-
-    return {
-      value: {
-        text,
-        matches,
-      },
-      text,
-      citations: [],
-      abstained: false,
-      traceDetail: {
-        matchCount: matches.length,
-      },
-    };
-  },
+      CAPABILITY_IDS.documentDiscovery,
+      {
+        accessScope,
+        input: {
+          docIds,
+          question,
+        },
+      }
+    ),
 });
 
 const createResearchBriefSkill = () => ({

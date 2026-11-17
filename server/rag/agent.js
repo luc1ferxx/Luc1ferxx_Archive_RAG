@@ -1060,7 +1060,6 @@ const runAgentRagInScope = async ({
         recordWorkingMemoryClaimSupport,
         recordWorkingMemoryGaps,
         researchBrief: executionResult.researchBrief,
-        shouldRunWeb: executionResult.shouldRunWeb,
         skippedWebBecauseBudget: executionResult.skippedWebBecauseBudget,
         trace,
         webResult: executionResult.webResult,

@@ -51,7 +51,6 @@ const getPrimaryVerificationSkill = ({
   documentRagSkill,
   primaryCustomResult,
   researchBrief,
-  webResult,
 } = {}) => {
   if (primaryCustomResult) {
     return primaryCustomResult;
@@ -62,14 +61,6 @@ const getPrimaryVerificationSkill = ({
       id: "research_brief",
       version: researchBrief.version ?? "1.0.0",
       label: "Research Brief",
-    };
-  }
-
-  if (webResult?.ok) {
-    return {
-      id: webResult.skillId ?? "web_search",
-      version: webResult.skillVersion ?? "1.0.0",
-      label: webResult.label ?? "Web Search",
     };
   }
 
@@ -94,17 +85,18 @@ const buildFinalizedResearchBriefText = ({ finalizer } = {}) => [
   finalizer.text,
 ].join("\n");
 
+// No Web answer reaches this verification: Web search answers only from its
+// approved capability_call step, never inside the outer plan
+// (agent-web-runner.js).
 export const shouldRunFinalAnswerVerification = ({
   agentMode,
   primaryCustomResult,
   researchBrief,
-  webResult,
 } = {}) =>
   Boolean(
     primaryCustomResult ||
       agentMode === SKILL_CHAIN_MODE ||
-      researchBrief ||
-      webResult?.ok
+      researchBrief
   );
 
 export const runFinalAnswerVerification = ({
@@ -120,14 +112,12 @@ export const runFinalAnswerVerification = ({
   recordWorkingMemoryClaimSupport,
   recordWorkingMemoryGaps,
   researchBrief,
-  webResult,
 } = {}) => {
   if (
     !shouldRunFinalAnswerVerification({
       agentMode,
       primaryCustomResult,
       researchBrief,
-      webResult,
     })
   ) {
     return {
@@ -141,7 +131,6 @@ export const runFinalAnswerVerification = ({
     documentRagSkill,
     primaryCustomResult,
     researchBrief,
-    webResult,
   });
   const verificationAnswerText =
     agentMode === "research_brief" && Array.isArray(researchBrief?.findings)

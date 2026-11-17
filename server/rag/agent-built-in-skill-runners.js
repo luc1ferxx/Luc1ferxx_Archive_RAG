@@ -11,10 +11,6 @@ import {
 } from "./skills/built-ins.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
 import { buildFailedSkillResult } from "./skills/registry.js";
-import {
-  buildCapabilityArtifactIdempotencyKey,
-  isWorkspaceArtifactWriteError,
-} from "./capabilities/artifacts.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const noop = () => {};
@@ -25,6 +21,15 @@ const INVENTORY_STEP_ID = "inventory:primary";
 
 const buildResultStepError = (fallbackMessage) => (result = {}) =>
   buildStepError(result, fallbackMessage);
+
+// The arXiv import, workspace action and document discovery Skills call a
+// gated Capability, which never answers inside the outer plan: its approval
+// interrupt pauses the Skill's step and the run (runLifecycleStep and
+// executeAgentSkill rethrow it), and the approved capability_call step runs
+// the Capability and answers (agent-run-step-handlers/capability-steps.js).
+// What their runners get back is a failed Skill result: input the
+// Capability's policy refused, no registry, or the Skill's own invariant
+// error (skills/built-ins.js).
 
 export const runArxivImportSkill = async ({
   accessScope,
@@ -65,23 +70,9 @@ export const runArxivImportSkill = async ({
     return null;
   }
 
-  const arxivStartInput = buildArxivImportSkillInput(question);
+  const arxivInput = buildArxivImportSkillInput(question);
   const arxivResult = await runLifecycleStep({
     buildError: buildResultStepError("Unable to import arXiv papers."),
-    buildOutput: (result) =>
-      buildTextCitationStepOutput(result, {
-        failedCount: result.value?.failedCount ?? 0,
-        foundCount: result.value?.foundCount ?? 0,
-        importedCount: result.value?.importedCount ?? 0,
-        skippedCount: result.value?.skippedCount ?? 0,
-      }),
-    completeDetail: ({ result }) => ({
-      foundCount: result.value?.foundCount ?? 0,
-      importedCount: result.value?.importedCount ?? 0,
-      requestedMaxResults: result.value?.requestedMaxResults ?? null,
-      skippedCount: result.value?.skippedCount ?? 0,
-      topic: result.value?.topic ?? arxivStartInput.topic,
-    }),
     execute: () =>
       executeObservedSkill(
         arxivImportSkill,
@@ -96,63 +87,45 @@ export const runArxivImportSkill = async ({
           phase: "primary",
         }
       ),
-    failDetail: ({ result }) => ({
-      requestedMaxResults:
-        result?.value?.requestedMaxResults ?? arxivStartInput.maxResults,
-      topic: result?.value?.topic ?? arxivStartInput.topic,
-    }),
+    failDetail: {
+      requestedMaxResults: arxivInput.maxResults,
+      topic: arxivInput.topic,
+    },
     id: ARXIV_IMPORT_STEP_ID,
-    input: arxivStartInput,
+    input: arxivInput,
     label: "arXiv Import",
     persistedInput: null,
     stepLifecycle,
     type: "arxiv_import",
   });
   recordSkillResult(arxivResult);
-  const importedCount = arxivResult.value?.importedCount ?? 0;
-  const skippedCount = arxivResult.value?.skippedCount ?? 0;
-  const processedCount = importedCount + skippedCount;
-  const arxivInput = {
-    question: normalizeText(question),
-    maxResults:
-      arxivResult.value?.requestedMaxResults ?? arxivStartInput.maxResults,
-    topic: arxivResult.value?.topic ?? arxivStartInput.topic,
-  };
+  const failure = serializeError(
+    arxivResult.error,
+    "Unable to import arXiv papers."
+  );
 
   addTraceStep({
     id: ARXIV_IMPORT_STEP_ID,
     type: "arxiv_import",
     label: "arXiv Import",
-    status: arxivResult.ok ? "completed" : "failed",
-    summary: arxivResult.ok
-      ? `Processed ${processedCount} arXiv paper${
-          processedCount === 1 ? "" : "s"
-        } (${importedCount} imported, ${skippedCount} already indexed).`
-      : `arXiv import failed: ${serializeError(
-          arxivResult.error,
-          "Unable to import arXiv papers."
-        )}`,
-    input: arxivInput,
-    output: buildTextCitationStepOutput(arxivResult, {
-      failedCount: arxivResult.value?.failedCount ?? 0,
-      foundCount: arxivResult.value?.foundCount ?? 0,
-      importedCount,
-      skippedCount,
-    }),
+    status: "failed",
+    summary: `arXiv import failed: ${failure}`,
+    input: {
+      question: normalizeText(question),
+      maxResults: arxivInput.maxResults,
+      topic: arxivInput.topic,
+    },
+    output: null,
     error: buildStepError(arxivResult, "Unable to import arXiv papers."),
-    detail: buildSkillTraceDetail(arxivResult, arxivResult.traceDetail ?? {}),
+    detail: buildSkillTraceDetail(arxivResult, {}),
   });
 
-  return arxivResult.ok ? arxivResult.text : `arXiv import unavailable: ${serializeError(
-    arxivResult.error,
-    "Unable to import arXiv papers."
-  )}`;
+  return `arXiv import unavailable: ${failure}`;
 };
 
 export const runWorkspaceActionSkill = async ({
   accessScope,
   addTraceStep = noop,
-  agentRunId,
   buildSkillTraceDetail = (result) => result,
   capabilityRegistry,
   docIds = [],
@@ -171,68 +144,37 @@ export const runWorkspaceActionSkill = async ({
     plan,
     question,
   });
-  const normalizedRunId = normalizeText(agentRunId);
-  const services = normalizedRunId
-    ? {
-        artifactExecution: {
-          idempotencyKey: buildCapabilityArtifactIdempotencyKey({
-            parts: [
-              normalizedRunId,
-              WORKSPACE_ACTION_STEP_ID,
-              actionInput.capabilityId,
-            ],
-          }),
-          sourceRunId: normalizedRunId,
-        },
-      }
-    : undefined;
   const actionResult = await executeObservedSkill(workspaceActionSkill, {
     accessScope,
     capabilityRegistry,
     docIds,
     plan,
     question,
-    services,
   });
   recordSkillResult(actionResult);
+  const failure = serializeError(
+    actionResult.error,
+    "Unable to execute workspace action."
+  );
 
   addTraceStep({
     id: WORKSPACE_ACTION_STEP_ID,
     type: "capability_call",
     label: "Workspace Action",
-    status: actionResult.ok ? "completed" : "failed",
-    summary: actionResult.ok
-      ? `Executed ${actionInput.capabilityId}.`
-      : `Workspace action failed: ${serializeError(
-          actionResult.error,
-          "Unable to execute workspace action."
-        )}`,
+    status: "failed",
+    summary: `Workspace action failed: ${failure}`,
     input: {
       capabilityId: actionInput.capabilityId,
       ...actionInput.input,
     },
-    output: buildTextCitationStepOutput(actionResult, {
-      capabilityId: actionInput.capabilityId,
-    }),
+    output: null,
     error: buildStepError(actionResult, "Unable to execute workspace action."),
     detail: buildSkillTraceDetail(actionResult, {
       capabilityId: actionInput.capabilityId,
     }),
   });
 
-  if (
-    !actionResult.ok &&
-    isWorkspaceArtifactWriteError(actionResult.error)
-  ) {
-    throw actionResult.error;
-  }
-
-  return actionResult.ok
-    ? actionResult.text
-    : `Workspace action unavailable: ${serializeError(
-        actionResult.error,
-        "Unable to execute workspace action."
-      )}`;
+  return `Workspace action unavailable: ${failure}`;
 };
 
 export const runResearchBriefSkill = async ({
@@ -462,10 +404,6 @@ export const runDocumentDiscoverySkill = async ({
   };
   const discoveryResult = await runLifecycleStep({
     buildError: buildResultStepError("Unable to inspect workspace metadata."),
-    buildOutput: (result) =>
-      buildTextCitationStepOutput(result, {
-        matchCount: result.value?.matches?.length ?? 0,
-      }),
     execute: () =>
       executeObservedSkill(discoverySkill, {
         capabilityRegistry,
@@ -482,42 +420,27 @@ export const runDocumentDiscoverySkill = async ({
     type: "document_discovery",
   });
   recordSkillResult(discoveryResult);
-  const matches = discoveryResult.value?.matches ?? [];
-  const discoveryAnswer = discoveryResult.ok
-    ? discoveryResult.text
-    : `Document discovery unavailable: ${serializeError(
-        discoveryResult.error,
-        "Unable to inspect workspace metadata."
-      )}`;
+  const failure = serializeError(
+    discoveryResult.error,
+    "Unable to inspect workspace metadata."
+  );
 
   addTraceStep({
     id: DOCUMENT_DISCOVERY_STEP_ID,
     type: "document_discovery",
     label: "Document Discovery",
-    status: discoveryResult.ok ? "completed" : "failed",
-    summary:
-      discoveryResult.ok && matches.length === 0
-        ? "No strong metadata match found."
-        : discoveryResult.ok
-          ? `Found ${matches.length} likely matching document${
-              matches.length === 1 ? "" : "s"
-            }.`
-          : `Document discovery failed: ${serializeError(
-              discoveryResult.error,
-              "Unable to inspect workspace metadata."
-            )}`,
+    status: "failed",
+    summary: `Document discovery failed: ${failure}`,
     input: discoveryInput,
-    output: buildTextCitationStepOutput(discoveryResult, {
-      matchCount: matches.length,
-    }),
+    output: null,
     error: buildStepError(
       discoveryResult,
       "Unable to inspect workspace metadata."
     ),
     detail: buildSkillTraceDetail(discoveryResult, {
-      matchCount: matches.length,
+      matchCount: 0,
     }),
   });
 
-  return discoveryAnswer;
+  return `Document discovery unavailable: ${failure}`;
 };
