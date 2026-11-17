@@ -19,8 +19,6 @@ import {
   guardRunnableEntryPoints,
 } from "../rag/langgraph/langsmith-guard.js";
 import { ArchiveRagChatModel } from "../rag/langgraph/model.js";
-import { toLangChainPromptTemplate } from "../rag/langgraph/prompts.js";
-import { ArchiveRagRetriever } from "../rag/langgraph/retriever.js";
 import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 
 const serverDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -133,14 +131,14 @@ const withLangSmithSwitchedOnLater = async (action) => {
     },
   });
 
-  const template = toLangChainPromptTemplate(
-    createChatPromptTemplate([
-      ["system", "Answer from the evidence."],
-      ["human", "{question}"],
-    ])
-  );
+  // The chat model the planners call (planner-model.js), and a prompt in the
+  // shape a lib/prompt-template.js chat template renders, which the model
+  // takes as is.
   const model = new ArchiveRagChatModel();
-  const retriever = new ArchiveRagRetriever({ docIds: ["doc-a"] });
+  const prompt = createChatPromptTemplate([
+    ["system", "Answer from the evidence."],
+    ["human", "{question}"],
+  ]).invoke({ question: SECRET });
 
   globalThis.fetch = async (url, init = {}) => {
     const body = init.body == null ? "" : Buffer.from(await new Response(init.body).arrayBuffer()).toString("utf8");
@@ -157,7 +155,7 @@ const withLangSmithSwitchedOnLater = async (action) => {
   };
 
   try {
-    return await action({ flush, model, providerCalls, requests, retriever, switchOn, template });
+    return await action({ flush, model, prompt, providerCalls, requests, switchOn });
   } finally {
     for (const [name, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[name];
@@ -168,71 +166,76 @@ const withLangSmithSwitchedOnLater = async (action) => {
   }
 };
 
-test("adapter runnables and what their own methods compose refuse before LangChain can trace the input", async () => {
+test("the chat model, its structured runnable and what their own methods compose refuse before LangChain can trace the input", async () => {
   const isRefusal = (error) => error.code === LANGSMITH_TRACING_ENABLED_CODE;
   const LANGSMITH_SETTINGS = ["LANGSMITH_API_KEY", "LANGSMITH_ENDPOINT", "LANGSMITH_TRACING"];
   const before = LANGSMITH_SETTINGS.map((name) => process.env[name]);
 
-  await withLangSmithSwitchedOnLater(async ({ flush, model, providerCalls, requests, retriever, switchOn, template }) => {
-    const values = { question: SECRET };
+  await withLangSmithSwitchedOnLater(async ({ flush, model, prompt, providerCalls, requests, switchOn }) => {
     const passThrough = RunnableLambda.from((value) => value);
     const structured = model.withStructuredOutput(
       { additionalProperties: false, properties: {}, type: "object" },
       { name: "probe" }
     );
+    // The model and its structured runnable refuse withFallbacks and
+    // withRetry (rag/openai.js owns retries), so what the guard does with
+    // those two is pinned on a runnable it guards directly, as model.js
+    // guards its own.
+    const guarded = guardRunnableEntryPoints(RunnableLambda.from((value) => value));
     // Composed while tracing is off, as a chain built at start-up would be.
     const built = {
-      "model.pipe": [model.pipe(passThrough), SECRET],
-      "model.withConfig": [model.withConfig({ runName: "answer" }), SECRET],
-      "retriever.pipe": [retriever.pipe(passThrough), SECRET],
-      "retriever.withConfig": [retriever.withConfig({ runName: "search" }), SECRET],
-      "structured.pipe": [structured.pipe(passThrough), SECRET],
-      "template.assign": [template.assign({ extra: passThrough }), values],
-      "template.pipe(model)": [template.pipe(model), values],
-      "template.pipe(model).pipe(...)": [template.pipe(model).pipe(passThrough), values],
-      "template.withConfig": [template.withConfig({ runName: "answer" }), values],
-      "template.withFallbacks": [template.withFallbacks([template]), values],
-      "template.withRetry": [template.withRetry(), values],
+      "guarded.withFallbacks": guarded.withFallbacks([passThrough]),
+      "guarded.withRetry": guarded.withRetry(),
+      "model.assign": model.assign({ extra: passThrough }),
+      "model.pipe": model.pipe(passThrough),
+      "model.pipe(...).pipe(...)": model.pipe(passThrough).pipe(passThrough),
+      "model.withConfig": model.withConfig({ runName: "answer" }),
+      "structured.pipe": structured.pipe(passThrough),
+      "structured.withConfig": structured.withConfig({ runName: "plan" }),
     };
 
     switchOn();
 
-    for (const [label, [runnable, input]] of Object.entries(built)) {
-      await assert.rejects(runnable.invoke(input), isRefusal, `${label}.invoke`);
-      await assert.rejects(runnable.stream(input), isRefusal, `${label}.stream`);
-      await assert.rejects(runnable.batch([input]), isRefusal, `${label}.batch`);
+    for (const [label, runnable] of Object.entries(built)) {
+      await assert.rejects(runnable.invoke(prompt), isRefusal, `${label}.invoke`);
+      await assert.rejects(runnable.stream(prompt), isRefusal, `${label}.stream`);
+      await assert.rejects(runnable.batch([prompt]), isRefusal, `${label}.batch`);
     }
 
     for (const [label, call] of [
-      ["template.invoke", () => template.invoke(values)],
-      ["template.batch", () => template.batch([values])],
-      ["template.stream", () => template.stream(values)],
+      ["model.invoke", () => model.invoke(prompt)],
+      ["model.batch", () => model.batch([prompt])],
+      ["model.stream", () => model.stream(prompt)],
+      ["structured.invoke", () => structured.invoke(prompt)],
+      ["structured.batch", () => structured.batch([prompt])],
+      ["structured.stream", () => structured.stream(prompt)],
       // Composing while tracing is on refuses at once.
-      ["template.pipe", () => template.pipe(model)],
+      ["model.pipe", () => model.pipe(passThrough)],
       ["model.withConfig", () => model.withConfig({})],
+      ["structured.pipe", () => structured.pipe(passThrough)],
     ]) {
       await assert.rejects(async () => call(), isRefusal, label);
     }
 
     // streamEvents returns its stream synchronously, so it refuses so too;
     // streamLog is a generator and refuses on its first step.
-    assert.throws(() => template.streamEvents(values, { version: "v2" }), isRefusal);
-    await assert.rejects(built["template.pipe(model)"][0].streamLog(values).next(), isRefusal);
+    assert.throws(() => model.streamEvents(prompt, { version: "v2" }), isRefusal);
+    await assert.rejects(built["model.pipe"].streamLog(prompt).next(), isRefusal);
 
     await flush();
     assert.deepEqual(requests, [], "nothing was sent to LangSmith");
     assert.deepEqual(providerCalls, [], "no model call ran");
 
     // The boundary the header of langsmith-guard.js describes: a composition
-    // another runnable starts configures its callbacks before any adapter
-    // code runs. The adapter step still refuses, but the chain input has
-    // already gone to the tracer -- which is why phase 2's outer entries must
-    // check first. It also shows this test would see a leak.
-    await assert.rejects(RunnableSequence.from([passThrough, template, model]).invoke(values), isRefusal);
+    // another runnable starts configures its callbacks before any model code
+    // runs. The model step still refuses, but the chain input has already
+    // gone to the tracer -- which is why phase 2's outer entries must check
+    // first. It also shows this test would see a leak.
+    await assert.rejects(RunnableSequence.from([passThrough, model]).invoke(prompt), isRefusal);
     await flush();
     assert.ok(
       requests.some(({ carriesSecret }) => carriesSecret),
-      "a foreign composition's input reaches LangSmith before the adapter refuses"
+      "a foreign composition's input reaches LangSmith before the model refuses"
     );
     assert.deepEqual(providerCalls, []);
   });
