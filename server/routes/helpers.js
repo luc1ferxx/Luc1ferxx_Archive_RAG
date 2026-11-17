@@ -430,8 +430,12 @@ export const sendBufferedFile = ({
     return;
   }
 
-  const start = match[1] ? Number.parseInt(match[1], 10) : 0;
-  const end = match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
+  // "bytes=-N" is the last N bytes (RFC 9110 suffix range); "bytes=-0" and
+  // "bytes=-" select nothing (416).
+  const start = match[1]
+    ? Number.parseInt(match[1], 10)
+    : Math.max(0, totalSize - Number.parseInt(match[2], 10));
+  const end = match[1] && match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
 
   if (
     !Number.isInteger(start) ||
