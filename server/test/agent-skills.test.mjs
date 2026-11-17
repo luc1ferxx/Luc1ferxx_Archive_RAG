@@ -541,6 +541,10 @@ test("agent rag pauses arxiv import behind a capability approval gate", async ()
     response.body.agentTrace.map((step) => step.type),
     ["plan", "capability_approval_gate"]
   );
+  // Reaching the gate spends the run's arXiv budget, so a run cannot open
+  // more import gates than maxArxivPaperFetches allows.
+  assert.equal(response.body.agentObservability.budget.used.arxivPaperFetches, 1);
+  assert.equal(response.body.agentObservability.budget.limits.maxArxivPaperFetches, 1);
 });
 
 // The request pauses at the arXiv gate; the approval runs the import and

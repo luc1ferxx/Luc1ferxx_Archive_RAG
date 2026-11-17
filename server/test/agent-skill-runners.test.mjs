@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAgentBudget } from "../rag/agent-budget.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
 import {
+  runArxivImportSkill,
   runInventorySkill,
   runWorkspaceActionSkill,
 } from "../rag/agent-built-in-skill-runners.js";
@@ -65,6 +66,42 @@ test("skill runners record web search budget skip without executing web skill", 
   assert.equal(result.webResult, null);
   assert.equal(result.skippedWebBecauseBudget, true);
   assert.equal(trace[0].tool, "Web Search");
+  assert.equal(tracker.getSkillRuns()[0].status, "skipped");
+  assert.equal(tracker.getSkillRuns()[0].phase, "primary");
+});
+
+test("skill runners record arXiv import budget skip without reaching its gate", async () => {
+  const budgetState = createAgentBudget({
+    maxArxivPaperFetches: 0,
+  });
+  const trace = [];
+  const tracker = createAgentSkillTracker({
+    budgetState,
+    selectedSkills: [],
+  });
+  const arxivImportSkill = createSkill({
+    budgetKey: "arxivPaperFetches",
+    id: "arxiv_import",
+    kind: "built_in",
+    label: "arXiv Import",
+    execute: async () => {
+      throw new Error("arXiv import should not execute.");
+    },
+  });
+
+  const result = await runArxivImportSkill({
+    addBudgetLimitTrace: (step) => trace.push(step),
+    arxivImportSkill,
+    budgetState,
+    buildSkillTraceDetail: tracker.buildSkillTraceDetail,
+    executeObservedSkill: tracker.executeObservedSkill,
+    question: "Fetch 2 arXiv papers about retrieval augmented generation",
+    recordSkippedSkill: tracker.recordSkippedSkill,
+    recordSkillResult: tracker.recordSkillResult,
+  });
+
+  assert.equal(result, null);
+  assert.equal(trace[0].tool, "arXiv Import");
   assert.equal(tracker.getSkillRuns()[0].status, "skipped");
   assert.equal(tracker.getSkillRuns()[0].phase, "primary");
 });
