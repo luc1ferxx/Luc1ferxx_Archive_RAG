@@ -34,7 +34,7 @@ export const useAgentRunActions = ({
   refreshAgentRunRecovery,
   setIsLoading,
   setSelectedSource,
-  updateConversationTurn,
+  updateTurnByRunId,
   t,
 }) => {
   const handleAgentApprovalAction = useCallback(
@@ -65,11 +65,14 @@ export const useAgentRunActions = ({
         if (action === "approve" && result?.response) {
           const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
 
-          updateConversationTurn(turnIndex, {
-            question: turn.question,
-            answer: nextAnswer,
-          });
-          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+          if (
+            updateTurnByRunId(runId, {
+              question: turn.question,
+              answer: nextAnswer,
+            })
+          ) {
+            setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+          }
           await refreshAgentRunRecovery();
           message.success(t("app.approvalRecorded"));
           return;
@@ -78,7 +81,7 @@ export const useAgentRunActions = ({
         const updatedGates = result?.run?.approvalGates ?? [];
         const updatedSteps = result?.run?.steps ?? [];
 
-        updateConversationTurn(turnIndex, (currentTurn) => ({
+        updateTurnByRunId(runId, (currentTurn) => ({
           ...currentTurn,
           answer: {
             ...currentTurn.answer,
@@ -107,7 +110,7 @@ export const useAgentRunActions = ({
       refreshAgentRunRecovery,
       setIsLoading,
       setSelectedSource,
-      updateConversationTurn,
+      updateTurnByRunId,
       t,
     ]
   );
@@ -128,11 +131,14 @@ export const useAgentRunActions = ({
         const result = await requestAgentRunStepRetry(runId, step.id);
         const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
 
-        updateConversationTurn(turnIndex, {
-          question: turn.question,
-          answer: nextAnswer,
-        });
-        setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+        if (
+          updateTurnByRunId(runId, {
+            question: turn.question,
+            answer: nextAnswer,
+          })
+        ) {
+          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+        }
         await refreshAgentRunRecovery();
         message.success(t("app.retryComplete"));
       } catch (error) {
@@ -148,7 +154,7 @@ export const useAgentRunActions = ({
       refreshAgentRunRecovery,
       setIsLoading,
       setSelectedSource,
-      updateConversationTurn,
+      updateTurnByRunId,
       t,
     ]
   );
@@ -186,11 +192,14 @@ export const useAgentRunActions = ({
         if (turn) {
           const nextAnswer = buildAgentRunActionAnswer(turn.answer, result);
 
-          updateConversationTurn(resolvedTurnIndex, {
-            question: turn.question,
-            answer: nextAnswer,
-          });
-          setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+          if (
+            updateTurnByRunId(resolvedRunId, {
+              question: turn.question,
+              answer: nextAnswer,
+            })
+          ) {
+            setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
+          }
         }
 
         await refreshAgentRunRecovery();
@@ -208,7 +217,7 @@ export const useAgentRunActions = ({
       refreshAgentRunRecovery,
       setIsLoading,
       setSelectedSource,
-      updateConversationTurn,
+      updateTurnByRunId,
       t,
     ]
   );

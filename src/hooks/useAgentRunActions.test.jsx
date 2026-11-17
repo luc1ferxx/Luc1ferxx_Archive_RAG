@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { vi } from "vitest";
 import { useAgentRunActions } from "./useAgentRunActions";
+import { useChatSession } from "./useChatSession";
 
 const messageError = vi.fn();
 const messageInfo = vi.fn();
@@ -40,7 +41,7 @@ const createHookDependencies = () => ({
   setIsLoading: vi.fn(),
   setSelectedSource: vi.fn(),
   t: (key) => key,
-  updateConversationTurn: vi.fn(),
+  updateTurnByRunId: vi.fn(),
 });
 
 beforeEach(() => {
@@ -131,7 +132,7 @@ describe("useAgentRunActions capability approval binding", () => {
       });
     });
 
-    const [, update] = dependencies.updateConversationTurn.mock.calls[0];
+    const [, update] = dependencies.updateTurnByRunId.mock.calls[0];
     const nextTurn = update({ answer: { agentAnswer: "Approve Web Search?" }, question: "q" });
     expect(nextTurn.answer.agentAnswer).toBe("app.approvalDeniedAnswer");
     expect(nextTurn.answer.clarification.needed).toBe(false);
@@ -159,4 +160,68 @@ describe("useAgentRunActions capability approval binding", () => {
       expect(messageError).toHaveBeenCalledWith("app.approvalMissing");
     }
   );
+});
+
+describe("useAgentRunActions with the chat session", () => {
+  it("drops an approval that resolves after New chat, so the new turn at its old position is unchanged", async () => {
+    let resolveApproval;
+    requestAgentRunActionMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveApproval = resolve;
+      })
+    );
+    const refreshAgentRunRecovery = vi.fn().mockResolvedValue([]);
+    const setSelectedSource = vi.fn();
+    const { result } = renderHook(() => {
+      const session = useChatSession();
+
+      return {
+        actions: useAgentRunActions({
+          ...session,
+          refreshAgentRunRecovery,
+          setSelectedSource,
+          t: (key) => key,
+        }),
+        session,
+      };
+    });
+    const newTurn = {
+      answer: { agentAnswer: "New answer.", agentRunId: "run-2" },
+      question: "A new question.",
+    };
+    let approval;
+
+    act(() => {
+      result.current.session.addConversationTurn("Search the web.", { agentRunId: "run-1" });
+    });
+    act(() => {
+      approval = result.current.actions.handleAgentApprovalAction({
+        action: "approve",
+        gate: { approvalObjectHash: APPROVAL_OBJECT_HASH, id: "approval:web.search:1.0.0" },
+        turnIndex: 0,
+      });
+    });
+    // New chat empties the conversation; the next answer takes position 0.
+    act(() => {
+      result.current.session.resetConversation();
+    });
+    act(() => {
+      result.current.session.addConversationTurn(newTurn.question, newTurn.answer);
+    });
+    await act(async () => {
+      resolveApproval({
+        response: {
+          agentAnswer: "Approved result.",
+          agentRunId: "run-1",
+          ragSources: [{ docId: "doc-1" }],
+        },
+        run: { approvalGates: [], status: "completed", steps: [] },
+      });
+      await approval;
+    });
+
+    expect(result.current.session.conversation).toEqual([newTurn]);
+    expect(setSelectedSource).not.toHaveBeenCalled();
+    expect(messageSuccess).toHaveBeenCalledWith("app.approvalRecorded");
+  });
 });
