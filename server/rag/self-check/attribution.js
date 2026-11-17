@@ -22,6 +22,7 @@ import {
   hasNegativePolarity,
   includesNormalizedPhrase,
   normalizeEvidenceText,
+  normalizeSearchTextInContext,
   normalizeStructuralClaimLabel,
   stripSourceLabels,
   uniqueValues,
@@ -48,7 +49,7 @@ export const getCitationDocumentLabels = (citations = []) =>
       const fileNameWithoutExtension = fileName.replace(/\.[^.]+$/, "");
 
       return [fileName, fileNameWithoutExtension, citation?.docId]
-        .map(normalizeSearchText)
+        .map((label) => normalizeSearchTextInContext(label))
         .filter(Boolean);
     })
   );
@@ -280,14 +281,22 @@ export const getMetadataFactAnchors = ({ claimText = "", citations = [] } = {}) 
 export const isStructuralSectionHeading = (value = "") =>
   STRUCTURAL_SECTION_HEADING_PATTERN.test(normalizeStructuralClaimLabel(value));
 
-export const isStructuralClaimLabel = ({ value = "", citations = [] } = {}) => {
-  const label = normalizeStructuralClaimLabel(value);
-  const normalizedLabel = normalizeSearchText(label);
+// Tells the structural lines of one answer (a section heading, or a line that
+// only names a cited document) from its claims. The citations' document labels
+// are the same for every line of the answer, so they are built once, when a
+// line first needs them.
+export const createStructuralClaimLabelTest = (citations = []) => {
+  let documentLabels = null;
 
-  return (
-    isStructuralSectionHeading(label) ||
-    getCitationDocumentLabels(citations).has(normalizedLabel)
-  );
+  return (value = "") => {
+    const label = normalizeStructuralClaimLabel(value);
+    const normalizedLabel = normalizeSearchText(label);
+
+    return (
+      isStructuralSectionHeading(label) ||
+      (documentLabels ??= getCitationDocumentLabels(citations)).has(normalizedLabel)
+    );
+  };
 };
 
 export const groupCitationsByDocument = (citations = []) => {

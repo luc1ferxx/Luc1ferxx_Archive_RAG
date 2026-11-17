@@ -15,7 +15,9 @@ import {
 import {
   extractNumericOccurrences,
   normalizeNumericSyntax,
+  normalizeSearchTextInContext,
 } from "../rag/self-check/text.js";
+import { normalizeSearchText } from "../rag/text-utils.js";
 
 // The evidence context is an exact memo: evaluateClaimSupport must return the
 // same result with it, without it (a disabled context), and with one context
@@ -229,6 +231,30 @@ test("numeric normalisation is memoised by exact input, never skipping a second 
   assert.equal(table.get(once), twice);
   assert.notEqual(memoised[0], memoised[1]);
   assert.notEqual(memoised[0][0], memoised[1][0]);
+});
+
+test("search-text normalisation is memoised in the active context by exact string input", () => {
+  const context = createSelfCheckEvidenceContext();
+  const value = "Remote-Work  Policy (2024).pdf";
+  const memoised = runWithSelfCheckEvidenceContext(context, () => [
+    normalizeSearchTextInContext(value),
+    normalizeSearchTextInContext(value),
+    normalizeSearchTextInContext(undefined),
+  ]);
+
+  // Outside the context the call is not counted, or kept, in it.
+  assert.equal(normalizeSearchTextInContext(value), normalizeSearchText(value));
+
+  const { hits, misses } = getSelfCheckEvidenceContextStats(context);
+
+  assert.deepEqual(memoised, [normalizeSearchText(value), normalizeSearchText(value), ""]);
+  assert.deepEqual([misses.normalizeSearchText, hits.normalizeSearchText], [1, 1]);
+  // Anything but a string is normalised as before, failing where it failed.
+  assert.throws(() => normalizeSearchText(null), TypeError);
+  assert.throws(
+    () => runWithSelfCheckEvidenceContext(context, () => normalizeSearchTextInContext(null)),
+    TypeError
+  );
 });
 
 test("numeric fact comparison gets fresh facts on every call", () => {

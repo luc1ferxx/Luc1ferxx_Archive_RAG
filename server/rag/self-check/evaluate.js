@@ -240,6 +240,12 @@ const computeClaimSupport = ({
         return false;
       }
 
+      // With one scoped citation this is the defaultSupport call again, with
+      // the same arguments: reuse its answer.
+      if (scopedCitations.length === 1 && scopedCitations[0] === citation) {
+        return defaultSupport.supported;
+      }
+
       return evaluateClaimAgainstCitations({
         claimText,
         citations: [citation],
