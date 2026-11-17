@@ -441,9 +441,9 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 - 租户 scope 只来自运行时；检索感知索引版本和 embedding 空间；未知 provider 直接报错，不回退
 - 解析和切块的问题是测出来的：换行切断句子、标题覆盖丢了 7,866 个字符，通用 splitter 不会报告丢字
 - 检索层是一个接缝：可以在进程内，也可以走远程检索层，两边结果 deepStrictEqual
-- 仓库里有 LangChain BaseRetriever 适配器（ArchiveRagRetriever）包着这个接缝，有逐项相等测试；生产没用，因为会改 /chat 的 retrieval 契约
+- 仓库里曾有 LangChain BaseRetriever 适配器（ArchiveRagRetriever）包着这个接缝，有逐项相等测试；生产没用（会改 /chat 的 retrieval 契约），2026-11-17 已删除
 
-代码：`server/rag/document-rag-execution.js retrieveGlobalContextForQueries`；`server/rag/langgraph/retriever.js ArchiveRagRetriever`；`server/rag/chunker.js findUnindexedPageText`
+代码：`server/rag/document-rag-execution.js retrieveGlobalContextForQueries`；（`server/rag/langgraph/retriever.js ArchiveRagRetriever` 已于 2026-11-17 删除）；`server/rag/chunker.js findUnindexedPageText`
 
 > ⚠ 别贬低框架，说"原型阶段框架合适，这里要的是可证明的契约"。被问"是不是重复造轮子"时承认维护成本：030 迁移一个文件约 760 行（含大段注释）
 

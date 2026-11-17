@@ -68,8 +68,8 @@
 | `@langchain/core` | 1.2.17 | 单一副本，`test/langchain-dependency-pins.test.mjs` 读 lock 断言 |
 | `@langchain/langgraph` | 1.5.0 | |
 | `@langchain/langgraph-checkpoint` | 1.2.0 | 目标文件没列，但自定义 saver 需要 `writesSortKey` / `compareWritesSortKeys` / `WRITES_IDX_MAP`，`@langchain/langgraph` 不转出，所以改为直接依赖 |
-| `@langchain/openai` | 1.6.2 | 阶段 1 才用 |
-| `langchain` | 1.5.16 | 只用于窄子任务的 `createAgent`，阶段 1 之后才用 |
+| `@langchain/openai` | 1.6.2 | 阶段 1 才用（一直没用上，2026-11-17 删除） |
+| `langchain` | 1.5.16 | 只用于窄子任务的 `createAgent`，阶段 1 之后才用（一直没用上，2026-11-17 删除） |
 
 - `zod` 的声明范围从 `^4.1.13` 改为 `^4.2.0`，对齐 LangGraph 的 peer 下限；锁定版本仍是 4.3.5。
 - `npm audit --omit=dev` 为 0。基线原本不是 0（`proxy-addr` critical、`@modelcontextprotocol/sdk` high），已在单独的 commit `ef826f57` 里修掉，只改 lock。
@@ -384,7 +384,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 约束 12 要求 `AGENT_RUNTIME=native` 在新默认发布后至少保留一个周期；阶段 4 刚切默认。
   - 目标点名的四个文件里，只有 `agent-execution-graph-runner.js` 有可删的调度循环（`runExecutionGraph`）。`agent-execution-graph-checkpoint.js` 和 `agent-unified-graph-run.js` 没有调度代码：前者是 run 的权威图 checkpoint，后者是 v3 的入口与准入流程。`agent-execution-plan-runner.js` 的原生循环是外层计划的生产调度器（见上）。
   - 交回情形：`eval:trajectory` 里实测为 0 次（17 次执行器调用）；生产默认的 custom-Skill DAG 不会出现（预算 2、四个 custom Skill 都可并行、上限 3）；v3 带 Web 的确定性文档图以前每次都会出现（非按层声明，document_rag 与 web 节点独占）。解法是两种 runtime 都按校验器的层序调度（按层声明的图不受影响），已实现，见上面的“层序调度”。v3 stage 里另外两处对它的使用（finalization 回放、step lifecycle 没有 run 目标的分支）也已替换，见“v3 stage 不再直接调用原生调度器”。
-- **发布证据**：`release:gate` 要九份报告都来自同一提交、干净工作区、`release` 配置。确定性的几份（rerank-hard-cs、arxiv-real-paper-rerank、trajectory、planner-mock、recovery-observability）可以在本机生成；compare-hard-synthetic（要求 8/8，qwen2.5:7b 上一次 6/8）、planner-real（7/7 固定投影）、runtime-smoke 和 rollout-readiness 需要 GPT 级模型，本机没有 `OPENAI_API_KEY`，只能在 CI 的 `Release Evidence Gate` 或提供密钥后生成。
+- **发布证据**：`release:gate` 要九份报告都来自同一提交、干净工作区、`release` 配置。确定性的几份（rerank-hard-cs、arxiv-real-paper-rerank、trajectory、planner-mock、recovery-observability）可以在本机生成；compare-hard-synthetic（要求 8/8，qwen2.5:7b 上一次 6/8）、planner-real（7/7 固定投影）、runtime-smoke 和 rollout-readiness 需要 GPT 级模型，本机没有 `OPENAI_API_KEY`，只能在 CI 的 `Release Evidence Gate`（2026-11-17 已删除，之后只能本机手动生成）或提供密钥后生成。
 
 ### 对照"迁移完成的定义"
 
@@ -687,7 +687,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 其他值（如 `gaurded`）：同样拒绝，信息里带原值。
 - 行为变化：阶段 8 之前，这个变量拼错的值静默落到 `off`，也就是顺序链。现在拼错即拒绝启动。`server/.env` 里如果显式写了 `off`、`shadow` 或拼错的值，要先改掉。
 - 检查位置和阶段 7 相同（`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom-Skill stage、v3 的入口与 stage、执行器），所以不建 app、直接调 `runAgentRag` 的 eval runner 在环境里有这种取值时也以 `case_error` 失败。
-- `rag/config.js` 的 `getAgentSkillGraphRollout()` 已删除。两个 workflow（`release-evidence.yml`、`planner-real-gate.yml`）和几个评测脚本仍然设置 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，这是唯一还接受的取值，没有改。
+- `rag/config.js` 的 `getAgentSkillGraphRollout()` 已删除。两个 workflow（`release-evidence.yml`、`planner-real-gate.yml`）和几个评测脚本仍然设置 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，这是唯一还接受的取值，没有改。（这两个 workflow 2026-11-17 已删除。）
 - `evaluation/rollout-readiness-report.js` 的 “custom Skill DAG 处于 guarded” 一项保留，改为直接读这个变量：环境里是别的值时进程根本起不来，这样的环境生成的报告不应该显示就绪。
 - `test/agent-runtime-removed.test.mjs`（19 个测试，原 15 个）对三个变量各跑一遍。
 
@@ -1284,7 +1284,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 ### 改了什么
 
 1. **请求不再带批准。** `runAgentRag` 去掉了 `capabilityApprovals` 参数，以及把它塞进每次 Capability 调用的包装（`withCapabilityApprovals`，连通配的 `"*"` 也认）。任务的批准 2026-11-16 改走 run 的审批路径之后，生产里没有谁再传它；现在需要审批的 Capability 只能在它的门被决定之后执行。`run_resumed` 事件不再带一直为空的 `approvedCapabilities`。任务级的 `capabilityApprovals`（任务把批准带给下一轮迭代，迭代 runner 再交给审批路径）不变。
-2. **删掉 `rag/langgraph/tools.js`**（阶段 1 的适配器，把 Skill 包成 LangChain tool）和它的测试（23 个）。它是唯一一处能在图节点之外调用 custom Skill 的代码，生产里没有任何地方把这些 tool 交给图或 agent。同目录另外三个没接线的适配器（`embeddings.js`、`retriever.js`、`prompts.js`）没删：LangSmith 防泄漏测试拿 `prompts.js` 和 `retriever.js` 当被测对象，删它们要先重写那条测试。
+2. **删掉 `rag/langgraph/tools.js`**（阶段 1 的适配器，把 Skill 包成 LangChain tool）和它的测试（23 个）。它是唯一一处能在图节点之外调用 custom Skill 的代码，生产里没有任何地方把这些 tool 交给图或 agent。同目录另外三个没接线的适配器（`embeddings.js`、`retriever.js`、`prompts.js`）没删：LangSmith 防泄漏测试拿 `prompts.js` 和 `retriever.js` 当被测对象，删它们要先重写那条测试。（2026-11-17：防泄漏测试改为测 `model.js` 的聊天模型，这三个适配器和它们的等价测试已删除，阶段 1 的 `document-rag-execution.js` 两个分派函数也不再导出。）
 3. **内置 Skill 去掉只有 v3 读过的图契约。** `document_rag`、`web_search`、`inventory`、`document_discovery` 不再声明 `plannerSummary`、`inputSchema`、`outputSchema`，`execute` 不再返回 `evidence`、`documentCount`、`hasDocuments`、`matchedDocIds`、`hasMatches`。调查数过，生产里读这些字段的地方是 0：授权目录只收 `kind === "custom"` 的 Skill，图的白名单、规划器和 replanner 只见到 custom Skill；内置 Skill 经 `executeAgentSkill` 运行时不带 `validateOutput`，`normalizeSkillResult` 本来就把这些输出丢掉。`effects`、`idempotency`、`parallelSafe`、`replaySafe`、`retryable` 保留。`document_rag` 原来在投影 `evidence` 的同时检查 RAG 结果各字段的类型，这个检查作为普通校验保留（`assertDocumentRagResultTypes`，错误文字不变）：字段类型不对的结果仍然让 Skill 调用失败，不会带进文档循环和收尾。
 4. **只有 `running` 的 run 有 LangGraph 写入者。** 写入围栏原来对没有图 checkpoint 的 run 也放行 `waiting_for_user`。这条规则来自阶段 0 的 spike（只用 LangGraph 的 run 在批准之后续跑同一线程），阶段 2 原样搬了过来，跟 v3 无关。生产里 saver 只在带 v1 checkpoint 的 custom Skill 图里构造，那条分支本来就要求 `running`，所以没有请求受影响；变的是直接构造的 saver 写一个 `waiting_for_user`、没有 checkpoint 的 run，现在是 409 `AGENT_GRAPH_EXECUTION_FENCED`。saver 自己的 `interrupt()` 和续跑契约测试照旧保留（见阶段 11“保留的”）。
 5. **replanner：没有可用的 Skill 预算就不调模型。** `hasSpendableBudget` 原来只要有一个预算键（`traceSteps` 除外）大于 0 就调 replanner 模型。补丁只能加选中的 Skill，每个都记在 `customSkillCalls` 上；这个键用完而网页搜索、研究问题等别的键还剩时，模型照样被调用，补丁随后被 `collectPendingBudgetShortfall` 以预算不足拒掉。默认预算（`customSkillCalls` 为 2）下，两个 Skill 的图只要有一个节点弃答或失败，就白花这一次规划调用。现在只看选中的 Skill 会用的预算键，都为 0 时在调用之前就以 `replan_budget_exhausted` 弃答，原因文字从 “Replan needs N customSkillCalls call(s) but only 0 remain.” 变成 “No skill budget remains.”。回答、Skill 结果、run 状态和 checkpoint 阶段不变。少了一种罕见情形：预算为 0 时模型给出只删除失败节点的补丁，会被应用，失败的 Skill 结果因此从列表里消失；现在不问模型，失败结果留在列表里。

@@ -40,7 +40,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `cd server && npm run verify:quality` | 用真实 embedding + chat 模型验证零基础设施档案下的检索、页码引文、对比取值归属、弃答和跨进程持久化。见 “DocCompare quality verification”。 |
 | `cd server && npm run feedback:corpus` | 从负反馈生成 synthetic 评测语料。 |
 | `cd server && npm run eval:feedback` | 用 seed + runtime feedback corpus 运行 deterministic 回归评测。 |
-| `cd server && npm run eval:robust-suite` | 手动运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank；固定周期由 Release Evidence Gate 调用同一 suite。 |
+| `cd server && npm run eval:robust-suite` | 手动运行 compare-hard synthetic、hard-CS rerank 和 arXiv real-paper rerank；没有定时运行（原来定时调用它的 Release Evidence Gate workflow 2026-11-17 已删除）。 |
 | `cd server && npm run robust:gate -- --fail-on-warn` | 只校验三份 robust suite 最新报告；不会读取历史 synthetic、feedback、planner、trajectory 或 recovery 状态。 |
 | `cd server && npm run quality:gate` | 兼容旧 payload 的历史 metrics gate；PASS 不代表当前 commit 已验证。 |
 | `cd server && npm run quality:current` | 校验当前 commit 的轻量报告 lineage、freshness、clean worktree 和 metrics。 |
@@ -242,7 +242,7 @@ npm run corpus:arxiv
 
 优化前，主 synthetic `latest.*` 和 legacy rerank 报告长期依赖 near-duplicate 小语料。旧 `latest-rerank.md` 只有 `6` 个 ranking cases，NDCG、Recall、MRR 都是 `1.0000 -> 1.0000`，lift 为 `0.0000`，无法证明 rerank 对困难检索有真实收益。
 
-这次优化把 robust 评测统一到 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 scoped `robust:gate -- --fail-on-warn` 强制检查。standalone workflow 负责手动诊断，固定周期由 Release Evidence Gate 运行同一命令并继续执行 strict release gate。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；suite lineage 同时绑定 pinned arXiv corpus 的内容 hash/identity，release gate 还要求三份 robust 正文的 runId/createdAt 与 evidence envelope 一致并固定 schema/generator。质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
+这次优化把 robust 评测统一到 `eval:robust-suite`：用 compare-hard 刷新主 synthetic regression，把 hard-CS rerank 和 arXiv real-paper rerank 写成独立 latest reports，并交给 scoped `robust:gate -- --fail-on-warn` 强制检查。原来由 standalone workflow 手动诊断、Release Evidence Gate 定时运行并继续执行 strict release gate；这两个 workflow 2026-11-17 已删除，现在只在本机手动运行。suite 定义集中在 `server/evaluation/eval-suite.js`，runner 只消费配置；suite lineage 同时绑定 pinned arXiv corpus 的内容 hash/identity，release gate 还要求三份 robust 正文的 runId/createdAt 与 evidence envelope 一致并固定 schema/generator。质量门通过 `quality-robust-suite-gate.js` 统一检查 report 是否存在、语料是否匹配、case 数量是否非空、NDCG/Recall 是否不回退，以及 NDCG lift 是否退化成 `0`。
 
 前后对比如下：
 
@@ -379,7 +379,7 @@ Smoke 断言：
 - 第二次请求加载该 memory 为 planning hint
 - `ragSources` 只包含 smoke document source，不包含 `agent_experience` 或 `successful_plan`
 
-报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。`Planner Real Provider Gate` scheduled workflow 会启动 PostgreSQL service，在纯 LLM + guarded Skill graph 环境下先运行这个 smoke，再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成灰度准备信号；完整发布还需 `release:gate` 的同提交证据校验。
+报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。需要时在本机带 `OPENAI_API_KEY`、接 PostgreSQL，在纯 LLM + guarded Skill graph 环境下先运行这个 smoke（原来定时做这件事的 `Planner Real Provider Gate` workflow 2026-11-17 已删除），再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成灰度准备信号；完整发布还需 `release:gate` 的同提交证据校验。
 
 ## DocCompare quality verification
 
@@ -3268,13 +3268,13 @@ GitHub Actions 的 `Quality Gate` workflow 会在 PR 和 `main` push 时执行�
 5. `npm run eval:feedback`
 6. `npm run quality:current -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`
 
-PR/main Quality Gate 只消费 deterministic/mock provider，不读取 `OPENAI_API_KEY`，因此无效密钥、限流或外部模型抖动不会让普通代码提交失败。真实 provider 由独立的 `Planner Real Provider Gate` 和每周 `Release Evidence Gate` 强制验证。eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
+PR/main Quality Gate 只消费 deterministic/mock provider，不读取 `OPENAI_API_KEY`，因此无效密钥、限流或外部模型抖动不会让普通代码提交失败。真实 provider 现在没有定时的 CI 门禁：`Planner Real Provider Gate`、`Robust Eval Suite`、`Release Evidence Gate` 三个 workflow 因仓库 secret `OPENAI_API_KEY` 失效，2026 年 9–10 月起手动停用、近期运行大多失败，2026-11-17 删除。Ollama 上的真实模型评测由每周的 `Real Model Eval` 负责。eval producer 和 current gate 都使用 `!cancelled()`，因此单个 producer 失败后仍会运行其余诊断；job 保持失败，最后通过 `always()` 上传原始 latest reports 与 `latest-current-quality-gate.*`。workflow 不再把兼容命令 `quality:gate` 的历史 PASS 当作 PR current 证据。
 
-`Planner Real Provider Gate` workflow 通过 `workflow_dispatch` 和每周二至周日 `0 9 * * 0,2-6` schedule 触发。它在纯 LLM planner + `AGENT_SKILL_GRAPH_ROLLOUT=guarded` 环境下强制运行 mock/real planner eval（含动态 DAG case）、trajectory eval、recovery observability eval，并执行 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`、`npm run runtime:smoke` 和 `npm run rollout:readiness`。该 workflow 会启动 PostgreSQL service，让 smoke 覆盖 Postgres default-on memory 和两次真实 LLM 规划的 guarded `/chat` DAG；缺少 `OPENAI_API_KEY` 会让 real eval 或 smoke 失败。周一由 `Release Evidence Gate` 在 `0 11 * * 1` 统一覆盖 planner、runtime、recovery 和 readiness 信号，避免重复周期通知。
+需要真实 provider 的证据时在本机手动运行，都要 `OPENAI_API_KEY`（这些命令原来由上面三个 workflow 定时或手动触发）：
 
-`Robust Eval Suite` workflow 仅通过 `workflow_dispatch` 手动触发。它要求 `OPENAI_API_KEY`，运行 `npm run eval:robust-suite`，再用 scoped `npm run robust:gate -- --fail-on-warn` 强制检查 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 三份 report，并上传 `latest.*`、`latest-rerank-hard-cs.*`、`latest-arxiv-rerank.*` artifacts。该 workflow 不读取历史 quality 状态。每周固定运行由 `Release Evidence Gate` 统一负责，避免同一 robust suite 产生重复周期任务和通知。
-
-`Release Evidence Gate` workflow 通过 `workflow_dispatch` 和每周一 `0 11 * * 1` schedule 触发，明确不在 `pull_request` 上运行。它在单个 job、单次 target checkout 中设置 `EVAL_TARGET_COMMIT_SHA=${{ github.sha }}`、`EVAL_EVIDENCE_PROFILE=release` 和 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，先用同一 pgvector PostgreSQL 服务运行 `test:pgvector`（包括跨 Node 进程的 graph checkpoint 恢复测试），再依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，执行严格 `release:gate` 并上传 required latest JSON/Markdown 和 `latest-release-evidence.*`。集成测试失败会使发布 job 失败，但 `release:gate` 的 JSON 报告只验证评测报告本身，不会将这项测试的运行结果伪装成其中一份报告。这样昂贵的 real/robust 评测不会增加默认 PR gate 成本，发布 artifacts 又都绑定同一 SHA。
+- **规划器**：`npm run eval:planner -- --provider mock` 和 `npm run eval:planner -- --provider real`，然后 `npm run planner:gate -- --provider real --compare-provider mock --max-unexpected-fallback-rate=0 --max-divergence-count=0`；接 PostgreSQL 运行 `npm run runtime:smoke` 和 `npm run rollout:readiness`。
+- **robust suite**：`npm run eval:robust-suite`，再用 `npm run robust:gate -- --fail-on-warn` 检查 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 三份报告。
+- **发布证据**：同一提交、干净工作区，设置 `EVAL_TARGET_COMMIT_SHA`（完整 SHA）和 `EVAL_EVIDENCE_PROFILE=release`；先接 pgvector PostgreSQL 运行 `test:pgvector`（包括跨 Node 进程的 graph checkpoint 恢复测试），再依次生成 robust suite、mock/real planner、trajectory、recovery observability、runtime smoke 与 rollout readiness，最后运行严格的 `npm run release:gate -- --target-commit "$EVAL_TARGET_COMMIT_SHA"`。`release:gate` 的报告只验证评测报告本身，不把集成测试的结果算作其中一份报告。
 
 提交前建议至少运行：
 
