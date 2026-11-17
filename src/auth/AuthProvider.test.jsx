@@ -1,6 +1,6 @@
 import React from "react";
 import { webcrypto } from "node:crypto";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthProvider, useAuth } from "./AuthProvider";
 import AuthStatus from "./AuthStatus";
@@ -97,6 +97,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   resetTokenStoreForTests();
 });
 
@@ -371,6 +372,41 @@ describe("AuthProvider", () => {
     expect(getStoredRefreshToken()).toBe("");
     expect(location.assign.mock.calls[0][0]).toMatch(/^https:\/\/idp\.example\.test\/logout\?/);
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  test("a failed timed refresh signs out and starts a new login, as an unrecoverable 401 does", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    savePendingLogin({
+      codeVerifier: "verifier-1",
+      createdAt: Date.now(),
+      nonce: "nonce-1",
+      redirectUri: "http://localhost:3000/",
+      state: "state-1",
+    });
+    const signInFetch = createFetch();
+    // The code exchange succeeds; the refresh grant is refused.
+    const fetchImpl = vi.fn(async (url, init) =>
+      new URLSearchParams(init?.body).get("grant_type") === "refresh_token"
+        ? jsonResponse({ error: "invalid_grant" }, 400)
+        : signInFetch(url, init)
+    );
+    const location = createLocation("http://localhost:3000/?code=code-1&state=state-1");
+
+    renderAuth({
+      env: {},
+      fetchImpl,
+      loadMe: async () => ({ permissions: [], userId: "alice" }),
+      loadServerConfig: async () => oidcConfig,
+      location,
+    });
+
+    expect(await screen.findByText("Signed in as alice")).toBeInTheDocument();
+    // The access token lasts an hour; the timer refreshes it a minute early.
+    await act(() => vi.advanceTimersByTimeAsync(3_600_000));
+
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    await waitFor(() => expect(location.assign).toHaveBeenCalledTimes(1));
+    expect(location.assign.mock.calls[0][0]).toMatch(/^https:\/\/idp\.example\.test\/authorize\?/);
   });
 });
 
