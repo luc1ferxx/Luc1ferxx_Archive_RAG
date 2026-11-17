@@ -8,18 +8,13 @@
 // module is what is left of the graph: how such a run is recognized and what
 // the runtime does with one. Nothing here runs a node or decides a gate.
 //
-// - A settled run is left as it is, and a request that continues it starts a
-//   new run (agent-runs.js). Settled means the run ended (completed, failed
-//   or canceled, whatever its graph looked like when it did) or was finalized
-//   as a question for the user.
-// - An unfinished run cannot be continued. Startup recovery hands it to an
+// - A request that names such a run (a background task's `continue`) starts a
+//   new run and leaves the stored run as it is (agent.js), as for any run.
+// - An unfinished run is never resumed. Startup recovery hands it to an
 //   operator, also when an earlier recovery claimed its graph: no process of
-//   this version can own that claim. An approval decision, and a request that
-//   re-enters a run parked at its gate, are refused after the run is listed
-//   for an operator. The operator can cancel it, which settles it.
-// - A request that re-enters an interrupted run stays fenced by the run store
-//   (AGENT_GRAPH_EXECUTION_FENCED), as for any run that holds a graph, until
-//   the run is settled.
+//   this version can own that claim. An approval decision of a run parked at
+//   its gate is refused after the run is listed for an operator. The operator
+//   can cancel it.
 import { AGENT_RUN_STATUSES } from "./agent-run-state-machine.js";
 import { AGENT_RUN_STEP_STATUSES } from "./agent-run-steps.js";
 
@@ -87,15 +82,6 @@ export const isRemovedUnifiedGraphClarification = ({ checkpoint, run } = {}) =>
   !toArray(run?.approvalGates).some((gate) => gate?.status === "pending") &&
   (run?.result?.recovery?.mode !== "manual" ||
     run.result.recovery.originalStatus === AGENT_RUN_STATUSES.waitingForUser);
-
-/**
- * Nothing is left to do for the run, so a request that continues it is a new
- * request with a new run: the run ended, or it was finalized as a question.
- */
-export const isSettledRemovedUnifiedGraphRun = ({ checkpoint, run } = {}) =>
-  isRemovedUnifiedGraphCheckpoint(checkpoint) &&
-  (ENDED_RUN_STATUSES.has(run?.status) ||
-    isRemovedUnifiedGraphClarification({ checkpoint, run }));
 
 /** Why an unfinished stored run needs an operator. */
 export const explainRemovedUnifiedGraphRun = ({ run } = {}) =>

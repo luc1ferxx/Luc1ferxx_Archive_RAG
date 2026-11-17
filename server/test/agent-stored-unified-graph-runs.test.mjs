@@ -149,7 +149,7 @@ const recoverOnStartup = ({ agentRunService, mode = "auto", ragService, resumed 
     },
   }).recoverOnStartup({ mode });
 
-const reenter = ({ agentRunService, ragService, state }) =>
+const continueRun = ({ agentRunService, ragService, state }) =>
   runAgentRag({
     accessScope,
     agentRunId: runIdOf(state),
@@ -171,7 +171,7 @@ const refusal = async (promise) => {
   return null;
 };
 
-// How every attempt to continue an unfinished stored run is refused.
+// How a decision of an unfinished stored run's gate is refused.
 const REMOVED = Object.freeze({
   code: "unified_graph_removed",
   message: "This run belongs to the v3 unified graph, which was removed; an operator must resolve it.",
@@ -500,28 +500,17 @@ test("startup recovery in manual mode lists every unended stored graph run, also
     partial_before_run_failed: listed([]),
   });
 
-  // Being listed does not change what the run is. The question for the user
-  // is still settled: answering it starts a new run. An unfinished graph is
-  // still unfinished: re-entering it stays fenced until an operator cancels.
-  const answered = await withEnv(() =>
-    reenter({ agentRunService, ragService, state: "finalized_as_clarification" })
-  );
+  // Being listed does not change what a request that continues the run gets:
+  // a new run, and the listed run is left as it was.
+  for (const state of ["finalized_as_clarification", "interrupted_at_node_boundary"]) {
+    const listedRun = await readStored(store, state);
+    const answered = await withEnv(() => continueRun({ agentRunService, ragService, state }));
 
-  assert.equal(answered.status, 200);
-  assert.notEqual(answered.body.agentRunId, runIdOf("finalized_as_clarification"));
-  assert.deepEqual(
-    describeAfter(await readStored(store, "finalized_as_clarification")),
-    listed(["needs_input"])
-  );
-  assert.equal(
-    (
-      await withEnv(() =>
-        refusal(reenter({ agentRunService, ragService, state: "interrupted_at_node_boundary" }))
-      )
-    )?.code,
-    "AGENT_GRAPH_EXECUTION_FENCED"
-  );
-  assert.equal(ragService.calls.length, 1);
+    assert.equal(answered.status, 200, state);
+    assert.notEqual(answered.body.agentRunId, runIdOf(state), state);
+    assert.deepEqual(await readStored(store, state), listedRun, state);
+  }
+  assert.equal(ragService.calls.length, 2);
 });
 
 test("an operator can only cancel a stored graph run", async () => {
@@ -571,10 +560,10 @@ test("an operator can only cancel a stored graph run", async () => {
     assert.equal(canceled.run.status, "canceled", state);
     assert.equal((await readStored(store, state)).status, "canceled", state);
 
-    // The cancel settles the run: a request that continues it is answered as
-    // a new run, and the canceled run is left as the operator left it.
+    // A request that continues the canceled run is answered as a new run, and
+    // the canceled run is left as the operator left it.
     const settled = await readStored(store, state);
-    const response = await withEnv(() => reenter({ agentRunService, ragService, state }));
+    const response = await withEnv(() => continueRun({ agentRunService, ragService, state }));
     const newRun = await agentRunService.getRun({ accessScope, runId: response.body.agentRunId });
 
     assert.equal(response.status, 200, state);
@@ -582,7 +571,7 @@ test("an operator can only cancel a stored graph run", async () => {
     assert.equal(newRun.status, "completed", state);
     assert.deepEqual(
       newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
-      [{ previousRunId: runIdOf(state), reason: "settled_unified_graph_run" }],
+      [{ previousRunId: runIdOf(state) }],
       state
     );
     assert.deepEqual(await readStored(store, state), settled, state);
@@ -678,101 +667,17 @@ test("the approval endpoint refuses a decision of the gate of a stored graph run
   }
 });
 
-test("a request that re-enters a graph parked at its gate is refused and the run is listed for an operator", async () => {
-  const attempt = async () => {
-    const { agentRunService, store } = await seed("parked_at_approval_gate");
-    const ragService = createRagService();
-    let response = null;
-    const refused = await withEnv(() =>
-      refusal(
-        reenter({
-          agentRunService,
-          ragService,
-          state: "parked_at_approval_gate",
-        }).then((value) => {
-          response = value;
-        })
-      )
-    );
-    const run = await readStored(store, "parked_at_approval_gate");
-
-    return {
-      after: describeAfter(run),
-      ragCalls: ragService.calls.length,
-      refused,
-      response: response
-        ? {
-            clarification: response.body.clarification?.reason ?? null,
-            gateIds: (response.body.approvalGates ?? []).map((gate) => gate.id),
-            runId: response.body.agentRunId,
-            status: response.status,
-          }
-        : null,
-      stored: (await store.list({ accessScope })).length,
-      unchanged: JSON.stringify(run) === JSON.stringify(fixture.runs.parked_at_approval_gate),
-    };
-  };
-  const refusedAndHandedOver = {
-    after: {
-      gates: ["pending"],
-      recovery: "manual:unified_graph_removed",
-      status: "waiting_for_user",
-    },
-    ragCalls: 0,
-    refused: REMOVED,
-    response: null,
-    stored: 1,
-    unchanged: false,
-  };
-
-  // A request (a background task's `continue`) cannot continue the graph.
-  // Nothing is decided; the run is listed for an operator. A request carries
-  // no decision: a background task's decision goes through the run's approval
-  // path, which refuses it (below).
-  assert.deepEqual(await attempt(), refusedAndHandedOver);
-});
-
-test("a request that re-enters an interrupted stored graph is fenced and changes nothing", async () => {
-  for (const state of [
-    "approved_before_capability_step",
-    "capability_step_in_flight",
-    "interrupted_at_node_boundary",
-    "receipt_written_run_not_completed",
-    "claimed_by_startup_recovery",
-    "partial_before_run_failed",
-  ]) {
+// A request (a background task's `continue`) that names a stored graph run is
+// answered as a new run whatever state the stored run is in, and the stored
+// run is left as it was (user's choice, 2026-11-17). Until then only a settled
+// one was (it ended, or was finalized as a question for the user): one parked
+// at its gate was refused (REMOVED) and listed for an operator, any other
+// unfinished one fenced (409 AGENT_GRAPH_EXECUTION_FENCED).
+test("a request that continues a stored graph run is answered as a new run", async () => {
+  for (const state of STATES) {
     const { agentRunService, store } = await seed(state);
     const ragService = createRagService();
-    const refused = await withEnv(() => refusal(reenter({ agentRunService, ragService, state })));
-
-    assert.deepEqual(
-      refused,
-      {
-        code: "AGENT_GRAPH_EXECUTION_FENCED",
-        message: "Agent run re-entry requires the dedicated graph recovery path.",
-        status: 409,
-      },
-      state
-    );
-    assert.deepEqual(await readStored(store, state), fixture.runs[state], state);
-    assert.equal((await store.list({ accessScope })).length, 1, state);
-    assert.equal(ragService.calls.length, 0, state);
-  }
-});
-
-// Settled: the run ended (whatever its graph looked like when it did), or it
-// was finalized as a question for the user.
-test("a request that continues a settled stored graph run is answered as a new run", async () => {
-  for (const state of [
-    "finalized_as_clarification",
-    "completed",
-    "failed_partial",
-    "failed_on_outage_inside_graph",
-    "canceled_inside_graph",
-  ]) {
-    const { agentRunService, store } = await seed(state);
-    const ragService = createRagService();
-    const response = await withEnv(() => reenter({ agentRunService, ragService, state }));
+    const response = await withEnv(() => continueRun({ agentRunService, ragService, state }));
     const newRun = await agentRunService.getRun({ accessScope, runId: response.body.agentRunId });
 
     assert.equal(response.status, 200, state);
@@ -781,13 +686,13 @@ test("a request that continues a settled stored graph run is answered as a new r
     assert.equal(newRun.status, "completed", state);
     assert.deepEqual(
       newRun.events.filter((event) => event.type === "run_continued").map((event) => event.payload),
-      [{ previousRunId: runIdOf(state), reason: "settled_unified_graph_run" }],
+      [{ previousRunId: runIdOf(state) }],
       state
     );
     // The answer came from the outer execution plan, not from a graph.
     assert.equal(newRun.events.some((event) => event.type === "execution_planned"), true, state);
     assert.equal(ragService.calls.length, 1, state);
-    // The settled run is left as it was.
+    // The stored run is left as it was.
     assert.deepEqual(await readStored(store, state), fixture.runs[state], state);
   }
 });
@@ -902,7 +807,7 @@ test("a stored graph node step is never retried on its own", async () => {
   }
 });
 
-test("a background task parked at a stored graph gate fails on continue or approve, and deny is no action", async () => {
+test("a background task parked at a stored graph gate continues in a new run, fails on approve, and deny is no action", async () => {
   const act = async (action) => {
     const { agentRunService, store } = await seed("parked_at_approval_gate");
     const ragService = createRagService();
@@ -981,9 +886,15 @@ test("a background task parked at a stored graph gate fails on continue or appro
   assert.equal(fixture.task.status, "waiting_for_user");
   assert.equal(fixture.task.requiredUserAction, "approve_capability");
 
-  // Whatever the user does with the task, it fails with the reason and its
-  // run is handed to an operator.
-  assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), failed);
+  // Continue answers in a new run and leaves the stored run as it was. Until
+  // 2026-11-17 it failed the task like approve, which fails it with the reason
+  // and hands its run to an operator.
+  assert.deepEqual(await act(AGENT_TASK_ACTIONS.continue), {
+    ragCalls: 1,
+    refused: null,
+    run: { gates: ["pending"], recovery: null, status: "waiting_for_user" },
+    task: { error: null, pendingGates: [], requiredUserAction: "", status: "completed" },
+  });
   assert.deepEqual(await act(AGENT_TASK_ACTIONS.approve), failed);
   // The task-level `deny` went with the graph's own approval gates (ADR 0001
   // phase 11; it denied nothing else): refused as an unknown action before

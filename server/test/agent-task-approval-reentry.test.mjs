@@ -248,10 +248,10 @@ test("a task's approval of a gate on a run that has ended is refused and nothing
 });
 
 // A run whose custom-Skill graph completed before the plan stopped at a later
-// gate holds a graph checkpoint, so re-entering it is fenced. A task's
-// approval used to re-enter it (409 AGENT_GRAPH_EXECUTION_FENCED); it now
-// decides the gate as the chat page does, which the replay guard allows for a
-// gate created after the graph's terminal event.
+// gate holds a graph checkpoint. A task's approval used to re-enter it (409
+// AGENT_GRAPH_EXECUTION_FENCED); it now decides the gate as the chat page
+// does, which the replay guard allows for a gate created after the graph's
+// terminal event.
 test("a task's approval of a gate after a completed custom-Skill graph runs the Capability and completes the run", async () => {
   await withEnv(async () => {
     const harness = createHarness();

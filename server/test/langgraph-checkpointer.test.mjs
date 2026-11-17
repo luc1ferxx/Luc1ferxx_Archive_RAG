@@ -1282,8 +1282,7 @@ test("the LangGraph record never reaches a public projection, and no generic pat
   );
 
   // Forging, replacing or dropping it through any generic patch is refused,
-  // with or without the graph re-entry guard (which reads the graph
-  // checkpoint), and through completeRun's result.
+  // and through completeRun's result.
   const before = await readRun(fixture);
   for (const value of [{ forged: true }, null]) {
     await rejectsWithCode(
@@ -1297,16 +1296,6 @@ test("the LangGraph record never reaches a public projection, and no generic pat
     );
   }
   const plain = await createRunFixture({ agentRunStore: fixture.agentRunStore, runId: "lg-run-plain" });
-  await rejectsWithCode(
-    service.updateRun({
-      accessScope: ALICE,
-      graphReentryGuard: true,
-      patch: { result: { [LANGGRAPH_CHECKPOINT_RESULT_KEY]: { forged: true } } },
-      runId: plain.runId,
-    }),
-    "AGENT_GRAPH_CHECKPOINT_PRIVATE_FIELD",
-    409
-  );
   await rejectsWithCode(
     service.completeRun({
       accessScope: ALICE,
