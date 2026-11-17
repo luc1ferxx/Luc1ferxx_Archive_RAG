@@ -286,6 +286,8 @@ Approval 仍然绑定原始 input hash。
 
 这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到 approval gate `inputPreview`。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
 
+需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。
+
 Agent task 的最终产物也复用同一套 capability registry。`server/rag/agent-goal-deliverables.js` 只根据公开目标、最终回答和 docIds 生成产物规格，例如 markdown report、document organization、saved summary 和 follow-up task；`agent-tasks.js` 在回答完成后把 task 暂停为 `requiredUserAction: "approve_deliverables"`，用户批准后才执行这些 capability。Artifact deliverable 只有在真实存储成功并返回 compact artifact ref 后才算 created；写入失败会保持任务未完成。这样目标交付不会绕过 action capability 的审批边界，也不会把产物结果误当成 RAG citation。
 
 Workspace artifact 是生成结果，不是证据来源。它不会注册成 document、写入向量索引、进入 `ragSources`、citation、claim support 或 final-answer evidence；即使 artifact 引用源文档，其 `citationManifest` 也只记录 provenance。持久化前会过滤 prompt、raw trace、token、secret、auth、cookie 和完整 approval payload 等敏感字段。
@@ -412,14 +414,14 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 - 调用失败、输出无法解析、缺某条 verdict，一律保留词法结论。
 - 结论按 claim 文本 + 证据全文缓存，自检和 finalizer 对同一条 claim 只调一次。
 
-生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、Web、research 的最终校验和流式草稿仍只用词法规则。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条，升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
+生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、research 的最终校验和流式草稿仍只用词法规则；批准后执行的 Web 搜索直接用 Capability 返回的文本作答，不做 claim 校验。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条，升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
 
 ## 流式进度与校验过的答案草稿
 
 `POST /chat/stream` 推送两类中间事件，最后的 `result` 与 `/chat` 完全一致：
 
 - `trace_step`：每记录一步 trace 推一个精简摘要（`agent-event-stream.js`）。
-- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。重试或切换备用模型时推 `answer_draft_reset`。
+- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。同一次模型调用的各个前缀共用一个校验 memo，已经校验过的句子直接取结果，所以每写完一句只校验新写的句子。重试或切换备用模型时推 `answer_draft_reset`，memo 也重新开始。
 
 草稿只在 agent 用 `runWithAnswerDraftChannel` 包住的主文档检索里、且有流式客户端时产生；`/chat`、后台任务、评测、Skill 内部的模型调用和补检索都不产生草稿。草稿不是最终答案：自检失败后文档循环会补检索、可能换成补检索的答案或改为澄清，finalizer 也可能重写整段，所以界面把草稿标成"已通过证据校验，最终答案可能调整"，收到 `result` 后整体替换。保证是"不展示未经校验的内容"，不是"不撤回"。
 

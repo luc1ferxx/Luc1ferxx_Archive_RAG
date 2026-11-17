@@ -411,7 +411,7 @@ routes/chat.js handleChatRequest
 
 - 假模型 0 ms：claim memo 后并发 32 约 239–258 req/s，每请求 CPU 4.6–4.9 ms（3.24）；旧的 91 req/s 是 memo 前；3.24 测于外层计划迁 LangGraph 之前，之后每请求 CPU 约多 1 ms，没重测（3.48）
 - 定位：压测里每个 /chat 166 条语句的异常值 → pg_stat_statements 差值法 → 往返 167→22
-- claim 校验是热点 → 一次 /chat 内精确 memo（self-check/evidence-context.js buildClaimSupportContentKey），不跨请求以免跨租户
+- claim 校验是热点 → 一次 /chat 内精确 memo（self-check/evidence-context.js buildClaimSupportContentKey；2026-11-17 起逐句缓存，流式草稿每次模型调用共用一个），不跨请求以免跨租户
 - 拆分：同机同进程数单体快 1.56 倍；价值是只扩 agent 层（×2 1.84 倍）和故障隔离（3.19）
 - 真模型下容量由模型并发上限决定；LLM 规划每请求多 2 次调用、约 1/3 容量是推算
 - 100 倍：PG 单点、单表 HNSW、run 行整行重写、BM25 统计锁热点 → 按 workspace 分区/分片、事件拆表

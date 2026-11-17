@@ -364,11 +364,11 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 不对外的接口：`runAgentRag` 不再接受 `capabilityApprovals`；内置 Skill 不再声明、也不再返回上面那些图契约字段。
 - **测试**：
   - 删掉 `tools.js` 的 23 个测试。
-  - 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变。两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”）。
+  - 6 个用预批准驱动“在外层计划里直接执行需审批 Capability”的测试，改为自己构造预批准的 registry（`test/pre-approved-capabilities-test-helpers.mjs`），断言不变（2026-11-17 阶段 13 删掉了这条直接执行的路径和这个辅助文件：需审批的 Capability 只在批准后由 `capability_call` 步骤执行并作答）。两个测试里“请求带着批准”的变体去掉了：已存 v3 图停在门上时请求带的批准；已结束的 run 收到批准（改成“续接已结束的 run 开新 run、在新门上等”）。
   - `app-planner-adapters.test.mjs` 证明后台任务和 `/chat` 用同一个 replanner；它的两节点图用完了默认的两次 Skill 调用，按新规则 replanner 不再被问，所以给它 3 次，断言不变。全量里受新规则影响的只有这一个测试：第一次覆盖率门（92d97cd6）4,454 个测试里失败的 1 个就是它，ab98c509 修了。
 - **留给用户决定的**：
   - 第一个 custom Skill 失败时要不要照样跑第二个（阶段 8 起的默认行为，见 3.49“失去、且没有替代的”）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）；删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户回复“改成 B”，同一天做了**：失败的依赖只给下游提供可选输入、下游的 `when` 也不读它时，下游照常运行，这些输入留空；因依赖故障失败的依赖（否则第二个会再撞一次挂掉的模型或存储）、必填输入、纯顺序边、被跳过的依赖、`fail_fast` 之后的中止仍然阻塞。确定性图里第一个 Skill 失败时，第二个用原问题运行，调用 2 次，以它的结果回答（之前调用 1 次、弃答）；三个确定性评测与改动前一致，覆盖率门 4,459 个测试 0 失败。
-  - 需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）
+  - 需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）2026-11-17 数过之后删掉了（阶段 13，38 处里删 36 处，留下的 2 处生产走得到）：需审批的内置 Skill 只走到门上，批准后的 arXiv 导入和文档发现在 `capability_call` 步骤里用格式化的结果作答。
   - 规划器的灰度开关 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
 - **证据**（本机 Node 24.21.0）：
   - 三个确定性 agent 评测（d9a3612e 与本分支各一个干净 worktree，屏蔽 UUID、时间戳和耗时之后比较）：trajectory 15/15、planner 6/6 逐字节一致，用例之外也一致；recovery-observability 只多了 `skillGraphRejectedCount: 0`（`recovery` 和 `observability.recovery` 两处）。
@@ -384,7 +384,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 被问“为什么不顺手把第一个 Skill 失败的行为也改了”：那会改变用户看到的答案，是产品决定，不是清理。调查给了三个选项，推荐 B（失败的依赖只喂可选输入时不阻塞，约 25 行）；用户选了 B，单独提交、单独验证、单独复核。
   - 被问“custom Skill 能不能绕过图被调用”：能这样做的唯一一处代码是 `rag/langgraph/tools.js`，从来没接进生产，这一步删了。
   - 被问冷启动：承载 agent tier 的进程在 listen 之后后台加载 LangGraph，第一个 agent 请求不再付约 100–180 ms；代价是进程一启动就多约 60 MB RSS，listen 之后约 100–180 ms 里到达的请求要等模块求值完。不经过 listen 的进程内调用方（例如直接调 `runAgentRag` 的评测 runner）仍在第一次调用时加载，这是读代码得出的。
-  - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支现在只有测试走得到，删不删没定；`AGENT_PLANNER_ROLLOUT` 还在，它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
+  - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支，2026-11-17 阶段 13 已删除；`AGENT_PLANNER_ROLLOUT` 还在，它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
 
 ### 3.52 LangGraph 迁移阶段 11：删除共用图模块里只有 v3 用过的代码（2026-11-15）
 

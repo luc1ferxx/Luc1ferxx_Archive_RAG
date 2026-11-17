@@ -22,7 +22,7 @@
 | `server/rag/self-check/support.js` | evaluateClaimAgainstCitations：数字锚点、情态、主语绑定、极性、关系方向、词重叠 ≥0.6 的核心词法判定（约 1800 行） |
 | `server/rag/self-check/claims.js` | splitAnswerStructure / splitAnswerClaims：按标题/句号/分号（CLAIM_SPLIT_PATTERN）和 splitCoordinatedClaim 切 claim，识别 Differences 段 |
 | `server/rag/self-check/claim-judge.js` | 可选 LLM 评审 judgeClaimSupport：只复核被词法拒绝且引用合法（isJudgeEligible）、数字都在证据里（claimNumbersAppearInEvidence）的 claim，只升不降，异常时保留词法结论；按租户分区缓存（CACHE_LIMIT 500，Redis SHARED_VERDICT_TTL_MS 7 天） |
-| `server/rag/self-check/evidence-context.js` | 每次 /chat 内的精确 memo（createSelfCheckEvidenceContext / memoizeInEvidenceContext / buildClaimSupportContentKey），不跨请求 |
+| `server/rag/self-check/evidence-context.js` | 每次 /chat 内（流式草稿是每次模型调用内）的精确 memo（createSelfCheckEvidenceContext / memoizeInEvidenceContext / buildClaimSupportContentKey），不跨请求 |
 | `server/rag/agent-document-loop.js` | runDocumentRagLoop：主答 → 自检 → 最多 1 次补检索 → 再自检 → 选优/澄清 |
 | `server/rag/grounded-answer-finalizer.js` | finalizeGroundedAnswer：有 claim 不被支持时只保留被支持的 claim，引用改写成已验证的 rank（formatSupportedClaim）；一条都不剩则 GROUNDED_ABSTENTION_TEXT（agent-finalizer.js 只是 re-export） |
 | `server/rag/answer-drafts.js` | createAnswerDraftReleaser / findCompletePrefix / runWithAnswerDraftChannel：token 留在服务端，每个完整句子过 finalizer 同一套校验后才推 answer_draft |
@@ -50,7 +50,7 @@
    - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。开了 RAG_QA_ANSWER_VERDICT 时还有 readQaAnswerVerdict，再开 override 时有 overrideNotInEvidenceVerdict。模型自判拒答（abstainSource = answer_model）时调 retryQaWithDeeperRetrieval（top 18，只给模型没看过、且过同一门控的块，最多 topK 条，只重试一次）。
 4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖 min(docIds 数, 2) 份文档）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
 5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（默认返回 buildEvidenceRetryQuestion 的 "Re-check the uploaded documents…" 元文本，里面带原问题和证据问题）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这段补检索问题文本，再加 2 条修复查询，共 3 条）。第二次 executeObservedSkill 带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
-6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支现在只有测试走得到（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
+6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支只有测试走得到，2026-11-17 阶段 13 已删除，批准之后的回答就是 Web 搜索 Capability 返回的文本（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
 7. agent-finalization-flow.js：getBoundSelfCheckEvidenceContext 取回 memo，对同样的文本和证据直接命中，开评审时走 judgeClaimSupport。然后 finalizeAgentAnswer（即 finalizeGroundedAnswer）：全部 claim 被支持时原文原样返回；有不被支持的就重建文本，只保留被支持的 claim，formatSupportedClaim 只写已验证的 [Source N]；一条证据 claim 都不剩时输出 GROUNDED_ABSTENTION_TEXT。
 8. /chat/stream 额外的部分：createAnswerDraftReleaser 用 findCompletePrefix 等到句末、来源标签和下一个字符都到了，才对已写出的前缀调 evaluateClaimSupport。通过的句子先 formatSupportedClaim；如果 guardAnswerLinks 会删掉其中的链接，这句就不推；否则 emitAgentEvent(answer_draft)。以 NOT_IN_EVIDENCE: 开头的回复不出草稿。模型重试或切换时发 answer_draft_reset。最后的 result 事件与 /chat 的 body 完全一致，替换掉所有草稿。
 9. 对比路径（executeComparisonRag）：
