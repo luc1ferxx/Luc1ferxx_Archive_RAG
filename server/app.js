@@ -7,6 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { noStoreTenantData } from "./routes/helpers.js";
+import { allowLoopbackOrigin, createCrossSiteGuard } from "./cross-site-guard.js";
 import {
   assertApiAuthTokenConfiguration,
   bindDatabaseTenant,
@@ -204,7 +205,7 @@ export const createApp = async (options = {}) => {
 
   if (allowedOrigins.length === 0) {
     console.warn(
-      "[security] ALLOWED_ORIGINS is not set; CORS accepts any origin. Set ALLOWED_ORIGINS (comma-separated) for any non-local deployment."
+      "[security] ALLOWED_ORIGINS is not set; CORS answers browser pages on loopback origins only (localhost, 127.0.0.1 or [::1], any port), and the cross-site guard refuses state-changing requests from pages on any other origin but the API's own. Set ALLOWED_ORIGINS (comma-separated) to serve the frontend from another origin."
     );
   }
 
@@ -229,10 +230,16 @@ export const createApp = async (options = {}) => {
   );
   app.use(
     cors({
-      origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+      origin: allowedOrigins.length > 0 ? allowedOrigins : allowLoopbackOrigin,
       exposedHeaders: ["Content-Disposition"],
     })
   );
+  // CORS only decides what a page may read; a simple cross-site POST (or an
+  // <img> at GET /chat) still runs. The guard refuses those, and, while API
+  // auth is off, any browser request naming a host that is not loopback or an
+  // ALLOWED_ORIGINS host (DNS rebinding). Ahead of the static frontend, the
+  // probes and the rate limiters; requests without browser headers pass.
+  app.use(createCrossSiteGuard({ allowedOrigins }));
   // The single-container deployment (Dockerfile) serves the built frontend
   // from the API origin. Static files carry no archive data, so they are
   // mounted ahead of rate limiting and API auth; the SPA has no client-side
