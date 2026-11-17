@@ -488,6 +488,35 @@ test("a generic OpenAI client can stream from the gateway", async (t) => {
   );
 });
 
+test("a streamed answer ends with the backend's finish reason, never one the gateway made up", async (t) => {
+  withEnv(t, BASE_ENV);
+  const upstream = await startUpstream(t, (entry, res, index) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    // The first answer ends with [DONE] alone; the second names its reason.
+    const finish = index === 0 ? [] : [{ choices: [{ delta: {}, finish_reason: "length", index: 0 }] }];
+    writeSse(res, [deltaChunk("Hel"), deltaChunk("lo"), ...finish, "[DONE]"]);
+    res.end();
+  });
+  withEnv(t, { OPENAI_BASE_URL: upstream.baseUrl });
+  const gateway = await startGateway(t);
+  const finishReasons = [];
+
+  for (let call = 0; call < 2; call += 1) {
+    const response = await callGateway(gateway.url, "/v1/chat/completions", {
+      body: { messages: [{ content: "Say hello.", role: "user" }], stream: true },
+    });
+    const choices = (await response.text())
+      .split("\n")
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(6)).choices[0])
+      .filter((choice) => choice && !choice.delta.content);
+
+    finishReasons.push(choices.map((choice) => choice.finish_reason));
+  }
+
+  assert.deepEqual(finishReasons, [[null], ["length"]]);
+});
+
 test("embeddings keep the caller's task prefixes, pinned space and query marker", async (t) => {
   withEnv(t, {
     ...BASE_ENV,

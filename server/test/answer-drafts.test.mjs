@@ -296,6 +296,43 @@ test("a streamed completion that fails before it starts is retried from the top"
   assert.deepEqual(calls, ["attempt", "attempt", "po", "ng"]);
 });
 
+test("a streamed completion that reports an error or is cut off is retried from the top", async (t) => {
+  const delta = (content) => `data: ${JSON.stringify({ choices: [{ delta: { content }, index: 0 }] })}\n\n`;
+  const server = await startStreamingServer((response, count) => {
+    if (count === 3) {
+      writeSse(response, ["po", "ng"]);
+      return;
+    }
+
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(delta(count === 1 ? "Par" : "tial"));
+
+    if (count === 1) {
+      // The backend fails mid-answer: an error object, then [DONE].
+      response.write(`data: ${JSON.stringify({ error: { message: "engine died", type: "server_error" } })}\n\n`);
+      response.write("data: [DONE]\n\n");
+    }
+    // count 2: the stream just ends, with no finish reason and no [DONE].
+    response.end();
+  });
+  t.after(() => server.close());
+  withEnv(t, {
+    OPENAI_API_KEY: "test",
+    OPENAI_BASE_URL: server.url,
+    OPENAI_CHAT_FALLBACK_MODEL: "",
+    OPENAI_CHAT_MODEL: `stream-cut-${Date.now()}`,
+  });
+  const calls = [];
+
+  const completion = await completeTextWithMetadata("ping", {
+    onAttemptStart: () => calls.push("attempt"),
+    onTextDelta: (piece) => calls.push(piece),
+  });
+
+  assert.equal(completion.text, "pong");
+  assert.deepEqual(calls, ["attempt", "Par", "attempt", "tial", "attempt", "po", "ng"]);
+});
+
 const askDocumentQuestion = (t, answer) => {
   configureOpenAIProvider({
     completeText: async (_input, { onTextDelta } = {}) => {

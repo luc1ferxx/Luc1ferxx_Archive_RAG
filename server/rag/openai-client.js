@@ -131,6 +131,18 @@ const fetchJson = async (url, { signal, ...options }) => {
   return JSON.parse(text);
 };
 
+// A stream that reports an error, or ends before the model or the server said
+// it finished, failed like a 5xx before it: the same retriable shape (withRetry
+// in openai.js), marked as the backend's own answer so the model gateway
+// reports it as unavailable. What it streamed so far is part of an answer.
+const toStreamError = (message) => {
+  const error = new Error(message);
+  error.status = 502;
+  error.upstreamStatus = 502;
+  error.retryAfterMs = null;
+  return error;
+};
+
 /**
  * Reads an OpenAI-style chat completion stream (server-sent `data:` lines,
  * ending with `data: [DONE]`), calling onDelta with each piece of content as it
@@ -142,6 +154,8 @@ const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
   let content = "";
   let finishReason = null;
   let usage = null;
+  let done = false;
+  let reader = null;
 
   const handleLine = (line) => {
     const trimmed = line.trim();
@@ -152,11 +166,23 @@ const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
 
     const payload = trimmed.slice(5).trim();
 
-    if (!payload || payload === "[DONE]") {
+    if (payload === "[DONE]") {
+      done = true;
+      return;
+    }
+
+    if (!payload) {
       return;
     }
 
     const chunk = JSON.parse(payload);
+
+    if (chunk.error || chunk.object === "error") {
+      throw toStreamError(
+        chunk.error?.message || chunk.message || "The model's answer stream reported an error."
+      );
+    }
+
     const choice = chunk.choices?.[0];
     const delta = choice?.delta?.content;
 
@@ -179,14 +205,14 @@ const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
       throw toHttpError(response, await response.text());
     }
 
-    const reader = response.body.getReader();
+    reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
 
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done: ended, value } = await reader.read();
 
-      if (done) {
+      if (ended) {
         break;
       }
 
@@ -198,7 +224,13 @@ const fetchChatStream = async (url, { signal, ...options }, onDelta) => {
 
     handleLine(buffer + decoder.decode());
   } catch (cause) {
+    // An error chunk stops the read with the body still open.
+    await reader?.cancel().catch(() => {});
     throw toTimeoutError(cause, timeoutMs);
+  }
+
+  if (finishReason === null && !done) {
+    throw toStreamError("The model's answer stream ended before the answer finished.");
   }
 
   return { content, finishReason, usage };
