@@ -1410,7 +1410,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **回答与旧 Skill 逐字节一致。** 14 个场景（8 个 arXiv、6 个文档发现）比较了 agentAnswer、ragAnswer、step 输出、来源、拒答、run 结果，全部相同；复核又用 32 个场景比较格式化结果，0 处不同。批准后重试（`prepareRetry`）给出同样的回答。
 - **仍然走得到的路径不变。** 上表 21 个场景在 e23a83f6 和分支上记录的结果，JSON 完全相同。
 - **三个确定性 agent 评测**：trajectory 15/15（63 项检查）、recovery-observability 8/8（27 项）、planner 6/6（22 项）通过；`quality:current` 在 d2d3e475 的干净 worktree 上通过。
-- **覆盖率门**（d2d3e475，一次性 PostgreSQL 18 + pgvector）：4,508 个测试，4,501 通过、7 跳过、0 失败；全局行覆盖 92.33%，“RAG / AgentRAG core” 一组 96.21%。复核修正之后的结果见下面“独立复核”。
+- **覆盖率门**（d2d3e475，一次性 PostgreSQL 18 + pgvector）：4,508 个测试，4,501 通过、7 跳过、0 失败；全局行覆盖 92.33%，“RAG / AgentRAG core” 一组 96.21%。复核修正之后（57562850，同样的环境）：4,511 个测试，4,504 通过、7 跳过、0 失败；全局行覆盖 92.34%，“RAG / AgentRAG core” 一组 96.27%（pass）。复核修正只动了流式草稿、规模压测和测试，评测走不到，`quality:current` 没有在修正后重跑。
 - **没有验证的**：真实浏览器；真实模型和真实 arXiv。
 
 ### 独立复核（2026-11-17）
