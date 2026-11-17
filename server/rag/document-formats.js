@@ -54,8 +54,6 @@ export {
   isDocumentFormatError,
 } from "./document-format-errors.js";
 
-export const OFFICE_DOCUMENT_FORMATS = Object.freeze(["docx", "pptx", "xlsx"]);
-
 export const DOCUMENT_MIME_TYPES = Object.freeze({
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   pdf: "application/pdf",

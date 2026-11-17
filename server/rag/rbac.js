@@ -77,20 +77,6 @@ const ALL_PERMISSION_LIST = Object.freeze([
 const PERMISSION_SET = new Set(ALL_PERMISSION_LIST);
 const ORDINARY_PERMISSION_SET = new Set(ORDINARY_PERMISSION_LIST);
 
-export const RBAC_PERMISSION_CATALOG = Object.freeze(
-  ALL_PERMISSION_LIST.map((id) =>
-    Object.freeze({
-      id,
-      kind: ADMIN_PERMISSION_LIST.includes(id) ? "admin" : "workspace",
-    })
-  )
-);
-
-export const listRbacPermissionIds = () => [...ALL_PERMISSION_LIST];
-
-export const isKnownRbacPermission = (permissionId) =>
-  PERMISSION_SET.has(normalizeScopeId(permissionId));
-
 const VIEWER_PERMISSIONS = [
   RBAC_PERMISSION_IDS.documentsRead,
   RBAC_PERMISSION_IDS.chatAsk,

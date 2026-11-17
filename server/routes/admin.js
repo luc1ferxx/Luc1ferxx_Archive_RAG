@@ -14,8 +14,6 @@ import {
   isPlatformAdminReadScope,
 } from "../rag/data-access-audit.js";
 
-import { serializeError } from "./helpers.js";
-
 /**
  * Runs one controlled admin action (POST /admin/actions/:action) once the
  * permission check has passed. The agent tier of a split deployment mounts it

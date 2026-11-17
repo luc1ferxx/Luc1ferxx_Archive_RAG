@@ -7,26 +7,12 @@ import {
 } from "../../../rag/agent-runs.js";
 import {
   CAPABILITY_IDS,
-  CAPABILITY_POLICY_DECISIONS,
   createCapabilityRegistry,
-  createRecommendationImportSelectedCapability,
   createWebSearchCapability,
-  evaluateCapabilityPolicy,
 } from "../../../rag/capabilities/index.js";
 import {
-  getAgentWorkingMemory,
   getChatResponseBody,
-  getClarification,
-  getExecutionPlanner,
-  getExecutionLoop,
-  getIntentPlanner,
-  getObservedSkill,
-  getRunPhases,
   getSelectedSkillIds,
-  getSkillChainIds,
-  getTraceSteps,
-  getTraceTypes,
-  hasTraceStep,
 } from "../../chat-response-contract.js";
 import {
   buildScopedRagService,

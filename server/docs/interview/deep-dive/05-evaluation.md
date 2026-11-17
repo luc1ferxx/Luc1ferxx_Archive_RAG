@@ -31,7 +31,7 @@
 | `server/evaluation/release-evidence-gate.js、eval-evidence-policy.js` | release:gate：完整报告集（RELEASE_EVIDENCE_REPORT_SPECS）；buildPromptLineageCheck、buildRobustLineageCheck、buildReadinessSourceCheck、buildGateWorktreeCheck |
 | `server/evaluation/baselines/quality-near-duplicate-deterministic-v2.json` | PR 门唯一接受的确定性回归基线（2026-10-29 默认 topK 改为 10 时取代 v1，指标和用例与 v1 相同） |
 | `server/evaluation/run-llm-judge.mjs、run-claim-judge-eval.mjs` | LLM 评审：measureJudgeAgreement 对人工标签算一致率和 Cohen's kappa 的框架（还没在真实数据上跑）；claim judge 在构造的对照集（CLAIM_JUDGE_CONTRAST_SET、CLAIM_JUDGE_HELD_OUT_SET）上做校准 |
-| `.github/workflows/quality-gate.yml、real-model-eval.yml、release-evidence.yml、planner-real-gate.yml、robust-eval-suite.yml` | PR 三个并行 job；每周一用 Ollama 跑真实模型（不需要 key）；每周一（或手动）跑发布证据（需要 OPENAI_API_KEY）；真实规划器门（需要 key）；robust suite 手动诊断 |
+| `.github/workflows/quality-gate.yml、real-model-eval.yml` | PR 三个并行 job；每周一用 Ollama 跑真实模型（不需要 key）。发布证据、真实规划器门和 robust suite 的三个 workflow 因 key 失效停用，2026-11-17 删除，改为本机手动运行 |
 | `server/test/run.test.mjs、coverage-gate.mjs、coverage-policy.mjs、ci-workflow.test.mjs` | 测试文件自动发现（collectTestFiles），每个文件一个子进程；CI 只跑一遍 coverage:gate；ci-workflow.test.mjs 钉死 workflow 和两处发现逻辑一致，并断言 quality-gate.yml 里不出现 OPENAI_API_KEY |
 | `server/test/langgraph-support/graph-goldens.mjs、test/fixtures/graph-goldens/` | 删除原生调度器前冻结的 golden，8 个套件、102 个文件、约 5.3 MB；2026-11-13 删外层计划的原生循环前又冻结了 32 个文件（CURRENT-TRUTH §3.48）；同一天删 V1 顺序链时，这些文件里删了 2 个（custom_skill_retry、skill_graph_shadow_comparison 两个用例的）、改写了 1 个（统一图用例的 V1 对照从 4 次变 2 次），其余没动（§3.49）；阶段 9 又改写了 1 个（langgraph-runtime-parity 的 recovery_observability_skill_graph_signal.json：恢复评测去掉了造数，事件从 37 条变成 33 条，其中 17 条图事件逐字节未变，§3.50）；阶段 10 随 v3 统一图删了 44 份，规划器 golden 摘要里去掉了统一图规划器的 21 条（§3.51）；阶段 11（2026-11-15）又删了 2 份（langgraph-execution-graph-runtime 里只有 Capability 的预检能停住或拒绝节点的对照，随预检钩子一起删，§3.52；评测没有改，manifest 还是 1.18.0）；只有 UPDATE_GRAPH_GOLDENS=1 能改写，改写后本次测试仍判失败 |
 
@@ -51,7 +51,7 @@ B. 离线效果评测（本地 Ollama，或每周的 real-model-eval.yml，后�
 - 门控：run-abstention-gate-analysis.mjs，每题检索一次 → 在网格上重放 assessQaConfidence → computeAuc / gateCost / pickRerankThreshold。
 - 检索对比：run-retrieval-comparison.mjs，每个 route 跑一次 runRerankEvaluation → pairedBootstrapDelta。
 
-C. 发布（release-evidence.yml，每周一或手动，第一步要求 OPENAI_API_KEY 非空）：test:pgvector → eval:robust-suite → robust:gate --fail-on-warn → planner（mock 和 real）、trajectory、recovery、runtime:smoke、rollout:readiness → release-evidence-gate.js 的 buildReleaseEvidenceReport（buildGateWorktreeCheck、buildRobustLineageCheck、buildPromptLineageCheck、buildReadinessSourceCheck）。
+C. 发布（原来是 release-evidence.yml，每周一或手动，第一步要求 OPENAI_API_KEY 非空；2026-11-17 删除，现在本机手动跑同样的步骤）：test:pgvector → eval:robust-suite → robust:gate --fail-on-warn → planner（mock 和 real）、trajectory、recovery、runtime:smoke、rollout:readiness → release-evidence-gate.js 的 buildReleaseEvidenceReport（buildGateWorktreeCheck、buildRobustLineageCheck、buildPromptLineageCheck、buildReadinessSourceCheck）。
 
 ## 设计决策
 

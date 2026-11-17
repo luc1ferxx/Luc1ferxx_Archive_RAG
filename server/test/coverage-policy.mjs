@@ -128,8 +128,8 @@ export const GLOBAL_GATE = {
   },
 };
 
-// These tracked files are executable entry points, evaluation utilities, or
-// test-only fixtures that are not part of the in-process backend test surface.
+// These tracked files are executable entry points or evaluation utilities that
+// are not part of the in-process backend test surface.
 // Keeping the list explicit makes every newly added backend source opt in to
 // coverage by default instead of silently disappearing when no test imports it.
 export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
@@ -163,7 +163,6 @@ export const GLOBAL_COVERAGE_EXCLUDED_PATHS = Object.freeze([
   "server/evaluation/run-trace-demo.mjs",
   "server/evaluation/run-trajectory-eval.mjs",
   "server/mcp-server.js",
-  "server/rag/connectors/built-ins/test-connector.js",
   "server/server.js",
 ]);
 

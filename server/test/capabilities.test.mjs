@@ -23,7 +23,7 @@ import {
   TEST_CONNECTOR_CAPABILITY_ID,
   TEST_CONNECTOR_ID,
   createTestConnectorSpec,
-} from "../rag/connectors/index.js";
+} from "./fixtures/test-connector.mjs";
 
 test("capability registry validates and describes tool adapters", async () => {
   const capability = {

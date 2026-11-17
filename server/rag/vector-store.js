@@ -23,7 +23,6 @@ import { embedTexts } from "./openai.js";
 import { instrumentVectorStoreSearch, timeRetrievalRoute } from "./metrics-retrieval.js";
 import { adaptQueryVectorForSearch, stampQueryAdapterProvenance } from "./query-adapter.js";
 import {
-  addDocumentsToPgvectorIndex,
   beginPgvectorIndexWrite,
   clearPgvectorIndex,
   countPgvectorChunksInEveryTable,
@@ -975,9 +974,6 @@ export const searchDocumentsPerDocumentWithRoutes = async ({
     ),
   };
 };
-
-export const searchDocumentsPerDocument = async (args) =>
-  (await searchDocumentsPerDocumentWithRoutes(args)).resultsByDocument;
 
 export const resetVectorStore = () => {
   // Reset every backend's in-process state, not only the active one: tests and

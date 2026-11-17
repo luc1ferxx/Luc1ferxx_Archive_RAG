@@ -1018,15 +1018,8 @@ export const resetPostgresPool = async () => {
   postgresPool = null;
 };
 
-export const isLongMemoryPostgresConfigured = () => isPostgresConfigured();
-
-export const getLongMemoryPostgresPool = () => getPostgresPool();
-
 export const queryLongMemoryPostgres = async (queryText, values = []) =>
   queryPostgres(queryText, values);
-
-export const withLongMemoryPostgresClient = async (callback) =>
-  withPostgresClient(callback);
 
 export const checkLongMemoryPostgresHealth = async () => {
   if (!isLongMemoryEnabled()) {

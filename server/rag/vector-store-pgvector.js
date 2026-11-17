@@ -1319,16 +1319,6 @@ export const writeDocumentsToPgvectorIndex = async ({
   });
 };
 
-export const addDocumentsToPgvectorIndex = async ({
-  accessScope = {},
-  client = null,
-  documents,
-} = {}) => {
-  const preparedDocuments = await prepareDocumentsForPgvectorIndex({ documents });
-
-  return writeDocumentsToPgvectorIndex({ accessScope, client, preparedDocuments });
-};
-
 /**
  * Deletes from every write-target version and from every other live version
  * table (removeFromRetainedVersions); returns the active version's count.
@@ -1913,25 +1903,3 @@ export const searchPgvectorSparseDocuments = async ({
         (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
     );
 };
-
-export const searchPgvectorDocumentsPerDocument = async ({
-  queryVector,
-  queryText = "",
-  docIds,
-  topKPerDoc,
-  scoringMode = "combined",
-} = {}) =>
-  new Map(
-    await Promise.all(
-      toDocIdArray(docIds).map(async (docId) => [
-        docId,
-        await searchPgvectorDocuments({
-          queryVector,
-          queryText,
-          docIds: [docId],
-          topK: topKPerDoc,
-          scoringMode,
-        }),
-      ])
-    )
-  );

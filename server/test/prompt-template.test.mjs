@@ -38,6 +38,38 @@ test("createPromptTemplate handles empty values", () => {
   assert.equal(result, "x");
 });
 
+// Values carry questions, memory and document text: braces, escapes, another
+// variable's name and String.prototype.replace patterns in them come out as
+// written, never parsed again.
+test("a value that looks like template syntax is inserted verbatim", () => {
+  const value = `{question} {{context}} }} {{ {"rewritten_query":"x"} } { {name} $& $1 $$ \\ 第二行\n  indented`;
+
+  assert.equal(createPromptTemplate("Q: {name}!").format({ name: value, question: "q" }), `Q: ${value}!`);
+  assert.deepEqual(
+    createChatPromptTemplate([
+      ["system", "S {name}"],
+      ["human", "{name}"],
+    ]).invoke({ name: value }),
+    {
+      messages: [
+        { role: "system", content: `S ${value}` },
+        { role: "human", content: value },
+      ],
+    }
+  );
+});
+
+test("a lone, empty or unclosed brace in a template stays literal text", () => {
+  for (const [source, expected] of [
+    ["Single closing } brace", "Single closing } brace"],
+    ["Empty {} braces", "Empty {} braces"],
+    ["Unclosed { brace", "Unclosed { brace"],
+    ["Nested {a{b} braces", "Nested {avalue braces"],
+  ]) {
+    assert.equal(createPromptTemplate(source).format({ b: "value" }), expected, source);
+  }
+});
+
 test("createChatPromptTemplate returns messages with role and rendered content", () => {
   const template = createChatPromptTemplate([
     ["system", "You are a {role}."],

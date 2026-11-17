@@ -4,8 +4,6 @@ export {
   createMockPlannerProvider,
 } from "./planner/cases/index.js";
 export {
-  CATEGORY_LABELS as PLANNER_CATEGORY_LABELS,
-  DEFAULT_ACCESS_SCOPE as PLANNER_DEFAULT_ACCESS_SCOPE,
   buildPlannerCheck,
   finishPlannerCase,
   runPlannerCaseSafely,

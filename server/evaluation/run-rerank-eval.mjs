@@ -38,7 +38,6 @@ import { configureEvaluationStores } from "./eval-store-overrides.js";
 import {
   buildExpectedEvidenceUnits,
   findRobustReport as findRobustReportGeneric,
-  hashToken,
   toDeterministicEmbedding,
 } from "./eval-case-helpers.js";
 import {

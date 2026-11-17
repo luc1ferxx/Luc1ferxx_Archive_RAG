@@ -1270,7 +1270,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - 默认覆盖率门禁不含 Redis，`model-call-guard.js` 的共享分支只由 Redis 集成测试覆盖。
 - 前端测试 113 个全部通过，生产构建通过（Docker 镜像构建时执行）。
 - 覆盖率门禁通过：后端全局行覆盖 89.8%，RAG/AgentRAG 核心 93.6%（本次测得；全局比上次低 0.8 个百分点，因为新加的压测和规模脚本里需要数据库的主流程只在一次性集群上跑，单元测试覆盖不到）。
-- 定时的 Planner Real Provider Gate 从 2026-09-20 起每天失败，原因是仓库 secret `OPENAI_API_KEY` 失效，OpenAI 返回 "Incorrect API key provided"，真实规划器全部退回确定性规划。这不是代码问题，需要换一个有效的 key；workflow 现在会在第一步检查 key，并给出明确的报错。
+- 定时的 Planner Real Provider Gate 从 2026-09-20 起每天失败，原因是仓库 secret `OPENAI_API_KEY` 失效，OpenAI 返回 "Incorrect API key provided"，真实规划器全部退回确定性规划。这不是代码问题，需要换一个有效的 key；workflow 后来在第一步检查 key 并给出明确的报错；2026-11-17 这个 workflow 连同另外两个停用的（Robust Eval Suite、Release Evidence Gate）一起删除，真实 provider 的评测改为本机手动运行。
 - 真实模型 `verify:quality`（qwen2.5:7b，默认配置）：18/18。
 
 ## 4. 边界（主动说，不要等被问）

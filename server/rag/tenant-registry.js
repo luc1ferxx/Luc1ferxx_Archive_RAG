@@ -1301,14 +1301,6 @@ export const getDefaultTenantRegistry = () => {
   return defaultRegistry;
 };
 
-export const configureDefaultTenantRegistry = (registry) => {
-  defaultRegistry = registry ?? null;
-};
-
-export const resetDefaultTenantRegistry = () => {
-  defaultRegistry = null;
-};
-
 // ---------------------------------------------------------------------------
 // Enforcement
 // ---------------------------------------------------------------------------

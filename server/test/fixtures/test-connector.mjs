@@ -1,12 +1,14 @@
+// A connector spec for the connector and capability contract tests only; no
+// registry of the server includes it.
 import {
   AGENT_CONNECTOR_SPEC_VERSION,
   AGENT_CONNECTOR_TYPE,
   CONNECTOR_REPLAY_STEP_TYPE,
-} from "../schema.js";
+} from "../../rag/connectors/schema.js";
 import {
   STEP_REPLAY_APPROVAL_POLICIES,
   STEP_REPLAY_IDEMPOTENCY,
-} from "../../agent-run-step-replay-safety.js";
+} from "../../rag/agent-run-step-replay-safety.js";
 
 export const TEST_CONNECTOR_ID = "test_connector";
 export const TEST_CONNECTOR_CAPABILITY_ID = "connector.test_echo";

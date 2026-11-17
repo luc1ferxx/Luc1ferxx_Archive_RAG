@@ -189,14 +189,6 @@ export const REQUIRE_MODALITY_PATTERN =
 export const RECOMMEND_MODALITY_PATTERN = /\b(?:should|ought\s+to|recommended)\b/i;
 export const NEGATIVE_POLARITY_PATTERN =
   /(?:\b(?:no\s+longer|no|not|never|without|absent|missing|lacks?|cannot|can't|mustn't|needn't|shouldn't|isn't|aren't|wasn't|weren't|doesn't|don't|didn't|hasn't|haven't|hadn't)\b|不|未|无|禁止|不得|不能|不可|没有|缺少)/i;
-export const NEGATIVE_POLARITY_TERMS = new Set([
-  "absent",
-  "lack",
-  "lacks",
-  "missing",
-  "never",
-  "without",
-]);
 export const MODALITY_CLAUSE_SPLIT_PATTERN =
   /(?<=[.!?。！？])\s+|\n+|[;；]+\s*|(?:[,，]\s*)?\b(?:but|however|whereas|while|whilst|yet)\b\s*|(?:[,，]\s*)?(?:而|但是?|然而|相比之下|相较之下)\s*/gi;
 export const MODALITY_CLAIM_TERMS = new Set([

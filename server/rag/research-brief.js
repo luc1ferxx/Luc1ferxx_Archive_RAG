@@ -7,38 +7,6 @@ const MAX_QUESTIONS = 3;
 const trimQuestion = (value = "") =>
   normalizeWhitespace(value).replace(/[?？。.\s]+$/u, "");
 
-const getCitationKey = (citation = {}) =>
-  [
-    citation.docId ?? "",
-    citation.fileName ?? "",
-    citation.pageNumber ?? "",
-    citation.chunkIndex ?? "",
-    citation.rank ?? "",
-  ].join(":");
-
-export const dedupeResearchCitations = (results = []) => {
-  const citations = [];
-  const seenKeys = new Set();
-
-  for (const result of results) {
-    for (const citation of result.citations ?? []) {
-      const key = getCitationKey(citation);
-
-      if (seenKeys.has(key)) {
-        continue;
-      }
-
-      seenKeys.add(key);
-      citations.push({
-        ...citation,
-        rank: citations.length + 1,
-      });
-    }
-  }
-
-  return citations;
-};
-
 export const buildResearchPlan = ({ question, documents = [] }) => {
   const topic = trimQuestion(question);
   const documentHints = documents

@@ -1155,8 +1155,6 @@ export const isQaAnswerVerdictEnabled = () =>
 // rival; a question the decomposer split into parts is never overridden
 // (answer-verdict-override.js). The LLM claim judge is never asked. Any other
 // value is off.
-export const QA_VERDICT_OVERRIDE_MODES = Object.freeze(["off", "supported"]);
-
 export const getQaVerdictOverrideMode = () =>
   String(process.env.RAG_QA_VERDICT_OVERRIDE ?? "").trim().toLowerCase() === "supported"
     ? "supported"
@@ -1868,14 +1866,8 @@ export const getPostgresSystemRole = () => {
   return role;
 };
 
-export const getLongMemoryDatabaseUrl = () =>
-  getPostgresDatabaseUrl();
-
 export const getLongMemoryPostgresTable = () =>
   (process.env.LONG_MEMORY_POSTGRES_TABLE || "long_memory_items").trim();
-
-export const isLongMemoryPostgresSslEnabled = () =>
-  isPostgresSslEnabled();
 
 export const getDocumentsPostgresTable = () =>
   (process.env.DOCUMENTS_POSTGRES_TABLE || "rag_documents").trim();

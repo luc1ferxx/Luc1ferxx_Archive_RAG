@@ -498,7 +498,7 @@ test("reranker scores cross the wire unchanged: heuristic rerankScore and cross-
   assert.deepStrictEqual(chatWithCrossEncoder.remote, chatWithCrossEncoder.local);
 });
 
-test("the query adapter applies on the retrieval tier exactly as in process and its stamp comes back", async (t) => {
+test("the query adapter applies on the retrieval tier exactly as in process and its stamp comes back; without the QA scope neither adapts", async (t) => {
   const SPACE = { dimensions: 3, documentPrefix: "", model: "adapter-parity-model", queryPrefix: "" };
   const adapterPath = path.join(tempRoot, "adapter.json");
   const vectors = { "alpha paragraph": [1, 0, 0], "beta paragraph": [0, 1, 0], question: [1, 0, 0] };
@@ -533,26 +533,35 @@ test("the query adapter applies on the retrieval tier exactly as in process and 
     })),
   });
 
-  const run = () =>
+  const run = (queryAdapterScope) => () =>
     process.env.RETRIEVAL_SERVICE_URL
       ? retrieveGlobalContextRemotely({
           accessScope: ALICE,
           docIds: ["paper"],
-          queryAdapterScope: QUERY_ADAPTER_SCOPE_QA,
+          queryAdapterScope,
           retrievalQueries: [{ id: "primary", primary: true, query: "question" }],
         })
       : retrieveGlobalContextForQueriesInProcess({
           docIds: ["paper"],
-          queryAdapterScope: QUERY_ADAPTER_SCOPE_QA,
+          queryAdapterScope,
           retrievalQueries: [{ id: "primary", primary: true, query: "question" }],
         });
-  const { local, remote } = await runBothWays(run);
+  const { local, remote } = await runBothWays(run(QUERY_ADAPTER_SCOPE_QA));
   const stamp = local.retrieval.routes.dense.queryAdapter;
 
   assert.match(String(stamp), /^qa1-/, "the adapter ranked the in-process search");
   assert.equal(local.results[0].document.pageContent, "beta paragraph", "W q ranked beta first");
   assert.equal(local.results[0].provenance.queryAdapter, stamp);
   assert.deepStrictEqual(remote, local);
+
+  // Agent-planned retrieval passes no scope: with the adapter loaded, the
+  // tier searches with the model's own vector too, and stamps nothing.
+  const unscoped = await runBothWays(run(null));
+
+  assert.equal(unscoped.local.retrieval.routes.dense.queryAdapter, undefined);
+  assert.equal(unscoped.local.results[0].document.pageContent, "alpha paragraph", "q ranked alpha first");
+  assert.equal(Object.hasOwn(unscoped.local.results[0].provenance, "queryAdapter"), false);
+  assert.deepStrictEqual(unscoped.remote, unscoped.local);
 });
 
 // ---------------------------------------------------------------------------

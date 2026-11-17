@@ -2,10 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createAgentTaskService } from "../rag/agent-tasks.js";
-import {
-  createAgentTriggerRegistry,
-  createResearchDossierTriggerSpec,
-} from "../rag/agent-triggers/index.js";
+import { createResearchDossierTriggerSpec } from "../rag/agent-triggers/built-ins/research-dossier.js";
+import { createAgentTriggerRegistry } from "../rag/agent-triggers/registry.js";
 import { AGENT_TRIGGER_MODES } from "../rag/agent-triggers/schema.js";
 import { createAgentTriggerDispatcher } from "../rag/agent-trigger-dispatcher.js";
 import {
