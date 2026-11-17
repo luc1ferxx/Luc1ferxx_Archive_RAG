@@ -1481,40 +1481,58 @@ export const loadDocumentsFromStore = async (docIds) => {
 };
 
 const refreshFromStore = async (accessScope) => {
+  // Every entry, not only the scope's: a listed row may replace an entry the
+  // map holds under another scope, and only if that entry did not change
+  // while the listing ran.
   const before = new Map(documentRegistry);
   const store = getDocumentRegistryStore();
-  const { result: storedDocuments, touched } = await readWhileTrackingWrites(() =>
-    runAsDatabaseSystem(async () =>
-      (store.list ? await store.list(accessScope) : []).filter((document) =>
-        documentMatchesAccessScope(toStoredDocument(document), accessScope)
-      )
-    )
+  const { result: rows, touched } = await readWhileTrackingWrites(() =>
+    runAsDatabaseSystem(async () => (store.list ? store.list(accessScope) : []))
   );
-  const stored = new Map(
-    storedDocuments
-      .map((document) => toStoredDocument(document))
-      .filter((document) => document.docId)
-      .map((document) => [document.docId, document])
-  );
+  // Each row normalized once; a store may list more than the scope.
+  const stored = new Map();
+
+  for (const row of rows) {
+    const document = toStoredDocument(row);
+
+    if (document.docId && documentMatchesAccessScope(document, accessScope)) {
+      stored.set(document.docId, document);
+    }
+  }
 
   const changed = [];
+  const apply = (docId) => {
+    const previous = before.get(docId);
 
-  for (const docId of new Set([...before.keys(), ...stored.keys()])) {
-    if (touched.has(docId) || documentRegistry.get(docId) !== before.get(docId)) {
-      continue;
+    if (touched.has(docId) || documentRegistry.get(docId) !== previous) {
+      return;
     }
 
-    if (stored.has(docId)) {
-      documentRegistry.set(docId, stored.get(docId));
-    } else if (documentMatchesAccessScope(before.get(docId), accessScope)) {
-      // Only an entry the listing covered can be missing from it.
-      documentRegistry.delete(docId);
+    const next = stored.get(docId);
+
+    if (next) {
+      documentRegistry.set(docId, next);
     } else {
-      continue;
+      documentRegistry.delete(docId);
     }
 
-    if (isContentChange(before.get(docId), stored.get(docId))) {
+    if (isContentChange(previous, next)) {
       changed.push(docId);
+    }
+  };
+
+  // The entries the listing covered (a missing one is gone) and the ones it
+  // returned, in map order, then the rows the map did not hold. Another
+  // scope's entry the listing did not return is left alone.
+  for (const [docId, previous] of before) {
+    if (stored.has(docId) || documentMatchesAccessScope(previous, accessScope)) {
+      apply(docId);
+    }
+  }
+
+  for (const docId of stored.keys()) {
+    if (!before.has(docId)) {
+      apply(docId);
     }
   }
 
@@ -1552,11 +1570,14 @@ const startRefresh = (key, scope, queue) => {
  * delete). Callers with the same scope that arrive while a listing runs share
  * the one queued behind it, so a scope has at most one listing running and one
  * waiting.
+ *
+ * Resolves with nothing: every caller (/chat before its run, GET /documents,
+ * the arXiv duplicate check) reads the map itself afterwards.
  */
 export const refreshDocumentRegistry = async (accessScope = {}) => {
   if (!documentRegistryInitialized) {
-    await initializeDocumentRegistry();
-    return listDocuments(accessScope);
+    await ensureDocumentRegistryInitialized();
+    return;
   }
 
   const scope = normalizeAccessScope(accessScope);
@@ -1581,7 +1602,6 @@ export const refreshDocumentRegistry = async (accessScope = {}) => {
   }
 
   await refresh;
-  return listDocuments(scope);
 };
 
 export const getStoredDocument = (docId, accessScope = {}) => {

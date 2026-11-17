@@ -19,6 +19,7 @@ import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
 import {
   configureDocumentRegistryStore,
+  getStoredDocument,
   resetDocumentRegistry,
   resetDocumentRegistryStore,
 } from "../rag/doc-registry.js";
@@ -712,6 +713,49 @@ test("qa flow returns grounded citations", async () => {
   assert.match(response.text, /Grounded answer/);
   assert.equal(response.citations.length, 1);
   assert.equal(response.citations[0].pageNumber, 1);
+});
+
+test("chat and recordConversationTurn read only the documents they are asked about, never list the registry", async () => {
+  await ingestFixture({
+    docId: "benefits-2024",
+    fileName: "benefits-2024.pdf",
+    pages: ["Annual leave policy: employees receive 10 paid annual leave days each year."],
+  });
+  await ingestFixture({
+    docId: "travel-2024",
+    fileName: "travel-2024.pdf",
+    pages: ["Travel policy: meals are reimbursed up to forty dollars per day."],
+  });
+
+  // Listing the registry (listDocuments: sorted by uploadedAt, one public
+  // copy per entry) reads every entry's uploadedAt. Count the reads of the
+  // entry no call below asks about.
+  const unasked = getStoredDocument("travel-2024");
+  const { uploadedAt } = unasked;
+  let reads = 0;
+
+  Object.defineProperty(unasked, "uploadedAt", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      reads += 1;
+      return uploadedAt;
+    },
+  });
+
+  const response = await chat(["benefits-2024"], "What is the annual leave policy?", { sessionId: "registry-reads" });
+
+  assert.match(response.text, /Grounded answer/);
+  await recordConversationTurn({
+    answer: "Ten days.",
+    docIds: ["benefits-2024"],
+    query: "How many leave days do employees get?",
+    sessionId: "registry-reads",
+  });
+  assert.equal(reads, 0, "neither call listed the registry");
+
+  assert.equal(listDocuments().length, 2);
+  assert.ok(reads > 0, "a listing does read it");
 });
 
 test("agent verification keeps full retrieved evidence internal to the public response", async () => {

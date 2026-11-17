@@ -1529,7 +1529,7 @@ export const recordConversationTurn = async ({
     return;
   }
 
-  await initializeDocumentRegistry();
+  await ensureDocumentRegistryInitialized();
   const documents = getDocuments(normalizeDocIds(docIds), accessScope);
 
   await recordUserExchange({
@@ -1584,7 +1584,7 @@ const chat = async (docIds, query, options = {}) => {
       throw error;
     }
 
-    await initializeDocumentRegistry();
+    await ensureDocumentRegistryInitialized();
     ensureDocumentsExist(normalizedDocIds, accessScope);
 
     const selectedDocuments = getDocuments(normalizedDocIds, accessScope);
