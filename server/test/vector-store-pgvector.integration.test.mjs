@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import pg from "pg";
 
 // Real-database integration suite for the default retrieval stack. It needs a
 // PostgreSQL with the pgvector extension and runs only when
@@ -287,6 +288,55 @@ if (!databaseUrl) {
 
     assert.equal(search.results[0].document.metadata.chunkIndex, 1);
     assert.equal(listDocuments().some((document) => document.docId === "it-alpha"), true);
+  });
+
+  test("a dense search is one round trip: the iterative scan setting rides as its prelude and holds for that statement only", async () => {
+    const search = () =>
+      pgvector.searchPgvectorDocuments({
+        docIds: ["it-alpha"],
+        queryText: "gamma renewal",
+        queryVector: embed("gamma renewal"),
+        topK: 2,
+      });
+
+    // The first search verifies the version and reads the pointer.
+    await search();
+
+    const sent = [];
+    const originalQuery = pg.Client.prototype.query;
+
+    pg.Client.prototype.query = function recordedQuery(config, ...rest) {
+      sent.push(typeof config === "string" ? config : String(config?.text ?? ""));
+      return originalQuery.call(this, config, ...rest);
+    };
+
+    let results;
+
+    try {
+      results = await search();
+    } finally {
+      pg.Client.prototype.query = originalQuery;
+    }
+
+    assert.equal(results[0].document.metadata.chunkIndex, 1);
+    assert.equal(sent.filter((text) => /AS vector_score/.test(text)).length, 1);
+    assert.ok(
+      !sent.some((text) => /^\s*(BEGIN|COMMIT)\b/i.test(text) || /set_config/.test(text)),
+      `no transaction and no statement of its own for the setting: ${JSON.stringify(sent)}`
+    );
+
+    const extension = await queryPostgres("SELECT extversion FROM pg_extension WHERE extname = 'vector'");
+
+    if (pgvector.supportsPgvectorIterativeScan(extension.rows[0]?.extversion)) {
+      // What that prelude does on this server: the transaction-local setting
+      // applies to the statement it precedes and is gone after it.
+      const prelude = [{ text: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] }];
+      const during = await queryPostgres("SELECT current_setting('hnsw.iterative_scan', true) AS mode", [], { prelude });
+      const afterwards = await queryPostgres("SELECT current_setting('hnsw.iterative_scan', true) AS mode");
+
+      assert.equal(during.rows[0].mode, "relaxed_order");
+      assert.notEqual(afterwards.rows[0].mode, "relaxed_order");
+    }
   });
 
   test("a failed write rolls back every chunk in the transaction and the foreign key refuses orphans", async () => {

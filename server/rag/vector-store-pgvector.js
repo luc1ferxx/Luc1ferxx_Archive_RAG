@@ -1602,12 +1602,14 @@ const getIterativeScanSetting = (iterativeScan, indexType) =>
     ? { name: "ivfflat.iterative_scan", value: "relaxed_order" }
     : { name: "hnsw.iterative_scan", value: iterativeScan };
 
-// set_config(..., true) is SET LOCAL: it needs the statement's own transaction.
-// A caller's client is already in one; otherwise the setting and the search
-// share a short transaction (under a tenant, the same one that sets the role).
-// A search a replica may answer (`replicaRead`) sends the setting as the
-// statement's prelude instead: the same implicit transaction and round trip,
-// on the replica or, when the router falls back, on the primary.
+// set_config(..., true) is SET LOCAL: it lasts until the search's transaction
+// ends. A caller's client is already in a transaction, so the setting and the
+// search go out on it one after the other. Otherwise the setting is the
+// search's prelude (rag/postgres.js queryPostgres): the role's settings step,
+// the setting and the search run in one implicit transaction, one round trip
+// ending in one Sync, on the primary or, for a search a replica may answer
+// (`replicaRead`), on the replica with the router's fallback to the primary.
+// BEGIN, set_config, the search and COMMIT would be four round trips.
 const runIterativeDenseSearch = async ({
   client,
   indexType,
@@ -1618,22 +1620,17 @@ const runIterativeDenseSearch = async ({
   values,
 }) => {
   const setting = getIterativeScanSetting(iterativeScan, indexType);
+  const settingStatement = { text: "SELECT set_config($1, $2, true)", values: [setting.name, setting.value] };
+  const searchSql = buildIterativeDenseSearchSql(tableName, scored);
 
-  if (replicaRead) {
-    return getPgvectorRuntime().query(buildIterativeDenseSearchSql(tableName, scored), values, {
-      ...replicaRead,
-      prelude: [{ text: "SELECT set_config($1, $2, true)", values: [setting.name, setting.value] }],
-    });
+  if (client) {
+    const query = getPgvectorQuery(client);
+
+    await query(settingStatement.text, settingStatement.values);
+    return query(searchSql, values);
   }
 
-  const search = async (transactionClient) => {
-    const query = getPgvectorQuery(transactionClient);
-
-    await query("SELECT set_config($1, $2, true)", [setting.name, setting.value]);
-    return query(buildIterativeDenseSearchSql(tableName, scored), values);
-  };
-
-  return client ? search(client) : getPgvectorRuntime().withTransaction(search);
+  return getPgvectorRuntime().query(searchSql, values, { ...replicaRead, prelude: [settingStatement] });
 };
 
 // `scoreVector` (the query adapter, rag/query-adapter.js): the model's own

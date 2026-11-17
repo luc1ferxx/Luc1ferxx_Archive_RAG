@@ -424,7 +424,29 @@ test("iterative HNSW scans need pgvector 0.8 or later", () => {
   assert.equal(supportsPgvectorIterativeScan("dev"), false);
 });
 
-test("dense search on pgvector 0.8 sets a relaxed iterative scan in the search's own transaction and restores distance order", async () => {
+// The scripted runtime, recording the options (a prelude, a read-only mark)
+// each dense search call hands rag/postgres.js, and every transaction opened.
+const recordDenseSearchCalls = (database) => {
+  const recorded = { searches: [], transactions: 0 };
+
+  configurePgvectorRuntime({
+    ...database.runtime,
+    query: (sql, values, options) => {
+      if (/AS vector_score/.test(sql)) {
+        recorded.searches.push(options);
+      }
+
+      return database.query(sql, values);
+    },
+    withTransaction: async (callback) => {
+      recorded.transactions += 1;
+      return callback({ query: database.query });
+    },
+  });
+  return recorded;
+};
+
+test("dense search on pgvector 0.8 sends a relaxed iterative scan as the search's prelude, one call and no transaction, and restores distance order", async () => {
   const database = useDatabase({
     denseRows: [
       chunkRow({ content: "Alpha", docId: "doc-1", score: 0.9 }),
@@ -432,31 +454,20 @@ test("dense search on pgvector 0.8 sets a relaxed iterative scan in the search's
     ],
     extensionVersion: "0.8.6",
   });
-  const transactions = [];
-  configurePgvectorRuntime({
-    ...database.runtime,
-    withTransaction: async (callback) => {
-      const statements = [];
-
-      transactions.push(statements);
-      return callback({
-        query: (sql, values) => {
-          statements.push(sql.replace(/\s+/g, " ").trim());
-          return database.query(sql, values);
-        },
-      });
-    },
-  });
+  const recorded = recordDenseSearchCalls(database);
 
   const results = await searchPgvectorDocuments(DENSE_ARGS);
-  const settingCall = database.calls.find((call) => /set_config/.test(call.sql));
   const searchCall = database.calls.find((call) => /AS vector_score/.test(call.sql));
 
-  assert.deepEqual(settingCall.values, ["hnsw.iterative_scan", "relaxed_order"]);
-  assert.equal(transactions.length, 1, "setting and search share one transaction");
-  assert.equal(transactions[0].length, 2);
-  assert.match(transactions[0][0], /set_config\(\$1, \$2, true\)/);
-  assert.match(transactions[0][1], /WITH nearest AS MATERIALIZED/);
+  // queryPostgres sends the role's settings, the prelude and the search in
+  // one round trip, one implicit transaction: no BEGIN / set_config / search
+  // / COMMIT.
+  assert.deepEqual(recorded.searches, [
+    { prelude: [{ text: "SELECT set_config($1, $2, true)", values: ["hnsw.iterative_scan", "relaxed_order"] }] },
+  ]);
+  assert.equal(recorded.transactions, 0);
+  assert.ok(!database.calls.some((call) => /set_config/.test(call.sql)), "no statement of its own");
+  assert.match(searchCall.sql, /WITH nearest AS MATERIALIZED/);
   assert.match(searchCall.sql, /ORDER BY embedding <=> \$1::vector ASC, chunk_id ASC LIMIT \$5/);
   assert.match(searchCall.sql, /ORDER BY distance \+ 0 ASC, chunk_id ASC/);
   assert.deepEqual(searchCall.values, ["[1,0,0,0]", ["doc-1", "doc-2"], MODEL, DIMENSIONS, 2]);
@@ -502,12 +513,14 @@ test("dense search keeps the plain statement when iterative scans are off, and r
 
   await withIterativeScanEnv({ RAG_PGVECTOR_INDEX_TYPE: "ivfflat" }, async () => {
     const database = useDatabase({ annIndexMethod: "ivfflat", extensionVersion: "0.8.0" });
+    const recorded = recordDenseSearchCalls(database);
 
     await searchPgvectorDocuments(DENSE_ARGS);
     assert.deepEqual(
-      database.calls.find((call) => /set_config/.test(call.sql)).values,
-      ["ivfflat.iterative_scan", "relaxed_order"]
+      recorded.searches.map((options) => options.prelude.map((statement) => statement.values)),
+      [[["ivfflat.iterative_scan", "relaxed_order"]]]
     );
+    assert.equal(recorded.transactions, 0);
   });
 });
 
