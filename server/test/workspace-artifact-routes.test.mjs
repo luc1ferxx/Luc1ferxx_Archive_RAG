@@ -186,7 +186,9 @@ test("workspace artifact routes are scoped, projected, downloadable, and archiva
         {
           headers: {
             ...ownerHeaders,
-            Origin: "https://workspace.example.test",
+            // The dev frontend (a loopback origin, which CORS answers
+            // while ALLOWED_ORIGINS is empty) reads the file name.
+            Origin: "http://localhost:3000",
           },
         }
       );

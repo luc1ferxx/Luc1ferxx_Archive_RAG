@@ -4,9 +4,10 @@ import {
   normalizeAccessPrincipalWorkspaceIds,
   normalizeScopeId,
 } from "./access-scope.js";
-import { verifyJwtAuthToken } from "./auth-jwt.js";
+import { isJwtSecretTooShort, verifyJwtAuthToken } from "./auth-jwt.js";
 import {
   getApiAuthConfigStatus,
+  getApiAuthJwtSecret,
   getApiAuthToken,
   getApiAuthTokens,
   isApiAuthEnabled,
@@ -21,6 +22,7 @@ import {
   verifyOidcAccessToken,
 } from "./rag/oidc.js";
 import { runWithDatabaseTenant } from "./rag/postgres-tenant.js";
+import { MIN_SERVICE_KEY_SECRET_LENGTH } from "./rag/service-identity.js";
 import { recordTenantRefusal } from "./rag/tenant-refusals.js";
 import {
   decideTenantMembership,
@@ -724,20 +726,70 @@ const resolveRefusalLedgerScope = async (req, accessScope = {}, decision = {}) =
   return tenant.userId ? { userId: tenant.userId, workspaceId: "" } : null;
 };
 
+// The API_AUTH_TOKEN value server/.env.example shipped until 2026-11-17 (it
+// now ships the variable empty), so many server/.env copies still carry it.
+// Anyone who has read the repository knows it, and as the single shared token
+// it may also act for any user (x-user-id), so with API auth on it is no
+// credential at all.
+const API_AUTH_TOKEN_PLACEHOLDER = "change-me-for-local-dev";
+
+const isApiAuthTokenPlaceholder = (token) =>
+  normalizeString(token) === API_AUTH_TOKEN_PLACEHOLDER;
+
 /**
- * Refuses an API_AUTH_TOKENS entry that names no user, no workspace, no
- * workspace list, no roles, no workspace roles and no permissions and does not
- * let the client choose its user. Without x-workspace-id such a token acts for
- * no tenant (requireTenantScope refuses it), and with one it acts for any
- * workspace it names, which is not a credential to issue on purpose.
- * createApp calls this so the misconfiguration stops the start.
+ * With API auth on, refuses the start (createApp calls this) when:
+ * - API_AUTH_TOKEN, or the token of an API_AUTH_TOKENS entry, is the public
+ *   placeholder older copies of server/.env.example carry
+ *   (API_AUTH_TOKEN_PLACEHOLDER). A
+ *   placeholder API_AUTH_TOKEN is refused even while API_AUTH_TOKENS takes
+ *   precedence, since emptying API_AUTH_TOKENS would make it the credential;
+ * - HS256 JWT mode is on and its secret is missing or shorter than
+ *   MIN_SERVICE_KEY_SECRET_LENGTH characters (API_AUTH_JWT_SECRET_TOO_SHORT;
+ *   auth-jwt.js isJwtSecretTooShort, which the apiAuth health check reports
+ *   too);
+ * - an API_AUTH_TOKENS entry names no user, no workspace, no workspace list,
+ *   no roles, no workspace roles and no permissions and does not let the
+ *   client choose its user (API_AUTH_TOKEN_WITHOUT_SCOPE). Without
+ *   x-workspace-id such a token acts for no tenant (requireTenantScope refuses
+ *   it), and with one it acts for any workspace it names, which is not a
+ *   credential to issue on purpose.
+ * No message names a configured token or secret.
  */
 export const assertApiAuthTokenConfiguration = () => {
-  if (!isApiAuthEnabled() || !getApiAuthTokens().trim()) {
+  if (!isApiAuthEnabled()) {
     return;
   }
 
-  const unusable = parseConfiguredTokenPrincipals().filter(
+  // The API_AUTH_TOKENS entries only: with the map empty,
+  // parseConfiguredTokenPrincipals returns API_AUTH_TOKEN, checked by name.
+  const tokenMapPrincipals = getApiAuthTokens().trim()
+    ? parseConfiguredTokenPrincipals()
+    : [];
+  const placeholderSource = isApiAuthTokenPlaceholder(getApiAuthToken())
+    ? "API_AUTH_TOKEN is"
+    : tokenMapPrincipals.some((principal) => isApiAuthTokenPlaceholder(principal.token))
+      ? "An API_AUTH_TOKENS entry's token is"
+      : "";
+
+  if (placeholderSource) {
+    const error = new Error(
+      `${placeholderSource} the public placeholder older copies of server/.env.example carried, which anyone who has read the repository can present. Empty it (API_AUTH_TOKEN=) when API_AUTH_TOKENS, JWT or OIDC carry the credentials, or set a long random token (for example the output of: openssl rand -hex 32).`
+    );
+    error.code = "API_AUTH_TOKEN_PLACEHOLDER";
+    throw error;
+  }
+
+  if (isApiAuthJwtEnabled() && isJwtSecretTooShort()) {
+    const error = new Error(
+      `API_AUTH_JWT_ENABLED=true needs API_AUTH_JWT_HS256_SECRET (or API_AUTH_JWT_SECRET) of at least ${MIN_SERVICE_KEY_SECRET_LENGTH} characters; it is ${
+        getApiAuthJwtSecret().trim() ? "shorter" : "missing"
+      }. A short secret can be guessed offline from one captured token and then signs tokens with any roles. Set a random secret (for example the output of: openssl rand -hex 32).`
+    );
+    error.code = "API_AUTH_JWT_SECRET_TOO_SHORT";
+    throw error;
+  }
+
+  const unusable = tokenMapPrincipals.filter(
     (principal) =>
       !principal.userId &&
       !principal.workspaceId &&

@@ -7,6 +7,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import { noStoreTenantData } from "./routes/helpers.js";
+import { createCrossSiteGuard, LOOPBACK_ORIGIN_PATTERN } from "./cross-site-guard.js";
 import {
   assertApiAuthTokenConfiguration,
   bindDatabaseTenant,
@@ -36,7 +37,12 @@ import {
 } from "./upload-session-store.js";
 import { assertRbacConfiguration, createRbacMiddleware } from "./rag/rbac.js";
 import { createDefaultTenantRegistryService } from "./rag/tenant-registry.js";
-import { createTenantLimits } from "./rag/tenant-limits.js";
+import {
+  classifyTenantLimitRequest,
+  createTenantLimits,
+  TENANT_DESTRUCTIVE_CLASS_ROUTES,
+  TENANT_LIMIT_CLASSES,
+} from "./rag/tenant-limits.js";
 import { createAgentEdgeRouter } from "./rag/agent-service/edge-router.js";
 import { stripInternalServiceHeadersMiddleware } from "./rag/service-identity.js";
 import {
@@ -114,7 +120,9 @@ export const createApp = async (options = {}) => {
   // RBAC_MODE / RBAC_POLICY_JSON / RBAC_POLICY_FILE / RBAC_DEFAULT_ROLE are
   // validated before anything starts: a bad policy refuses the start.
   assertRbacConfiguration();
-  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start.
+  // An API_AUTH_TOKENS entry that can act for no tenant refuses the start; with
+  // auth on, so do the public placeholder token and an HS256 secret shorter
+  // than 32 characters.
   assertApiAuthTokenConfiguration();
   // An unknown POSTGRES_TENANT_CONTEXT refuses the start here rather than at
   // the first query (every query reads it again).
@@ -204,13 +212,13 @@ export const createApp = async (options = {}) => {
 
   if (allowedOrigins.length === 0) {
     console.warn(
-      "[security] ALLOWED_ORIGINS is not set; CORS accepts any origin. Set ALLOWED_ORIGINS (comma-separated) for any non-local deployment."
+      "[security] ALLOWED_ORIGINS is not set; CORS answers browser pages on loopback origins only (localhost, 127.0.0.1 or [::1], any port), and the cross-site guard refuses state-changing requests from pages on any other origin but the API's own. Set ALLOWED_ORIGINS (comma-separated) to serve the frontend from another origin."
     );
   }
 
   if (!rateLimitEnabled) {
     console.warn(
-      "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to protect /chat, uploads, and destructive endpoints."
+      "[security] Rate limiting is disabled. Set RATE_LIMIT_ENABLED=true to limit, per client IP, every request that runs the agent, every upload and the bulk deletes."
     );
   }
 
@@ -229,10 +237,17 @@ export const createApp = async (options = {}) => {
   );
   app.use(
     cors({
-      origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+      origin: allowedOrigins.length > 0 ? allowedOrigins : LOOPBACK_ORIGIN_PATTERN,
       exposedHeaders: ["Content-Disposition"],
     })
   );
+  // CORS only decides what a page may read; a simple cross-site POST still
+  // runs. The guard refuses those (a browser write whose Origin is neither
+  // this server nor an ALLOWED_ORIGINS one) and, while API auth is off, any
+  // request naming a host that is not loopback, an IP address or an
+  // ALLOWED_ORIGINS host (DNS rebinding). Ahead of the static frontend, the
+  // probes and the rate limiters.
+  app.use(createCrossSiteGuard({ allowedOrigins }));
   // The single-container deployment (Dockerfile) serves the built frontend
   // from the API origin. Static files carry no archive data, so they are
   // mounted ahead of rate limiting and API auth; the SPA has no client-side
@@ -323,30 +338,43 @@ export const createApp = async (options = {}) => {
         max: toRateLimitMax(process.env.RATE_LIMIT_GLOBAL_MAX, 300),
       })
     );
-    app.use(
-      "/chat",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_CHAT_MAX, 30),
-      })
-    );
-    app.use(
-      "/upload",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_UPLOAD_MAX, 120),
-      })
-    );
-    app.use(
-      "/documents/clear",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
-      })
-    );
-    app.use(
-      "/admin/tenants/erase",
-      createRateLimiter({
-        max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5),
-      })
-    );
+    // On top of the global limit, each request is counted under its cost
+    // class, decided from the route table exactly as the per-tenant limiter
+    // decides it (classifyTenantLimitRequest, rag/tenant-limits.js), so every
+    // route that starts or resumes agent work, brings document bytes in or
+    // destroys data is covered, a new one included, with no path list here.
+    // One counter per class and client IP; `default` has no limiter of its own.
+    // The per-IP destructive budget (RATE_LIMIT_DESTRUCTIVE_MAX, default 5) is
+    // for the bulk wipes TENANT_DESTRUCTIVE_CLASS_ROUTES lists (the documents
+    // clear, the tenant erase). A single DELETE, which the UI sends once per
+    // deleted document or closed session, stays under the global limit as it
+    // always was; the per-tenant limiter still counts it as destructive.
+    const classRateLimiters = new Map([
+      [
+        TENANT_LIMIT_CLASSES.chat,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_CHAT_MAX, 30) }),
+      ],
+      [
+        TENANT_LIMIT_CLASSES.ingest,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_UPLOAD_MAX, 120) }),
+      ],
+      [
+        TENANT_LIMIT_CLASSES.destructive,
+        createRateLimiter({ max: toRateLimitMax(process.env.RATE_LIMIT_DESTRUCTIVE_MAX, 5) }),
+      ],
+    ]);
+
+    const bulkDestructiveRoutes = new Set(TENANT_DESTRUCTIVE_CLASS_ROUTES);
+
+    app.use((req, res, next) => {
+      const { costClass, route } = classifyTenantLimitRequest(req.method, req.path);
+      const limiter =
+        costClass === TENANT_LIMIT_CLASSES.destructive && !bulkDestructiveRoutes.has(route)
+          ? null
+          : classRateLimiters.get(costClass);
+
+      return limiter ? limiter(req, res, next) : next();
+    });
   }
 
   app.use(requireApiAuth);

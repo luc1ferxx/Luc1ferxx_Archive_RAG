@@ -17,12 +17,15 @@ import test from "node:test";
 // test/fixtures/graph-goldens/langgraph-routes/, and the app is held to those
 // goldens with deepStrictEqual (assertMatchesGraphGolden; rewriting one is a
 // decision, see test/langgraph-support/graph-goldens.mjs): document QA, its
-// stream with GET and POST /chat, and the Capability approval, from commit
-// 3313b40b with the outer plan on the native loop, before phase 7.
+// stream with POST /chat, and the Capability approval, from commit 3313b40b
+// with the outer plan on the native loop, before phase 7. The stream golden
+// also held a GET /chat answer and its run until that route was removed
+// (asking is POST only); they were dropped from it, nothing else changed.
 //
 //   - POST /chat on the outer plan;
-//   - GET and POST /chat, POST /chat/stream (the bytes on the wire, with
-//     answer drafts);
+//   - POST /chat and POST /chat/stream (the bytes on the wire, with answer
+//     drafts);
+//   - GET /chat, which is no route: a 404 that starts no run;
 //   - the Capability approval through POST /agent-runs/:runId/actions/approve.
 //
 // Until ADR 0001 phase 10 removed the v3 unified graph, this suite also held
@@ -270,12 +273,6 @@ const postJson = async (url, body, headers = {}) => {
   return { body: await response.json(), status: response.status };
 };
 
-const getJson = async (url, headers = {}) => {
-  const response = await fetch(url, { headers });
-
-  return { body: await response.json(), status: response.status };
-};
-
 /** What LangGraph was asked to schedule since the last take, ids only. */
 const takeInvocations = () => ({
   graph: takeLangGraphInvocations(),
@@ -401,7 +398,7 @@ test("POST /chat answers a document question as the native loop's golden records
   assert.ok(langgraph.invocations.plan[0].stepIds.includes("document_rag"));
 });
 
-test("POST /chat/stream relays the SSE bytes the native branch's golden records, drafts included; its result equals GET /chat and POST /chat; GET /chat/stream is no route", async (t) => {
+test("POST /chat/stream relays the SSE bytes the native branch's golden records, drafts included; its result equals POST /chat; GET /chat/stream is no route", async (t) => {
   installStreamingModel(t);
 
   const langgraph = await onLangGraph(() =>
@@ -418,11 +415,10 @@ test("POST /chat/stream relays the SSE bytes the native branch's golden records,
       const text = await streamed.text();
       const relayCalls = takeAgentStreamRelayCalls();
       const query = new URLSearchParams(qaRequest).toString();
-      // The router mounts GET /chat and POST /chat/stream (routes/chat.js);
+      // The router mounts POST /chat and POST /chat/stream (routes/chat.js);
       // a GET of the stream path is a 404.
       const getStream = await fetch(`${app.baseUrl}/chat/stream?${query}`, { headers });
       await getStream.text();
-      const got = await getJson(`${app.baseUrl}/chat?${query}`, headers);
       const invocations = takeInvocations();
       const posted = await postJson(`${app.baseUrl}/chat`, qaRequest, headers);
       const runs = [];
@@ -432,7 +428,6 @@ test("POST /chat/stream relays the SSE bytes the native branch's golden records,
       }
 
       return {
-        get: got,
         getStreamStatus: getStream.status,
         invocations,
         post: posted,
@@ -445,7 +440,6 @@ test("POST /chat/stream relays the SSE bytes the native branch's golden records,
 
   assert.equal(langgraph.stream.status, 200);
   assert.equal(langgraph.getStreamStatus, 404);
-  assert.equal(langgraph.get.status, 200);
   assert.equal(langgraph.post.status, 200);
   const events = langgraph.stream.frames.map((frame) => frame.event);
   assert.ok(events.includes("trace_step"));
@@ -456,14 +450,14 @@ test("POST /chat/stream relays the SSE bytes the native branch's golden records,
       .map((frame) => frame.data.draft.text),
     QA_SENTENCES
   );
-  // The result frame is the /chat answer, whichever method asked.
+  // The result frame is the /chat answer.
   assert.deepStrictEqual(mask(langgraph.stream.frames.at(-2).data), mask(langgraph.post));
-  assert.deepStrictEqual(mask(langgraph.get), mask(langgraph.post));
-  assert.equal(langgraph.runs.length, 3);
-  // The bytes, both /chat answers and the three runs are what the native
-  // route branch and loop left (the golden).
+  assert.equal(langgraph.runs.length, 2);
+  // The bytes, the /chat answer and the two runs are what the native route
+  // branch and loop left (the golden). The golden's GET /chat answer and the
+  // run that GET started were dropped when the route was removed; masked,
+  // both equalled the POST's, so the native record of the rest is unchanged.
   assertMatchesGraphGolden("langgraph-routes", "v1-chat-stream-document-question", {
-    get: mask(langgraph.get),
     post: mask(langgraph.post),
     runs: mask(langgraph.runs),
     stream: {
@@ -472,12 +466,60 @@ test("POST /chat/stream relays the SSE bytes the native branch's golden records,
       text: maskVolatileText(langgraph.stream.text),
     },
   });
-  // The stream went through the relay generator, and the stream and GET
-  // /chat each scheduled the outer plan on LangGraph (the POST /chat after
-  // them is not in the count).
+  // The stream went through the relay generator and scheduled the outer plan
+  // on LangGraph (the POST /chat after it is not in the count).
   assert.equal(langgraph.relayCalls, 1);
-  assert.equal(langgraph.invocations.plan.length, 2);
+  assert.equal(langgraph.invocations.plan.length, 1);
   assert.deepStrictEqual(langgraph.invocations.graph, []);
+});
+
+test("GET /chat is no route: GET /chat?question=hi answers 404, never calls the chat service and starts no run", async (t) => {
+  installStreamingModel(t);
+
+  const chatCalls = [];
+  const qaRagService = createQaRagService();
+  const ragService = {
+    ...qaRagService,
+    chat: async (...args) => {
+      chatCalls.push(args);
+      return qaRagService.chat(...args);
+    },
+  };
+  const outcome = await onLangGraph(() =>
+    withApp({ agentRunService: newService(newStore()), ragService }, async (app) => {
+      const headers = scopeHeaders(qaScope);
+      const countRuns = async () =>
+        (await app.agentRunService.listRuns({ accessScope: qaScope })).runs.length;
+      const got = await fetch(`${app.baseUrl}/chat?question=hi`, { headers });
+
+      await got.text();
+
+      const afterGet = {
+        chatCalls: chatCalls.length,
+        invocations: takeInvocations(),
+        runs: await countRuns(),
+        status: got.status,
+      };
+      // The same counters see a POST /chat ask, so their zeros above are a
+      // GET that ran nothing.
+      const posted = await postJson(`${app.baseUrl}/chat`, qaRequest, headers);
+
+      return {
+        afterGet,
+        afterPost: { chatCalls: chatCalls.length, runs: await countRuns(), status: posted.status },
+      };
+    })
+  );
+
+  assert.deepStrictEqual(outcome.afterGet, {
+    chatCalls: 0,
+    invocations: { graph: [], plan: [] },
+    runs: 0,
+    status: 404,
+  });
+  assert.equal(outcome.afterPost.status, 200);
+  assert.equal(outcome.afterPost.runs, 1);
+  assert.ok(outcome.afterPost.chatCalls > 0, "POST /chat reached the chat service");
 });
 
 // ---------------------------------------------------------------------------

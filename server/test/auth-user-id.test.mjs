@@ -453,7 +453,7 @@ test("the single API_AUTH_TOKEN and auth off keep the client-chosen user", async
 });
 
 test("an HS256 JWT principal always acts as its own user", async () => {
-  const secret = "auth-user-id-test-secret";
+  const secret = "auth-user-id-test-secret-of-32-chars-plus";
 
   await withEnv(
     {

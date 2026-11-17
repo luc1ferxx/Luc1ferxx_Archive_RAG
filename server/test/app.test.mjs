@@ -3634,7 +3634,7 @@ test("jwt auth maps claims to scoped document access and rejects workspace escap
     authEnvKeys.map((key) => [key, process.env[key]])
   );
   const observedScopes = [];
-  const jwtSecret = "integration-jwt-secret";
+  const jwtSecret = "integration-jwt-secret-of-32-chars-plus";
 
   process.env.API_AUTH_ENABLED = "true";
   process.env.API_AUTH_JWT_AUDIENCE = "archive-rag";

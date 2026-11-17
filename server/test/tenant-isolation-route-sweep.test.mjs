@@ -21,7 +21,7 @@
 // EXEMPT, so a new object route cannot be added without a decision.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { after, before, describe } from "node:test";
@@ -89,6 +89,8 @@ const ENV_KEYS = [
   "AGENT_SERVICE_URL",
   "API_AUTH_ENABLED",
   "API_AUTH_JWT_ENABLED",
+  "API_AUTH_JWT_HS256_SECRET",
+  "API_AUTH_JWT_SECRET",
   "API_AUTH_OIDC_ENABLED",
   "API_AUTH_REQUIRE_WORKSPACE",
   "API_AUTH_TOKEN",
@@ -460,6 +462,109 @@ test("createApp refuses an API_AUTH_TOKENS entry that can act for no tenant", as
     await withEnv(authEnv({ "delegating-token": { allowClientUserId: true } }), async () => {
       await createStubApp(tempRoot);
     });
+  } finally {
+    await rm(tempRoot, { force: true, recursive: true });
+  }
+});
+
+test("createApp refuses the public placeholder token and a short HS256 secret", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tenant-gate-credentials-"));
+  // The value server/.env.example shipped until it shipped the variable empty;
+  // server/.env copies made before still carry it.
+  const exampleEnv = await readFile(new URL("../.env.example", import.meta.url), "utf8");
+  const placeholder = "change-me-for-local-dev";
+  const isRefusal = (code) => (error) => {
+    assert.equal(error.code, code);
+    return true;
+  };
+  const shortSecret = "s".repeat(31);
+  const jwtEnv = (secrets) => ({
+    API_AUTH_ENABLED: "true",
+    API_AUTH_JWT_ENABLED: "true",
+    API_AUTH_TOKENS: JSON.stringify({ "member-token": { userId: "alice" } }),
+    ...secrets,
+  });
+
+  // The example ships no credential any more.
+  assert.equal(/^API_AUTH_TOKEN=(.*)$/mu.exec(exampleEnv)?.[1]?.trim(), "");
+
+  try {
+    // The placeholder as the single shared token, which may act for any user.
+    await withEnv({ API_AUTH_ENABLED: "true", API_AUTH_TOKEN: placeholder }, async () => {
+      await assert.rejects(() => createStubApp(tempRoot), isRefusal("API_AUTH_TOKEN_PLACEHOLDER"));
+    });
+    // Left behind next to API_AUTH_TOKENS it is not used, but emptying
+    // API_AUTH_TOKENS would make it the credential: refused as well.
+    await withEnv(
+      { ...authEnv({ "member-token": { userId: "alice" } }), API_AUTH_TOKEN: ` ${placeholder} ` },
+      async () => {
+        await assert.rejects(() => createStubApp(tempRoot), isRefusal("API_AUTH_TOKEN_PLACEHOLDER"));
+      }
+    );
+    // As an API_AUTH_TOKENS token, in both the object and the array form.
+    await withEnv(authEnv({ [placeholder]: { userId: "alice" } }), async () => {
+      await assert.rejects(() => createStubApp(tempRoot), isRefusal("API_AUTH_TOKEN_PLACEHOLDER"));
+    });
+    await withEnv(
+      {
+        API_AUTH_ENABLED: "true",
+        API_AUTH_TOKENS: JSON.stringify([{ token: placeholder, userId: "alice" }]),
+      },
+      async () => {
+        await assert.rejects(() => createStubApp(tempRoot), isRefusal("API_AUTH_TOKEN_PLACEHOLDER"));
+      }
+    );
+    // With auth off (the local default) the example's value is no credential
+    // and the start goes on.
+    await withEnv({ API_AUTH_ENABLED: "false", API_AUTH_TOKEN: placeholder }, async () => {
+      await createStubApp(tempRoot);
+    });
+    // Any other single shared token starts.
+    await withEnv({ API_AUTH_ENABLED: "true", API_AUTH_TOKEN: "a-real-local-token" }, async () => {
+      await createStubApp(tempRoot);
+    });
+
+    // HS256 JWT mode: a secret under 32 characters, under either name, or none.
+    const isShortSecretRefusal = (error) => {
+      isRefusal("API_AUTH_JWT_SECRET_TOO_SHORT")(error);
+      // The message never names the secret.
+      assert.equal(error.message.includes(shortSecret), false);
+      return true;
+    };
+
+    await withEnv(jwtEnv({ API_AUTH_JWT_HS256_SECRET: shortSecret }), async () => {
+      await assert.rejects(() => createStubApp(tempRoot), isShortSecretRefusal);
+    });
+    await withEnv(jwtEnv({ API_AUTH_JWT_SECRET: shortSecret }), async () => {
+      await assert.rejects(() => createStubApp(tempRoot), isShortSecretRefusal);
+    });
+    await withEnv(jwtEnv({ API_AUTH_JWT_HS256_SECRET: `  ${shortSecret}  ` }), async () => {
+      await assert.rejects(() => createStubApp(tempRoot), isShortSecretRefusal);
+    });
+    await withEnv(jwtEnv({}), async () => {
+      await assert.rejects(() => createStubApp(tempRoot), (error) => {
+        isRefusal("API_AUTH_JWT_SECRET_TOO_SHORT")(error);
+        assert.match(error.message, /missing/);
+        return true;
+      });
+    });
+    await withEnv(jwtEnv({ API_AUTH_JWT_HS256_SECRET: "s".repeat(32) }), async () => {
+      await createStubApp(tempRoot);
+    });
+    // A short secret left behind with JWT mode off is never used.
+    await withEnv(
+      { ...jwtEnv({ API_AUTH_JWT_HS256_SECRET: shortSecret }), API_AUTH_JWT_ENABLED: "false" },
+      async () => {
+        await createStubApp(tempRoot);
+      }
+    );
+    // With auth off nothing is checked.
+    await withEnv(
+      { ...jwtEnv({ API_AUTH_JWT_HS256_SECRET: shortSecret }), API_AUTH_ENABLED: "false" },
+      async () => {
+        await createStubApp(tempRoot);
+      }
+    );
   } finally {
     await rm(tempRoot, { force: true, recursive: true });
   }

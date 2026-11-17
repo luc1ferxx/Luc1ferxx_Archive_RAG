@@ -317,15 +317,19 @@ test("the edge answers /chat through the agent tier exactly as the monolith does
     assert.deepEqual(normalizeAnswer(actualBody), normalizeAnswer(expectedBody));
     assert.match(actualBody.agentAnswer ?? actualBody.ragAnswer, /allocation amount is 5/u);
 
-    // GET /chat carries its question in the query string.
+    // Asking is POST only: GET /chat, question in the query, is a 404 at the
+    // monolith and at the edge, and never reaches the agent tier.
+    const forwardedBeforeGet = split.agent.requests.length;
     const query = "docId=doc-1&question=What%20is%20the%20allocation%20amount%3F";
     const [expectedGet, actualGet] = await Promise.all([
       fetch(`${monolith.baseUrl}/chat?${query}`),
       fetch(`${split.edge.baseUrl}/chat?${query}`),
     ]);
 
+    assert.equal(expectedGet.status, 404);
     assert.equal(actualGet.status, expectedGet.status);
-    assert.deepEqual(normalizeAnswer(await actualGet.json()), normalizeAnswer(await expectedGet.json()));
+    assert.equal(await actualGet.text(), await expectedGet.text());
+    assert.equal(split.agent.requests.length, forwardedBeforeGet);
 
     // A request the edge refuses never reaches the agent tier.
     const forwardedBefore = split.agent.requests.length;
@@ -550,7 +554,7 @@ const startFakeAgentReplicas = async (answer) => {
   return { a: replicas[0], b: replicas[1], close: () => Promise.all(replicas.map((r) => r.close())) };
 };
 
-test("GET /chat runs the agent, so the edge never sends it to a second replica", async () => {
+test("POST /chat runs the agent, so the edge never sends it to a second replica; GET /chat is no route", async () => {
   const replicas = await startFakeAgentReplicas((name, req) =>
     req.url.startsWith("/chat") || name === "a"
       ? { body: { error: "The model circuit is open." }, status: 503 }
@@ -567,54 +571,81 @@ test("GET /chat runs the agent, so the edge never sends it to a second replica",
     assert.equal(tasks.status, 200);
     assert.deepEqual([...replicas.a.seen, ...replicas.b.seen], ["GET /tasks", "GET /tasks"]);
 
-    // GET /chat writes a run and memory: one replica answers it, once.
-    const chat = await fetch(`${edge.baseUrl}/chat?docId=doc-1&question=Anything`);
+    // POST /chat writes a run and memory: one replica answers it, once.
+    const chat = await postJson(`${edge.baseUrl}/chat`, { docId: "doc-1", question: "Anything" });
 
     assert.equal(chat.status, 503);
     assert.deepEqual(await chat.json(), { error: "The model circuit is open." });
     assert.equal(
-      [...replicas.a.seen, ...replicas.b.seen].filter((line) => line === "GET /chat").length,
+      [...replicas.a.seen, ...replicas.b.seen].filter((line) => line === "POST /chat").length,
       1
     );
+
+    // Asking is POST only: the edge answers GET /chat 404 and forwards nothing.
+    const seenBefore = replicas.a.seen.length + replicas.b.seen.length;
+    const getChat = await fetch(`${edge.baseUrl}/chat?docId=doc-1&question=Anything`);
+
+    assert.equal(getChat.status, 404);
+    await getChat.text();
+    assert.equal(replicas.a.seen.length + replicas.b.seen.length, seenBefore);
   } finally {
     await edge.close();
     await replicas.close();
   }
 });
 
-test("a question with a raw backslash in the query reaches the agent as the monolith reads it", async () => {
+test("a raw backslash in the request target reaches the agent as the monolith reads it", async () => {
   const monolith = await startServer(await createMonolith({ ragService: createStubRagService() }));
   const split = await startSplitDeployment({
     agentOptions: { ragService: createStubRagService() },
     edgeOptions: { ragService: createStubRagService() },
   });
-  // http.request sends the target exactly as written, raw backslash included.
-  const rawGet = (baseUrl, target) =>
+  // http.request sends the target exactly as written, raw backslash included;
+  // with a body it is a JSON POST.
+  const rawRequest = (baseUrl, target, body) =>
     new Promise((resolve, reject) => {
-      const request = httpRequest(`${baseUrl}${target}`, (response) => {
-        let text = "";
+      const request = httpRequest(
+        `${baseUrl}${target}`,
+        body === undefined ? {} : { headers: { "content-type": "application/json" }, method: "POST" },
+        (response) => {
+          let text = "";
 
-        response.setEncoding("utf8");
-        response.on("data", (chunk) => {
-          text += chunk;
-        });
-        response.on("end", () => resolve({ body: JSON.parse(text), status: response.statusCode }));
-      });
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            text += chunk;
+          });
+          response.on("end", () => resolve({ body: JSON.parse(text), status: response.statusCode }));
+        }
+      );
 
       request.on("error", reject);
-      request.end();
+      request.end(body === undefined ? undefined : JSON.stringify(body));
     });
 
   try {
-    const target = "/chat?docId=doc-1&question=What+is+the+allocation+amount+in+C:\\notes?";
+    // POST /chat with a raw backslash in its target is forwarded, not refused
+    // as a bad path, and answered as the monolith answers it.
+    const chatTarget = "/chat?source=C:\\notes";
+    const question = { docId: "doc-1", question: "What is the allocation amount in C:\\notes?" };
     const [expected, actual] = await Promise.all([
-      rawGet(monolith.baseUrl, target),
-      rawGet(split.edge.baseUrl, target),
+      rawRequest(monolith.baseUrl, chatTarget, question),
+      rawRequest(split.edge.baseUrl, chatTarget, question),
     ]);
 
     assert.equal(expected.status, 200);
     assert.equal(actual.status, expected.status);
     assert.deepEqual(normalizeAnswer(actual.body), normalizeAnswer(expected.body));
+
+    // A read whose query the agent tier parses answers as the monolith's.
+    const runsTarget = "/agent-runs?status=C:\\notes";
+    const [expectedRuns, actualRuns] = await Promise.all([
+      rawRequest(monolith.baseUrl, runsTarget),
+      rawRequest(split.edge.baseUrl, runsTarget),
+    ]);
+
+    assert.equal(expectedRuns.status, 200);
+    assert.equal(actualRuns.status, expectedRuns.status);
+    assert.deepEqual(actualRuns.body, expectedRuns.body);
   } finally {
     await split.close();
     await monolith.close();

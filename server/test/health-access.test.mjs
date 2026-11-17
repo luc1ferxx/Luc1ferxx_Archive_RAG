@@ -222,7 +222,7 @@ const FAILING_REPORT = Object.freeze({
 });
 const THROWN_MESSAGE = "health failed at 10.0.0.5:5432";
 
-const JWT_SECRET = "health-access-test-secret";
+const JWT_SECRET = "health-access-test-secret-of-32-chars-plus";
 const JWT_ENV = {
   API_AUTH_JWT_AUDIENCE: "archive-rag",
   API_AUTH_JWT_ENABLED: "true",
@@ -396,12 +396,18 @@ describe("GET /health, /ready and /livez", () => {
       assert.deepEqual(livez.body, { role: "all", status: "ok" });
       // No new caching header when the body does not depend on a credential.
       assert.notEqual(health.cacheControl, "no-store");
+    });
 
+    // A fresh server for each report: the router answers with the last report
+    // it built for HEALTH_REPORT_REUSE_MS (routes/system.js).
+    await withServer({}, async (server, state) => {
       state.mode = "error";
       const failingReady = await get(server, "/ready");
       assert.equal(failingReady.status, 503);
       assert.deepEqual(failingReady.body, FAILING_REPORT);
+    });
 
+    await withServer({}, async (server, state) => {
       state.mode = "throw";
       const thrownHealth = await get(server, "/health");
       assert.equal(thrownHealth.status, 500);
@@ -447,26 +453,31 @@ describe("GET /health, /ready and /livez", () => {
       assert.equal(ready.status, 503);
       assert.deepEqual(ready.body, { status: "error" });
 
-      let health = await get(server, "/health");
+      const health = await get(server, "/health");
       assert.equal(health.status, 200);
       assert.deepEqual(health.body, { status: "error" });
 
       ready = await get(server, "/ready", apiKey("viewer-token"));
       assert.equal(ready.status, 503);
       assert.deepEqual(ready.body, FAILING_REPORT);
+    });
 
+    // A fresh server: the failing report above would answer for up to
+    // HEALTH_REPORT_REUSE_MS (routes/system.js). A thrown build is never reused,
+    // so each request below builds again.
+    await withServer(authEnv(), async (server, state) => {
       state.mode = "throw";
 
-      health = await get(server, "/health");
+      const health = await get(server, "/health");
       assert.equal(health.status, 500);
       assert.deepEqual(health.body, { status: "error" });
-      ready = await get(server, "/ready", apiKey("member-token"));
+      const ready = await get(server, "/ready", apiKey("member-token"));
       assert.equal(ready.status, 503);
       assert.deepEqual(ready.body, { status: "error" });
 
-      health = await get(server, "/health", apiKey("viewer-token"));
-      assert.equal(health.status, 500);
-      assert.deepEqual(health.body, { error: THROWN_MESSAGE, status: "error" });
+      const viewerHealth = await get(server, "/health", apiKey("viewer-token"));
+      assert.equal(viewerHealth.status, 500);
+      assert.deepEqual(viewerHealth.body, { error: THROWN_MESSAGE, status: "error" });
     });
   });
 

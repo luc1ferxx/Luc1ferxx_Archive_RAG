@@ -641,10 +641,10 @@ test("HS256 JWTs keep their verifier next to OIDC; an HS token never reaches OID
     };
     const hsToken = createHs256Jwt({
       payload: { exp: Math.floor(Date.now() / 1000) + 60, sub: "hs-user" },
-      secret: "hs-secret",
+      secret: "hs-secret-of-at-least-32-characters-long",
     });
 
-    await withEnv({ ...env, API_AUTH_JWT_ENABLED: "true", API_AUTH_JWT_SECRET: "hs-secret" }, async () => {
+    await withEnv({ ...env, API_AUTH_JWT_ENABLED: "true", API_AUTH_JWT_SECRET: "hs-secret-of-at-least-32-characters-long" }, async () => {
       const response = await fetch(`${api.url}/whoami`, { headers: { authorization: `Bearer ${hsToken}` } });
       assert.equal(response.status, 200);
       assert.equal((await response.json()).authProvider, "jwt");

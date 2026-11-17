@@ -40,13 +40,12 @@ const chatRequestSchema = z.object({
 
 /**
  * The /chat and /chat/stream request check: the question, docIds / docId and
- * sessionId from the query (GET) or the JSON body. Answers 400 and returns
- * null when it fails. Exported so the public edge of a split deployment
+ * sessionId from the JSON body. Answers 400 and returns null when it fails.
+ * Exported so the public edge of a split deployment
  * (rag/agent-service/edge-router.js) refuses the same requests before
  * forwarding them to the agent tier.
  */
-export const validateChatRequest = (req, res) =>
-  parseOrRespond(chatRequestSchema, req.method === "GET" ? req.query : req.body, res);
+export const validateChatRequest = (req, res) => parseOrRespond(chatRequestSchema, req.body, res);
 
 /**
  * The answer for an agent request that failed: a cancellation (the deadline
@@ -93,7 +92,7 @@ export const createChatRouter = (services) => {
   // Shared by /chat and /chat/stream: validation, scope, and the one agent entry
   // point, so the two responses can never disagree about what was answered.
   const parseChatRequest = (req, res) => {
-    const payload = req.method === "GET" ? req.query : req.body;
+    const payload = req.body;
     const parsed = validateChatRequest(req, res);
     if (!parsed) return null;
     const accessScope = getRequestAccessScope(req);
@@ -230,7 +229,9 @@ export const createChatRouter = (services) => {
     }
   };
 
-  router.get("/chat", handleChatRequest);
+  // POST only: asking starts an agent run (a run record, session and memory
+  // writes, model calls), and any page can make a browser send a GET, with no
+  // Origin, from an <img> tag.
   router.post("/chat", handleChatRequest);
   router.post("/chat/stream", handleChatStreamRequest);
 

@@ -334,7 +334,11 @@ test("role api starts the public edge: documents answer while agent routes wait 
         status: "ok",
       });
 
-      const chat = await fetch(`${baseUrl}/chat?docId=doc-1&question=Anything`);
+      const chat = await fetch(`${baseUrl}/chat`, {
+        body: JSON.stringify({ docId: "doc-1", question: "Anything" }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
 
       assert.equal(chat.status, 503);
       assert.equal((await chat.json()).code, SERVICE_CLIENT_ERROR_CODES.unreachable);

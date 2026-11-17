@@ -141,7 +141,12 @@ test("every route of RBAC_ROUTE_TABLE gets its cost class", () => {
 
   // The classes the part names, spelled out.
   assert.equal(classifyTenantLimitRequest("POST", "/chat").costClass, "chat");
-  assert.equal(classifyTenantLimitRequest("GET", "/chat").costClass, "chat");
+  // Asking is POST only: GET /chat is no route, so it costs the default.
+  assert.deepEqual(classifyTenantLimitRequest("GET", "/chat"), {
+    costClass: "default",
+    countsAsRun: false,
+    route: null,
+  });
   assert.equal(classifyTenantLimitRequest("POST", "/chat/stream").costClass, "chat");
   assert.equal(classifyTenantLimitRequest("POST", "/agent-tasks").costClass, "chat");
   assert.equal(classifyTenantLimitRequest("POST", "/upload").costClass, "ingest");
@@ -149,9 +154,12 @@ test("every route of RBAC_ROUTE_TABLE gets its cost class", () => {
   assert.equal(classifyTenantLimitRequest("PUT", "/documents/doc-1").costClass, "ingest");
   assert.equal(classifyTenantLimitRequest("DELETE", "/documents/doc-1").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("POST", "/documents/clear").costClass, "destructive");
+  assert.equal(classifyTenantLimitRequest("POST", "/admin/tenants/erase").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("DELETE", "/memory").costClass, "destructive");
   assert.equal(classifyTenantLimitRequest("GET", "/documents").costClass, "default");
-  assert.equal(classifyTenantLimitRequest("GET", "/upload/status").costClass, "default");
+  assert.equal(classifyTenantLimitRequest("GET", "/admin/tenants/export").costClass, "default");
+  // Every path the per-IP /upload limiter used to cover stays with the uploads.
+  assert.equal(classifyTenantLimitRequest("GET", "/upload/status").costClass, "ingest");
 });
 
 test("the class follows the route Express runs: case, a trailing slash, HEAD, unknown paths", () => {

@@ -520,7 +520,6 @@ export const RBAC_ROUTE_TABLE = Object.freeze(
     perm("POST", "/artifacts/:artifactId/archive", P.documentsWrite),
 
     // Chat and the caller's own agent runs.
-    perm("GET", "/chat", P.chatAsk),
     perm("POST", "/chat", P.chatAsk),
     perm("POST", "/chat/stream", P.chatAsk),
     perm("GET", "/capabilities", P.chatAsk),
