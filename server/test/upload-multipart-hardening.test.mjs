@@ -1,6 +1,7 @@
 // Multipart uploads after the multer 2 upgrade: the public size limits answer
-// 413 exactly above the maximum, and a request that is oversized or cut off
-// mid-file leaves nothing behind in the uploads directory.
+// 413 exactly above the maximum, a request that is oversized or cut off
+// mid-file leaves nothing behind in the uploads directory, and a UTF-8 file
+// name is read as UTF-8.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
@@ -16,7 +17,7 @@ const okHealthService = {
   runStartupHealthChecks: async () => ({ status: "ok", checks: {} }),
 };
 
-const startApp = async () => {
+const startApp = async ({ ingestDocument = async () => ({ docId: "unexpected" }) } = {}) => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-multipart-"));
   const uploadsDirectory = path.join(tempRoot, "uploads");
   await mkdir(uploadsDirectory, { recursive: true });
@@ -27,7 +28,7 @@ const startApp = async () => {
     ragService: {
       initializeDocumentRegistry: async () => [],
       initializeSessionMemory: async () => true,
-      ingestDocument: async () => ({ docId: "unexpected" }),
+      ingestDocument,
     },
   });
   const server = createServer(app);
@@ -117,6 +118,26 @@ test("a direct upload cut off mid-file leaves no partial file behind", async () 
     });
 
     assert.deepEqual(await waitForCleanup(server.uploadsDirectory), []);
+  } finally {
+    await server.close();
+  }
+});
+
+test("a direct upload keeps a UTF-8 file name", async () => {
+  const server = await startApp({ ingestDocument: async ({ docId, fileName }) => ({ docId, fileName }) });
+
+  try {
+    for (const name of ["合同.pdf", "résumé.pdf"]) {
+      const form = new FormData();
+      form.append("file", new Blob(["%PDF-1.4\n"], { type: "application/pdf" }), name);
+      const response = await fetch(`http://127.0.0.1:${server.port}/upload`, {
+        method: "POST",
+        body: form,
+      });
+
+      assert.equal(response.status, 201, name);
+      assert.equal((await response.json()).fileName, name);
+    }
   } finally {
     await server.close();
   }
