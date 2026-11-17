@@ -324,6 +324,8 @@ const recordDraftClaimChecks = async (action) => {
     const { hits, misses } = getSelfCheckEvidenceContextStats(input.evidenceContext);
 
     checks.push({
+      // Whole results the memo holds as this check returns (its own included).
+      claimSupportEntries: input.evidenceContext?.tables.get("claimSupport")?.size ?? 0,
       context: input.evidenceContext,
       counts: [result.claims.length, misses.claimCheck ?? 0, hits.claimCheck ?? 0],
       input,
@@ -359,6 +361,35 @@ test("a streamed answer's drafts check each claim once across the growing prefix
       [4, 4, 6],
     ]
   );
+  for (const { input, result } of checks) {
+    assert.deepStrictEqual(result, unmemoisedClaimSupport(input));
+  }
+});
+
+// A long streamed answer (a model that keeps writing) must not keep every
+// prefix's whole result: that would hold memory growing with the square of
+// the answer's length, and no later prefix reads an earlier prefix's result.
+test("a streamed answer's drafts keep their claims' checks, not each prefix's whole result", async () => {
+  const lines = Array.from(
+    { length: 24 },
+    (_, index) => `Employees receive a stipend of ${index + 1} dollars per year. [Source 1]`
+  );
+  const checks = await recordDraftClaimChecks(async () => {
+    const drafts = createAnswerDraftReleaser({ citations: [POLICY_CITATION] });
+
+    drafts.finish(streamAttempt(drafts.completionOptions, lines));
+  });
+  const [{ context }] = checks;
+
+  assert.equal(checks.length, lines.length);
+  // Each check finds only its own whole result in the memo, and the last one
+  // is gone once its drafts are decided; every claim's check stays.
+  assert.deepEqual(
+    checks.map((check) => check.claimSupportEntries),
+    lines.map(() => 1)
+  );
+  assert.equal(context.tables.has("claimSupport"), false);
+  assert.equal(context.tables.get("claimCheck").size, lines.length);
   for (const { input, result } of checks) {
     assert.deepStrictEqual(result, unmemoisedClaimSupport(input));
   }

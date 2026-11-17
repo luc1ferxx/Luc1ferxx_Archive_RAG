@@ -9,7 +9,10 @@ import {
   normalizeGroundedClaimSupportForHeadings,
 } from "./grounded-answer-finalizer.js";
 import { evaluateClaimSupport } from "./self-check/evaluate.js";
-import { createSelfCheckEvidenceContext } from "./self-check/evidence-context.js";
+import {
+  clearSelfCheckEvidenceContextTable,
+  createSelfCheckEvidenceContext,
+} from "./self-check/evidence-context.js";
 import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { guardAnswerLinks } from "./prompt-injection-screen.js";
 import { startsWithNotInEvidenceVerdict } from "./answer-verdict.js";
@@ -95,7 +98,9 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
   let checkedPrefixLength = 0;
   let decidedClaimCount = 0;
   // Each prefix check splits the claims before it again; this attempt's memo
-  // returns their earlier checks, so only the new sentence is checked.
+  // returns their earlier checks, so only the new sentence is checked. It
+  // keeps the claim checks only: each prefix's whole result is dropped once
+  // its drafts are decided (see release).
   let evidenceContext = createSelfCheckEvidenceContext();
 
   const release = (answerText) => {
@@ -113,6 +118,9 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
           evidenceContext,
         })
       );
+
+      // No later prefix asks for this one's whole result; its claims stay.
+      clearSelfCheckEvidenceContextTable(evidenceContext, "claimSupport");
 
       if (!claimSupport.checked) {
         return;

@@ -132,6 +132,19 @@ export const releaseSelfCheckEvidenceContext = (owner) => {
   }
 };
 
+/**
+ * Drops one table of `context`'s memo. The answer-draft releaser
+ * (answer-drafts.js) keeps a streamed answer's claim checks across its
+ * prefixes, but no later prefix asks for an earlier prefix's whole result
+ * ("claimSupport"), and keeping every one of them would hold memory that
+ * grows with the square of a long answer's length.
+ */
+export const clearSelfCheckEvidenceContextTable = (context, table) => {
+  if (isSelfCheckEvidenceContext(context)) {
+    context.tables.delete(table);
+  }
+};
+
 export const getSelfCheckEvidenceContextStats = (context) => ({
   hits: { ...(context?.stats?.hits ?? {}) },
   misses: { ...(context?.stats?.misses ?? {}) },
