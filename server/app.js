@@ -242,10 +242,11 @@ export const createApp = async (options = {}) => {
     })
   );
   // CORS only decides what a page may read; a simple cross-site POST still
-  // runs. The guard refuses those, and, while API auth is off, any browser
-  // request naming a host that is not loopback or an ALLOWED_ORIGINS host
-  // (DNS rebinding). Ahead of the static frontend, the probes and the rate
-  // limiters; requests without browser headers pass.
+  // runs. The guard refuses those (a browser write whose Origin is neither
+  // this server nor an ALLOWED_ORIGINS one) and, while API auth is off, any
+  // request naming a host that is not loopback, an IP address or an
+  // ALLOWED_ORIGINS host (DNS rebinding). Ahead of the static frontend, the
+  // probes and the rate limiters.
   app.use(createCrossSiteGuard({ allowedOrigins }));
   // The single-container deployment (Dockerfile) serves the built frontend
   // from the API origin. Static files carry no archive data, so they are
