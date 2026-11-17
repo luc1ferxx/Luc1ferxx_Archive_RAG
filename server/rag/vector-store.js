@@ -23,7 +23,6 @@ import { embedTexts } from "./openai.js";
 import { instrumentVectorStoreSearch, timeRetrievalRoute } from "./metrics-retrieval.js";
 import { adaptQueryVectorForSearch, stampQueryAdapterProvenance } from "./query-adapter.js";
 import {
-  addDocumentsToPgvectorIndex,
   beginPgvectorIndexWrite,
   clearPgvectorIndex,
   countPgvectorChunksInEveryTable,

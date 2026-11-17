@@ -59,7 +59,6 @@ import {
   buildHeadingScopedSupportSentences,
   getCitationDocIds,
   getCitationDocumentAliases,
-  getCitationDocumentAliasEntries,
   getCitationIdentity,
   getCitationSourceRank,
   getDocumentAttributionTerms,

@@ -1,7 +1,6 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 import { CAPABILITY_IDS } from "./capabilities/shared.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
-import { normalizeText } from "../lib/normalize-text.js";
 import { isAgentSingleDocumentRoutingEnabled } from "./config.js";
 
 const WEB_SIGNAL_PATTERN =

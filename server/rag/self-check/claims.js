@@ -26,7 +26,6 @@ import {
 } from "./text.js";
 import {
   createStructuralClaimLabelTest,
-  getDocumentAttributionTerms,
   getGenericDocumentAttributionTerms,
   isStructuralSectionHeading,
 } from "./attribution.js";

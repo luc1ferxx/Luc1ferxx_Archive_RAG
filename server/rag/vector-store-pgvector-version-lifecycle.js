@@ -12,7 +12,6 @@ import {
   getIndexVersionBuildConcurrency,
   getIndexVersionBuildLeaseMs,
   getIndexVersionDualWriteGraceMs,
-  getIndexVersionPointerTtlMs,
   getIndexVersionRetireDropAttempts,
   getIndexVersionRetireLockTimeoutMs,
   getIndexVersionRetireRetryDelayMs,
