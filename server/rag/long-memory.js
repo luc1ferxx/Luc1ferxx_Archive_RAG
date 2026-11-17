@@ -96,39 +96,43 @@ const withWorkspace = (input, workspaceId) =>
 
 const isWorkspaceArgument = (workspaceId) => typeof workspaceId === "string";
 
+// Only an explicit instruction about the reply becomes a standing preference.
+// Bare words ("reply ... Chinese", "short", "brief", "detailed", and "answer
+// ... English" in Chinese) also occur in ordinary document questions ("the
+// reply from the Chinese supplier", "short-term borrowings"), which were
+// saved as preferences that every later answer then followed.
 const CHINESE_REPLY_PATTERNS = [
   /\u4ee5\u540e.*(?:\u7528\u4e2d\u6587|\u4e2d\u6587\u56de\u7b54)/i,
   /\u9ed8\u8ba4.*\u4e2d\u6587\u56de\u7b54/i,
   /\u8bf7.*\u4e2d\u6587\u56de\u7b54/i,
   /\u540e\u7eed.*\u4e2d\u6587\u56de\u7b54/i,
-  /\u56de\u7b54.*\u4e2d\u6587/i,
-  /\b(reply|answer)\b.*\bchinese\b/i,
+  /\u7528\u4e2d\u6587\u56de\u7b54/i,
+  /\b(?:reply|answer|respond)\s+in\s+chinese\b/i,
 ];
 const ENGLISH_REPLY_PATTERNS = [
   /\u4ee5\u540e.*(?:\u7528\u82f1\u6587|\u82f1\u6587\u56de\u7b54)/i,
   /\u9ed8\u8ba4.*\u82f1\u6587\u56de\u7b54/i,
   /\u8bf7.*\u82f1\u6587\u56de\u7b54/i,
   /\u540e\u7eed.*\u82f1\u6587\u56de\u7b54/i,
-  /\u56de\u7b54.*\u82f1\u6587/i,
-  /\b(reply|answer)\b.*\benglish\b/i,
+  /\u7528\u82f1\u6587\u56de\u7b54/i,
+  /\b(?:reply|answer|respond)\s+in\s+english\b/i,
 ];
 const CONCISE_PATTERNS = [
   /\u4ee5\u540e.*(?:\u7b80\u77ed|\u7b80\u6d01)/i,
-  /\u56de\u7b54.*(?:\u7b80\u77ed|\u7b80\u6d01)/i,
   /\u522b\u592a\u957f/i,
   /\u7cbe\u7b80\u4e00\u70b9/i,
   /\u7b80\u77ed\u4e00\u70b9/i,
   /\u7b80\u6d01\u4e00\u70b9/i,
-  /\b(concise|brief|short)\b/i,
+  /\b(?:keep|make)\s+(?:the\s+|your\s+)?(?:answers?|replies|responses)\s+(?:more\s+)?(?:concise|brief|short(?:er)?)\b/i,
 ];
 const DETAILED_PATTERNS = [
   /\u4ee5\u540e.*\u8be6\u7ec6/i,
-  /\u56de\u7b54.*\u8be6\u7ec6/i,
   /\u5c55\u5f00\u4e00\u70b9/i,
   /\u8bf4\u7ec6\u4e00\u70b9/i,
   /\u8be6\u7ec6\u4e00\u70b9/i,
   /\u8bb2\u8be6\u7ec6\u4e00\u70b9/i,
-  /\b(detailed|detail|verbose)\b/i,
+  /\bbe\s+more\s+detailed\b/i,
+  /\b(?:keep|make)\s+(?:the\s+|your\s+)?(?:answers?|replies|responses)\s+(?:more\s+)?detailed\b/i,
 ];
 
 let configuredLongMemoryStore = null;
@@ -696,10 +700,13 @@ const addCandidate = (candidates, candidate) => {
     return;
   }
 
+  // One candidate per preference key, the first match: a message read as both
+  // "concise" and "detailed" would send two writes of one key at once, and
+  // the store's look-up-then-insert can leave two rows for that key.
   const dedupeKey = [
     candidate.category ?? "note",
     candidate.memoryKey ?? "",
-    normalizeMemoryText(candidate.text),
+    candidate.memoryKey ? "" : normalizeMemoryText(candidate.text),
   ].join(":");
 
   if (candidates.some((entry) => entry.dedupeKey === dedupeKey)) {

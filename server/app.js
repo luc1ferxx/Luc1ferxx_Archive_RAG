@@ -226,12 +226,15 @@ export const createApp = async (options = {}) => {
   // internal token, deadline, or request id (rag/service-identity.js).
   app.use(stripInternalServiceHeadersMiddleware);
 
-  // frameguard/CSP frame-ancestors and CORP stay off: the workbench iframes
-  // PDF previews from a different origin (frontend :3000 -> API :5001).
+  // frameguard is on (X-Frame-Options: SAMEORIGIN): a page on another site
+  // that framed the single-container SPA could click "Clear workspace" for
+  // the user, and the cross-site guard would see a same-origin request.
+  // Nothing frames an API URL: the PDF preview fetches the file with
+  // credentials and frames a blob: URL (useAuthenticatedDocumentPreview.js).
+  // CSP and CORP keep their earlier settings.
   app.use(
     helmet({
       contentSecurityPolicy: false,
-      frameguard: false,
       crossOriginResourcePolicy: { policy: "cross-origin" },
     })
   );

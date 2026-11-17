@@ -467,7 +467,9 @@ export const createModelGatewayApp = ({
 
         events.finish({
           extension: buildAnswerExtension(call, result.modelRoute),
-          finishReason: call.completion?.finishReason ?? "stop",
+          // The model's own finish reason; the gateway never claims "stop"
+          // for an answer whose end it did not see.
+          finishReason: call.completion?.finishReason ?? null,
           model: call.completion?.modelName ?? null,
           usage: toOpenAIUsage(answeredEvent(call)),
         });

@@ -796,6 +796,8 @@ describe("App", () => {
 
     const removeButton = await screen.findByLabelText("Remove benefits-2025.pdf");
     removeButton.click();
+    // The sidebar asks first (WorkspaceSidebar.test.jsx); confirm.
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
 
     await waitFor(() =>
       expect(screen.queryByText("benefits-2025.pdf")).not.toBeInTheDocument()

@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Button } from "antd";
+import { Button, Popconfirm } from "antd";
 import {
   AppstoreOutlined,
   BranchesOutlined,
@@ -468,18 +468,32 @@ const WorkspaceSidebar = ({
                     >
                       {isInSelectedChatScope ? <CheckSquareOutlined /> : <PlusCircleOutlined />}
                     </button>
-                    <button
-                      type="button"
-                      className="document-item-remove"
-                      aria-label={t("sidebar.removeDocument", {
+                    {/* The server deletes at once (no trash by default) and
+                        the workbench then resets the conversation, so a
+                        click only asks. */}
+                    <Popconfirm
+                      title={t("sidebar.removeDocumentConfirm", {
                         fileName: document.fileName,
                       })}
+                      description={t("sidebar.deleteCannotBeUndone")}
+                      okText={t("sidebar.confirmDelete")}
+                      cancelText={t("common.cancel")}
+                      okButtonProps={{ danger: true }}
                       disabled={!canDelete}
-                      title={canDelete ? undefined : t("auth.deleteNotAllowed")}
-                      onClick={() => void onRemoveDocument(document.docId)}
+                      onConfirm={() => onRemoveDocument(document.docId)}
                     >
-                      ×
-                    </button>
+                      <button
+                        type="button"
+                        className="document-item-remove"
+                        aria-label={t("sidebar.removeDocument", {
+                          fileName: document.fileName,
+                        })}
+                        disabled={!canDelete}
+                        title={canDelete ? undefined : t("auth.deleteNotAllowed")}
+                      >
+                        ×
+                      </button>
+                    </Popconfirm>
                   </div>
                 )}
               </article>
@@ -539,14 +553,28 @@ const WorkspaceSidebar = ({
     </SidebarSection>
 
     <section className="archive-sidebar-footer">
-      <Button
-        className="archive-secondary-button archive-sidebar-clear"
-        onClick={() => void onClearDocuments()}
+      <Popconfirm
+        title={t(
+          activeDocuments.length === 1
+            ? "sidebar.clearWorkspaceConfirm"
+            : "sidebar.clearWorkspaceConfirm_plural",
+          { count: activeDocuments.length }
+        )}
+        description={t("sidebar.deleteCannotBeUndone")}
+        okText={t("sidebar.confirmDelete")}
+        cancelText={t("common.cancel")}
+        okButtonProps={{ danger: true }}
         disabled={activeDocuments.length === 0 || !canDelete}
-        title={canDelete ? undefined : t("auth.deleteNotAllowed")}
+        onConfirm={() => onClearDocuments()}
       >
-        {t("sidebar.clearWorkspace")}
-      </Button>
+        <Button
+          className="archive-secondary-button archive-sidebar-clear"
+          disabled={activeDocuments.length === 0 || !canDelete}
+          title={canDelete ? undefined : t("auth.deleteNotAllowed")}
+        >
+          {t("sidebar.clearWorkspace")}
+        </Button>
+      </Popconfirm>
     </section>
   </aside>
 );

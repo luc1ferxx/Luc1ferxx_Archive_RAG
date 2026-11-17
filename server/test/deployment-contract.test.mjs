@@ -338,14 +338,16 @@ test("the standalone reranker compose file builds the same image", async () => {
   assert.equal(path.join(serverDirectory, composeFile), standaloneComposePath);
 });
 
-test("the app image context leaves out secrets, the model cache, the reranker venv, tests and docs", async () => {
+test("the app image context leaves out secrets, backups, the model cache, the reranker venv, tests and docs", async () => {
   // The app Dockerfile copies server/ whole; anything not ignored here ends up
-  // in the image (server/.env, the 2 GB Hugging Face cache, the 1 GB venv, the
+  // in the image (server/.env, the backups npm run backup:postgres writes to
+  // server/backups by default, the 2 GB Hugging Face cache, the 1 GB venv, the
   // tests and interview notes nothing in the image reads).
   const patterns = (await readText(appDockerignorePath)).split("\n").filter(isContentLine);
 
   for (const pattern of [
     "**/.env",
+    "server/backups",
     "server/evaluation/generated",
     "server/evaluation/.venv*",
     "server/test",

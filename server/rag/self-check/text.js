@@ -391,12 +391,14 @@ export const extractDateValues = (value = "") => {
 
 // Removes the numbers a claim states (they are checked as anchors, not as
 // terms). Only a number that stands on its own goes: a digit run inside a word
-// ("BIBREF20", "seq2seq", "word2vec", "GPT2", "2nd", "5km") is one token to
-// the tokenizer the evidence side uses, so it stays one term here too, where
-// it used to be cut to "bibref" / "seq" and could never be found.
+// ("BIBREF20", "seq2seq", "word2vec", "GPT2", "2nd", "5km", "5ème", "15일")
+// is one token to the tokenizer the evidence side uses (text-utils.js: a run of
+// non-Han letters, marks and digits), so it stays one term here too, where it
+// used to be cut to "bibref" / "seq" and could never be found. A Han character
+// is a token of its own, so "15天" still loses its number.
 export const stripNumericValueSurfaces = (value = "") => {
   return normalizeNumericSyntax(value).replace(
-    /(?<![A-Za-z0-9])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?(?![A-Za-z0-9])/g,
+    /(?<!(?!\p{Script=Han})[\p{L}\p{M}\p{N}])[+-]?[$€£¥]?\d+(?:,\d{3})*(?:\.\d+)?%?(?!(?!\p{Script=Han})[\p{L}\p{M}\p{N}])/gu,
     " "
   );
 };

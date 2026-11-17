@@ -883,8 +883,9 @@ export const getEmbeddingDimensions = () =>
   getEmbeddingDimensionsConfigStatus().dimensions;
 
 // `simple` on purpose: chunk text is pre-tokenized by the same tokenizer the
-// local sparse store uses (per-character CJK, lowercase ASCII words, stop words
-// removed), so a language-specific stemmer would only diverge the two routes.
+// local sparse store uses (per-character Han, lowercase words of other scripts,
+// stop words removed), so a language-specific stemmer would only diverge the
+// two routes.
 export const getPgvectorTextSearchConfig = () =>
   (process.env.RAG_PGVECTOR_TEXT_SEARCH_CONFIG || "simple").trim();
 

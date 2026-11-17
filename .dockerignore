@@ -11,6 +11,8 @@ server/uploads
 server/upload-sessions
 server/tmp-rag-data
 server/feedback
+# npm run backup:postgres's default output: every tenant's documents and text.
+server/backups
 server/evaluation/generated
 # Local Python venvs (npm run rerank:cross-encoder:setup, about 1 GB with
 # torch); COPY server/ would bake them into the app image.

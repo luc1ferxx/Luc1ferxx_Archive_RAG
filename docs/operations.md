@@ -201,7 +201,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 - 用拥有表的登录（role split 时是迁移登录 `POSTGRES_MIGRATION_DATABASE_URL`）：备份要读到所有租户的行。脚本在会话里设 `row_security = off`，被行策略过滤的登录会直接报错，不会悄悄少算。
 - dump 和 manifest 的统计在同一个导出快照里完成（`pg_export_snapshot` + `pg_dump --snapshot`），备份期间有写入也一致。
 - manifest 记录：时间、已应用的迁移（`schema_migrations`）、每张表的行数、每个 (owner, workspace) 的文档数（正常的和回收站里的分开）和字节数、每条审计哈希链最后一行的 id 和哈希、行策略引用的角色、dump 的 SHA-256 和大小。
-- 默认输出到 `server/backups/`（已在 `.gitignore` 里）。备份写出的每个文件都是 0600，它新建的输出目录是 0700。备份文件里有所有租户的文档和文本，存放时要加密、限制访问，并设自己的保留期。
+- 默认输出到 `server/backups/`（已在 `.gitignore` 和 `.dockerignore` 里，不会进 git，也不会被打进镜像）。备份写出的每个文件都是 0600，它新建的输出目录是 0700。备份文件里有所有租户的文档和文本，存放时要加密、限制访问，并设自己的保留期。
 - `--with-files` 另外打包数据库以外的磁盘状态：`UPLOADS_DIRECTORY`（默认 `server/uploads`）、`UPLOAD_SESSION_DIRECTORY`（默认 `server/upload-sessions`）和数据目录（默认 `server/data`：本地索引、文件注册表、JSONL 存储、trace）。默认的 PostgreSQL 部署里这些大多是临时数据；用 local / Qdrant 或文件注册表时才必须带上（Qdrant 自己的数据要另外按 Qdrant 的方式备份）。密钥库和 KMS 主密钥不进这个 tar：按路径排除（`--keystore-dir` / `--kms-master-key-file`，没给就用环境里的 `TENANT_KEYSTORE_DIR` / `TENANT_KMS_MASTER_KEY_FILE`，再没有就用默认位置；脚本不读 `server/.env`，这两个设置在 `.env` 里时要用参数传），按名字排除，并且按内容排除：打包目录里 1 MiB 以内、JSON 的 `format` 是本地 KMS 密钥文件（包括已销毁密钥的墓碑）或主密钥的文件，不论放在哪里、叫什么名字都会排除，manifest 的 `files.keyMaterialExcluded` 只列路径和格式。
 
 ### 恢复演练

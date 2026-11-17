@@ -168,6 +168,38 @@ test("a Chinese pronoun follow-up is detected as a rewrite candidate", async () 
   });
 });
 
+test("a rewrite reply whose JSON does not parse keeps the user's question", async () => {
+  const rewritten = "第二份文档的远程办公政策是什么？";
+  const replies = [
+    [`{\n  "rewritten_query": "${rewritten}",\n  "preserved_ambiguity": false,\n}`, "那第二个呢？"],
+    [`{"rewritten_query": "${rewritten}", "preserved_ambiguity": fal`, "那第二个呢？"],
+    [`Here is the rewrite:\n{\n  "rewritten_query": "${rewritten}",\n}`, "那第二个呢？"],
+    [JSON.stringify({ preserved_ambiguity: false, rewritten_query: rewritten }), rewritten],
+  ];
+
+  await withEnv({ RAG_PROMPT_VERSION: "v3" }, async () => {
+    configureStaticSession(buildChineseCompareSession());
+
+    try {
+      for (const [reply, expected] of replies) {
+        configureOpenAIProvider({ completeText: async () => reply });
+
+        const result = await resolveQueryWithSessionMemory({
+          sessionId: "session-zh",
+          query: "那第二个呢？",
+          documents: [{ fileName: "plan-a.pdf" }, { fileName: "plan-b.pdf" }],
+        });
+
+        assert.equal(result.resolvedQuery, expected, reply);
+        assert.equal(result.memoryApplied, expected === rewritten, reply);
+      }
+    } finally {
+      resetOpenAIProvider();
+      configureSessionMemoryStore(null);
+    }
+  });
+});
+
 test("a self-contained Chinese question with an active session is left untouched", async () => {
   await withEnv({ RAG_PROMPT_VERSION: "v3" }, async () => {
     configureStaticSession(buildChineseCompareSession());

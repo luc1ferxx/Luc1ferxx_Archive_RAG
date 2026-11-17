@@ -570,6 +570,13 @@ const sanitizeRewrittenQuery = (rewrittenResponse, fallbackQuery) => {
     }
   }
 
+  // A JSON reply that gave no question (a trailing comma or a reply cut off
+  // mid-object does not parse) keeps the user's question: its last line would
+  // be "}" or a fragment of the object.
+  if (String(rewrittenResponse ?? "").includes("{")) {
+    return fallbackQuery;
+  }
+
   return sanitizeRewriteQueryText(rewrittenResponse, fallbackQuery);
 };
 

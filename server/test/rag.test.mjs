@@ -4684,7 +4684,7 @@ test("an agent follow-up retrieval writes no session turn or long-term preferenc
 
 test("a research brief records the user's exchange once and no research question", async () => {
   // The research questions name the selected files, so this file name puts
-  // "reply ... chinese" into every question the brief composes.
+  // "reply in chinese" into every question the brief composes.
   configureOpenAIProvider({
     ...provider,
     completeText: async (prompt) => {
@@ -4702,7 +4702,7 @@ test("a research brief records the user's exchange once and no research question
   await withConversationMemory(async ({ readMemories, readSession }) => {
     await ingestFixture({
       docId: "vendor-research-guide",
-      fileName: "reply-in-chinese-vendor-guide.pdf",
+      fileName: "reply in chinese vendor guide.pdf",
       pages: [
         [
           "Vendor notice facts terms obligations: the vendor notice deadline is five business days after the incident.",
@@ -4712,9 +4712,8 @@ test("a research brief records the user's exchange once and no research question
       ],
     });
 
-    // Not "brief": the long-memory extractor reads that word in the user's
-    // own message as an answer_style preference.
-    const question = "Write a research report on the vendor notice deadline.";
+    // "brief" is no instruction about the reply: it stores no answer_style.
+    const question = "Write a research brief on the vendor notice deadline.";
     const response = await runAgentRag({
       ragService: {
         chat,
@@ -4776,8 +4775,8 @@ test("a request run without conversation memory writes reads memory but writes n
     });
     assertOnlyUserExchange(await readSession(), userQuestion);
 
-    // Phase text that would otherwise flip reply_language to en and set
-    // answer_style=concise ("brief"), and append a session turn.
+    // Phase text that would otherwise flip reply_language to en ("Reply in
+    // English") and append a session turn.
     const composed =
       "Create a document-grounded research brief for this dossier. Reply in English. Original goal: remote work policy";
 
