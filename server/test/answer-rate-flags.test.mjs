@@ -616,9 +616,11 @@ test("the follow-up question is the meta text by default and the question with t
   };
   const question = "What does remote work require?";
 
+  // The meta text asks the primary call's resolved question when there is one.
+  assert.equal(buildFollowUpQuestion({ check, question }), buildEvidenceRetryQuestion({ check, question }));
   assert.equal(
-    buildFollowUpQuestion({ check, question, resolvedQuestion: "ignored" }),
-    buildEvidenceRetryQuestion({ check, question })
+    buildFollowUpQuestion({ check, question, resolvedQuestion: "What does remote work require for staff?" }),
+    buildEvidenceRetryQuestion({ check, question: "What does remote work require for staff?" })
   );
 
   withFlags({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, () => {

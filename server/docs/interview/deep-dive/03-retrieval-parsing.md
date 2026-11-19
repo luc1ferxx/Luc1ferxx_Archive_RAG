@@ -39,7 +39,7 @@
 | `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序 |
 | `server/rag/query-router.js` | routeQuery：用正则信号判 qa / compare（多文档且置信度 ≥0.5 才走 compare） |
 | `server/rag/query-decomposer.js` | buildEvidenceRequirements / buildRetrievalQueries：按 and、also、以及、分号等拆多部分问题（最多 4 个，RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS） |
-| `server/rag/agent-query-planner.js` | buildAgentRetrievalPlan：agent 路径的检索计划（意图 → topK + 模板化子查询，INTENT_OPTIONS） |
+| `server/rag/agent-query-planner.js` | buildAgentRetrievalPlan：agent 路径的检索计划（意图 → topK，INTENT_OPTIONS；模板化子查询在 agent-retrieval-queries.js buildAgentRetrievalQueries） |
 | `server/rag/document-rag-execution.js` | executeDocumentRag / buildRetrievalInputs / retrieveGlobalContextForQueries（本地或远程检索层）/ retrieveQaCandidates |
 | `server/rag/semantic-cache.js` | 进程内语义答案缓存：键、命中、失效（lookupSemanticCache / storeSemanticCacheAnswer / invalidateSemanticCacheDocuments，默认关） |
 | `server/rag/semantic-cache-guard.js` | compareCacheQuestions 词法守卫（SEMANTIC_CACHE_GUARD_VERSION = semantic-cache-guard/v2） |
@@ -58,7 +58,7 @@
 
 【一次 /chat 的检索】agent 的 document_rag 步骤（agent-preparation-flow 先用 buildAgentRetrievalPlan 生成检索计划；MCP archive_ask 没有这个计划）→ ragService.chat → document-rag-execution.js executeDocumentRag → buildRetrievalInputs：
 - routeQuery 判 qa/compare
-- buildEvidenceRequirements + buildRetrievalQueries 拆子查询；有 agent 计划时用计划里的查询
+- buildEvidenceRequirements + buildRetrievalQueries 拆子查询；有 agent 计划时用计划里的查询（会话记忆改写了问题时，chat() 先按改写后的问题用同一套模板重建主计划的查询）
 - embedQueryCached(resolvedQuery)：加查询前缀，按激活版本的空间嵌入
 
 → lookupSemanticCache（开启时；命中直接返回）→ executeQaRag 或 executeComparisonRag → retrieveGlobalContextForQueries（走远程检索层或进程内）。每条子查询：

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { buildAgentRetrievalQueries } from "./agent-retrieval-queries.js";
 import { chunkDocumentWithConfig } from "./chunker.js";
 import { describeChunkProfile, readOfficeParse, stampChunkProfile } from "./chunk-profile.js";
 import {
@@ -1564,7 +1565,7 @@ const chat = async (docIds, query, options = {}) => {
     // Memory reads (query rewrite, preference block) are unchanged either way.
     memoryWrites = true,
   } = options;
-  const agentRetrievalPlan = normalizeRetrievalPlan(retrievalPlan);
+  let agentRetrievalPlan = normalizeRetrievalPlan(retrievalPlan);
   const traceId = randomUUID();
   const timestamp = new Date().toISOString();
   const startedAt = Date.now();
@@ -1625,6 +1626,25 @@ const chat = async (docIds, query, options = {}) => {
             longTermMemory: longMemoryContext.rewriteBlock,
           });
     resolvedQuery = memoryResolution.resolvedQuery;
+
+    // The planner built the plan's queries around the words the user typed;
+    // when memory rewrote them, retrieval searches with the rewrite, as the QA
+    // gate and the answer prompt read it ("And how quickly?" alone finds
+    // nothing). The intent stays the one classified from the user's words. A
+    // follow-up plan keeps its queries: they come from an earlier answer's gaps.
+    // shortcut: the agent's trace and working memory still list the queries it
+    // planned, only the RAG trace the searched ones; return this plan from
+    // chat() when a client needs the searched queries.
+    if (agentRetrievalPlan?.phase === "primary" && memoryResolution.memoryApplied) {
+      agentRetrievalPlan = normalizeRetrievalPlan({
+        ...agentRetrievalPlan,
+        retrievalQueries: buildAgentRetrievalQueries({
+          question: resolvedQuery,
+          intent: agentRetrievalPlan.intent,
+          phase: agentRetrievalPlan.phase,
+        }),
+      });
+    }
 
     const buildResponse = async (response) => {
       const abstained = Boolean(response.abstained);

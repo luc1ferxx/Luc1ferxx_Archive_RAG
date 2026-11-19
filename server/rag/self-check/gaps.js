@@ -91,16 +91,17 @@ export const buildEvidenceRetryQuestion = ({ question, check } = {}) => {
  * The question a follow-up document RAG call asks. By default it is the
  * "Re-check the uploaded documents..." text above, which the answer model,
  * the QA gate and the primary retrieval query all read. With
- * AGENT_FOLLOW_UP_ORIGINAL_QUESTION on it is the question itself (the primary
- * call's resolved question when there is one); the evidence issue then reaches
- * only the follow-up retrieval queries (agent-query-planner.js).
+ * AGENT_FOLLOW_UP_ORIGINAL_QUESTION on it is the question itself; the evidence
+ * issue then reaches only the follow-up retrieval queries
+ * (agent-retrieval-queries.js). Either way the question is the primary call's
+ * resolved question when there is one: "And how quickly?" alone finds nothing.
  */
 export const buildFollowUpQuestion = ({ question, resolvedQuestion = null, check } = {}) => {
-  if (!isAgentFollowUpOriginalQuestionEnabled()) {
-    return buildEvidenceRetryQuestion({ question, check });
-  }
-
   const resolved = typeof resolvedQuestion === "string" ? resolvedQuestion.trim() : "";
+
+  if (!isAgentFollowUpOriginalQuestionEnabled()) {
+    return buildEvidenceRetryQuestion({ question: resolved || question, check });
+  }
 
   return resolved || question;
 };

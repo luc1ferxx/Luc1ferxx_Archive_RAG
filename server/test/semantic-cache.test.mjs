@@ -431,6 +431,23 @@ test("the plan shape keeps the planner's templates and drops the question", () =
   assert.equal(describeRetrievalPlanShape({ phase: "retry" }, "q"), null);
 });
 
+test("a rewritten question's key drops the rewrite its plan was built around", async () => {
+  process.env.RAG_SEMANTIC_CACHE = "on";
+  const rewritten = (resolvedQuery) => ({
+    agentRetrievalPlan: {
+      phase: "primary",
+      intent: "fact",
+      retrievalQueries: [{ id: "primary", query: resolvedQuery, primary: true }],
+    },
+    query: "And per day?",
+    resolvedQuery,
+  });
+
+  await prime(rewritten("What is the meal limit per day?"));
+
+  assert.equal((await lookup({ ...rewritten("what is the meal limit per day"), queryVector: unitVector(0.1) })).hit, true);
+});
+
 test("below the threshold, or rejected by the guard, is a miss", async () => {
   process.env.RAG_SEMANTIC_CACHE = "on";
   await prime();
