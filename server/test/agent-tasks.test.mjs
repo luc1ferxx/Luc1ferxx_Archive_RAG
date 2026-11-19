@@ -1225,6 +1225,80 @@ test("artifact storage failure keeps an approved agent task and goal completion 
   assert.equal(task.items.at(-1).status, TASK_STATUSES.failed);
 });
 
+// The deliverable being written when the task is canceled finishes; no later
+// one is written. Every remaining deliverable used to be written anyway.
+test("a task canceled while it creates approved deliverables writes none after the cancel", async () => {
+  const capabilityRegistry = createDeliverableCapabilityRegistry();
+  const executeCapability = capabilityRegistry.execute;
+  const taskId = "agent_goal:canceled-deliverables";
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const runner = createAgentTaskRunner({
+    capabilityRegistry,
+    runAgentTask: async () => ({
+      body: {
+        agentAnswer: "Risk report answer backed by the selected documents.",
+        agentMode: "document",
+        agentRunId: "run-canceled-deliverables",
+      },
+      status: 200,
+    }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      [AGENT_TASK_RUNNER_ID]: runner,
+    },
+    taskService,
+  });
+  const agentTaskService = createAgentTaskService({
+    createTaskId: () => "canceled-deliverables",
+    jobOrchestrator: null,
+    taskService,
+  });
+
+  capabilityRegistry.execute = async (capabilityId, payload) => {
+    if (capabilityRegistry.calls.length === 0) {
+      await orchestrator.resumeTask({ accessScope, action: "cancel", taskId });
+    }
+
+    return executeCapability(capabilityId, payload);
+  };
+
+  await agentTaskService.createTask({
+    accessScope,
+    docIds: ["doc-1", "doc-2"],
+    maxIterations: 1,
+    question: "整理这些论文并生成风险报告",
+    sessionId: "session-canceled-deliverables",
+    userId: "alice",
+  });
+  await orchestrator.runTask({ accessScope, taskId });
+  const pendingTask = await taskService.getInternalTask({ accessScope, taskId });
+
+  await orchestrator.resumeTask({
+    accessScope,
+    action: AGENT_TASK_ACTIONS.approveDeliverables,
+    payload: {
+      approvalBindings: pendingTask.result.approvalGates.map((gate) => ({
+        approvalObjectHash: gate.approvalObjectHash,
+        gateId: gate.id,
+      })),
+    },
+    runImmediately: false,
+    taskId,
+  });
+
+  const task = await orchestrator.runTask({ accessScope, taskId });
+
+  assert.equal(pendingTask.payload.deliverables.specs.length, 4);
+  assert.equal(task.status, TASK_STATUSES.canceled);
+  assert.deepEqual(
+    capabilityRegistry.calls.map((call) => call.capabilityId),
+    [CAPABILITY_IDS.documentOrganize]
+  );
+});
+
 test("goal completion rejects completed deliverables with invalid artifact references", () => {
   const completion = buildAgentGoalCompletion({
     items: [

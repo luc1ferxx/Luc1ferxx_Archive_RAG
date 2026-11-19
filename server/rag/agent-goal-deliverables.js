@@ -760,6 +760,7 @@ export const executeAgentGoalDeliverables = async ({
   accessScope = {},
   capabilityRegistry,
   deliverables = {},
+  signal,
 } = {}) => {
   const specs = toArray(deliverables.specs);
   const results = [];
@@ -783,6 +784,8 @@ export const executeAgentGoalDeliverables = async ({
   });
 
   for (const execution of executions) {
+    // A canceled task writes no further deliverable; the one being written finished.
+    signal?.throwIfAborted();
     const { approval, input, spec } = execution;
 
     try {

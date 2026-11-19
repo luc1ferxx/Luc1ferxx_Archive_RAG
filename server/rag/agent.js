@@ -1126,6 +1126,32 @@ const endRunForTermination = async ({
   }
 };
 
+// Conversation memory gets the user's question and the text they are given
+// (final answer or clarification), once per request: no chat() inside the run
+// writes memory, so the next rewrite never reads an unchecked or replaced answer.
+const recordConversationTurnSafely = async (
+  { accessScope, docIds, question, ragService, sessionId, userId },
+  response
+) => {
+  if (response.status < 400) {
+    try {
+      await ragService?.recordConversationTurn?.({
+        accessScope,
+        answer: response.body?.agentAnswer ?? "",
+        docIds,
+        query: question,
+        routeMode: response.body?.agentMode ?? null,
+        sessionId,
+        userId,
+      });
+    } catch (error) {
+      console.warn("Failed to record the user's exchange in conversation memory.", error);
+    }
+  }
+
+  return response;
+};
+
 // Every model call a run causes -- planners, document RAG, Skills, web -- is
 // charged to that run's usage meter through AsyncLocalStorage, so the meter has
 // to be active before the first of them. The run context picks the same meter
@@ -1146,7 +1172,8 @@ export const runAgentRag = (options = {}) =>
             : undefined,
           [GEN_AI_ATTRIBUTES.conversationId]: options.sessionId,
         },
-        () => runAgentRagInScope(options)
+        async () =>
+          recordConversationTurnSafely(options, await runAgentRagInScope(options))
       )
   );
 

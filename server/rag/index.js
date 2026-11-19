@@ -1485,16 +1485,21 @@ const recordUserExchange = async ({
     return;
   }
 
-  await recordSessionTurn({
-    // The tenant is part of the session key (rag/memory.js).
-    accessScope,
-    sessionId,
-    query,
-    resolvedQuery,
-    answer,
-    documents,
-    routeMode,
-  });
+  // The answer is already generated: a failed write must not fail it.
+  try {
+    await recordSessionTurn({
+      // The tenant is part of the session key (rag/memory.js).
+      accessScope,
+      sessionId,
+      query,
+      resolvedQuery,
+      answer,
+      documents,
+      routeMode,
+    });
+  } catch (error) {
+    console.error("Failed to record the session turn.", error);
+  }
 
   if (userId) {
     try {
@@ -1511,9 +1516,9 @@ const recordUserExchange = async ({
 };
 
 /**
- * Records the user's exchange for an agent answer that no memory-writing
- * chat() call produced (a research brief, whose document lookups run with
- * memoryWrites: false). Same writes as chat()'s own: one session turn and the
+ * Records the user's exchange for an agent request, once, after its answer is
+ * final (rag/agent.js): every chat() call inside the agent runs with
+ * memoryWrites: false. Same writes as chat()'s own: one session turn and the
  * preferences the user's question states.
  */
 export const recordConversationTurn = async ({
@@ -1550,10 +1555,10 @@ const chat = async (docIds, query, options = {}) => {
     includeRetrievedContexts = false,
     accessScope = {},
     retrievalPlan = null,
-    // false for the agent's own sub-calls (follow-up retrieval, research
-    // questions, composed Skill prompts): their question is system text, so
-    // it must not become a session turn or a long-term preference. Memory
-    // reads (query rewrite, preference block) are unchanged either way.
+    // false for every call the agent makes: its question may be text the
+    // agent composed, and its answer is not yet the one the user is given.
+    // The agent records the exchange once, after finalizing (rag/agent.js).
+    // Memory reads (query rewrite, preference block) are unchanged either way.
     memoryWrites = true,
   } = options;
   const agentRetrievalPlan = normalizeRetrievalPlan(retrievalPlan);
@@ -1605,9 +1610,7 @@ const chat = async (docIds, query, options = {}) => {
     }
 
     // The agent's follow-up (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) passes the
-    // question its primary call already resolved. The primary call has since
-    // recorded a session turn, so rewriting again would read that turn and
-    // could add to the question (a file name becomes an anchor).
+    // question its primary call already resolved, so it is not rewritten again.
     const memoryResolution =
       agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled()
         ? { resolvedQuery: query, memoryApplied: false }

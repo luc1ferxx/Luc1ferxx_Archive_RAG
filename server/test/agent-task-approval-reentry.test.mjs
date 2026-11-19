@@ -21,6 +21,7 @@ import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent
 import { createApprovalExecutionSnapshot } from "../rag/capabilities/approval-execution-snapshot.js";
 import { createDefaultCapabilityRegistry } from "../rag/capabilities/index.js";
 import { createJobOrchestrator } from "../rag/job-orchestrator.js";
+import { throwIfRequestCancelled } from "../rag/request-deadline.js";
 import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 
 // A background task that a Capability approval gate paused, approved through
@@ -393,4 +394,56 @@ test("a run whose completion is refused ends failed instead of staying running",
 
     assert.equal(stored?.status, "failed");
   });
+});
+
+// Cancelling a task stops the run it drives, as a client leaving /chat does:
+// the run ends canceled at its next safe point and the rest of its plan is
+// never called. It used to run every remaining research question and end
+// completed under the canceled task.
+test("cancelling a task mid-run ends its run canceled and calls none of its later steps", async () => {
+  await withEnv(async () => {
+    const harness = createHarness();
+    const { chat } = harness.ragService;
+    let taskId = null;
+
+    harness.ragService.chat = async (...args) => {
+      if (harness.ragService.calls.length === 0) {
+        await harness.orchestrator.resumeTask({ accessScope, action: "cancel", taskId });
+      }
+      return chat(...args);
+    };
+    ({ id: taskId } = await harness.agentTaskService.createTask({
+      accessScope,
+      docIds: DOCS,
+      question: "Write a research brief on the key risks in these contracts.",
+      userId: accessScope.userId,
+    }));
+
+    const task = await harness.orchestrator.runTask({ accessScope, taskId });
+    const { runs } = await harness.agentRunService.listRuns({ accessScope });
+
+    assert.equal(task.status, "canceled");
+    assert.equal(harness.ragService.calls.length, 1);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, "canceled");
+    assert.equal(runs[0].error.code, "AGENT_CLIENT_CANCELLED");
+    assert.ok(runs[0].steps.every((step) => step.status !== "running"));
+  });
+});
+
+// A claim lost mid-run (not a cancel) stops the run too, and the iteration
+// rejects with the task's reason: the orchestrator then leaves the task for
+// recovery, as before, instead of failing it as "the client disconnected".
+test("an iteration whose task aborts mid-run rejects with the task's own reason", async () => {
+  const task = new AbortController();
+  const claimLost = Object.assign(new Error("Task execution claim is no longer active."), { code: "TASK_CLAIM_LOST" });
+  const runAgentTask = createAgentTaskIterationRunner({
+    runAgentRequest: async () => {
+      task.abort(claimLost);
+      throwIfRequestCancelled();
+      return { body: {}, status: 200 };
+    },
+  });
+
+  await assert.rejects(runAgentTask({ signal: task.signal }), (error) => error === claimLost);
 });

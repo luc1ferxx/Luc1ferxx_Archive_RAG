@@ -31,6 +31,7 @@ import {
   readTenantTaskLimits,
   TENANT_TASK_LIMITED,
 } from "./job-orchestrator.js";
+import { createRequestCancellation, runWithRequestCancellation } from "./request-deadline.js";
 import { buildTaskScopeKey, createTaskService, TASK_STATUSES } from "./tasks.js";
 import { recordTenantRefusal } from "./tenant-refusals.js";
 import { runWithoutConversationMemoryWrites } from "./conversation-memory-writes.js";
@@ -551,9 +552,14 @@ export const createAgentTaskService = ({
  *
  * Every other iteration is an agent request (`runAgentRequest`, runAgentRag):
  * a new question, or the continuation of the task's run.
+ *
+ * Either one runs under the task's `signal` (a cancel, or the claim lost) the
+ * way a /chat run runs under its client's disconnect (request-deadline.js):
+ * once it aborts, the run stops at its next safe point and ends canceled; a
+ * Capability already writing finishes first.
  */
-export const createAgentTaskIterationRunner = ({ approveRunGate, runAgentRequest } = {}) =>
-  async ({ accessScope, agentRunId, capabilityApprovals = {}, ...request } = {}) => {
+export const createAgentTaskIterationRunner = ({ approveRunGate, runAgentRequest } = {}) => {
+  const runIteration = async ({ accessScope, agentRunId, capabilityApprovals = {}, ...request } = {}) => {
     const approval = Object.values(capabilityApprovals ?? {}).find(
       (entry) => entry?.approved === true && normalizeText(entry.gateId)
     );
@@ -576,6 +582,25 @@ export const createAgentTaskIterationRunner = ({ approveRunGate, runAgentRequest
 
     return runAgentRequest({ accessScope, agentRunId, ...request });
   };
+
+  return async ({ signal, ...request } = {}) => {
+    const cancellation = createRequestCancellation();
+    const cancel = () => cancellation.cancel();
+
+    signal?.addEventListener("abort", cancel);
+    if (signal?.aborted) cancel();
+
+    try {
+      return await runWithRequestCancellation(cancellation, () => runIteration(request));
+    } catch (error) {
+      // The task's reason (its claim lost): the orchestrator fences on it rather than failing the task.
+      throw signal?.aborted ? signal.reason : error;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+      cancellation.dispose();
+    }
+  };
+};
 
 export const createAgentTaskRunner = ({
   capabilityRegistry,

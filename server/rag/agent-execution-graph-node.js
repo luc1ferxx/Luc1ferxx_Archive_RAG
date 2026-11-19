@@ -6,10 +6,7 @@ import {
   buildExecutionGraphNodeStepId,
   digestExecutionGraphTypedOutput,
 } from "./agent-execution-graph-checkpoint.js";
-import {
-  EXECUTION_GRAPH_BINDING_SOURCES,
-  EXECUTION_GRAPH_FAILURE_POLICIES,
-} from "./agent-execution-graph.js";
+import { EXECUTION_GRAPH_FAILURE_POLICIES } from "./agent-execution-graph.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
 import { serializeAgentError as serializeError } from "./agent-response-builder.js";
@@ -132,10 +129,6 @@ const buildSkillStepError = (result = {}) =>
         message: serializeError(result.error, "Unable to run custom skill."),
         name: result.error?.name ?? "Error",
       };
-
-const isQuestionBoundToNodeOutput = (node) =>
-  node?.inputBindings?.question?.source ===
-  EXECUTION_GRAPH_BINDING_SOURCES.node;
 
 const graphNodeIdentity = (nodeId) => ({
   stepId: buildExecutionGraphNodeStepId({ nodeId }),
@@ -869,11 +862,6 @@ export const executeExecutionGraphNodeLaunch = async ({
             retrievalPlan: nodeRetrievalPlan,
             sessionId,
             userId,
-            // A node whose question is bound to an upstream output asks
-            // agent text, so it must not write conversation memory.
-            ...(isQuestionBoundToNodeOutput(node)
-              ? { memoryWrites: false }
-              : {}),
           },
           {
             budget,

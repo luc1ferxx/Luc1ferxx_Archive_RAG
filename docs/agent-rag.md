@@ -180,13 +180,13 @@ Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Ski
 
 外层的 `document_rag`、`follow_up_retrieval` 和 built-in `research_question` 不属于上面的 custom-only DAG。它们调用带真实 `sessionId` / `userId` 的 `ragService.chat`。启动恢复不重放这三类 step（它不单独重放任何 step），中断的转人工；没有 replay metadata 的旧记录按 step type 给原因码。新的 V1 step input 显式持久化 `effects: workspace_write`、`idempotency: adapter_defined`、`replaySafe: false`。显式 `retry_failed_step` 继续可用；现有路径没有跨 RAG 写入与 step 结算的 exactly-once 保证。
 
-**会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。长期偏好只从明确的指令里提取（“以后用中文回答”“reply in English”“回答简短一点”等）；问题里只是提到语言或长短（“中国供应商的回复”“short-term borrowings”）不会存成偏好。
+**会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。长期偏好只从明确的指令里提取（“以后用中文回答”“reply in English”“回答简短一点”等）；问题里只是提到语言或长短（“中国供应商的回复”“short-term borrowings”）不会存成偏好。会话写入失败只记日志，不影响已经生成的答案。
 
-- 写入：主 `document_rag` 调用（用户的问题，一条用户 turn 加一条助手 turn，加上问题里说明的偏好）及其重试；research brief 在子问题都跑完后，经 `ragService.recordConversationTurn` 记一次（用户问题加 brief 文本）。
-- 不写入：V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、每个 `research_question` 子调用、这两类 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
-- 后台任务：问题不是任务自身问题的迭代（研究 dossier 的阶段问题、agent 规划的 `nextQuestion`）在 `runWithoutConversationMemoryWrites` 下运行，整次迭代只读不写。
+- 写入：每个 agent 请求在 run 结束后记一次：`runAgentRag`（`rag/agent.js`）把用户的问题和用户实际看到的文本（`body.agentAnswer`：定稿答案、替换了主答案的 follow-up 答案，或澄清、拒答）交给 `ragService.recordConversationTurn`（一条用户 turn 加一条助手 turn，加上问题里说明的偏好；`routeMode` 取 `body.agentMode`，不记改写后的检索问题），只记 2xx 响应，失败只记日志。取消、依赖故障结束和出错的请求不写；审批答复和启动恢复续跑的 run 也不写。直接调用 `chat()`（默认 `memoryWrites: true`）的仍自己记。
+- 不写入（`memoryWrites: false`）：agent 发起的每个 `chat()`：主 `document_rag` 调用、V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、每个 `research_question` 子调用、这些 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
+- 后台任务：问题不是任务自身问题的迭代（研究 dossier 的阶段问题、agent 规划的 `nextQuestion`）在 `runWithoutConversationMemoryWrites` 下运行，整次迭代只读不写（请求结束时那次记录也不写）。
 
-这三类 step 的 replay 元数据没有因此改动：注入的 `ragService` 或旧的文档 Skill 不一定遵守 `memoryWrites`，证明不了这些 step 什么都不写。重试主 `document_rag` 会再记一次用户的交流。
+这三类 step 的 replay 元数据没有因此改动：注入的 `ragService` 或旧的文档 Skill 不一定遵守 `memoryWrites`，证明不了这些 step 什么都不写。重试不写记忆：失败的请求本来就没记，重试也不补记。
 
 Approval 仍然绑定原始 input hash。
 

@@ -12,6 +12,9 @@ import chat, {
   recordConversationTurn,
 } from "../chat.js";
 import { runAgentRag } from "../rag/agent.js";
+import { createAgentRunService, createInMemoryAgentRunStore } from "../rag/agent-runs.js";
+import { createAgentRunStepExecutor } from "../rag/agent-run-step-executor.js";
+import { createDocumentRagStepExecutor } from "../rag/agent-run-step-handlers/index.js";
 import { runWithoutConversationMemoryWrites } from "../rag/conversation-memory-writes.js";
 import { formatAskResult, toMcpTextContent } from "../archive-mcp-tools.js";
 import { buildPublicFilePath } from "../rag/document-utils.js";
@@ -4544,8 +4547,9 @@ const withConversationMemory = async (callback) => {
 
 // The user turn is the user's message; the assistant turn is the answer the
 // user was given (a research brief lists its own questions as next questions,
-// so only a plain answer is checked for agent text).
-const assertOnlyUserExchange = (session, question, { plainAnswer = true } = {}) => {
+// so only a plain answer is checked for agent text). `answer`, when given, is
+// that text exactly (the session stores it whitespace-collapsed).
+const assertOnlyUserExchange = (session, question, { answer, plainAnswer = true } = {}) => {
   assert.ok(session, "the user's exchange is recorded");
   assert.deepEqual(
     session.messages.map((message) => message.role),
@@ -4556,6 +4560,10 @@ const assertOnlyUserExchange = (session, question, { plainAnswer = true } = {}) 
 
   if (plainAnswer) {
     assert.doesNotMatch(session.messages[1].text ?? "", AGENT_TEXT_PATTERN);
+  }
+
+  if (answer !== undefined) {
+    assert.equal(session.messages[1].text, answer.replace(/\s+/g, " ").trim());
   }
 };
 
@@ -4677,9 +4685,153 @@ test("an agent follow-up retrieval writes no session turn or long-term preferenc
       response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
       "the run took a follow-up retrieval"
     );
-    assertOnlyUserExchange(await readSession(), question);
+    // The user was told the answer could not be verified, not the uncited claim.
+    assert.doesNotMatch(response.body.agentAnswer, /Vendors must reply/);
+    assertOnlyUserExchange(await readSession(), question, {
+      answer: response.body.agentAnswer,
+    });
     assert.deepEqual(await readMemories(), []);
   });
+});
+
+// Every agent answer below is over this one page: the line manager approves.
+const REMOTE_APPROVAL_DOC_ID = "remote-approval-policy";
+const REMOTE_APPROVAL_QUESTION = "Who approves remote work?";
+const HR_DIRECTOR_ANSWER = "Remote work is approved by the HR director. [Source 1]";
+const LINE_MANAGER_ANSWER = "The line manager approves remote work. [Source 1]";
+const ingestRemoteApprovalPolicy = () =>
+  ingestFixture({
+    docId: REMOTE_APPROVAL_DOC_ID,
+    fileName: "remote-approval-policy.pdf",
+    pages: ["Remote work policy: the line manager approves remote work requests."],
+  });
+const askRemoteApproval = (options = {}) =>
+  runAgentRag({
+    ragService: { chat, getDocument, listDocuments, recordConversationTurn },
+    webChatService: async () => ({ text: "Web search should not run." }),
+    question: REMOTE_APPROVAL_QUESTION,
+    docIds: [REMOTE_APPROVAL_DOC_ID],
+    sessionId: MEMORY_SESSION_ID,
+    userId: MEMORY_USER_ID,
+    accessScope: {},
+    ...options,
+  });
+// Rewrite prompts pass through (and are returned); the answer model gives
+// `answers` in order, repeating the last one.
+const configureAnswers = (answers) => {
+  const rewritePrompts = [];
+  let answerCount = 0;
+
+  configureOpenAIProvider({
+    ...provider,
+    completeText: async (prompt) => {
+      if (prompt.includes("Latest user question:")) {
+        rewritePrompts.push(prompt);
+        return provider.completeText(prompt);
+      }
+
+      answerCount += 1;
+      return answers[Math.min(answerCount, answers.length) - 1];
+    },
+  });
+
+  return rewritePrompts;
+};
+
+test("the session keeps the answer the user was given, not an unchecked primary answer", async () => {
+  // Both answers claim the HR director over evidence naming the line manager:
+  // the user is told the answer could not be verified, and the next
+  // follow-up's rewrite must not resolve "And for contractors?" from the claim.
+  const rewritePrompts = configureAnswers([HR_DIRECTOR_ANSWER]);
+
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestRemoteApprovalPolicy();
+
+    const response = await askRemoteApproval();
+
+    assert.doesNotMatch(response.body.agentAnswer, /HR director/);
+    assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, {
+      answer: response.body.agentAnswer,
+    });
+
+    rewritePrompts.length = 0;
+    await chat([REMOTE_APPROVAL_DOC_ID], "And for contractors?", {
+      memoryWrites: false,
+      sessionId: MEMORY_SESSION_ID,
+    });
+    assert.equal(rewritePrompts.length, 1, "the follow-up question was rewritten");
+    assert.doesNotMatch(rewritePrompts[0], /HR director/);
+  });
+});
+
+test("a follow-up answer that replaces the primary answer is the one the session keeps", async () => {
+  configureAnswers([HR_DIRECTOR_ANSWER, LINE_MANAGER_ANSWER]);
+
+  // The follow-up asks the user's question (the default meta text never
+  // clears the QA gate here), so its supported answer replaces the primary.
+  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, () =>
+    withConversationMemory(async ({ readSession }) => {
+      await ingestRemoteApprovalPolicy();
+
+      const response = await askRemoteApproval();
+
+      assert.ok(
+        response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
+        "the run took a follow-up retrieval"
+      );
+      assert.match(response.body.agentAnswer, /line manager/);
+      assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, {
+        answer: response.body.agentAnswer,
+      });
+    })
+  );
+});
+
+test("one /chat records one exchange, and a retry of its primary step records none", async () => {
+  configureAnswers([LINE_MANAGER_ANSWER]);
+
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestRemoteApprovalPolicy();
+
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const response = await askRemoteApproval({ agentRunService });
+    const exchange = { answer: response.body.agentAnswer };
+
+    assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, exchange);
+
+    const executor = createAgentRunStepExecutor({
+      agentRunService,
+      executeDocumentRagStep: createDocumentRagStepExecutor({
+        ragService: { chat, getDocument, listDocuments, recordConversationTurn },
+      }),
+    });
+    const retried = await executor.retryStep({
+      accessScope: {},
+      runId: response.body.agentRunId,
+      stepId: "document_rag:primary",
+    });
+
+    assert.match(retried.response.agentAnswer, /line manager/);
+    assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, exchange);
+  });
+});
+
+test("a failing session write still returns the answer", async () => {
+  configureSessionMemoryStore({
+    ...createFakeSessionMemoryStore(),
+    async upsert() {
+      throw new Error("session store unavailable");
+    },
+  });
+  await ingestRemoteApprovalPolicy();
+
+  const response = await chat([REMOTE_APPROVAL_DOC_ID], REMOTE_APPROVAL_QUESTION, {
+    sessionId: MEMORY_SESSION_ID,
+  });
+
+  assert.match(response.text, /Grounded answer/);
 });
 
 test("a research brief records the user's exchange once and no research question", async () => {
