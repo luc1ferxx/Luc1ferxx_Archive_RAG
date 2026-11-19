@@ -8,7 +8,7 @@ import {
   startFaultInjectingServer,
 } from "../evaluation/run-llm-resilience-eval.mjs";
 import { createChatClient, parseRetryAfterMs } from "../rag/openai-client.js";
-import { completeTextWithMetadata, computeRetryDelayMs } from "../rag/openai.js";
+import { completeTextWithMetadata, computeRetryDelayMs, embedTexts } from "../rag/openai.js";
 
 const withEnv = (t, values) => {
   const original = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
@@ -126,6 +126,49 @@ test("a client error never fails over: it would fail the same way on any model",
 
   await assert.rejects(completeTextWithMetadata("ping"), /Invalid schema/);
   assert.deepEqual(bodies, ["resilience-primary"]);
+});
+
+test("a failed embedding batch is sent again on its own, not with the batches before it", async (t) => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const { input } = JSON.parse(body);
+
+      requests.push(input.length);
+
+      if (requests.length === 3) {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "busy" } }));
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({ data: input.map((text, index) => ({ embedding: [Number(text.match(/\d+$/)[0])], index })) })
+      );
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  withEnv(t, {
+    OPENAI_API_KEY: "test",
+    OPENAI_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`,
+    OPENAI_EMBEDDING_MODEL: "resilience-embedding",
+  });
+  const texts = Array.from({ length: 1100 }, (_, index) => `chunk ${index}`);
+
+  const vectors = await embedTexts(texts);
+
+  // Batches of 512: the third one failed once and only it was sent again.
+  assert.deepEqual(requests, [512, 512, 76, 76]);
+  assert.deepEqual(
+    vectors.map(([value]) => value),
+    texts.map((_, index) => index)
+  );
 });
 
 test("an empty completion is retried once, then returned as empty text as before", async (t) => {
