@@ -434,6 +434,27 @@ describe("GET /health, /ready and /livez", () => {
     });
   });
 
+  // Only the probes the system router serves are public: a path that merely
+  // starts like one is authenticated like any other path.
+  test("auth on: a path that only starts like a probe needs a credential, the probes do not", async () => {
+    await withServer(authEnv(), async (server) => {
+      for (const [method, requestPath] of [
+        ["GET", "/not-a-route"],
+        ["GET", "/healthz"],
+        ["GET", "/readyz"],
+        ["GET", "/health/x"],
+        ["POST", "/health"],
+      ]) {
+        const response = await fetch(`${server.baseUrl}${requestPath}`, { method });
+
+        assert.equal(response.status, 401, `${method} ${requestPath}`);
+        assert.deepEqual(await response.json(), { error: "Unauthorized." }, `${method} ${requestPath}`);
+      }
+
+      await assertStatusOnly(server, {}, "no credential");
+    });
+  });
+
   test("auth on: admin.status.read reads the full report, however it is granted", async () => {
     await withServer(authEnv(), async (server) => {
       await assertDetailed(server, apiKey("viewer-token"), "admin.viewer by x-api-key");
