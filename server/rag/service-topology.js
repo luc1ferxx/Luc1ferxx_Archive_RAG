@@ -279,6 +279,13 @@ export const validateServiceTopology = (env = process.env) => {
     }
   }
 
+  // shortcut: one agent only; its startup recovery cannot tell another agent's live run from an interrupted one. Upgrade with run ownership, leases and heartbeats before supporting agent replicas.
+  if (parsed[SERVICE_TIERS.agent].urls.length > 1) {
+    warnings.push(
+      "AGENT_SERVICE_URL lists more than one agent; run a single agent: each agent's startup recovery treats every running run as interrupted, another agent's live ones included."
+    );
+  }
+
   const hasUrls = (tier) => parsed[tier].urls.length > 0;
 
   for (const tier of Object.values(SERVICE_TIERS)) {

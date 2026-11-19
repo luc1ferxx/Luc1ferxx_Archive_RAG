@@ -626,7 +626,7 @@ RBAC_MODE=enforce
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `ARCHIVE_RAG_ROLE` | `all` | 这个进程跑哪一层：`all`（单体）、`api`（公网入口）、`agent`（Agent 编排）、`retrieval`（检索）、`model-gateway`（模型网关）。忽略大小写和首尾空格；其他值在启动时直接报错，不会退回单体。 |
-| `AGENT_SERVICE_URL` | 空 | agent 层的副本地址，逗号分隔。设置后，`/chat`、`/chat/stream`、任务、触发器、agent run 及其操作、`/capabilities` 和 `POST /admin/actions/:action` 转发到 agent 层。`api` 角色必须设置。 |
+| `AGENT_SERVICE_URL` | 空 | agent 层的副本地址，逗号分隔。设置后，`/chat`、`/chat/stream`、任务、触发器、agent run 及其操作、`/capabilities` 和 `POST /admin/actions/:action` 转发到 agent 层。`api` 角色必须设置。目前只支持一个 agent：列多个地址时启动打警告，因为每个 agent 的启动恢复会把别的 agent 正在跑的 run 转人工（见 deployment.md「给某一层加副本」）。 |
 | `RETRIEVAL_SERVICE_URL` | 空 | 检索层的副本地址，逗号分隔。设置后，文档问答和对比的检索（查询 embedding、稠密 + 稀疏、融合、重排）交给检索层，本进程不再读分块表。`agent` 角色不设时在本进程检索，启动时打印警告。 |
 | `MODEL_GATEWAY_URL` | 空 | 模型网关的副本地址，逗号分隔。设置后，chat、embedding 和交叉编码器重排都经网关调用；配置了自定义 provider 的调用仍在本进程执行。 |
 

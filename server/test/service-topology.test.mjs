@@ -168,9 +168,23 @@ test("impossible setups are errors and doubtful ones warnings", () => {
   assert.deepEqual(duplicate.warnings, ["AGENT_SERVICE_URL lists the same replica more than once; duplicates are ignored."]);
 });
 
+test("more than one agent replica warns", () => {
+  const twoAgents = validateServiceTopology({
+    ARCHIVE_RAG_ROLE: "api",
+    AGENT_SERVICE_URL: "http://agent-1:5001,http://agent-2:5001",
+    INTERNAL_SERVICE_KEYS: KEYS,
+    MODEL_GATEWAY_URL: "http://gw:1",
+  });
+
+  assert.deepEqual(twoAgents.errors, []);
+  assert.deepEqual(twoAgents.warnings, [
+    "AGENT_SERVICE_URL lists more than one agent; run a single agent: each agent's startup recovery treats every running run as interrupted, another agent's live ones included.",
+  ]);
+});
+
 test("a complete split validates clean", () => {
   const shared = {
-    AGENT_SERVICE_URL: "http://agent-1:5001,http://agent-2:5001",
+    AGENT_SERVICE_URL: "http://agent-1:5001",
     INTERNAL_SERVICE_KEYS: KEYS,
     MODEL_GATEWAY_URL: "http://gw:8080",
     RETRIEVAL_SERVICE_URL: "http://retrieval:5002",
