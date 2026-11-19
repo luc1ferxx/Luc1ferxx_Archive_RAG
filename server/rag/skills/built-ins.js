@@ -306,8 +306,9 @@ const createDocumentRagSkill = () => ({
   kind: "built_in",
   budgetKey: "documentRagCalls",
   requiresAccessScope: true,
-  // ragService.chat records a session turn and may persist user long memory.
-  // A replay could append those writes again without an idempotency key.
+  // ragService.chat runs with the live session/user identity. It is asked not
+  // to write memory, but nothing proves an injected ragService honours that,
+  // and a replay could append such writes again without an idempotency key.
   effects: SKILL_EFFECTS.workspaceWrite,
   idempotency: SKILL_IDEMPOTENCY.adapterDefined,
   parallelSafe: false,
@@ -336,7 +337,6 @@ const createDocumentRagSkill = () => ({
     userId,
     accessScope,
     retrievalPlan,
-    memoryWrites,
   }) => {
     const value = await ragService.chat(docIds, question, {
       sessionId,
@@ -344,9 +344,9 @@ const createDocumentRagSkill = () => ({
       includeRetrievedContexts: true,
       accessScope,
       retrievalPlan,
-      // The agent's follow-up asks a question it composed; only the primary
-      // call (the user's own question) records the exchange in memory.
-      ...(memoryWrites === false ? { memoryWrites: false } : {}),
+      // Neither answer is final yet (a follow-up or the finalizer may replace
+      // it): the agent records the user's exchange once, after finalizing.
+      memoryWrites: false,
     });
     assertDocumentRagResultTypes(value);
 
@@ -576,9 +576,9 @@ const createResearchBriefSkill = () => ({
   budgetKey: "researchQuestions",
   requiresAccessScope: true,
   // The questions call ragService.chat with the live session/user identity
-  // (memoryWrites: false), and the brief then records the user's exchange as
-  // one session turn plus the long-term preferences the question states. A
-  // restarted worker cannot infer from an in-flight run whether that landed.
+  // and memoryWrites: false, which nothing proves an injected ragService
+  // honours. A restarted worker cannot infer from an in-flight run whether
+  // such a write landed.
   effects: SKILL_EFFECTS.workspaceWrite,
   idempotency: SKILL_IDEMPOTENCY.adapterDefined,
   parallelSafe: false,
@@ -666,7 +666,7 @@ const createResearchBriefSkill = () => ({
       try {
         // A research question is text this skill composed around the user's
         // topic, not the user's message: it reads session memory but writes
-        // none. The user's own exchange is recorded once, after the brief.
+        // none. The agent records the user's exchange once, after finalizing.
         const value = await ragService.chat(docIds, entry.question, {
           sessionId: sessionId ?? null,
           userId: userId ?? null,
@@ -755,23 +755,6 @@ const createResearchBriefSkill = () => ({
       results,
     });
     const evidenceCitations = rebaseEvidenceResults(evidenceResults).citations;
-
-    // The user's exchange: their question and the brief, as one session turn,
-    // plus the preferences their question states. A failure here never fails
-    // the brief.
-    try {
-      await ragService.recordConversationTurn?.({
-        accessScope,
-        answer: brief.text,
-        docIds,
-        query: question,
-        routeMode: "research_brief",
-        sessionId: sessionId ?? null,
-        userId: userId ?? null,
-      });
-    } catch (error) {
-      console.error("Failed to record the research brief exchange in memory.", error);
-    }
 
     return {
       value: {

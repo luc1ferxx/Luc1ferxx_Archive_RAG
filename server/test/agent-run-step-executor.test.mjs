@@ -1350,8 +1350,8 @@ test("agent run step executor retries document_rag through the wired document ha
   assert.equal(calls[0].question, "What is annual leave?");
   assert.deepEqual(calls[0].options.accessScope, accessScope);
   assert.deepEqual(calls[0].options.retrievalPlan, retrievalPlan);
-  // The primary call is the user's question: a retry records it as before.
-  assert.equal(calls[0].options.memoryWrites, undefined);
+  // Only the agent request records the user's exchange (rag/agent.js).
+  assert.equal(calls[0].options.memoryWrites, false);
   assert.equal(retried.response.agentMode, "document");
   assert.match(retried.response.agentAnswer, /Retried document answer/);
   assert.equal(retried.response.ragSources.length, 1);
