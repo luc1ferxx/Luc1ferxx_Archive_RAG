@@ -394,17 +394,19 @@ export const startServiceRole = async ({
   const appStop = typeof app.locals?.stop === "function" ? [() => app.locals.stop()] : [];
   const metricsStop = metrics ? [() => metrics.close()] : [];
   // The usage this tier still holds in memory (rag/tenant-usage.js), written
-  // before the pool closes; a no-op when nothing was recorded or after the
-  // api role's app.locals.stop already wrote it.
+  // right after the app stops, before the span flush (up to the 30 s export
+  // timeout when the collector does not answer, as long as compose waits
+  // before it kills the container); a no-op when nothing was recorded or after
+  // the api role's app.locals.stop already wrote it.
   const usageStop = [() => stopTenantUsageLedger()];
   const shutdown = createGracefulShutdown({
     exit,
     finalizers: [
       ...appStop,
+      ...usageStop,
       ...finalizers,
       ...shutdownFinalizers,
       ...metricsStop,
-      ...usageStop,
       resetPostgresPool,
     ],
     graceMs,
