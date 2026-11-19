@@ -28,6 +28,13 @@
 // each row's contextChars, the characters of chunk text the answer model was
 // given (null on the agent surface, whose body carries no context text).
 //
+// On the agent surface each row also carries checks, one per self_check step
+// of the trace (phase primary, follow_up or final): the answer text the check
+// read and, for each claim it rejected, the check's own fields and the cited
+// sources' text as the check compared it (describeAgentChecks in
+// agent-answer-outcome.js). The .md report counts those claims by failure
+// field and the failed checks by reason.
+//
 // Two runs over the same sample can be compared question by question:
 // --compare <other report.json> adds a paired bootstrap block (this run minus
 // that one; compare-qasper-answer-reports.mjs does the same for two saved
@@ -65,9 +72,11 @@ import {
 } from "./qasper-answer-metrics.js";
 import {
   classifyAgentAnswer,
+  describeAgentChecks,
   describeAgentFollowUp,
   isAgentAnswerTruncated,
   isAgentVerdictOverridden,
+  summarizeAgentChecks,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
 import {
@@ -214,6 +223,38 @@ export const describeRagSurfaceAnswer = (result) => {
   };
 };
 
+// The agent surface's answer as this eval scores it, from runAgentRag's body.
+// ragReplies are the run's document RAG replies in call order, each
+// { question, value }; the row's checks pair them with the trace's
+// self-checks (describeAgentChecks).
+export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
+  // A clarification and the grounded abstention sentence are both
+  // abstentions (agent-answer-outcome.js).
+  const outcome = classifyAgentAnswer(body);
+  // The finalizer projects ragSources and rebases the answer's labels to
+  // them, so the labels resolve against ragSources as on the rag surface.
+  const sources = body.ragSources ?? body.citations ?? [];
+
+  return {
+    abstained: !outcome.answered,
+    abstainSource: outcome.abstainSource,
+    agent: { ...outcome, ...describeAgentFollowUp(body), checks: describeAgentChecks(body, ragReplies) },
+    answerTruncated: isAgentAnswerTruncated(body),
+    // The agent body carries its cited sources as ragSources; it has no
+    // citations field, so reading that gave every agent row no pages.
+    // An abstention counts as returning no sources. contextPages keeps
+    // the figure earlier agent reports called evidenceRecall.
+    citedPages: citedSourcePages({ abstained: !outcome.answered, citations: sources, text: body.agentAnswer }),
+    contextChars: null,
+    contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
+    // The extractive short answer rides on the body as ragDirectAnswer;
+    // the finalizer never rewrites it.
+    directAnswer: outcome.answered && typeof body.ragDirectAnswer === "string" ? body.ragDirectAnswer : null,
+    text: body.agentAnswer,
+    verdictOverridden: isAgentVerdictOverridden(body),
+  };
+};
+
 // RAG_QA_VERDICT_OVERRIDE: answers given although the answer model opened with
 // NOT_IN_EVIDENCE:, split by whether the question was answerable.
 const summarizeVerdictOverrides = (rows) => {
@@ -255,6 +296,22 @@ export const describeAnswerOutputLimit = (
   };
 };
 
+// The agent's self-checks (summarizeAgentChecks): why it rejected its answers.
+const formatAgentChecks = (agentChecks) => [
+  `Agent self-checks (every self_check step of every row; ${
+    Object.entries(agentChecks.phases).map(([phase, n]) => `${phase} ${n}`).join(", ") || "none"
+  }): ${agentChecks.failedChecks} of ${agentChecks.checks} failed, with ${agentChecks.unsupportedClaims} unsupported claims. A claim counts once under each failure field or code it carries.`,
+  "",
+  "| Unsupported claims by failure field: code | Claims | Rows |",
+  "|---|---|---|",
+  ...agentChecks.claimFailures.map(({ claims, failure, rows }) => `| ${failure} | ${claims} | ${rows} |`),
+  "",
+  "| Failed checks by reason | Checks | Rows |",
+  "|---|---|---|",
+  ...agentChecks.failedCheckReasons.map(({ checks, reason, rows }) => `| ${reason} | ${checks} | ${rows} |`),
+  "",
+];
+
 const formatMarkdown = (report) => {
   const summary = report.summary;
 
@@ -293,6 +350,7 @@ const formatMarkdown = (report) => {
     "|---|---|---|",
     ...Object.entries(summary.answerF1ByType).map(([type, entry]) => `| ${type} | ${entry.cases} | ${entry.f1} |`),
     "",
+    ...(summary.agentChecks ? formatAgentChecks(summary.agentChecks) : []),
     ...(report.comparison ? formatComparisonMarkdown(report.comparison) : []),
   ].join("\n");
 };
@@ -471,41 +529,30 @@ const main = async () => {
 
         answer = describeRagSurfaceAnswer(result);
       } else {
+        // Every reply the document RAG gave this run, in call order: the
+        // self-check read its text, citations and retrieved chunks, which
+        // neither the trace nor the body keeps.
+        const ragReplies = [];
         const response = await runAgentRag({
           accessScope,
           docIds: [docId],
           question: testCase.question,
-          ragService,
+          ragService: {
+            ...ragService,
+            chat: async (...args) => {
+              const reply = { question: args[1], value: null };
+
+              ragReplies.push(reply);
+              reply.value = await ragService.chat(...args);
+              return reply.value;
+            },
+          },
           sessionId: `qasper-agent-${testCase.id}`,
           userId: "",
           webChatService: async () => ({ text: "" }),
         });
-        const body = response.body ?? {};
-        // A clarification and the grounded abstention sentence are both
-        // abstentions (agent-answer-outcome.js).
-        const outcome = classifyAgentAnswer(body);
-        // The finalizer projects ragSources and rebases the answer's labels to
-        // them, so the labels resolve against ragSources as on the rag surface.
-        const sources = body.ragSources ?? body.citations ?? [];
 
-        answer = {
-          abstained: !outcome.answered,
-          abstainSource: outcome.abstainSource,
-          agent: { ...outcome, ...describeAgentFollowUp(body) },
-          answerTruncated: isAgentAnswerTruncated(body),
-          // The agent body carries its cited sources as ragSources; it has no
-          // citations field, so reading that gave every agent row no pages.
-          // An abstention counts as returning no sources. contextPages keeps
-          // the figure earlier agent reports called evidenceRecall.
-          citedPages: citedSourcePages({ abstained: !outcome.answered, citations: sources, text: body.agentAnswer }),
-          contextChars: null,
-          contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
-          // The extractive short answer rides on the body as ragDirectAnswer;
-          // the finalizer never rewrites it.
-          directAnswer: outcome.answered && typeof body.ragDirectAnswer === "string" ? body.ragDirectAnswer : null,
-          text: body.agentAnswer,
-          verdictOverridden: isAgentVerdictOverridden(body),
-        };
+        answer = describeAgentSurfaceAnswer(response.body ?? {}, ragReplies);
       }
 
       const prediction = toQasperPrediction(answer);
@@ -596,7 +643,7 @@ const main = async () => {
     rows,
     summary: {
       ...summarizeQasperRuns(rows),
-      ...(surface === "agent" ? { agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
+      ...(surface === "agent" ? { agentChecks: summarizeAgentChecks(rows), agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
       answerTruncations: summarizeAnswerTruncations(rows),
       verdictOverrides: summarizeVerdictOverrides(rows),
     },
