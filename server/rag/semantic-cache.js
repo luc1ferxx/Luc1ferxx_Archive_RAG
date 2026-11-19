@@ -462,7 +462,8 @@ export const lookupSemanticCache = async ({
     return bypass("no_access_scope");
   }
 
-  const planShape = describeRetrievalPlanShape(agentRetrievalPlan, query);
+  // chat() builds a primary plan's queries around the resolved question.
+  const planShape = describeRetrievalPlanShape(agentRetrievalPlan, resolvedQuery ?? query);
 
   if (planShape === null) {
     return bypass("follow_up_plan");

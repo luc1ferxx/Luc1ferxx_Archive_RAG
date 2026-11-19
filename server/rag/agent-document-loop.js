@@ -324,7 +324,7 @@ export const runDocumentRagLoop = async ({
       docIds,
       phase: "follow_up",
       focus: {
-        originalQuestion: question,
+        originalQuestion: resolvedQuestion || question,
         reasons: primaryCheck.reasons,
         unsupportedClaims: primaryCheck.claimSupport?.claims
           ?.filter((claim) => !claim.supported)

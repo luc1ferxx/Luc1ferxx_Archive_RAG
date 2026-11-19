@@ -4871,6 +4871,81 @@ test("a clarification keeps no resolved question", async () => {
   }
 });
 
+// A short follow-up with no word of its own on the page ("quickly"); its
+// rewrite has the page's words. The QA gate and the answer prompt read the
+// rewrite, so retrieval must search with it too.
+const QUICK_FOLLOW_UP = "And how quickly?";
+const QUICK_FOLLOW_UP_REWRITE = "How quickly does the line manager decide remote work requests?";
+const DECISION_TIME_ANSWER =
+  "The line manager decides remote work requests within five business days. [Source 1]";
+const rewriteQuickFollowUp = (prompt) =>
+  prompt.includes("Original question:") ? provider.completeText(prompt) : QUICK_FOLLOW_UP_REWRITE;
+const ingestDecisionTimePolicy = () =>
+  ingestFixture({
+    docId: REMOTE_APPROVAL_DOC_ID,
+    fileName: "remote-approval-policy.pdf",
+    pages: ["Remote work policy: the line manager decides remote work requests within five business days."],
+  });
+
+test("a follow-up searches with its rewrite and answers from the document", async () => {
+  configureAnswers([DECISION_TIME_ANSWER], { rewrite: rewriteQuickFollowUp });
+
+  await withEnv({ RAG_OBSERVABILITY_ENABLED: "true" }, () =>
+    withConversationMemory(async ({ readSession }) => {
+      await ingestDecisionTimePolicy();
+
+      const { response } = await askFollowUp(readSession, QUICK_FOLLOW_UP);
+      const [primaryTrace] = await readRagObservabilityEvents();
+
+      assert.equal(response.body.clarification?.reason, undefined);
+      assert.equal(response.body.ragAbstained, false);
+      assert.match(response.body.agentAnswer, /five business days/);
+      assert.ok(response.body.ragSources.length > 0, "the answer cites the page");
+      assert.equal(primaryTrace.retrievalQueries[0].query, QUICK_FOLLOW_UP_REWRITE);
+    })
+  );
+});
+
+test("a follow-up's evidence retry asks its rewrite, not its raw words", async () => {
+  // The director is not on the page, so the first answer takes a follow-up.
+  configureAnswers(
+    ["The HR director decides remote work requests within two days. [Source 1]", DECISION_TIME_ANSWER],
+    { rewrite: rewriteQuickFollowUp }
+  );
+
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestDecisionTimePolicy();
+
+    const { response } = await askFollowUp(readSession, QUICK_FOLLOW_UP);
+    const followUp = response.body.agentTrace.find((step) => step.type === "follow_up_retrieval");
+
+    assert.ok(followUp, "the run took a follow-up retrieval");
+    assert.ok(followUp.detail.followUpQuestion.includes(`Original question: ${QUICK_FOLLOW_UP_REWRITE}`));
+    assert.ok(!followUp.detail.followUpQuestion.includes(QUICK_FOLLOW_UP));
+    assert.equal(
+      followUp.detail.retrievalPlan.retrievalQueries.find((query) => query.id === "follow-up-source-check")
+        .query,
+      `Find source excerpts that directly support the final answer for: ${QUICK_FOLLOW_UP_REWRITE}`
+    );
+  });
+});
+
+test("a question memory did not rewrite searches exactly the planner's queries", async () => {
+  configureAnswers([DECISION_TIME_ANSWER]);
+
+  await withEnv({ RAG_OBSERVABILITY_ENABLED: "true" }, async () => {
+    await ingestDecisionTimePolicy();
+
+    const response = await askRemoteApproval({ question: QUICK_FOLLOW_UP_REWRITE });
+    const planned = response.body.agentTrace.find((step) => step.type === "query_planner").detail;
+    const [trace] = await readRagObservabilityEvents();
+
+    assert.equal(response.body.ragMemoryApplied, false);
+    assert.deepEqual(trace.agentRetrievalPlan.retrievalQueries, planned.retrievalQueries);
+    assert.deepEqual(trace.retrievalQueries, planned.retrievalQueries);
+  });
+});
+
 test("one /chat records one exchange, and a retry of its primary step records none", async () => {
   configureAnswers([LINE_MANAGER_ANSWER]);
 
