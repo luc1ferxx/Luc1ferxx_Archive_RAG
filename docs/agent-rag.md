@@ -182,13 +182,13 @@ Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Ski
 
 **会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。长期偏好只从明确的指令里提取（“以后用中文回答”“reply in English”“回答简短一点”等）；问题里只是提到语言或长短（“中国供应商的回复”“short-term borrowings”）不会存成偏好。会话写入失败只记日志，不影响已经生成的答案。
 
-- 写入：每个 agent 请求在 run 结束后记一次：`runAgentRag`（`rag/agent.js`）把用户的问题和用户实际看到的文本（`body.agentAnswer`：定稿答案、替换了主答案的 follow-up 答案，或澄清、拒答）交给 `ragService.recordConversationTurn`（一条用户 turn 加一条助手 turn，加上问题里说明的偏好；`routeMode` 取 `body.agentMode`，不记改写后的检索问题），只记 2xx 响应，失败只记日志。取消、依赖故障结束和出错的请求不写；审批答复和启动恢复续跑的 run 也不写。直接调用 `chat()`（默认 `memoryWrites: true`）的仍自己记。
+- 写入：每个 agent 请求在 run 结束后记一次：`runAgentRag`（`rag/agent.js`）把用户的问题和用户实际看到的文本（`body.agentAnswer`：定稿答案、替换了主答案的 follow-up 答案，或澄清、拒答）交给 `ragService.recordConversationTurn`（一条用户 turn 加一条助手 turn，加上问题里说明的偏好；`routeMode` 取 `body.agentMode`；回答记 `body.ragResolvedQuestion` 作为改写后的检索问题，即主 `document_rag` 调用对用户问题的改写，follow-up 答案替换主答案时也是（`agent-document-loop.js` 把主调用的 `resolvedQuery` 给胜出的 follow-up 结果，客户端看到的也是这个值）；澄清不记），只记 2xx 响应，失败只记日志。取消、依赖故障结束和出错的请求不写；审批答复和启动恢复续跑的 run 也不写。直接调用 `chat()`（默认 `memoryWrites: true`）的仍自己记。
 - 不写入（`memoryWrites: false`）：agent 发起的每个 `chat()`：主 `document_rag` 调用、V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、每个 `research_question` 子调用、这些 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
 - 后台任务：问题不是任务自身问题的迭代（研究 dossier 的阶段问题、agent 规划的 `nextQuestion`）在 `runWithoutConversationMemoryWrites` 下运行，整次迭代只读不写（请求结束时那次记录也不写）。
 
 这三类 step 的 replay 元数据没有因此改动：注入的 `ragService` 或旧的文档 Skill 不一定遵守 `memoryWrites`，证明不了这些 step 什么都不写。重试不写记忆：失败的请求本来就没记，重试也不补记。
 
-Approval 仍然绑定原始 input hash。
+Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必须带 gate 的 `approvalObjectHash`，不带或对不上的审批什么都不放行（`capabilities/policy-enforcer.js` `isApprovalGranted`，2026-11-19 起不再有按 source 豁免的未绑定审批）。
 
 "不重跑已完成的 node"先由 step executor 限定 `retry_failed_step` / approval resume 的目标（没有 `resume_from_step`，阶段 9 删除）；对于 graph node，通用单步 retry 会在任何状态修改前拒绝，中断的图只能走整图恢复，以免跳过依赖、输出契约和预算。该拒绝也在 run store 的单次 CAS 内重新判断，覆盖预检与状态修改之间的竞态；只有持久事件能证明是在终态 graph event 之后创建的外层 step/gate 才可单步续跑。图节点的启动和结算都必须携带同一恢复 claim。Graph replan 则用 `completedNodeRuns` 复用已完成或已 `reused` 的 node。Guarded stage 进一步把 graph、owner、已结算 node 和预算起点写入同一个 agent run 的私有 checkpoint；专用续跑路径会校验摘要、scope、文档、graph、live Skill contract 与已持久化 step，重算已发生的预算后才复用已完成节点。普通 `runAgentRag` 重入即使请求和 owner 相同，也会在更新 input/plan 的同一次 CAS 中拒绝已有 graph checkpoint，避免与尚未停下的原 worker 并行执行或改写快照、事件。状态不一致、缺少已完成 step 的 checkpoint、或 node 仍处于未知 in-flight 状态时会拒绝静默续跑，转由 recovery policy 处理。公开 `/agent-runs` 投影不暴露私有 checkpoint。
 
@@ -365,7 +365,7 @@ Durable agent task 支持一个 task-level `research_task` / dossier 流程。�
 Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Center 可以展示目标、已完成 step、等待用户动作和最终交付状态：
 
 - 公开计划步骤写在 task `items`，沿用通用 task item contract：`id`、`status`、`label`、`summary`、`result`、`error`。
-- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
+- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`overBudgetIterations`（超出 `maxIterations` 的轮数，只有已批准的审批会让任务多跑；Run Center 显示为 "x/max runs · N after approval"）、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
 - 生成逻辑集中在 `server/rag/agent-goal-plan.js`；`agent-tasks.js` 只在 create / run / resume 边界调用它。
 - Goal plan 是展示和恢复控制合同，不作为 citation、claim support 或答案证据。
 

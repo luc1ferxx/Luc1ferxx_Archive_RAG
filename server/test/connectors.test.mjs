@@ -16,6 +16,7 @@ import {
   TEST_CONNECTOR_ID,
   createTestConnectorSpec,
 } from "./fixtures/test-connector.mjs";
+import { executeApproved } from "./capability-approval-test-helpers.mjs";
 
 const accessScope = {
   userId: "alice",
@@ -191,6 +192,7 @@ test("connector registry maps connector capabilities through capability approval
     accessScope,
     approval: {
       approved: true,
+      approvalObjectHash: approvalError.detail.approvalGate.approvalObjectHash,
     },
     input: {
       apiKey: "sk-test-secret-value",
@@ -253,11 +255,8 @@ test("connector registry rejects duplicate capability ids and disabled executors
 
   await assert.rejects(
     () =>
-      capabilityRegistry.execute(TEST_CONNECTOR_CAPABILITY_ID, {
+      executeApproved(capabilityRegistry, TEST_CONNECTOR_CAPABILITY_ID, {
         accessScope,
-        approval: {
-          approved: true,
-        },
         input: {
           message: "hello",
         },
@@ -267,11 +266,8 @@ test("connector registry rejects duplicate capability ids and disabled executors
 
   await assert.rejects(
     () =>
-      capabilityRegistry.execute(TEST_CONNECTOR_CAPABILITY_ID, {
+      executeApproved(capabilityRegistry, TEST_CONNECTOR_CAPABILITY_ID, {
         accessScope,
-        approval: {
-          approved: true,
-        },
         input: {
           message: "hello",
         },

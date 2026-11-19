@@ -26,6 +26,7 @@ import {
   runWithRequestDeadline,
 } from "../rag/request-deadline.js";
 import { ServiceTimeoutError, ServiceUnavailableError } from "../rag/service-client.js";
+import { executeApproved } from "./capability-approval-test-helpers.mjs";
 
 // Cancellation and outages through the agent run, in one process: runAgentRag
 // under a request deadline, and the monolith's /chat and /chat/stream with
@@ -756,9 +757,8 @@ test("a Capability that writes is never cut by the deadline: it runs once, outsi
     },
   });
   const written = await deadline.run(() =>
-    registry.execute(CAPABILITY_IDS.taskCreate, {
+    executeApproved(registry, CAPABILITY_IDS.taskCreate, {
       accessScope,
-      approval: { approved: true },
       input: { description: "Review the renewal notice period.", title: "Review renewal" },
     })
   );
@@ -770,8 +770,7 @@ test("a Capability that writes is never cut by the deadline: it runs once, outsi
   const reading = createDeadlineOnCue();
 
   await reading.run(() =>
-    registry.execute(CAPABILITY_IDS.webSearch, {
-      approval: { approved: true },
+    executeApproved(registry, CAPABILITY_IDS.webSearch, {
       input: { question: "latest renewal rules" },
     })
   );

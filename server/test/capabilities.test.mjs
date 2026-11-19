@@ -24,6 +24,7 @@ import {
   TEST_CONNECTOR_ID,
   createTestConnectorSpec,
 } from "./fixtures/test-connector.mjs";
+import { executeApproved } from "./capability-approval-test-helpers.mjs";
 
 test("capability registry validates and describes tool adapters", async () => {
   const capability = {
@@ -100,13 +101,10 @@ test("default capability registry can mount connector capabilities explicitly", 
   assert.equal(description.id, TEST_CONNECTOR_CAPABILITY_ID);
   assert.equal(description.label, "Connector Echo");
 
-  const result = await registry.execute(TEST_CONNECTOR_CAPABILITY_ID, {
+  const result = await executeApproved(registry, TEST_CONNECTOR_CAPABILITY_ID, {
     accessScope: {
       userId: "alice",
       workspaceId: "workspace-a",
-    },
-    approval: {
-      approved: true,
     },
     input: {
       apiKey: "sk-test-secret-value",
@@ -248,32 +246,24 @@ test("built-in capabilities execute whitelisted adapters", async () => {
     workspaceId: "workspace-a",
   };
 
-  const arxivResult = await registry.execute(CAPABILITY_IDS.arxivImportTopic, {
+  const arxivResult = await executeApproved(registry, CAPABILITY_IDS.arxivImportTopic, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       maxResults: 99,
       topic: "retrieval augmented generation",
     },
   });
-  const discoveryResult = await registry.execute(CAPABILITY_IDS.documentDiscovery, {
+  const discoveryResult = await executeApproved(registry, CAPABILITY_IDS.documentDiscovery, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       question: "remote approval",
     },
   });
-  const searchResult = await registry.execute(
+  const searchResult = await executeApproved(
+    registry,
     CAPABILITY_IDS.workspaceSearchDocuments,
     {
       accessScope,
-      approval: {
-        approved: true,
-      },
       input: {
         limit: 2,
         query: "remote approval",
@@ -292,11 +282,8 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       ],
     },
   });
-  const reportResult = await registry.execute(CAPABILITY_IDS.reportExport, {
+  const reportResult = await executeApproved(registry, CAPABILITY_IDS.reportExport, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       title: "Remote Work Report",
       content: "Remote work requires approval.",
@@ -310,13 +297,11 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       ],
     },
   });
-  const importResult = await registry.execute(
+  const importResult = await executeApproved(
+    registry,
     CAPABILITY_IDS.recommendationImportSelected,
     {
       accessScope,
-      approval: {
-        approved: true,
-      },
       input: {
         provider: "arxiv",
         docId: "doc-remote",
@@ -325,32 +310,24 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       },
     }
   );
-  const compareResult = await registry.execute(
+  const compareResult = await executeApproved(
+    registry,
     CAPABILITY_IDS.documentCompareBatch,
     {
       accessScope,
-      approval: {
-        approved: true,
-      },
       input: {
         question: "Compare remote work limits.",
         docIds: ["doc-remote", "doc-security"],
       },
     }
   );
-  const webResult = await registry.execute(CAPABILITY_IDS.webSearch, {
-    approval: {
-      approved: true,
-    },
+  const webResult = await executeApproved(registry, CAPABILITY_IDS.webSearch, {
     input: {
       question: "latest policy",
     },
   });
-  const taskResult = await registry.execute(CAPABILITY_IDS.taskCreate, {
+  const taskResult = await executeApproved(registry, CAPABILITY_IDS.taskCreate, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       description: "Review renewal risks before Friday.",
       priority: "high",
@@ -358,11 +335,8 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       title: "Review renewal risks",
     },
   });
-  const organizeResult = await registry.execute(CAPABILITY_IDS.documentOrganize, {
+  const organizeResult = await executeApproved(registry, CAPABILITY_IDS.documentOrganize, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       docIds: ["doc-remote", "doc-security"],
       strategy: "profile_tags",
@@ -370,11 +344,8 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       title: "Policy folders",
     },
   });
-  const summaryResult = await registry.execute(CAPABILITY_IDS.summaryCreate, {
+  const summaryResult = await executeApproved(registry, CAPABILITY_IDS.summaryCreate, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       citations: [
         {
@@ -388,13 +359,11 @@ test("built-in capabilities execute whitelisted adapters", async () => {
       title: "Remote Work Summary",
     },
   });
-  const externalImportResult = await registry.execute(
+  const externalImportResult = await executeApproved(
+    registry,
     CAPABILITY_IDS.externalImport,
     {
       accessScope,
-      approval: {
-        approved: true,
-      },
       input: {
         provider: "url",
         sourceUrl: "https://example.test/policy.pdf",
@@ -450,9 +419,6 @@ test("report export persists one replay-safe workspace artifact", async () => {
   };
   const payload = {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       citations: [
         {
@@ -475,8 +441,8 @@ test("report export persists one replay-safe workspace artifact", async () => {
     },
   };
 
-  const result = await registry.execute(CAPABILITY_IDS.reportExport, payload);
-  const replay = await registry.execute(CAPABILITY_IDS.reportExport, payload);
+  const result = await executeApproved(registry, CAPABILITY_IDS.reportExport, payload);
+  const replay = await executeApproved(registry, CAPABILITY_IDS.reportExport, payload);
 
   assert.equal(result.stored, true);
   assert.equal(result.report.fileName, "grounded-report.md");
@@ -555,11 +521,8 @@ test("JSON report artifacts filter sensitive metadata while preserving compatibi
     userId: "alice",
     workspaceId: "workspace-a",
   };
-  const result = await registry.execute(CAPABILITY_IDS.reportExport, {
+  const result = await executeApproved(registry, CAPABILITY_IDS.reportExport, {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       citations: [{ docId: "doc-1", title: "Public source" }],
       content: "Safe generated report content.",
@@ -604,9 +567,6 @@ test("summary create persists a workspace artifact and compatible action task", 
   };
   const payload = {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       citations: [{ docId: "doc-1", pageNumber: 1 }],
       docIds: ["doc-1"],
@@ -625,8 +585,8 @@ test("summary create persists a workspace artifact and compatible action task", 
     },
   };
 
-  const result = await registry.execute(CAPABILITY_IDS.summaryCreate, payload);
-  const replay = await registry.execute(CAPABILITY_IDS.summaryCreate, payload);
+  const result = await executeApproved(registry, CAPABILITY_IDS.summaryCreate, payload);
+  const replay = await executeApproved(registry, CAPABILITY_IDS.summaryCreate, payload);
   const stored = await workspaceArtifactService.getArtifact({
     accessScope,
     artifactId: result.artifact.artifactId,
@@ -689,9 +649,6 @@ test("document organize persists a collection artifact without mutating document
   };
   const payload = {
     accessScope,
-    approval: {
-      approved: true,
-    },
     input: {
       docIds: ["doc-1", "doc-2"],
       strategy: "profile_tags",
@@ -706,11 +663,13 @@ test("document organize persists a collection artifact without mutating document
     },
   };
 
-  const result = await registry.execute(
+  const result = await executeApproved(
+    registry,
     CAPABILITY_IDS.documentOrganize,
     payload
   );
-  const replay = await registry.execute(
+  const replay = await executeApproved(
+    registry,
     CAPABILITY_IDS.documentOrganize,
     payload
   );
@@ -765,13 +724,10 @@ test("artifact-producing capability fails before recording success when storage 
 
   await assert.rejects(
     () =>
-      registry.execute(CAPABILITY_IDS.summaryCreate, {
+      executeApproved(registry, CAPABILITY_IDS.summaryCreate, {
         accessScope: {
           userId: "alice",
           workspaceId: "workspace-a",
-        },
-        approval: {
-          approved: true,
         },
         input: {
           summary: "Summary that must not be marked stored.",
@@ -805,9 +761,6 @@ test("task creation reuses the execution idempotency key when replay input has n
       userId: "alice",
       workspaceId: "workspace-a",
     },
-    approval: {
-      approved: true,
-    },
     input: {
       description: "Review the approved operation.",
       title: "Review approval",
@@ -819,8 +772,8 @@ test("task creation reuses the execution idempotency key when replay input has n
     },
   };
 
-  await registry.execute(CAPABILITY_IDS.taskCreate, payload);
-  await registry.execute(CAPABILITY_IDS.taskCreate, payload);
+  await executeApproved(registry, CAPABILITY_IDS.taskCreate, payload);
+  await executeApproved(registry, CAPABILITY_IDS.taskCreate, payload);
 
   assert.deepEqual(taskIds, [
     "capability-artifact:run-1:step-1:task.create",
@@ -833,13 +786,10 @@ test("artifact-producing capability reports missing storage as a typed write fai
 
   await assert.rejects(
     () =>
-      registry.execute(CAPABILITY_IDS.reportExport, {
+      executeApproved(registry, CAPABILITY_IDS.reportExport, {
         accessScope: {
           userId: "alice",
           workspaceId: "workspace-a",
-        },
-        approval: {
-          approved: true,
         },
         input: {
           content: "Report body",
@@ -1162,13 +1112,32 @@ test("capability policy blocks execution until required approval is granted", as
   );
   assert.equal(calls.length, 0);
 
-  const result = await registry.execute("paper.import", {
+  const approvedPayload = {
     accessScope,
-    approval: {
-      decision: "approved",
-    },
     input: {
       topic: "  retrieval augmented generation  ",
+    },
+  };
+
+  // An approval that carries no approval object hash grants no gate.
+  await assert.rejects(
+    () =>
+      registry.execute("paper.import", {
+        ...approvedPayload,
+        approval: {
+          decision: "approved",
+        },
+      }),
+    (error) => error.type === "capability_approval_required"
+  );
+  assert.equal(calls.length, 0);
+
+  const result = await registry.execute("paper.import", {
+    ...approvedPayload,
+    approval: {
+      approvalObjectHash: evaluateCapabilityPolicy(capability, approvedPayload)
+        .approvalGate.approvalObjectHash,
+      decision: "approved",
     },
   });
 

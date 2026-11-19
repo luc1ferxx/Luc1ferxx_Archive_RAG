@@ -3,6 +3,7 @@ import { buildPublicFilePath } from "../rag/document-utils.js";
 import { configureDocumentRegistryStore } from "../rag/doc-registry.js";
 import { configureLongMemoryStore } from "../rag/long-memory.js";
 import { configureSessionMemoryStore } from "../rag/memory.js";
+import { createInMemorySessionMemoryStore } from "../standalone-profile.js";
 
 const createEvaluationDocumentRegistryStore = () => {
   const documentsById = new Map();
@@ -88,43 +89,6 @@ const createEvaluationDocumentRegistryStore = () => {
   };
 };
 
-const createEvaluationSessionMemoryStore = () => {
-  const sessionsById = new Map();
-
-  const cloneSession = (session) =>
-    session
-      ? {
-          updatedAt: Number(session.updatedAt ?? Date.now()),
-          messages: structuredClone(session.messages ?? []),
-        }
-      : null;
-
-  return {
-    async initialize() {
-      return true;
-    },
-    async get(sessionId) {
-      return cloneSession(sessionsById.get(sessionId) ?? null);
-    },
-    async upsert({ sessionId, messages, updatedAt = Date.now() }) {
-      const session = {
-        updatedAt,
-        messages: structuredClone(messages ?? []),
-      };
-
-      sessionsById.set(sessionId, session);
-      return cloneSession(session);
-    },
-    async delete(sessionId) {
-      return sessionsById.delete(sessionId);
-    },
-    async reset() {
-      sessionsById.clear();
-      return true;
-    },
-  };
-};
-
 const createDisabledLongMemoryStore = () => ({
   async initialize() {
     return false;
@@ -158,6 +122,6 @@ export const configureEvaluationStores = ({
   configureDocumentRegistryStore(
     keepDocumentRegistryStore ? null : createEvaluationDocumentRegistryStore()
   );
-  configureSessionMemoryStore(createEvaluationSessionMemoryStore());
+  configureSessionMemoryStore(createInMemorySessionMemoryStore());
   configureLongMemoryStore(createDisabledLongMemoryStore());
 };

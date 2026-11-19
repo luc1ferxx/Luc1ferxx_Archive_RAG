@@ -912,8 +912,10 @@ const createSessionStore = () => {
       const session = sessions.get(sessionKey);
       return session ? structuredClone(session) : null;
     },
-    async upsert({ messages, sessionId, updatedAt }) {
-      sessions.set(sessionId, { messages: structuredClone(messages), updatedAt });
+    async append({ messages, sessionId, updatedAt }) {
+      const stored = sessions.get(sessionId)?.messages ?? [];
+
+      sessions.set(sessionId, { messages: [...stored, ...structuredClone(messages)], updatedAt });
       return structuredClone(sessions.get(sessionId));
     },
     async delete(sessionKey) {

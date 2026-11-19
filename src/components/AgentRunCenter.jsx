@@ -96,6 +96,8 @@ const getPrimaryAction = (task = {}) => {
 const renderPlanMeta = (task = {}) => {
   const goalPlan = getGoalPlan(task);
   const counts = goalPlan?.counts ?? {};
+  // Runs past the budget, which only an approved gate allows (server/rag/agent-goal-plan.js).
+  const overBudget = goalPlan?.overBudgetIterations ?? 0;
 
   if (!goalPlan) {
     return null;
@@ -108,7 +110,10 @@ const renderPlanMeta = (task = {}) => {
         {counts.completed ?? 0}/{counts.total ?? 0} done
       </span>
       {goalPlan.maxIterations ? (
-        <span>{goalPlan.completedIterations ?? 0}/{goalPlan.maxIterations} runs</span>
+        <span>
+          {(goalPlan.completedIterations ?? 0) - overBudget}/{goalPlan.maxIterations} runs
+          {overBudget ? ` · ${overBudget} after approval` : null}
+        </span>
       ) : null}
     </div>
   );

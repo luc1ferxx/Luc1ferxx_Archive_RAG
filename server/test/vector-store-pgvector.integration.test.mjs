@@ -88,8 +88,9 @@ if (!databaseUrl) {
       async get(sessionId) {
         return sessions.get(sessionId) ?? null;
       },
-      async upsert({ sessionId, messages, updatedAt = Date.now() }) {
-        const session = { messages: structuredClone(messages ?? []), updatedAt };
+      async append({ sessionId, messages, updatedAt = Date.now() }) {
+        const stored = sessions.get(sessionId)?.messages ?? [];
+        const session = { messages: [...stored, ...structuredClone(messages ?? [])], updatedAt };
 
         sessions.set(sessionId, session);
         return session;

@@ -1129,6 +1129,9 @@ const endRunForTermination = async ({
 // Conversation memory gets the user's question and the text they are given
 // (final answer or clarification), once per request: no chat() inside the run
 // writes memory, so the next rewrite never reads an unchecked or replaced answer.
+// An answer also keeps the question as the primary document_rag call resolved
+// it (ragResolvedQuestion, rag/agent-document-loop.js); a clarification, which
+// waits on the user, keeps none.
 const recordConversationTurnSafely = async (
   { accessScope, docIds, question, ragService, sessionId, userId },
   response
@@ -1140,6 +1143,9 @@ const recordConversationTurnSafely = async (
         answer: response.body?.agentAnswer ?? "",
         docIds,
         query: question,
+        resolvedQuery: response.body?.clarification?.needed
+          ? null
+          : response.body?.ragResolvedQuestion ?? null,
         routeMode: response.body?.agentMode ?? null,
         sessionId,
         userId,

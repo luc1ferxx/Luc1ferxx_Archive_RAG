@@ -38,32 +38,22 @@ const getPolicyMode = (approvalPolicy = {}) =>
 const hasAccessScope = (accessScope = {}) =>
   Boolean(accessScope && typeof accessScope === "object" && !Array.isArray(accessScope));
 
-const BOUND_APPROVAL_SOURCES = new Set([
-  "agent_run_action",
-  "agent_run_step_retry",
-  "task_action",
-]);
-
 const isApprovalIntentGranted = (approval = {}) =>
   approval.approved === true ||
   APPROVED_DECISIONS.has(
     normalizeText(approval.decision ?? approval.action).toLowerCase()
   );
 
+// Every approval is bound: it grants only the gate whose approval object hash
+// it carries, the exact object the user was shown. One without a hash grants
+// nothing.
 const isApprovalGranted = ({ approval = {}, approvalGate = null } = {}) => {
   if (!isApprovalIntentGranted(approval)) {
     return false;
   }
 
-  const approvalSource = normalizeText(approval.source).toLowerCase();
   const suppliedHash = normalizeText(approval.approvalObjectHash);
   const suppliedGateId = normalizeText(approval.gateId);
-  const requiresBinding =
-    BOUND_APPROVAL_SOURCES.has(approvalSource) || Boolean(suppliedHash);
-
-  if (!requiresBinding) {
-    return true;
-  }
 
   return (
     Boolean(approvalGate) &&
