@@ -31,7 +31,6 @@ import {
 } from "./config.js";
 import {
   isPostgresConfigured,
-  queryPostgresAsOwner,
   readPostgresRuntimeLogin,
   withPostgresOwnerClient,
 } from "./postgres.js";
@@ -41,6 +40,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultMigrationsDirectory = path.join(__dirname, "..", "db", "migrations");
 const MIGRATIONS_TABLE = "schema_migrations";
+const MIGRATIONS_LOCK_KEY = "archive_rag:schema_migrations";
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const ensureSimpleTableName = (tableName, envName) => {
@@ -779,12 +779,15 @@ export const grantRuntimeRoles = async ({
 
 /**
  * Applies the pending migrations, in file order, each in its own transaction
- * on a raw owner session. With the role split on (POSTGRES_MIGRATION_DATABASE_
- * URL) that session and the bookkeeping statements use the owner pool, and
- * after the migrations the tenant and system roles are granted to the runtime
- * login (grantRuntimeRoles) on every run, so a database migrated before the
- * split was switched on needs no extra step; without the split they use the
- * one pool exactly as before and nothing is granted.
+ * on one raw owner session that holds a session advisory lock from the read of
+ * schema_migrations to the last grant: replicas started together for a release
+ * apply each migration once, the others wait for the lock and then read it as
+ * applied. Callers in one process that arrive during a run share it. With the
+ * role split on (POSTGRES_MIGRATION_DATABASE_URL) that session comes from the
+ * owner pool, and after the migrations the tenant and system roles are granted
+ * to the runtime login (grantRuntimeRoles) on every run, so a database migrated
+ * before the split was switched on needs no extra step; without the split it
+ * comes from the one pool and nothing is granted.
  */
 export const createPostgresMigrator = ({
   getEmbeddingDimensions: resolveEmbeddingDimensions = getEmbeddingDimensions,
@@ -796,15 +799,15 @@ export const createPostgresMigrator = ({
   isPostgresConfigured: isConfigured = isPostgresConfigured,
   isRoleSplitEnabled = isPostgresRoleSplitEnabled,
   migrationsDirectory = defaultMigrationsDirectory,
-  queryPostgres: query = queryPostgresAsOwner,
   readFile = readTextFile,
   readdir = readDirectory,
   withPostgresClient: withClient = withPostgresOwnerClient,
 } = {}) => {
   let migrationsInitialized = false;
+  let pendingRun = null;
 
-  const ensureMigrationsTable = async () => {
-    await query(`
+  const ensureMigrationsTable = async (client) => {
+    await client.query(`
       CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
         id TEXT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -818,6 +821,75 @@ export const createPostgresMigrator = ({
     return fileNames
       .filter((fileName) => /^\d+.*\.sql$/i.test(fileName))
       .sort((left, right) => left.localeCompare(right));
+  };
+
+  // shortcut: a session lock needs a direct or session-pooled owner connection
+  // (a PgBouncer transaction pool can send the lock and the unlock to different
+  // server sessions); take a transaction lock per migration if one is ever used.
+  const migrate = async (client) => {
+    await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [MIGRATIONS_LOCK_KEY]);
+
+    try {
+      await ensureMigrationsTable(client);
+
+      const existingMigrations = await client.query(
+        `SELECT id FROM ${MIGRATIONS_TABLE}`
+      );
+      const appliedMigrationIds = new Set(
+        existingMigrations.rows.map((row) => String(row.id))
+      );
+      const migrationFiles = await listMigrationFiles();
+      const newlyAppliedMigrations = [];
+
+      for (const fileName of migrationFiles) {
+        if (appliedMigrationIds.has(fileName)) {
+          continue;
+        }
+
+        const filePath = path.join(migrationsDirectory, fileName);
+        const migrationSql = renderMigrationSql(
+          await readFile(filePath, "utf8"),
+          resolveTableNames(),
+          {
+            embeddingDimensions: resolveEmbeddingDimensions(),
+            systemRole: resolveSystemRole(),
+            tenantRole: resolveTenantRole(),
+            textSearchConfig: resolveTextSearchConfig(),
+          }
+        );
+
+        await client.query("BEGIN");
+
+        try {
+          await client.query(migrationSql);
+          await client.query(
+            `INSERT INTO ${MIGRATIONS_TABLE} (id) VALUES ($1)`,
+            [fileName]
+          );
+          await client.query("COMMIT");
+          newlyAppliedMigrations.push(fileName);
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      }
+
+      const runtimeLogin = isRoleSplitEnabled()
+        ? await grantRoles({
+            systemRole: resolveSystemRole(),
+            tenantRole: resolveTenantRole(),
+            withClient: (callback) => callback(client),
+          })
+        : null;
+
+      return {
+        status: "ok",
+        appliedMigrations: newlyAppliedMigrations,
+        ...(runtimeLogin === null ? {} : { runtimeLogin }),
+      };
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [MIGRATIONS_LOCK_KEY]);
+    }
   };
 
   const run = async () => {
@@ -834,63 +906,15 @@ export const createPostgresMigrator = ({
       };
     }
 
-    await ensureMigrationsTable();
+    pendingRun ??= withClient(migrate).finally(() => {
+      pendingRun = null;
+    });
 
-    const existingMigrations = await query(
-      `SELECT id FROM ${MIGRATIONS_TABLE}`
-    );
-    const appliedMigrationIds = new Set(
-      existingMigrations.rows.map((row) => String(row.id))
-    );
-    const migrationFiles = await listMigrationFiles();
-    const newlyAppliedMigrations = [];
-
-    for (const fileName of migrationFiles) {
-      if (appliedMigrationIds.has(fileName)) {
-        continue;
-      }
-
-      const filePath = path.join(migrationsDirectory, fileName);
-      const migrationSql = renderMigrationSql(
-        await readFile(filePath, "utf8"),
-        resolveTableNames(),
-        {
-          embeddingDimensions: resolveEmbeddingDimensions(),
-          systemRole: resolveSystemRole(),
-          tenantRole: resolveTenantRole(),
-          textSearchConfig: resolveTextSearchConfig(),
-        }
-      );
-
-      await withClient(async (client) => {
-        await client.query("BEGIN");
-
-        try {
-          await client.query(migrationSql);
-          await client.query(
-            `INSERT INTO ${MIGRATIONS_TABLE} (id) VALUES ($1)`,
-            [fileName]
-          );
-          await client.query("COMMIT");
-          newlyAppliedMigrations.push(fileName);
-        } catch (error) {
-          await client.query("ROLLBACK");
-          throw error;
-        }
-      });
-    }
-
-    const runtimeLogin = isRoleSplitEnabled()
-      ? await grantRoles({ systemRole: resolveSystemRole(), tenantRole: resolveTenantRole(), withClient })
-      : null;
+    const result = await pendingRun;
 
     migrationsInitialized = true;
 
-    return {
-      status: "ok",
-      appliedMigrations: newlyAppliedMigrations,
-      ...(runtimeLogin === null ? {} : { runtimeLogin }),
-    };
+    return result;
   };
 
   return {

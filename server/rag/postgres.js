@@ -897,7 +897,7 @@ const assertOwnerWork = (operation) => {
   }
 };
 
-/** One owner statement (the migrator's bookkeeping). */
+/** One owner statement (the admin audit store's read of schema_migrations). */
 export const queryPostgresAsOwner = async (queryText, values = []) => {
   if (!isPostgresRoleSplitEnabled()) {
     return queryPostgres(queryText, values);
