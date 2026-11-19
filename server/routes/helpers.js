@@ -39,12 +39,51 @@ export const PDF_MAGIC = Buffer.from("%PDF");
 // The PDF spec allows the %PDF header to appear within the first 1024 bytes.
 export const PDF_MAGIC_SCAN_WINDOW = 1024;
 
+// An answer of the model backend itself (rag/openai-client.js, reranker.js,
+// the model gateway's client): its status and text are the provider's (a 401
+// is the provider refusing this server's key), never the client's.
+const isUpstreamError = (error) => Number.isInteger(error?.upstreamStatus);
+
+/** The status of a route's error answer: 502 for an upstream error, else the error's own. */
+export const toErrorStatus = (error, fallbackStatus = 500) =>
+  isUpstreamError(error) ? 502 : error?.status ?? fallbackStatus;
+
+/**
+ * The `error` text of a route's error answer: the message of an error raised
+ * for the client (a 4xx); for anything else -- no status (a database or file
+ * system error naming a host or a path), a 5xx, an upstream error -- the
+ * route's fallback, with the error logged.
+ */
 export const serializeError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
+  if (error instanceof Error && error.status >= 400 && error.status < 500 && !isUpstreamError(error)) {
     return error.message;
   }
 
+  console.error(fallbackMessage, error);
   return fallbackMessage;
+};
+
+/**
+ * The last error middleware of the API and agent apps, for an error no route
+ * answered (a body express.json cannot parse, a disk error while multer stores
+ * an upload): JSON instead of Express's HTML page, which outside
+ * NODE_ENV=production carries the stack. An error meant for the client
+ * (`expose: true`, as body-parser's 4xx are) keeps its status and message;
+ * anything else is a logged 500.
+ */
+export const answerUnhandledError = (error, req, res, next) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+
+  if (error?.expose === true) {
+    res.status(error.status ?? 500).json({ error: error.message });
+    return;
+  }
+
+  console.error(`Unhandled error on ${req.method} ${req.path}.`, error);
+  res.status(500).json({ error: "Internal server error." });
 };
 
 // /chat checks docIds before this runs (routes/validation.js boundedIdList);

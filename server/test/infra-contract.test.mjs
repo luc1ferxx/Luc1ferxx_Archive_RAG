@@ -451,7 +451,7 @@ test("health report contracts cover auth, qdrant, and scoped store failures", as
   }
 });
 
-test("API auth middleware contract preserves public paths and scoped principals", async () => {
+test("API auth middleware contract has no public path and preserves scoped principals", async () => {
   await withEnv(
     {
       API_AUTH_ENABLED: "false",
@@ -490,12 +490,15 @@ test("API auth middleware contract preserves public paths and scoped principals"
       API_AUTH_TOKENS: "{not-json",
     },
     async () => {
-      const publicResult = runAuthMiddleware({
+      // A path under /health is checked like any other: the probes are
+      // answered before requireApiAuth (app.js).
+      const healthPrefixedResult = runAuthMiddleware({
         path: "/health/deep",
       });
 
-      assert.equal(publicResult.nextCalled, true);
-      assert.deepEqual(publicResult.accessScope, {});
+      assert.equal(healthPrefixedResult.nextCalled, false);
+      assert.equal(healthPrefixedResult.statusCode, 500);
+      assert.match(healthPrefixedResult.jsonPayload.error, /valid JSON/);
 
       const protectedResult = runAuthMiddleware();
 

@@ -40,6 +40,9 @@ RUN npm ci --omit=dev --legacy-peer-deps --no-audit --no-fund
 COPY server/ ./
 COPY --from=web /app/build /app/build
 RUN mkdir -p /data && chown -R node:node /data
+# POST /admin/actions/quality-refresh runs evaluation/run-synthetic-eval.mjs
+# here as node; .dockerignore leaves out both of its output directories.
+RUN mkdir -p evaluation/results evaluation/generated && chown node:node evaluation/results evaluation/generated
 USER node
 VOLUME ["/data"]
 EXPOSE 5001

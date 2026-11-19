@@ -411,7 +411,7 @@ describe("GET /health, /ready and /livez", () => {
       state.mode = "throw";
       const thrownHealth = await get(server, "/health");
       assert.equal(thrownHealth.status, 500);
-      assert.deepEqual(thrownHealth.body, { error: THROWN_MESSAGE, status: "error" });
+      assert.deepEqual(thrownHealth.body, { error: "Failed to collect health status.", status: "error" });
     });
   });
 
@@ -431,6 +431,27 @@ describe("GET /health, /ready and /livez", () => {
         { ...apiKey("viewer-token"), "x-workspace-id": "ws-b" },
         "workspace outside scope"
       );
+    });
+  });
+
+  // Only the probes the system router serves are public: a path that merely
+  // starts like one is authenticated like any other path.
+  test("auth on: a path that only starts like a probe needs a credential, the probes do not", async () => {
+    await withServer(authEnv(), async (server) => {
+      for (const [method, requestPath] of [
+        ["GET", "/not-a-route"],
+        ["GET", "/healthz"],
+        ["GET", "/readyz"],
+        ["GET", "/health/x"],
+        ["POST", "/health"],
+      ]) {
+        const response = await fetch(`${server.baseUrl}${requestPath}`, { method });
+
+        assert.equal(response.status, 401, `${method} ${requestPath}`);
+        assert.deepEqual(await response.json(), { error: "Unauthorized." }, `${method} ${requestPath}`);
+      }
+
+      await assertStatusOnly(server, {}, "no credential");
     });
   });
 
@@ -477,7 +498,7 @@ describe("GET /health, /ready and /livez", () => {
 
       const viewerHealth = await get(server, "/health", apiKey("viewer-token"));
       assert.equal(viewerHealth.status, 500);
-      assert.deepEqual(viewerHealth.body, { error: THROWN_MESSAGE, status: "error" });
+      assert.deepEqual(viewerHealth.body, { error: "Failed to collect health status.", status: "error" });
     });
   });
 

@@ -17,10 +17,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 let client = null;
-let transport = null;
-let isConnecting = false;
 let connectionPromise = null;
 const RETRY_DELAYS_MS = [250, 750];
+const createStdioTransport = (parameters) => new StdioClientTransport(parameters);
+let createTransport = createStdioTransport;
 // The MCP SDK's own default per request; a bound agent request's deadline
 // (request-deadline.js) caps it, and its signal aborts the search.
 const SEARCH_TOOL_TIMEOUT_MS = 60_000;
@@ -44,42 +44,43 @@ const getOpenAIApiKey = () => {
   return apiKey;
 };
 
+/** Test seam: replaces how the search server is reached (null: the child process). */
+export const configureChatMcpTransport = (factory) => {
+  createTransport = factory ?? createStdioTransport;
+  client = null;
+};
+
+// The one client every web search shares. It is replaced only once its
+// connection closed (the SDK clears `transport` when the child exits or its
+// pipe breaks), never because one search failed: others may be in flight on it.
 const ensureConnected = async () => {
-  if (client && transport) {
-    return;
+  if (client?.transport) {
+    return client;
   }
 
-  if (isConnecting && connectionPromise) {
-    await connectionPromise;
-    return;
-  }
+  connectionPromise ??= (async () => {
+    const next = new Client({
+      name: "chat-client",
+      version: "1.0.0",
+    });
 
-  isConnecting = true;
-  connectionPromise = (async () => {
-    try {
-      client = new Client({
-        name: "chat-client",
-        version: "1.0.0",
-      });
-
-      const serverPath = join(__dirname, "mcp-server.js");
-
-      transport = new StdioClientTransport({
+    await next.connect(
+      createTransport({
         command: "node",
-        args: [serverPath],
-        env: {
-          ...process.env,
-        },
-      });
+        args: [join(__dirname, "mcp-server.js")],
+        // On top of the SDK's own safe defaults (PATH, HOME, ...), only what
+        // mcp-server.js reads: no other secret of this process reaches the child.
+        env: { SERPAPI_KEY: process.env.SERPAPI_KEY },
+      })
+    );
+    client = next;
 
-      await client.connect(transport);
-    } finally {
-      isConnecting = false;
-      connectionPromise = null;
-    }
-  })();
+    return next;
+  })().finally(() => {
+    connectionPromise = null;
+  });
 
-  await connectionPromise;
+  return connectionPromise;
 };
 
 const withRetry = async (operation) => {
@@ -172,55 +173,40 @@ export const getActiveWebAnswerPromptDescriptor = () => selectWebAnswerPrompt().
 const chatMCP = async (query) => {
   getOpenAIApiKey();
 
-  try {
-    await ensureConnected();
-
-    const toolResult = await withRetry(() =>
-      client.callTool(
-        {
-          name: "search_web",
-          arguments: {
-            query,
-            num: 5,
-          },
+  // Each attempt takes the client anew, so a connection that closed is re-made.
+  const toolResult = await withRetry(async () =>
+    (await ensureConnected()).callTool(
+      {
+        name: "search_web",
+        arguments: {
+          query,
+          num: 5,
         },
-        undefined,
-        getRequestCallOptions(SEARCH_TOOL_TIMEOUT_MS)
-      )
-    );
+      },
+      undefined,
+      getRequestCallOptions(SEARCH_TOOL_TIMEOUT_MS)
+    )
+  );
 
-    const searchResults =
-      toolResult.content && toolResult.content.length > 0
-        ? toolResult.content[0].text
-        : "No search results available";
+  const searchResults =
+    toolResult.content && toolResult.content.length > 0
+      ? toolResult.content[0].text
+      : "No search results available";
 
-    // Search snippets are as untrusted as uploaded documents: screened before
-    // the model sees them, and the answer may only link to what it was shown.
-    const screenedResults = screenUntrustedText(searchResults).text;
-    const webAnswerPrompt = selectWebAnswerPrompt();
-    const formattedPrompt = webAnswerPrompt.render({
-      question: query,
-      searchResults: screenedResults,
-    });
-    const text = guardAnswerLinks(
-      await completeText(formattedPrompt, { promptTemplate: webAnswerPrompt.descriptor }),
-      { allowedText: `${screenedResults}\n${query}` }
-    ).text;
+  // Search snippets are as untrusted as uploaded documents: screened before
+  // the model sees them, and the answer may only link to what it was shown.
+  const screenedResults = screenUntrustedText(searchResults).text;
+  const webAnswerPrompt = selectWebAnswerPrompt();
+  const formattedPrompt = webAnswerPrompt.render({
+    question: query,
+    searchResults: screenedResults,
+  });
+  const text = guardAnswerLinks(
+    await completeText(formattedPrompt, { promptTemplate: webAnswerPrompt.descriptor }),
+    { allowedText: `${screenedResults}\n${query}` }
+  ).text;
 
-    return { text };
-  } catch (error) {
-    if (client) {
-      try {
-        await client.close();
-      } catch (cleanupError) {
-        // Ignore cleanup errors so the original failure is preserved.
-      }
-      client = null;
-      transport = null;
-    }
-
-    throw error;
-  }
+  return { text };
 };
 
 export default chatMCP;

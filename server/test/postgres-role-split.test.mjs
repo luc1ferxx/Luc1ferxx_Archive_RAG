@@ -471,14 +471,17 @@ describe("migrations under the split", () => {
 
     const ownerTexts = executedTexts(owner.state.messages);
 
-    assert.match(ownerTexts[0], /^CREATE TABLE IF NOT EXISTS schema_migrations/);
-    assert.equal(ownerTexts[1], "SELECT id FROM schema_migrations");
+    assert.equal(ownerTexts[0], "SELECT pg_advisory_lock(hashtextextended($1, 0))");
+    assert.match(ownerTexts[1], /^CREATE TABLE IF NOT EXISTS schema_migrations/);
+    assert.equal(ownerTexts[2], "SELECT id FROM schema_migrations");
     assert.ok(ownerTexts.some((text) => text.includes("CREATE POLICY system_access")));
     assert.ok(!ownerTexts.some((text) => text.includes("set_config('role'")), "the owner never switches role");
+    assert.equal(ownerTexts.at(-1), "SELECT pg_advisory_unlock(hashtextextended($1, 0))");
 
     // The grant: the login's name as a bind value, then the DO block, in one
-    // transaction after the last migration.
-    const tail = shape(withoutTerminate(owner.state.messages)).slice(-8);
+    // transaction after the last migration, before the lock is released (the
+    // unlock's Parse, Bind, Describe, Execute and Sync).
+    const tail = shape(withoutTerminate(owner.state.messages)).slice(-13, -5);
 
     assert.deepEqual(tail.slice(0, 5), [
       "Query BEGIN",
@@ -503,8 +506,8 @@ describe("migrations under the split", () => {
         granted += 1;
       },
       isPostgresConfigured: () => true,
-      queryPostgres: async (sql) => ({ rows: /SELECT id/.test(sql) ? [] : [] }),
       readdir: async () => [],
+      withPostgresClient: async (callback) => callback({ query: async () => ({ rows: [] }) }),
     });
     const result = await migrator.run();
 
@@ -514,17 +517,23 @@ describe("migrations under the split", () => {
 
   test("with the split the migrator grants after the migrations, with the configured roles and its own owner client", async () => {
     const calls = [];
-    const withClient = async (callback) => callback({ query: async (sql) => calls.push(sql) });
+    const withClient = async (callback) =>
+      callback({
+        query: async (sql) => {
+          calls.push(sql);
+          return { rows: [] };
+        },
+      });
     const migrator = modules.migrations.createPostgresMigrator({
       getSystemRole: () => "sys_role",
       getTenantRole: () => "tenant_role",
-      grantRuntimeRoles: async (options) => {
+      grantRuntimeRoles: async ({ withClient: withGrantClient, ...options }) => {
         calls.push(options);
+        await withGrantClient((client) => client.query("GRANT"));
         return "runtime_login";
       },
       isPostgresConfigured: () => true,
       isRoleSplitEnabled: () => true,
-      queryPostgres: async () => ({ rows: [] }),
       readFile: async () => "SELECT 1;",
       readdir: async () => ["001_one.sql"],
       withPostgresClient: withClient,
@@ -532,11 +541,13 @@ describe("migrations under the split", () => {
     const result = await migrator.run();
 
     assert.deepEqual(result, { appliedMigrations: ["001_one.sql"], runtimeLogin: "runtime_login", status: "ok" });
-    assert.equal(calls.at(-2), "COMMIT", "the migration committed first");
-    assert.deepEqual(
-      { ...calls.at(-1), withClient: calls.at(-1).withClient === withClient },
-      { systemRole: "sys_role", tenantRole: "tenant_role", withClient: true }
-    );
+    // The grant runs on the migration session, under its lock, after the commit.
+    assert.deepEqual(calls.slice(-4), [
+      "COMMIT",
+      { systemRole: "sys_role", tenantRole: "tenant_role" },
+      "GRANT",
+      "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+    ]);
   });
 
   test("the grant gives both roles SET and never INHERIT, keeps an existing SET grant, and explains a missing ADMIN option", () => {

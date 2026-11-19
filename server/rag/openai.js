@@ -1,4 +1,9 @@
-import { createChatClient, createEmbeddingsClient, toChatMessages } from "./openai-client.js";
+import {
+  createChatClient,
+  createEmbeddingsClient,
+  EMBEDDING_BATCH_SIZE,
+  toChatMessages,
+} from "./openai-client.js";
 import { CIRCUIT_OPEN_CODE, resetModelCallGuards } from "./model-call-guard.js";
 import { admitModelCallQuota, recordModelMetricEventWithQuota } from "./model-call-quota.js";
 import { getModelGatewayCall } from "./model-gateway/call-context.js";
@@ -587,17 +592,26 @@ export const embedTexts = async (texts, options = {}) => {
     modelName: embeddingSpace?.model,
   });
   const inputCharacters = getTextListCharacters(safeTexts);
+  const prefixedTexts = withEmbeddingPrefix(texts, documentPrefix);
 
   return runWithLlmOpsMetric({
-    action: () =>
-      withRetry(
-        async () =>
-          instance.embedDocuments(withEmbeddingPrefix(texts, documentPrefix), {
+    // Retried per provider request: a batch that fails is sent again on its
+    // own, never with the batches before it (each of them billed again).
+    action: async () => {
+      const vectors = [];
+
+      for (let index = 0; index < prefixedTexts.length; index += EMBEDDING_BATCH_SIZE) {
+        const batch = prefixedTexts.slice(index, index + EMBEDDING_BATCH_SIZE);
+
+        vectors.push(
+          ...(await withRetry(() => instance.embedDocuments(batch, { signal }), "Embedding request failed.", {
             signal,
-          }),
-        "Embedding request failed.",
-        { signal }
-      ),
+          }))
+        );
+      }
+
+      return vectors;
+    },
     metric: getEmbeddingMetricBase({
       ...buildUsageMetricFields({
         inputCharacters,

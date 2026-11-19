@@ -21,6 +21,11 @@ import { getAgentServiceTimeoutMs, getServiceShutdownGraceMs } from "../rag/conf
 import { resetServiceClients, SERVICE_CLIENT_ERROR_CODES } from "../rag/service-client.js";
 import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import {
+  configureTenantUsageLedger,
+  createTenantUsageLedger,
+  recordTenantUsage,
+} from "../rag/tenant-usage.js";
 import { describeChunkProfile } from "../rag/chunk-profile.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 import { configurePgvectorRuntime, resetPgvectorRuntime } from "../rag/vector-store-pgvector.js";
@@ -517,6 +522,61 @@ test("graceful shutdown runs workers alongside the drain and finalizers after it
   assert.deepEqual(order, ["worker", "finalizer"]);
   assert.deepEqual(exitSpy.codes, [0]);
   assert.equal(server.listening, false);
+});
+
+test("a split role writes its tenant usage before a span flush that does not settle", async () => {
+  const order = [];
+  const flushStarted = createDeferred();
+  const collectorAnswers = createDeferred();
+  const exitSpy = createExitSpy();
+
+  configureTenantUsageLedger(
+    createTenantUsageLedger({
+      isDatabaseConfigured: () => true,
+      isEnabled: () => true,
+      query: async () => {
+        order.push("usage written");
+        return { rows: [] };
+      },
+      runAsSystem: (callback) => callback(),
+      setTimer: () => null,
+    })
+  );
+
+  try {
+    await withEnvironment({ ARCHIVE_RAG_ROLE: "model-gateway" }, async () => {
+      const started = await startServiceRole({
+        exit: exitSpy.exit,
+        handleSignals: false,
+        host: "127.0.0.1",
+        loaders: { "model-gateway": async () => ({ createModelGatewayApp: () => express() }) },
+        logger: quietLogger,
+        port: 0,
+        role: "model-gateway",
+        // server.js's span flush while the OTLP collector does not answer.
+        shutdownFinalizers: [
+          async () => {
+            order.push("span flush");
+            flushStarted.resolve();
+            await collectorAnswers.promise;
+          },
+        ],
+      });
+
+      recordTenantUsage({ userId: "alice", workspaceId: "ws-a" }, { model_tokens: 42 });
+
+      const stopping = started.shutdown("SIGTERM");
+
+      await flushStarted.promise;
+      assert.deepEqual(order, ["usage written", "span flush"]);
+
+      collectorAnswers.resolve();
+      await stopping;
+      assert.deepEqual(exitSpy.codes, [0]);
+    });
+  } finally {
+    configureTenantUsageLedger(null);
+  }
 });
 
 test("each role listens where its own entry point would", async () => {

@@ -19,6 +19,7 @@ import {
   parseDocIds,
   resolveScopedUserId,
   serializeError,
+  toErrorStatus,
 } from "./helpers.js";
 import {
   boundedIdList,
@@ -210,7 +211,7 @@ export const createTasksRouter = (services) => {
         })
       );
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to list tasks."),
       });
     }
@@ -235,7 +236,7 @@ export const createTasksRouter = (services) => {
 
       return res.json(task);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to read task."),
       });
     }
@@ -258,7 +259,7 @@ export const createTasksRouter = (services) => {
         task,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to update task."),
       });
     }
@@ -285,7 +286,7 @@ export const createTasksRouter = (services) => {
         task,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         // TENANT_MAX_QUEUED_TASKS (rag/agent-tasks.js): the stable code.
         ...(error?.code === TENANT_TASK_LIMITED ? { code: error.code } : {}),
         error: serializeError(error, "Failed to create agent task."),
@@ -303,7 +304,7 @@ export const createTasksRouter = (services) => {
         }),
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to list agent triggers."),
       });
     }
@@ -323,7 +324,7 @@ export const createTasksRouter = (services) => {
 
       return res.status(202).json(result);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to dispatch agent trigger."),
       });
     }
@@ -340,7 +341,7 @@ export const createTasksRouter = (services) => {
         })
       );
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to list agent runs."),
       });
     }
@@ -354,7 +355,7 @@ export const createTasksRouter = (services) => {
         })
       );
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to list recoverable agent runs."),
       });
     }
@@ -379,7 +380,7 @@ export const createTasksRouter = (services) => {
 
       return res.json(run);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to read agent run."),
       });
     }
@@ -402,7 +403,7 @@ export const createTasksRouter = (services) => {
 
         return res.json(result);
       } catch (error) {
-        return res.status(error.status ?? 500).json({
+        return res.status(toErrorStatus(error)).json({
           error: serializeError(error, "Failed to recover agent run."),
         });
       }
@@ -448,7 +449,7 @@ export const createTasksRouter = (services) => {
 
       return res.json(result);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to retry agent run step."),
       });
     }

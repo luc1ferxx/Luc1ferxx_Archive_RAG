@@ -1,7 +1,7 @@
 import { getLlmMaxTokensField, getLlmRequestTimeoutMs } from "./config.js";
 import { guardModelCall, MODEL_CALL_LANES } from "./model-call-guard.js";
 
-const EMBEDDING_BATCH_SIZE = 512;
+export const EMBEDDING_BATCH_SIZE = 512;
 
 // Exported for evaluation/probe-output-limit.mjs, which names the host it probed.
 export const resolveBaseUrl = () => {

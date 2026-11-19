@@ -357,6 +357,20 @@ test("the app image context leaves out secrets, backups, the model cache, the re
   }
 });
 
+test("the app image lets node write the quality refresh's output directories", async () => {
+  // POST /admin/actions/quality-refresh runs evaluation/run-synthetic-eval.mjs
+  // in the server directory as node; server/ is copied as root and both
+  // directories are left out of the context, so node could not create them.
+  const lines = (await readText(appDockerfilePath)).split("\n").map((line) => line.trim());
+  const workdir = lines.indexOf("WORKDIR /app/server");
+  const writable = lines.indexOf(
+    "RUN mkdir -p evaluation/results evaluation/generated && chown node:node evaluation/results evaluation/generated"
+  );
+  const user = lines.indexOf("USER node");
+
+  assert.ok(workdir >= 0 && writable > workdir && user > writable, "created for node in the server directory before USER node");
+});
+
 test("the app image installs the vendored dependency tarballs: copied before npm ci, never ignored", async () => {
   // SheetJS CE ("xlsx": "file:vendor/xlsx-0.20.3.tgz") is not published on
   // the npm registry: `npm ci` in the image resolves it from server/vendor,

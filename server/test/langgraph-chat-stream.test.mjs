@@ -580,6 +580,7 @@ test("a LangSmith tracing variable makes the stream refuse with an error frame a
 
   takePlanGraphInvocations();
 
+  const logged = t.mock.method(console, "error", () => {});
   const refused = await withEnv({ LANGSMITH_TRACING: "true" }, async () => {
     takeAgentStreamRelayCalls();
 
@@ -595,8 +596,11 @@ test("a LangSmith tracing variable makes the stream refuse with an error frame a
   assert.equal(refused.status, 200);
   assert.deepStrictEqual(refused.frames.map(({ event }) => event), ["error", "done"]);
   assert.equal(refused.frames[0].data.status, 500);
-  assert.match(refused.frames[0].data.error, /LangSmith tracing must stay off/);
-  assert.match(refused.frames[0].data.error, /LANGSMITH_TRACING/);
+  // The client gets the route's text; the log names the variable to unset.
+  assert.equal(refused.frames[0].data.error, "Failed to answer the question.");
+  const [, refusal] = logged.mock.calls.find((call) => call.arguments[0] === "Failed to answer the question.").arguments;
+  assert.match(refusal.message, /LangSmith tracing must stay off/);
+  assert.match(refusal.message, /LANGSMITH_TRACING/);
   // Refused before the run started: no run was recorded, no plan scheduled.
   assert.deepStrictEqual(await listRuns(monolith.agentRunService), []);
   assert.equal(refused.relayCalls, 1);

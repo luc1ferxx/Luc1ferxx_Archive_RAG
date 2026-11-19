@@ -52,6 +52,7 @@ import {
   MAX_CHUNK_UPLOAD_SIZE,
   MAX_DIRECT_UPLOAD_SIZE,
   serializeError,
+  toErrorStatus,
 } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
@@ -314,7 +315,7 @@ export const createUploadsRouter = (services) => {
       const limitExceeded =
         error?.status === 429 && error?.code === UPLOAD_SESSION_LIMIT_EXCEEDED;
 
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...(limitExceeded ? { code: error.code, limit: error.limit } : {}),
         ...describeTenantStorageQuotaError(error),
         error: serializeError(error, "Failed to initialize the upload session."),
@@ -342,7 +343,7 @@ export const createUploadsRouter = (services) => {
 
       return res.json(session);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to read the upload session status."),
       });
     }
@@ -376,7 +377,7 @@ export const createUploadsRouter = (services) => {
 
       return res.status(201).json(result);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to store the uploaded chunk."),
       });
     }
@@ -479,7 +480,7 @@ export const createUploadsRouter = (services) => {
         );
       }
 
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...describeTenantStorageQuotaError(error),
         ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to finalize the uploaded PDF."),
@@ -538,7 +539,7 @@ export const createUploadsRouter = (services) => {
     } catch (error) {
       await cleanupUploadedFile(req.file.path);
 
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...describeTenantStorageQuotaError(error),
         ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to ingest uploaded PDF."),
@@ -640,7 +641,7 @@ export const createUploadsRouter = (services) => {
           kind: INGEST_JOB_KINDS.replace,
         });
       } catch (error) {
-        await recordReplace(error.status ?? 500);
+        await recordReplace(toErrorStatus(error));
         throw error;
       }
 
@@ -650,7 +651,7 @@ export const createUploadsRouter = (services) => {
     } catch (error) {
       await cleanupUploadedFile(req.file.path);
 
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...describeTenantStorageQuotaError(error),
         ...describeDocumentFormatErrorCode(error),
         error: serializeError(error, "Failed to replace the document."),
@@ -684,7 +685,7 @@ export const createUploadsRouter = (services) => {
 
         return res.json({ count: jobs.length, jobs: jobs.map(toDeadLetterIngestJob) });
       } catch (error) {
-        return res.status(error.status ?? 500).json({
+        return res.status(toErrorStatus(error)).json({
           error: serializeError(error, "Failed to list dead-letter ingest jobs."),
         });
       }
@@ -718,7 +719,7 @@ export const createUploadsRouter = (services) => {
 
         return res.json({ requeued: true, job: toDeadLetterIngestJob(job) });
       } catch (error) {
-        return res.status(error.status ?? 500).json({
+        return res.status(toErrorStatus(error)).json({
           error: serializeError(error, "Failed to requeue the ingest job."),
         });
       }
@@ -753,7 +754,7 @@ export const createUploadsRouter = (services) => {
 
       return res.json(body);
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to read the ingest job."),
       });
     }

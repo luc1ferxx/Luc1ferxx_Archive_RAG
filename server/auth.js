@@ -32,8 +32,6 @@ import {
   WORKSPACE_STATUSES,
 } from "./rag/tenant-registry.js";
 
-const PUBLIC_PATH_PREFIXES = ["/health", "/ready"];
-
 const normalizeString = (value) => String(value ?? "").trim();
 
 class AccessScopeError extends Error {
@@ -854,13 +852,8 @@ export const requireApiAuth = (req, res, next) => {
     return;
   }
 
-  if (
-    PUBLIC_PATH_PREFIXES.some((prefix) => req.path.startsWith(prefix))
-  ) {
-    next();
-    return;
-  }
-
+  // No path is public here: the probes (/health, /ready, /livez) are answered
+  // by the system router, mounted before this (app.js).
   let principal = null;
 
   const continueWithPrincipal = (resolvedPrincipal) => {

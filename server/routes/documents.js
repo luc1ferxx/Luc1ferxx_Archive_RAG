@@ -25,6 +25,7 @@ import {
   resolveDocumentFileDisposition,
   sendBufferedFile,
   serializeError,
+  toErrorStatus,
 } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
@@ -102,8 +103,8 @@ export const createDocumentsRouter = (services) => {
       });
       return;
     } catch (error) {
-      await recordDownload(error.status ?? 500);
-      return res.status(error.status ?? 500).json({
+      await recordDownload(toErrorStatus(error));
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to stream the document."),
       });
     }
@@ -131,7 +132,7 @@ export const createDocumentsRouter = (services) => {
 
       return res.json(documents.map((document) => describeTrashedDocument(document, { hours })));
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to list the document trash."),
       });
     }
@@ -162,7 +163,7 @@ export const createDocumentsRouter = (services) => {
       await dataAudit.recordOutcome(req, { ...audited, count: 1, status: 200 });
       return res.json({ document, restored: true });
     } catch (error) {
-      const status = error.status ?? 500;
+      const status = toErrorStatus(error);
 
       await dataAudit.recordOutcome(req, { ...audited, status });
       return res.status(status).json({
@@ -216,8 +217,8 @@ export const createDocumentsRouter = (services) => {
         ...(trash ? { purgeAfter: computeTrashPurgeAfter(document.deletedAt), trashed: true } : {}),
       });
     } catch (error) {
-      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
-      return res.status(error.status ?? 500).json({
+      await dataAudit.recordOutcome(req, { ...audited, status: toErrorStatus(error) });
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to delete the document."),
       });
     }
@@ -246,7 +247,7 @@ export const createDocumentsRouter = (services) => {
       try {
         return res.json(await (services.describeIndexVersions ?? describeIndexVersions)());
       } catch (error) {
-        return res.status(error.status ?? 500).json({
+        return res.status(toErrorStatus(error)).json({
           error: serializeError(error, "Failed to read the index versions."),
         });
       }
@@ -281,8 +282,8 @@ export const createDocumentsRouter = (services) => {
         ...(trash ? { trashed: true } : {}),
       });
     } catch (error) {
-      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
-      return res.status(error.status ?? 500).json({
+      await dataAudit.recordOutcome(req, { ...audited, status: toErrorStatus(error) });
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to clear documents."),
       });
     }

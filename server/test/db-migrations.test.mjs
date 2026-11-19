@@ -60,33 +60,12 @@ const tableNames = () => ({
 });
 
 test("PostgreSQL migrator applies new SQL files transactionally and skips applied files", async () => {
-  const queryCalls = [];
   const clientCalls = [];
   const readFileCalls = [];
   const migrator = createPostgresMigrator({
     getTableNames: tableNames,
     isPostgresConfigured: () => true,
     migrationsDirectory: "/fake/migrations",
-    queryPostgres: async (sql, values) => {
-      queryCalls.push({
-        sql: sql.trim(),
-        values,
-      });
-
-      if (/SELECT id FROM schema_migrations/.test(sql)) {
-        return {
-          rows: [
-            {
-              id: "001_existing.sql",
-            },
-          ],
-        };
-      }
-
-      return {
-        rows: [],
-      };
-    },
     readFile: async (filePath, encoding) => {
       readFileCalls.push({
         encoding,
@@ -117,6 +96,17 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
             sql: sql.trim(),
             values,
           });
+
+          if (/SELECT id FROM schema_migrations/.test(sql)) {
+            return {
+              rows: [
+                {
+                  id: "001_existing.sql",
+                },
+              ],
+            };
+          }
+
           return {
             rows: [],
           };
@@ -130,38 +120,49 @@ test("PostgreSQL migrator applies new SQL files transactionally and skips applie
     status: "ok",
     appliedMigrations: ["002_apply.sql"],
   });
-  assert.match(queryCalls[0].sql, /CREATE TABLE IF NOT EXISTS schema_migrations/);
-  assert.equal(queryCalls[1].sql, "SELECT id FROM schema_migrations");
+  // One session holds the migration lock from the read to the last statement.
+  assert.deepEqual(clientCalls[0], {
+    sql: "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+    values: ["archive_rag:schema_migrations"],
+  });
+  assert.match(clientCalls[1].sql, /CREATE TABLE IF NOT EXISTS schema_migrations/);
+  assert.equal(clientCalls[2].sql, "SELECT id FROM schema_migrations");
   assert.deepEqual(readFileCalls, [
     {
       encoding: "utf8",
       filePath: path.join("/fake/migrations", "002_apply.sql"),
     },
   ]);
-  assert.equal(clientCalls[0].sql, "BEGIN");
-  assert.match(clientCalls[1].sql, /CREATE TABLE rag_documents/);
-  assert.match(clientCalls[1].sql, /CREATE TABLE long_memory_items/);
-  assert.match(clientCalls[1].sql, /CREATE TABLE rag_agent_run_events/);
+  assert.equal(clientCalls[3].sql, "BEGIN");
+  assert.match(clientCalls[4].sql, /CREATE TABLE rag_documents/);
+  assert.match(clientCalls[4].sql, /CREATE TABLE long_memory_items/);
+  assert.match(clientCalls[4].sql, /CREATE TABLE rag_agent_run_events/);
   assert.match(
-    clientCalls[1].sql,
+    clientCalls[4].sql,
     /CREATE TABLE rag_agent_runs_approval_snapshots/
   );
-  assert.match(clientCalls[1].sql, /CREATE TABLE rag_admin_audit_events/);
-  assert.match(clientCalls[1].sql, /CREATE TABLE rag_workspace_artifacts/);
-  assert.deepEqual(clientCalls[2], {
+  assert.match(clientCalls[4].sql, /CREATE TABLE rag_admin_audit_events/);
+  assert.match(clientCalls[4].sql, /CREATE TABLE rag_workspace_artifacts/);
+  assert.deepEqual(clientCalls[5], {
     sql: "INSERT INTO schema_migrations (id) VALUES ($1)",
     values: ["002_apply.sql"],
   });
-  assert.equal(clientCalls[3].sql, "COMMIT");
+  assert.equal(clientCalls[6].sql, "COMMIT");
+  assert.deepEqual(clientCalls.slice(7), [
+    {
+      sql: "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+      values: ["archive_rag:schema_migrations"],
+    },
+  ]);
 
-  const queryCount = queryCalls.length;
+  const callCount = clientCalls.length;
   const secondResult = await migrator.run();
 
   assert.deepEqual(secondResult, {
     status: "ok",
     appliedMigrations: [],
   });
-  assert.equal(queryCalls.length, queryCount);
+  assert.equal(clientCalls.length, callCount);
 });
 
 test("admin audit migration avoids reserved authorization column name", async () => {
@@ -241,14 +242,6 @@ test("PostgreSQL migrator rolls back failed migration files and can be retried",
     getTableNames: tableNames,
     isPostgresConfigured: () => true,
     migrationsDirectory: "/fake/migrations",
-    queryPostgres: async (sql) =>
-      /SELECT id FROM schema_migrations/.test(sql)
-        ? {
-            rows: [],
-          }
-        : {
-            rows: [],
-          },
     readFile: async () => "SELECT * FROM __DOCUMENTS_TABLE__;",
     readdir: async () => ["001_fail_then_pass.sql"],
     withPostgresClient: async (callback) =>
@@ -271,24 +264,100 @@ test("PostgreSQL migrator rolls back failed migration files and can be retried",
   });
 
   await assert.rejects(() => migrator.run(), /migration failed/);
+  // After the lock, the bookkeeping table and the read; the lock is released.
   assert.deepEqual(
-    clientCalls.map((call) => call.sql),
-    ["BEGIN", "SELECT * FROM rag_documents;", "ROLLBACK"]
+    clientCalls.slice(3).map((call) => call.sql),
+    [
+      "BEGIN",
+      "SELECT * FROM rag_documents;",
+      "ROLLBACK",
+      "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+    ]
   );
+
+  const failedRunCalls = clientCalls.length;
 
   shouldFail = false;
   const result = await migrator.run();
 
   assert.deepEqual(result.appliedMigrations, ["001_fail_then_pass.sql"]);
   assert.deepEqual(
-    clientCalls.slice(3).map((call) => call.sql),
+    clientCalls.slice(failedRunCalls + 3).map((call) => call.sql),
     [
       "BEGIN",
       "SELECT * FROM rag_documents;",
       "INSERT INTO schema_migrations (id) VALUES ($1)",
       "COMMIT",
+      "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
     ]
   );
+});
+
+test("replicas started together apply each migration once; callers in one process share one run", async () => {
+  const applied = new Set();
+  const migrations = [];
+  let sessions = 0;
+  let lockReleased = Promise.resolve();
+
+  // One database for two processes: every statement is a round trip (the
+  // other session runs in between), the advisory lock admits one session at a
+  // time, and the primary key refuses a second row for one migration.
+  const withPostgresClient = async (callback) => {
+    let unlock = () => {};
+
+    sessions += 1;
+
+    return callback({
+      query: async (sql, values) => {
+        await new Promise(setImmediate);
+
+        if (sql.includes("pg_advisory_lock(")) {
+          const previous = lockReleased;
+
+          lockReleased = new Promise((resolve) => {
+            unlock = resolve;
+          });
+          await previous;
+        } else if (sql.includes("pg_advisory_unlock(")) {
+          unlock();
+        } else if (sql.includes("SELECT id FROM schema_migrations")) {
+          return { rows: [...applied].map((id) => ({ id })) };
+        } else if (sql.includes("INSERT INTO schema_migrations")) {
+          if (applied.has(values[0])) {
+            throw new Error('duplicate key value violates unique constraint "schema_migrations_pkey"');
+          }
+
+          applied.add(values[0]);
+        } else if (sql.startsWith("ALTER TABLE")) {
+          migrations.push(sql);
+        }
+
+        return { rows: [] };
+      },
+    });
+  };
+  const startReplica = () =>
+    createPostgresMigrator({
+      getTableNames: tableNames,
+      isPostgresConfigured: () => true,
+      migrationsDirectory: "/fake/migrations",
+      readFile: async (filePath) => `ALTER TABLE __DOCUMENTS_TABLE__ /* ${path.basename(filePath)} */;`,
+      readdir: async () => ["001_one.sql", "002_two.sql"],
+      withPostgresClient,
+    });
+  const [first, second] = [startReplica(), startReplica()];
+
+  const results = await Promise.all([first.run(), first.run(), second.run()]);
+
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["ok", "ok", "ok"]
+  );
+  assert.deepEqual(migrations, [
+    "ALTER TABLE rag_documents /* 001_one.sql */;",
+    "ALTER TABLE rag_documents /* 002_two.sql */;",
+  ]);
+  assert.equal(sessions, 2);
 });
 
 test("PostgreSQL migrator rejects missing configuration and invalid table names", async () => {
@@ -301,60 +370,58 @@ test("PostgreSQL migrator rejects missing configuration and invalid table names"
     /PostgreSQL-backed storage/
   );
 
+  const statements = [];
   const invalidTableMigrator = createPostgresMigrator({
     getTableNames: () => ({
       ...tableNames(),
       documentsTable: "bad-documents-table",
     }),
     isPostgresConfigured: () => true,
-    queryPostgres: async (sql) =>
-      /SELECT id FROM schema_migrations/.test(sql)
-        ? {
-            rows: [],
-          }
-        : {
-            rows: [],
-          },
     readFile: async () => "CREATE TABLE __DOCUMENTS_TABLE__ (id text);",
     readdir: async () => ["001_invalid.sql"],
-    withPostgresClient: async () => {
-      throw new Error("migration should not reach the database client");
-    },
+    withPostgresClient: async (callback) =>
+      callback({
+        query: async (sql) => {
+          statements.push(sql.trim());
+          return { rows: [] };
+        },
+      }),
   });
 
   await assert.rejects(
     () => invalidTableMigrator.run(),
     /DOCUMENTS_POSTGRES_TABLE.*simple PostgreSQL identifier/
   );
+  // Refused before any migration statement, and the lock is released.
+  assert.ok(!statements.includes("BEGIN"));
+  assert.equal(statements.at(-1), "SELECT pg_advisory_unlock(hashtextextended($1, 0))");
 });
 
 test("PostgreSQL migrator rejects a derived approval snapshot identifier that would be truncated", async () => {
+  const statements = [];
   const migrator = createPostgresMigrator({
     getTableNames: () => ({
       ...tableNames(),
       agentRunsTable: "a".repeat(50),
     }),
     isPostgresConfigured: () => true,
-    queryPostgres: async (sql) =>
-      /SELECT id FROM schema_migrations/.test(sql)
-        ? {
-            rows: [],
-          }
-        : {
-            rows: [],
-          },
     readFile: async () =>
       "CREATE TABLE __AGENT_RUN_APPROVAL_SNAPSHOTS_TABLE__ (id text);",
     readdir: async () => ["011_approval_snapshots.sql"],
-    withPostgresClient: async () => {
-      throw new Error("migration should not reach the database client");
-    },
+    withPostgresClient: async (callback) =>
+      callback({
+        query: async (sql) => {
+          statements.push(sql.trim());
+          return { rows: [] };
+        },
+      }),
   });
 
   await assert.rejects(
     () => migrator.run(),
     /derived agent run approval snapshots table.*63 bytes/i
   );
+  assert.ok(!statements.includes("BEGIN"));
 });
 
 test("PostgreSQL migrator resolves table names from runtime environment", async () => {
@@ -375,14 +442,6 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
       const migrator = createPostgresMigrator({
         isPostgresConfigured: () => true,
         migrationsDirectory: "/fake/migrations",
-        queryPostgres: async (sql) =>
-          /SELECT id FROM schema_migrations/.test(sql)
-            ? {
-                rows: [],
-              }
-            : {
-                rows: [],
-              },
         readFile: async () =>
           [
             "__LONG_MEMORY_TABLE__",
@@ -409,8 +468,9 @@ test("PostgreSQL migrator resolves table names from runtime environment", async 
 
       await migrator.run();
 
+      // After the lock, the bookkeeping table, the read and BEGIN.
       assert.equal(
-        renderedSql[1],
+        renderedSql[4],
         [
           "env_long_memory",
           "env_documents",
@@ -442,7 +502,6 @@ test("chunk migration renders the pgvector table, embedding width, text search c
         getTextSearchConfig: () => "simple",
         isPostgresConfigured: () => true,
         migrationsDirectory: "/fake/migrations",
-        queryPostgres: async () => ({ rows: [] }),
         readFile: async () =>
           "__DOCUMENT_CHUNKS_TABLE__ vector(__EMBEDDING_DIMENSIONS__) to_tsvector('__TEXT_SEARCH_CONFIG__'::regconfig, search_text) __VECTOR_INDEX_STATEMENT__",
         readdir: async () => ["012_create_rag_document_chunks.sql"],
@@ -457,7 +516,7 @@ test("chunk migration renders the pgvector table, embedding width, text search c
 
       await migrator.run();
 
-      const rendered = renderedSql[1];
+      const rendered = renderedSql[4];
 
       assert.match(rendered, /^env_chunks vector\(64\) to_tsvector\('simple'::regconfig, search_text\)/);
       assert.match(rendered, /CREATE INDEX IF NOT EXISTS env_chunks_embedding_idx/);

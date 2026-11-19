@@ -4,7 +4,7 @@ import { getRequestAccessScope } from "../auth.js";
 import { markHistoricalQualityEvidence } from "../evaluation/quality-evidence-scope.js";
 import { buildFeedbackRecord } from "../feedback.js";
 
-import { resolveScopedUserId, serializeError } from "./helpers.js";
+import { resolveScopedUserId, serializeError, toErrorStatus } from "./helpers.js";
 
 export const createQualityRouter = (services) => {
   const router = Router();
@@ -18,7 +18,7 @@ export const createQualityRouter = (services) => {
         )
       );
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to load the latest quality report."),
       });
     }
@@ -32,7 +32,7 @@ export const createQualityRouter = (services) => {
         )
       );
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to load quality history."),
       });
     }
@@ -51,7 +51,7 @@ export const createQualityRouter = (services) => {
         feedback,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to load answer feedback."),
       });
     }
@@ -92,7 +92,7 @@ export const createQualityRouter = (services) => {
         feedback: storedFeedback,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to store answer feedback."),
       });
     }
