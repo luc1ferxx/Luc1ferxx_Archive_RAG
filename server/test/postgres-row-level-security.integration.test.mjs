@@ -833,6 +833,62 @@ if (!adminDatabaseUrl) {
     }
   });
 
+  test("turns of one session written at once are all kept: one statement under the tenant role appends each and keeps the last six messages", async () => {
+    const memory = await import("../rag/memory.js");
+    const sessionTable = modules.config.getSessionMemoryPostgresTable();
+    const q = modules.postgres.queryPostgres;
+    const aliceScope = { ...ALICE, authenticated: true };
+    const sessionKey = memory.resolveSessionMemoryKey("concurrent-session", aliceScope);
+    const record = (text) =>
+      modules.tenant.runWithDatabaseTenant(aliceScope, () =>
+        memory.recordSessionTurn({
+          accessScope: aliceScope,
+          answer: `${text} answer`,
+          documents: [],
+          query: text,
+          routeMode: "qa",
+          sessionId: "concurrent-session",
+        })
+      );
+    const storedRow = async () =>
+      (
+        await q(
+          `SELECT owner_user_id, workspace_id, messages FROM ${sessionTable} WHERE session_id = $1`,
+          [sessionKey]
+        )
+      ).rows[0];
+    const texts = (row) => row.messages.map((message) => message.text);
+
+    memory.configureSessionMemoryStore(null);
+    memory.resetSessionMemory();
+
+    try {
+      // Three turns at once, the first of them creating the row.
+      await Promise.all(["one", "two", "three"].map((text) => record(text)));
+
+      const concurrent = await storedRow();
+      const written = texts(concurrent);
+
+      assert.deepEqual([concurrent.owner_user_id, concurrent.workspace_id], ["alice", "ws-a"]);
+      assert.deepEqual(
+        [...written].sort(),
+        ["one", "one answer", "three", "three answer", "two", "two answer"]
+      );
+      // Each question is followed by its own answer.
+      assert.deepEqual(
+        written.filter((_, index) => index % 2 === 1),
+        written.filter((_, index) => index % 2 === 0).map((text) => `${text} answer`)
+      );
+
+      // A fourth turn drops the oldest one.
+      await record("four");
+      assert.deepEqual(texts(await storedRow()), [...written.slice(2), "four", "four answer"]);
+    } finally {
+      await q(`DELETE FROM ${sessionTable}`);
+      memory.resetSessionMemory();
+    }
+  });
+
   test("long-term memory: the policy of migrations 045 and 046 keeps a workspace's rows in that workspace and personal rows out of every workspace, and LONG_MEMORY_SCOPE=workspace reads, writes and erases by it", async () => {
     const longMemory = await import("../rag/long-memory.js");
     const { normalizeTenantSelector } = await import("../rag/tenant-records.js");

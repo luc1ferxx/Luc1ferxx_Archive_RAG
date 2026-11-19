@@ -19,7 +19,7 @@
 
 import { configureDocumentRegistryStore } from "./rag/doc-registry.js";
 import { createFileDocumentRegistryStore } from "./rag/doc-registry-file.js";
-import { configureSessionMemoryStore } from "./rag/memory.js";
+import { configureSessionMemoryStore, MAX_RECENT_MESSAGES } from "./rag/memory.js";
 import { getActiveDatabaseTenant } from "./rag/postgres-tenant.js";
 import { summarizeTenantRecords, tenantSelectorMatches } from "./rag/tenant-records.js";
 
@@ -55,13 +55,18 @@ export const createInMemorySessionMemoryStore = () => {
     async get(sessionId) {
       return cloneSession(sessionsById.get(sessionId) ?? null);
     },
-    async upsert({ sessionId, messages, updatedAt = Date.now() }) {
+    // No await between the read and the write, so turns of one session
+    // recorded at once are all kept (rag/memory.js recordSessionTurn).
+    async append({ sessionId, messages, updatedAt = Date.now() }) {
       const tenant = getActiveDatabaseTenant();
+      const stored = sessionsById.get(sessionId);
 
       sessionsById.set(sessionId, {
         updatedAt,
-        messages: structuredClone(messages ?? []),
-        owner: sessionsById.get(sessionId)?.owner ?? (tenant ? { ...tenant } : null),
+        messages: [...(stored?.messages ?? []), ...structuredClone(messages ?? [])].slice(
+          -MAX_RECENT_MESSAGES
+        ),
+        owner: stored?.owner ?? (tenant ? { ...tenant } : null),
       });
 
       return cloneSession(sessionsById.get(sessionId));

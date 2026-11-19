@@ -16,7 +16,7 @@ import { tokenize } from "./text-utils.js";
 
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_RECENT_TURNS = 3;
-const MAX_RECENT_MESSAGES = MAX_RECENT_TURNS * 2;
+export const MAX_RECENT_MESSAGES = MAX_RECENT_TURNS * 2;
 const MAX_MESSAGE_CHARS = 700;
 const FOLLOW_UP_PATTERNS = [
   /\b(it|they|them|this|that|these|those|same|former|latter)\b/i,
@@ -351,7 +351,10 @@ const createDefaultStore = () => ({
     return result.rows[0] ? mapRowToSession(result.rows[0]) : null;
   },
 
-  async upsert({ sessionId, messages, updatedAt = Date.now() }) {
+  // One statement appends and keeps the last MAX_RECENT_MESSAGES (the jsonpath
+  // range; lax mode clamps it to a shorter array), so turns of one session
+  // written at once all stay: ON CONFLICT DO UPDATE locks the row.
+  async append({ sessionId, messages, updatedAt = Date.now() }) {
     const normalizedSessionId = normalizeSessionId(sessionId);
 
     if (!normalizedSessionId) {
@@ -377,7 +380,10 @@ const createDefaultStore = () => ({
           ON CONFLICT (session_id)
           DO UPDATE SET
             updated_at = EXCLUDED.updated_at,
-            messages = EXCLUDED.messages
+            messages = jsonb_path_query_array(
+              ${tableName}.messages || EXCLUDED.messages,
+              '$[last - ${MAX_RECENT_MESSAGES - 1} to last]'
+            )
           RETURNING session_id, updated_at, messages
         `,
         [
@@ -651,10 +657,8 @@ export const recordSessionTurn = async ({
 
   await initializeSessionMemoryStore();
   const store = getSessionMemoryStore();
-  const existingSession = store.get ? await store.get(sessionKey) : null;
   const docLabels = documents.map((document) => document.fileName);
   const nextMessages = [
-    ...(existingSession?.messages ?? []),
     {
       role: "user",
       text: trimMemoryText(query, 400),
@@ -670,10 +674,12 @@ export const recordSessionTurn = async ({
       docLabels,
       routeMode,
     },
-  ].slice(-MAX_RECENT_MESSAGES);
+  ];
 
-  return store.upsert
-    ? store.upsert({
+  // One store call, not a read then a write: two turns of one session recorded
+  // at once would otherwise keep only one.
+  return store.append
+    ? store.append({
         sessionId: sessionKey,
         messages: nextMessages,
         updatedAt: Date.now(),

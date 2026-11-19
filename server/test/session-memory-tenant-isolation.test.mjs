@@ -34,8 +34,10 @@ const createRecordingStore = () => {
       const session = sessions.get(sessionKey);
       return session ? structuredClone(session) : null;
     },
-    async upsert({ sessionId, messages, updatedAt }) {
-      sessions.set(sessionId, { messages: structuredClone(messages), updatedAt });
+    async append({ sessionId, messages, updatedAt }) {
+      const stored = sessions.get(sessionId)?.messages ?? [];
+
+      sessions.set(sessionId, { messages: [...stored, ...structuredClone(messages)], updatedAt });
       return structuredClone(sessions.get(sessionId));
     },
     async delete(sessionKey) {
@@ -273,5 +275,6 @@ test("a tenant-less caller cannot name a tenant's derived key as its raw session
   assert.equal(await clearSessionMemory(aliceKey), false);
 
   assert.deepEqual(messagesOf(store, aliceKey), ["alice private question", "alice private question answer"]);
-  assert.equal(store.reads.includes(aliceKey) && store.reads.every((key) => key === aliceKey), true);
+  // No forged id reached the store (alice's own turn appends without a read).
+  assert.deepEqual(store.reads, []);
 });

@@ -183,3 +183,47 @@ test("standalone profile serves session memory in process instead of failing on 
     assert.equal(await clearSessionMemory("session-a"), false);
   });
 });
+
+test("standalone session memory keeps both turns of one session recorded at once, and only the last three turns", async () => {
+  await withRestoredEnvironment(async () => {
+    applyStandaloneProfile({
+      createRegistryStore: () => ({
+        async list() {
+          return [];
+        },
+      }),
+    });
+    resetSessionMemory();
+
+    const record = (text) =>
+      recordSessionTurn({
+        sessionId: "session-b",
+        query: text,
+        answer: `${text} answer`,
+        documents: [],
+        routeMode: "document",
+      });
+    const texts = (session) => session.messages.map((message) => message.text);
+
+    // Two requests of one session that finish together (two tabs, or a chat
+    // and a task iteration): neither write may drop the other's turn.
+    await Promise.all([record("first"), record("second")]);
+
+    assert.deepEqual(texts(await record("third")), [
+      "first",
+      "first answer",
+      "second",
+      "second answer",
+      "third",
+      "third answer",
+    ]);
+    assert.deepEqual(texts(await record("fourth")), [
+      "second",
+      "second answer",
+      "third",
+      "third answer",
+      "fourth",
+      "fourth answer",
+    ]);
+  });
+});

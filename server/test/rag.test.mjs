@@ -512,10 +512,11 @@ const createFakeSessionMemoryStore = () => {
     async get(sessionId) {
       return cloneSession(sessionsById.get(sessionId) ?? null);
     },
-    async upsert({ sessionId, messages, updatedAt = Date.now() }) {
+    async append({ sessionId, messages, updatedAt = Date.now() }) {
+      const stored = sessionsById.get(sessionId)?.messages ?? [];
       const session = {
         updatedAt,
-        messages: structuredClone(messages ?? []),
+        messages: [...stored, ...structuredClone(messages ?? [])],
       };
 
       sessionsById.set(sessionId, session);
@@ -4821,7 +4822,7 @@ test("one /chat records one exchange, and a retry of its primary step records no
 test("a failing session write still returns the answer", async () => {
   configureSessionMemoryStore({
     ...createFakeSessionMemoryStore(),
-    async upsert() {
+    async append() {
       throw new Error("session store unavailable");
     },
   });
