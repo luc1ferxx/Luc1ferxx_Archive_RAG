@@ -4717,9 +4717,9 @@ const askRemoteApproval = (options = {}) =>
     accessScope: {},
     ...options,
   });
-// Rewrite prompts pass through (and are returned); the answer model gives
-// `answers` in order, repeating the last one.
-const configureAnswers = (answers) => {
+// Rewrite prompts go to `rewrite` (the fixture's by default) and are returned;
+// the answer model gives `answers` in order, repeating the last one.
+const configureAnswers = (answers, { rewrite = provider.completeText } = {}) => {
   const rewritePrompts = [];
   let answerCount = 0;
 
@@ -4728,7 +4728,7 @@ const configureAnswers = (answers) => {
     completeText: async (prompt) => {
       if (prompt.includes("Latest user question:")) {
         rewritePrompts.push(prompt);
-        return provider.completeText(prompt);
+        return rewrite(prompt);
       }
 
       answerCount += 1;
@@ -4786,6 +4786,89 @@ test("a follow-up answer that replaces the primary answer is the one the session
       });
     })
   );
+});
+
+// A follow-up question after one recorded exchange. `rewriteFollowUp` rewrites
+// it to REWRITTEN_FOLLOW_UP, and the evidence-retry text (gaps.js) to a
+// question of its own. askFollowUp resolves to the response and the user turn
+// it recorded.
+const FOLLOW_UP_QUESTION = "And who approves those requests?";
+const REWRITTEN_FOLLOW_UP = "Who approves remote work requests?";
+const rewriteFollowUp = (prompt) =>
+  prompt.includes("Original question:")
+    ? "Which manager approves remote work requests?"
+    : REWRITTEN_FOLLOW_UP;
+const askFollowUp = async (readSession, question = FOLLOW_UP_QUESTION) => {
+  await recordConversationTurn({
+    answer: LINE_MANAGER_ANSWER,
+    docIds: [REMOTE_APPROVAL_DOC_ID],
+    query: REMOTE_APPROVAL_QUESTION,
+    sessionId: MEMORY_SESSION_ID,
+  });
+
+  const response = await askRemoteApproval({ question });
+  const { messages } = await readSession();
+
+  assert.equal(messages.length, 4);
+  assert.equal(messages[2].text, question);
+  return { response, userTurn: messages[2] };
+};
+
+test("a follow-up question's rewrite is the resolved question its user turn keeps", async () => {
+  configureAnswers([LINE_MANAGER_ANSWER], { rewrite: rewriteFollowUp });
+
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestRemoteApprovalPolicy();
+
+    const { response, userTurn } = await askFollowUp(readSession);
+
+    assert.match(response.body.agentAnswer, /line manager/);
+    assert.equal(userTurn.resolvedQuery, REWRITTEN_FOLLOW_UP);
+  });
+});
+
+test("a follow-up answer that replaces the primary one keeps the user's rewrite, never the evidence retry's", async () => {
+  // Default flag: the follow-up asks the evidence-retry text (rewritten too),
+  // and its supported answer replaces the primary one. The retry's retrieval
+  // queries are mostly instructions, so the QA gate's coverage floor is lowered.
+  configureAnswers([HR_DIRECTOR_ANSWER, LINE_MANAGER_ANSWER], { rewrite: rewriteFollowUp });
+
+  await withEnv({ RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.01" }, () =>
+    withConversationMemory(async ({ readSession }) => {
+      await ingestRemoteApprovalPolicy();
+
+      const { response, userTurn } = await askFollowUp(readSession);
+
+      assert.ok(
+        response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
+        "the run took a follow-up retrieval"
+      );
+      assert.match(response.body.agentAnswer, /line manager/);
+      assert.equal(response.body.ragResolvedQuestion, REWRITTEN_FOLLOW_UP);
+      assert.equal(userTurn.resolvedQuery, REWRITTEN_FOLLOW_UP);
+    })
+  );
+});
+
+test("a clarification keeps no resolved question", async () => {
+  await ingestRemoteApprovalPolicy();
+
+  // The evidence check refuses both answers; then a Web search ("currently")
+  // waits for approval after a supported document answer, whose response
+  // still reports the rewrite.
+  for (const [answer, question, reason] of [
+    [HR_DIRECTOR_ANSWER, FOLLOW_UP_QUESTION, "document_evidence_unresolved_after_follow_up"],
+    [LINE_MANAGER_ANSWER, "And who currently approves those requests?", "capability_approval_required"],
+  ]) {
+    configureAnswers([answer], { rewrite: rewriteFollowUp });
+
+    await withConversationMemory(async ({ readSession }) => {
+      const { response, userTurn } = await askFollowUp(readSession, question);
+
+      assert.equal(response.body.clarification?.reason, reason);
+      assert.equal(userTurn.resolvedQuery, null);
+    });
+  }
 });
 
 test("one /chat records one exchange, and a retry of its primary step records none", async () => {

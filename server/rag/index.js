@@ -1518,14 +1518,16 @@ const recordUserExchange = async ({
 /**
  * Records the user's exchange for an agent request, once, after its answer is
  * final (rag/agent.js): every chat() call inside the agent runs with
- * memoryWrites: false. Same writes as chat()'s own: one session turn and the
- * preferences the user's question states.
+ * memoryWrites: false. Same writes as chat()'s own: one session turn (with
+ * `resolvedQuery`, the user's question as rewritten from session memory) and
+ * the preferences the user's question states.
  */
 export const recordConversationTurn = async ({
   accessScope = {},
   answer = "",
   docIds = [],
   query,
+  resolvedQuery = null,
   routeMode = null,
   sessionId = null,
   userId = null,
@@ -1542,6 +1544,7 @@ export const recordConversationTurn = async ({
     answer,
     documents,
     query,
+    resolvedQuery,
     routeMode,
     sessionId,
     userId,
