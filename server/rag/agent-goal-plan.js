@@ -398,6 +398,9 @@ export const buildAgentGoalPlan = ({
     stoppedReason,
     taskStatus,
   });
+  const maxIterations = Number.isFinite(Number(normalizedPayload.maxIterations))
+    ? Number(normalizedPayload.maxIterations)
+    : null;
 
   return {
     version: AGENT_GOAL_PLAN_VERSION,
@@ -409,9 +412,12 @@ export const buildAgentGoalPlan = ({
     completedIterations: iterationItems.length,
     deliverables: normalizedPayload.deliverables,
     goalCompletion,
-    maxIterations: Number.isFinite(Number(normalizedPayload.maxIterations))
-      ? Number(normalizedPayload.maxIterations)
-      : null,
+    maxIterations,
+    // Only an approved gate runs the task loop past its budget (agent-tasks.js).
+    // shortcut: a continue that lowers maxIterations below the runs already done
+    // is counted here too; mark approval iterations if a client ever does that.
+    overBudgetIterations:
+      maxIterations === null ? 0 : Math.max(0, iterationItems.length - maxIterations),
     requiredUserAction,
     researchTask: compactResearchTaskFlow(normalizedPayload.researchTask),
     items,
@@ -433,6 +439,9 @@ export const compactAgentGoalPlan = (plan = {}) => ({
   maxIterations: Number.isFinite(Number(plan.maxIterations))
     ? Number(plan.maxIterations)
     : null,
+  overBudgetIterations: Number.isFinite(Number(plan.overBudgetIterations))
+    ? Number(plan.overBudgetIterations)
+    : 0,
   requiredUserAction: normalizeText(plan.requiredUserAction, 80),
   researchTask: compactResearchTaskFlow(plan.researchTask),
 });

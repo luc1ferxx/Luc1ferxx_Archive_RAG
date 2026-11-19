@@ -2815,6 +2815,9 @@ test("agent task runner continues until blocked and resumes with preserved run c
   assert.equal(task.result.answer, "Renewal answer with approved web evidence.");
   assert.equal(task.result.agentRunId, "run-1");
   assert.equal(task.result.goalPlan.status, TASK_STATUSES.completed);
+  // The approval ran within the budget, so it counts toward it: "3/3 runs".
+  assert.equal(task.result.goalPlan.completedIterations, 3);
+  assert.equal(task.result.goalPlan.overBudgetIterations, 0);
   assert.equal(task.items.at(-1).id, "deliverable");
   assert.equal(task.items.at(-1).status, TASK_STATUSES.completed);
   assert.equal(calls[2].agentRunId, "run-1");
@@ -3166,6 +3169,10 @@ test("agent task runner runs an approval whose gate arrived on the last allowed 
   assert.equal(calls.length, 2);
   assert.equal(calls[1].agentRunId, "run-limit");
   assert.equal(calls[1].capabilityApprovals["web.search"].gateId, gate.id);
+  // The approval ran past the one-iteration budget: "1/1 runs · 1 after approval", not "2/1 runs".
+  assert.equal(task.result.goalPlan.completedIterations, 2);
+  assert.equal(task.result.goalPlan.maxIterations, 1);
+  assert.equal(task.result.goalPlan.overBudgetIterations, 1);
 });
 
 // Regression: a goal that asks for a follow-up task without any report wording

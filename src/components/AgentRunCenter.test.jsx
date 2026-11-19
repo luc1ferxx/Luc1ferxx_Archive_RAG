@@ -139,6 +139,34 @@ describe("AgentRunCenter", () => {
     ).toBeInTheDocument();
   });
 
+  test("counts runs within the budget and shows approval runs past it separately", () => {
+    render(
+      <AgentRunCenter
+        tasks={[
+          {
+            id: "agent_goal:approved-on-last-run",
+            type: "agent_goal",
+            status: "completed",
+            result: {
+              goalPlan: {
+                completedIterations: 2,
+                counts: { completed: 3, total: 3 },
+                goal: "Search the web for the launch date.",
+                maxIterations: 1,
+                overBudgetIterations: 1,
+                status: "completed",
+              },
+            },
+            items: [],
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("1/1 runs · 1 after approval")).toBeInTheDocument();
+    expect(screen.queryByText("2/1 runs")).not.toBeInTheDocument();
+  });
+
   test("forwards approval actions through the task action callback", () => {
     const onTaskAction = vi.fn();
     const task = {
