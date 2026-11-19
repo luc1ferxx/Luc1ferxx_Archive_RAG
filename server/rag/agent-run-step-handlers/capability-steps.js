@@ -307,7 +307,6 @@ export const createCapabilityCallStepHandler = () => ({
         approvalObjectHash: execution.approvalObjectHash,
         decision: "approved",
         gateId: execution.gate.id,
-        source: "agent_run_action",
       },
       capabilityId: execution.capabilityId,
       capabilityRegistry,
