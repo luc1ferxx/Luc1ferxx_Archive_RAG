@@ -630,7 +630,7 @@
 - 会话记忆：保留最近几轮，判定需要时用一次 LLM 调用改写追问，TTL 6 小时；开鉴权时键为 tenant:sha256(user\0ws\0session)，迁移 031 加了 RLS
 - 长期记忆：按查询词打分取偏好和笔记，进改写 prompt 和答案 prompt 的偏好块；LONG_MEMORY_SCOPE=workspace 时按工作区隔离
 - 经验记忆：只作规划提示，可以重排或补入白名单意图候选（置信度不低于 0.45）
-- 防污染：只记用户自己的话；补检索、子问题、Skill 拼的 prompt、后台任务中间轮都不写（memoryWrites:false、runWithoutConversationMemoryWrites）
+- 防污染：只记用户自己的话，整个请求在答案定稿后记一次（记用户实际看到的文本，所有 agent 内部 chat() 都不写）；补检索、子问题、Skill 拼的 prompt、后台任务中间轮都不写（memoryWrites:false、runWithoutConversationMemoryWrites）
 - 不上向量记忆：没正式评估过，判断是没证据表明需要，而且记忆永远不能成为证据来源
 
 代码：`server/rag/agent-working-memory.js createAgentWorkingMemory`；`server/rag/memory.js resolveSessionMemoryKey, resolveQueryWithSessionMemory, recordSessionTurn`；`server/rag/long-memory.js getLongMemoryContext, resolveLongMemoryWorkspace`；`server/rag/conversation-memory-writes.js runWithoutConversationMemoryWrites`；`server/rag/index.js recordUserExchange`；`server/rag/agent-intent-memory-hints.js applyExperienceHintsToCandidates`
@@ -650,7 +650,7 @@
 
 代码：`server/rag/agent-execution-graph-checkpoint.js verifyExecutionGraphCheckpoint, reconcileExecutionGraphCheckpoint`；`server/rag/agent-run-step-replay-safety.js isStepRetryAllowed`；`server/rag/agent-run-recovery.js createAgentRunRecoveryService, explainInterruptedRun`；`server/rag/agent-runs.js createAgentRunCursor`（原来这里还列着 capabilities/graph-approval-preflight.js verifyCapabilityGraphApproval：阶段 10 之后它没有生产调用方，2026-11-15 阶段 11 连同这个文件一起删了）
 
-> ⚠ 这不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 不会自动重放，要运维介入。启动自动续跑只剩一种情况，续跑的是整张图：外层计划恰好只有 custom_skills 一个阶段的 custom-Skill 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan；确定性外层计划至少列出其余 7 个阶段，所以永远不满足）。以前还有两种，都删了。一种是 v3 guarded run：2026-11-14 阶段 10 随 v3 统一图删除，已存的 v3 run 没结束的转人工、只能取消（CURRENT-TRUTH §3.51）。另一种是没有图 checkpoint 的 V1 custom_skill 步骤整步重放（当时矩阵里唯一 autoReplaySafe 的步骤类型）；这种步骤只有 V1 顺序链存下的旧 run 里有，2026-11-13 阶段 9 把处理器和这条路一起删了，这种旧 run 现在转人工、只能取消（CURRENT-TRUTH §3.50）。普通文档问答的 run 不会自动续跑，其余中断的 run 一律交给人，人只能重试失败步骤或取消。失败的 custom Skill 节点也不能单独手动重试：恢复面板不给它重试按钮，直接调重试接口是 409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY，以前只有顺序链的步骤支持。外层计划 2026-11-13 起由 LangGraph 调度也没有改变这一点：外层图不带 checkpointer，不从它续跑。
+> ⚠ 这不是 exactly-once：被放弃的 claim 不会自动重放，要运维介入。启动自动续跑只剩一种情况，续跑的是整张图：外层计划恰好只有 custom_skills 一个阶段的 custom-Skill 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan；确定性外层计划至少列出其余 7 个阶段，所以永远不满足）。以前还有两种，都删了。一种是 v3 guarded run：2026-11-14 阶段 10 随 v3 统一图删除，已存的 v3 run 没结束的转人工、只能取消（CURRENT-TRUTH §3.51）。另一种是没有图 checkpoint 的 V1 custom_skill 步骤整步重放（当时矩阵里唯一 autoReplaySafe 的步骤类型）；这种步骤只有 V1 顺序链存下的旧 run 里有，2026-11-13 阶段 9 把处理器和这条路一起删了，这种旧 run 现在转人工、只能取消（CURRENT-TRUTH §3.50）。普通文档问答的 run 不会自动续跑，其余中断的 run 一律交给人，人只能重试失败步骤或取消。失败的 custom Skill 节点也不能单独手动重试：恢复面板不给它重试按钮，直接调重试接口是 409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY，以前只有顺序链的步骤支持。外层计划 2026-11-13 起由 LangGraph 调度也没有改变这一点：外层图不带 checkpointer，不从它续跑。
 
 ### Q14. 预算用完会怎样？为什么做成软截止？成本放大 100 倍怎么控？
 
@@ -751,7 +751,7 @@
 - 阶段 6、阶段 7、阶段 8、阶段 9、阶段 10、阶段 11 之后都没有运行时回退开关，只能 git revert；golden 只覆盖固定场景，在 Node 24 上生成、CI 的 Node 22 上通过（阶段 8 合并之后 CI 的 Node 22 上同样通过；阶段 9 的结果本机 Node 24 上测，合并进 main 之后 CI 的 Node 22 上也通过，合并提交 db3ed97b），两个 PostgreSQL 集成套件的 native 一侧没冻结
 - LangGraph checkpointer 有写放大（每个 2 节点 custom-Skill /chat 多 7 次无事件 CAS）；取消靠 drain，只在 superstep 边界生效，在途节点要先结算
 - 预算是软截止，已开始的步骤（DAG 并发时可能多个）会跑完；规划器调用不受上限阻止；计量按每次调用新建、不跨审批累加；默认值没用真实流量校准，没有真实的单次成本分布
-- 不是 exactly-once：重试主 document_rag 会再记一次会话；被放弃的 claim 和在途节点都要人工介入
+- 不是 exactly-once：被放弃的 claim 和在途节点都要人工介入
 - 启动自动续跑只剩一种，续跑的是整张图：外层计划恰好只有 custom_skills 的 custom-Skill 图。步骤不单独重放（以前会整步重放的「没有图 checkpoint 的 V1 custom_skill 步骤」2026-11-13 阶段 9 删除；v3 guarded run 的续跑 2026-11-14 阶段 10 随 v3 统一图删除）；普通文档问答 run 不会自动续跑（外层计划迁到 LangGraph 后也一样，外层图不带 checkpointer），其余中断的 run 一律转人工
 - 等价证据（trajectory、planner、recovery 逐字节一致）来自 mock 和确定性用例，不是真实模型的规划证据
 - 记忆没有效果评测，也没和 mem0 等方案对比过；会话改写多一次 LLM 调用；迁移 031 之前的会话对租户不可见；拆分部署时每层要用相同的 API_AUTH_ENABLED

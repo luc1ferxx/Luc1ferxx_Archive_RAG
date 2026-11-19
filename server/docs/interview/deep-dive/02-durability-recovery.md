@@ -89,7 +89,7 @@ CURRENT-TRUTH.md 3.15：审查发现「CAS 等锁期间并发追加的事件没�
 
 **为什么**
 
-外部写和 step 完成落盘之间总有崩溃窗口，存储层无法证明旧 worker 写没写；所以不去证明「恰好一次」，而是规定中断之后谁可以再跑。现在的规则（2026-11-13 阶段 9 起，CURRENT-TRUTH.md 3.50）：没有步骤被单独自动重放。启动恢复自己只续跑中断的图（条件见 Q2），其余中断的 run 交给人；矩阵登记的是重放每类步骤会冒什么风险（原因码），以及它失败后能不能由人重试。custom_skill 的 replayActions 为空、retryable:false、幂等类别 graph_owned、原因码 graph_node_step：custom Skill 只作为图节点运行，它的步骤不单独重试，也不单独重放。document_rag / follow_up_retrieval / research_question 都标 memory_writing_rag：现在只有主 document_rag 真写会话和长期记忆，后两者传 memoryWrites:false，但注入的 ragService 不一定遵守，所以保守地都当成会写记忆，中断了转人工，失败了可以由人显式重试；capability_call 要哈希绑定的已批准门，失败了可以由人重试；web_search 是不确定的外部读、arxiv_import 是靠导入器去重的写，这两类需要审批的主步骤不能直接重试（处理器一直拒绝，要重试的是审批后排进来的 capability_call 步骤），矩阵里 replayActions 也是空的（阶段 9 的独立复核之前矩阵列着重试，恢复面板因此给过一个点了必 409 的按钮）。阶段 9 之前矩阵还有「可自动重放」一列，唯一的一项是 custom_skill（幂等类别 read_only_rag）：没有图 checkpoint 的 custom_skill 步骤在启动时整步重放。这种步骤只有已删除的 V1 顺序链写得出来（图节点的步骤一定带 nodeId，会先被回放守卫拒绝），所以这一列连同独立处理器一起删了
+外部写和 step 完成落盘之间总有崩溃窗口，存储层无法证明旧 worker 写没写；所以不去证明「恰好一次」，而是规定中断之后谁可以再跑。现在的规则（2026-11-13 阶段 9 起，CURRENT-TRUTH.md 3.50）：没有步骤被单独自动重放。启动恢复自己只续跑中断的图（条件见 Q2），其余中断的 run 交给人；矩阵登记的是重放每类步骤会冒什么风险（原因码），以及它失败后能不能由人重试。custom_skill 的 replayActions 为空、retryable:false、幂等类别 graph_owned、原因码 graph_node_step：custom Skill 只作为图节点运行，它的步骤不单独重试，也不单独重放。document_rag / follow_up_retrieval / research_question 都标 memory_writing_rag：三者都传 memoryWrites:false（agent 请求结束后统一记一次），但注入的 ragService 不一定遵守，所以保守地都当成会写记忆，中断了转人工，失败了可以由人显式重试；capability_call 要哈希绑定的已批准门，失败了可以由人重试；web_search 是不确定的外部读、arxiv_import 是靠导入器去重的写，这两类需要审批的主步骤不能直接重试（处理器一直拒绝，要重试的是审批后排进来的 capability_call 步骤），矩阵里 replayActions 也是空的（阶段 9 的独立复核之前矩阵列着重试，恢复面板因此给过一个点了必 409 的按钮）。阶段 9 之前矩阵还有「可自动重放」一列，唯一的一项是 custom_skill（幂等类别 read_only_rag）：没有图 checkpoint 的 custom_skill 步骤在启动时整步重放。这种步骤只有已删除的 V1 顺序链写得出来（图节点的步骤一定带 nodeId，会先被回放守卫拒绝），所以这一列连同独立处理器一起删了
 
 **为什么不用主流替代方案**
 
@@ -97,7 +97,7 @@ LangGraph/Temporal 默认的「从 checkpoint 重跑在途节点」（至少一�
 
 **代价**
 
-最常见的崩溃（主 document_rag 步骤在途）会转人工，不自动恢复；显式 retry_failed_step 重试主 document_rag 会再记一次用户的交流，不是 exactly-once；失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY），以前只有 V1 顺序链的步骤支持，顺序链 2026-11-13 删除后这项能力没有了，也没有替代（CURRENT-TRUTH.md 3.49）；阶段 9 之后恢复面板也不再给失败的图节点「重试失败步骤」按钮（以前给，点了一定是 409），顺序链留下的旧 run 中断了只能取消、失败了不能单步重试，要得到答案只能重新提问（3.50）
+最常见的崩溃（主 document_rag 步骤在途）会转人工，不自动恢复；显式 retry_failed_step 可以重试主 document_rag，重试不写记忆；失败的 custom Skill 节点不能单独手动重试：图运行的步骤拒绝单独重试（409 AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY），以前只有 V1 顺序链的步骤支持，顺序链 2026-11-13 删除后这项能力没有了，也没有替代（CURRENT-TRUTH.md 3.49）；阶段 9 之后恢复面板也不再给失败的图节点「重试失败步骤」按钮（以前给，点了一定是 409），顺序链留下的旧 run 中断了只能取消、失败了不能单步重试，要得到答案只能重新提问（3.50）
 
 **证据**
 
@@ -344,11 +344,10 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 - 恢复时 running/paused 的步骤一律 unknown_in_flight_node 转人工，不做推断
 - 写型 Capability 带确定性幂等键（图节点 runId+nodeId+skillId），工件表唯一约束 + ON CONFLICT
 - 没有步骤被无人值守地单独重放：自动的只有整图续跑；重放安全矩阵决定失败的步骤能不能由人重试
-- 例外：主 document_rag 的显式重试会再记一次会话和长期记忆
 
 代码：`server/rag/agent-execution-graph-checkpoint.js reconcileExecutionGraphCheckpoint`；`server/rag/agent-run-step-handlers/capability-steps.js createCapabilityCallStepHandler`；`server/rag/agent-run-step-replay-safety.js STEP_REPLAY_SAFETY_MATRIX`
 
-> ⚠ 安全说法：自动恢复路径不重放副作用；写型 Capability 在 adapter 遵守幂等键时做到效果一次；记忆写入的显式重试不是 exactly-once。
+> ⚠ 安全说法：自动恢复路径不重放副作用；写型 Capability 在 adapter 遵守幂等键时做到效果一次；会话记忆每个请求只在结束时记一次，步骤重试不写。
 
 ### Q5. （追问）矩阵里谁能自动重放？Skill 声明 replaySafe:true 就能放吗？
 
@@ -552,7 +551,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
 
 ## 要主动说出口的边界
 
-- 不是 exactly-once：主 document_rag 的显式 retry_failed_step 会再记一次会话和长期记忆；Capability 的幂等性交给 adapter（capability_defined），不遵守幂等键的 adapter 没有保证。
+- 不是 exactly-once：Capability 的幂等性交给 adapter（capability_defined），不遵守幂等键的 adapter 没有保证。
 - 恢复只在启动时扫描（app.js 与 agent-service/app.js 各调一次 recoverOnStartup），agent run 没有租约和心跳；活着的实例之间不会接管彼此崩溃的 run，要等某个进程重启。
 - （读代码推断，未测）listRecoverable 只按状态选、不区分孤儿和别的实例正在跑的 run；多实例滚动重启时，会把其他实例上在跑的图 run 转人工或认领接管、并 fence 掉原 worker（状态安全但那次请求失败），也会给非图 run 打上误导的人工标记。
 - 自动续跑范围很窄，只剩一种，续跑的是整张图：外层计划恰好只有 custom_skills 的 custom-Skill 图。走 v3 guarded 路径的统一图 2026-11-14 随 v3 统一图删除（阶段 10，CURRENT-TRUTH.md 3.51）：已存的 v3 run 不再续跑，没结束的转人工、只能取消。步骤不单独重放，没有图可续的 run 一律转人工（2026-11-13 阶段 9 起，CURRENT-TRUTH.md 3.50；之前非图 run 里的 custom_skill 步骤会整步重放，那种 run 只有 V1 顺序链存下的）。最常见的崩溃（主 document_rag 在途）会转人工；V1 待审批的 run 重启后也会被打上 manual 标记。外层计划 2026-11-13 起也由 LangGraph 调度（阶段 7），但外层图不带 checkpointer，持久化仍是 run 的步骤，这个范围没有因此改变。
@@ -599,7 +598,7 @@ CURRENT-TRUTH.md 3.25：在 /chat 处理到一半时发 SIGTERM，请求 200、�
   - 依据：grep recoverOnStartup：server/app.js:276 与 server/rag/agent-service/app.js:161
 - **decisions 第 3 条 why；limitations 第 1 条**
   - 原以为：document_rag / follow_up_retrieval / research_question 会写会话记忆；三者的显式重试会再写一次会话记忆
-  - 实际：三者在矩阵里都标 memory_writing_rag，但现在只有主 document_rag 真写记忆，follow_up 和 research_question 传 memoryWrites:false，只是因为注入的 ragService 不一定遵守才保守地不自动重放；只有主 document_rag 的重试会再记一次
+  - 实际：三者在矩阵里都标 memory_writing_rag，但三者现在都传 memoryWrites:false（agent 请求结束后统一记一次），只是因为注入的 ragService 不一定遵守才保守地不自动重放；重试不写记忆
   - 依据：AGENTS.md「Conversation memory」Never writes 一节与「The outer document_rag ... steps」一节；docs/configuration.md AGENT_RUN_RECOVERY_MODE 行；STEP_REPLAY_SAFETY_MATRIX 的 summary 文本
 - **decisions 第 5 条 alternativesRejected**
   - 原以为：PG advisory lock：会话级，连接池下难用
