@@ -49,7 +49,7 @@
    - prepareQASourceBundle：每个块和文件名都经 buildScreenedContextSection 过 screenUntrustedText 再进 prompt，citation 保留原文。
    - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。开了 RAG_QA_ANSWER_VERDICT 时还有 readQaAnswerVerdict，再开 override 时有 overrideNotInEvidenceVerdict。模型自判拒答（abstainSource = answer_model）时调 retryQaWithDeeperRetrieval（top 18，只给模型没看过、且过同一门控的块，最多 topK 条，只重试一次）。
 4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖 min(docIds 数, 2) 份文档）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
-5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（默认返回 buildEvidenceRetryQuestion 的 "Re-check the uploaded documents…" 元文本，里面带原问题和证据问题）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这段补检索问题文本，再加 2 条修复查询，共 3 条）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
+5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（默认返回 buildEvidenceRetryQuestion 的 "Re-check the uploaded documents…" 元文本，里面带主调用改写后的问题（没改写就是原问题）和证据问题）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这段补检索问题文本，再加 2 条修复查询，共 3 条）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
 6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支只有测试走得到，2026-11-17 阶段 13 已删除，批准之后的回答就是 Web 搜索 Capability 返回的文本（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
 7. agent-finalization-flow.js：getBoundSelfCheckEvidenceContext 取回 memo，对同样的文本和证据直接命中，开评审时走 judgeClaimSupport。然后 finalizeAgentAnswer（即 finalizeGroundedAnswer）：全部 claim 被支持时原文原样返回；有不被支持的就重建文本，只保留被支持的 claim，formatSupportedClaim 只写已验证的 [Source N]；一条证据 claim 都不剩时输出 GROUNDED_ABSTENTION_TEXT。
 8. /chat/stream 额外的部分：createAnswerDraftReleaser 用 findCompletePrefix 等到句末、来源标签和下一个字符都到了，才对已写出的前缀调 evaluateClaimSupport。通过的句子先 formatSupportedClaim；如果 guardAnswerLinks 会删掉其中的链接，这句就不推；否则 emitAgentEvent(answer_draft)。以 NOT_IN_EVIDENCE: 开头的回复不出草稿。模型重试或切换时发 answer_draft_reset。最后的 result 事件与 /chat 的 body 完全一致，替换掉所有草稿。
@@ -647,8 +647,8 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 - **requestFlow 第 5 步**
   - 原以为：buildAgentRetrievalPlan（phase follow_up：原问题加 2 条修复查询）
-  - 实际：主查询就是补检索问题文本（默认是 buildEvidenceRetryQuestion 的元文本，里面带原问题），再加 2 条修复查询，共 3 条
-  - 依据：server/rag/agent-document-loop.js 把 followUpQuestion 作为 question 传给 buildAgentRetrievalPlan；server/rag/agent-query-planner.js buildIntentQueries 的 follow_up 分支 baseQueries 用的是传入的 question
+  - 实际：主查询就是补检索问题文本（默认是 buildEvidenceRetryQuestion 的元文本，里面带主调用改写后的问题），再加 2 条修复查询，共 3 条
+  - 依据：server/rag/agent-document-loop.js 把 followUpQuestion 作为 question 传给 buildAgentRetrievalPlan；server/rag/agent-retrieval-queries.js buildIntentQueries 的 follow_up 分支 baseQueries 用的是传入的 question
 - **decisions[8]（模型自判拒答）evidence 与 numbers「两段式拒答」**
   - 原以为：只开标记：F1 0.231→0.242，配对 +0.010 [−0.027, +0.048] 不显著；可回答题拒答 +10pp
   - 实际：RAG_QA_ANSWER_VERDICT=true（补救区 + 模型标记）：F1 0.231→0.242……；只加模型判定、不开补救区时 F1 0.235、拒答 58.3%
