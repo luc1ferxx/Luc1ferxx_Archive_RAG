@@ -6,7 +6,7 @@ import { mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { noStoreTenantData } from "./routes/helpers.js";
+import { answerUnhandledError, noStoreTenantData } from "./routes/helpers.js";
 import { createCrossSiteGuard, LOOPBACK_ORIGIN_PATTERN } from "./cross-site-guard.js";
 import {
   assertApiAuthTokenConfiguration,
@@ -439,6 +439,8 @@ export const createApp = async (options = {}) => {
   if (!agentEdge) {
     app.use(createChatRouter(services));
   }
+
+  app.use(answerUnhandledError);
 
   return app;
 };

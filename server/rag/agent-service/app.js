@@ -15,6 +15,7 @@ import {
 import { runAsDatabaseSystem } from "../postgres-tenant.js";
 import { createAdminActionHandler } from "../../routes/admin.js";
 import { createChatRouter } from "../../routes/chat.js";
+import { answerUnhandledError } from "../../routes/helpers.js";
 import { createSystemRouter } from "../../routes/system.js";
 import { createTasksRouter } from "../../routes/tasks.js";
 import { bindServiceCallDeadline } from "../retrieval-service/call-deadline.js";
@@ -207,6 +208,7 @@ export const createAgentApp = async (options = {}) => {
   app.use((req, res) => {
     res.status(404).json({ error: "Not found." });
   });
+  app.use(answerUnhandledError);
 
   return app;
 };

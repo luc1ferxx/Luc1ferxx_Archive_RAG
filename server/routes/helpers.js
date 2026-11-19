@@ -63,6 +63,29 @@ export const serializeError = (error, fallbackMessage) => {
   return fallbackMessage;
 };
 
+/**
+ * The last error middleware of the API and agent apps, for an error no route
+ * answered (a body express.json cannot parse, a disk error while multer stores
+ * an upload): JSON instead of Express's HTML page, which outside
+ * NODE_ENV=production carries the stack. An error meant for the client
+ * (`expose: true`, as body-parser's 4xx are) keeps its status and message;
+ * anything else is a logged 500.
+ */
+export const answerUnhandledError = (error, req, res, next) => {
+  if (res.headersSent) {
+    next(error);
+    return;
+  }
+
+  if (error?.expose === true) {
+    res.status(error.status ?? 500).json({ error: error.message });
+    return;
+  }
+
+  console.error(`Unhandled error on ${req.method} ${req.path}.`, error);
+  res.status(500).json({ error: "Internal server error." });
+};
+
 // /chat checks docIds before this runs (routes/validation.js boundedIdList);
 // /agent-tasks does not, so an entry that is not a string is dropped here
 // instead of throwing.

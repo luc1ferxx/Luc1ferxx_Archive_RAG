@@ -5691,6 +5691,36 @@ test("a route answers a dependency's error with its fallback text; an app 4xx ke
   }
 });
 
+// An error no route answers reaches the client as JSON, not as Express's HTML
+// page with the stack (routes/helpers.js answerUnhandledError).
+test("a body express.json cannot parse answers 400 JSON without a stack", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-malformed-json-"));
+  const app = await createApp({
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    healthService: okHealthService,
+    ragService: createRecoveryRagService(),
+  });
+  const server = await startServer(app);
+
+  try {
+    const response = await fetch(`${server.baseUrl}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: '{"q":',
+    });
+
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get("content-type"), /^application\/json/);
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body), ["error"]);
+    assert.doesNotMatch(body.error, /node_modules|\n/);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("chat endpoint rejects documents outside the authenticated workspace", async () => {
   const originalAuthEnabled = process.env.API_AUTH_ENABLED;
   const originalAuthToken = process.env.API_AUTH_TOKEN;
