@@ -240,7 +240,10 @@ describe("GET /health and /ready share one health report", () => {
         assert.equal(builds, 2);
         for (const [index, response] of responses.entries()) {
           assert.equal(response.status, index % 2 ? 500 : 503);
-          assert.deepEqual(response.body, { error: "database unreachable", status: "error" });
+          assert.deepEqual(response.body, {
+            error: index % 2 ? "Failed to collect health status." : "Readiness check failed.",
+            status: "error",
+          });
         }
 
         // The same instant: only because the failure is not kept does the next
@@ -271,7 +274,7 @@ describe("GET /health and /ready share one health report", () => {
         const ready = await router.get("/ready");
 
         assert.equal(health.status, 500);
-        assert.deepEqual(health.body, { error: "not configured", status: "error" });
+        assert.deepEqual(health.body, { error: "Failed to collect health status.", status: "error" });
         assert.equal(ready.status, 503);
         assert.equal(builds, 2);
       } finally {

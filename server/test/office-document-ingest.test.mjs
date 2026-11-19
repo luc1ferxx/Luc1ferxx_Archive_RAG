@@ -1018,7 +1018,8 @@ test("an invalid RAG_DOCUMENT_FORMATS or Office limit refuses the start, and ans
 
   try {
     // A value changed to an invalid one after the start: the upload answers
-    // the setting's coded error instead of accepting some other set.
+    // the setting's code instead of accepting some other set (the setting's
+    // message goes to the log).
     process.env.RAG_DOCUMENT_FORMATS = "pdf,odt";
 
     for (const response of [
@@ -1029,7 +1030,7 @@ test("an invalid RAG_DOCUMENT_FORMATS or Office limit refuses the start, and ans
 
       assert.equal(status, 500);
       assert.equal(body.code, "RAG_DOCUMENT_FORMATS_INVALID");
-      assert.match(body.error, /RAG_DOCUMENT_FORMATS must be a comma list/);
+      assert.equal(body.error, "The accepted document formats are misconfigured.");
     }
   } finally {
     await server.close();

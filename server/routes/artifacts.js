@@ -11,6 +11,7 @@ import {
   noStoreTenantData,
   sendBufferedFile,
   serializeError,
+  toErrorStatus,
 } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
@@ -40,7 +41,7 @@ export const createArtifactsRouter = (services) => {
         artifacts: (result.artifacts ?? []).map(toWorkspaceArtifactSummary),
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...(error.code ? { code: error.code } : {}),
         error: serializeError(error, "Failed to list workspace artifacts."),
       });
@@ -72,7 +73,7 @@ export const createArtifactsRouter = (services) => {
       });
       return;
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...(error.code ? { code: error.code } : {}),
         error: serializeError(error, "Failed to download workspace artifact."),
       });
@@ -100,7 +101,7 @@ export const createArtifactsRouter = (services) => {
         artifact: toWorkspaceArtifactDetail(artifact),
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...(error.code ? { code: error.code } : {}),
         error: serializeError(error, "Failed to archive workspace artifact."),
       });
@@ -128,7 +129,7 @@ export const createArtifactsRouter = (services) => {
         artifact: toWorkspaceArtifactDetail(artifact),
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         ...(error.code ? { code: error.code } : {}),
         error: serializeError(error, "Failed to load workspace artifact."),
       });

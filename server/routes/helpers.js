@@ -39,11 +39,27 @@ export const PDF_MAGIC = Buffer.from("%PDF");
 // The PDF spec allows the %PDF header to appear within the first 1024 bytes.
 export const PDF_MAGIC_SCAN_WINDOW = 1024;
 
+// An answer of the model backend itself (rag/openai-client.js, reranker.js,
+// the model gateway's client): its status and text are the provider's (a 401
+// is the provider refusing this server's key), never the client's.
+const isUpstreamError = (error) => Number.isInteger(error?.upstreamStatus);
+
+/** The status of a route's error answer: 502 for an upstream error, else the error's own. */
+export const toErrorStatus = (error, fallbackStatus = 500) =>
+  isUpstreamError(error) ? 502 : error?.status ?? fallbackStatus;
+
+/**
+ * The `error` text of a route's error answer: the message of an error raised
+ * for the client (a 4xx); for anything else -- no status (a database or file
+ * system error naming a host or a path), a 5xx, an upstream error -- the
+ * route's fallback, with the error logged.
+ */
 export const serializeError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
+  if (error instanceof Error && error.status >= 400 && error.status < 500 && !isUpstreamError(error)) {
     return error.message;
   }
 
+  console.error(fallbackMessage, error);
   return fallbackMessage;
 };
 

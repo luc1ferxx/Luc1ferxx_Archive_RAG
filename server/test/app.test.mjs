@@ -4766,7 +4766,7 @@ test("document file route handles full responses, invalid ranges, and stream err
 
     response = await fetch(`${server.baseUrl}/documents/boom/file`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /storage unavailable/);
+    assert.equal((await response.json()).error, "Failed to stream the document.");
   } finally {
     await server.close();
   }
@@ -5458,11 +5458,11 @@ test("api routes expose consistent error responses for route failures", async ()
   try {
     let response = await fetch(`${server.baseUrl}/health`);
     assert.equal(response.status, 500);
-    assert.match((await response.json()).error, /health failed/);
+    assert.equal((await response.json()).error, "Failed to collect health status.");
 
     response = await fetch(`${server.baseUrl}/ready`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /health failed/);
+    assert.equal((await response.json()).error, "Readiness check failed.");
 
     response = await fetch(`${server.baseUrl}/documents/missing`, {
       method: "DELETE",
@@ -5473,19 +5473,19 @@ test("api routes expose consistent error responses for route failures", async ()
       method: "DELETE",
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /delete failed/);
+    assert.equal((await response.json()).error, "Failed to delete the document.");
 
     response = await fetch(`${server.baseUrl}/documents/clear`, {
       method: "POST",
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /clear failed/);
+    assert.equal((await response.json()).error, "Failed to clear documents.");
 
     response = await fetch(`${server.baseUrl}/sessions/session-1`, {
       method: "DELETE",
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /session clear failed/);
+    assert.equal((await response.json()).error, "Failed to clear session memory.");
 
     response = await fetch(`${server.baseUrl}/memory`);
     assert.equal(response.status, 400);
@@ -5493,7 +5493,7 @@ test("api routes expose consistent error responses for route failures", async ()
 
     response = await fetch(`${server.baseUrl}/memory?userId=user-1`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /memory list failed/);
+    assert.equal((await response.json()).error, "Failed to load long-term memories.");
 
     response = await fetch(`${server.baseUrl}/memory`, {
       method: "POST",
@@ -5518,7 +5518,7 @@ test("api routes expose consistent error responses for route failures", async ()
       }),
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /memory write failed/);
+    assert.equal((await response.json()).error, "Failed to store long-term memory.");
 
     response = await fetch(`${server.baseUrl}/memory/missing?userId=user-1`, {
       method: "DELETE",
@@ -5529,7 +5529,7 @@ test("api routes expose consistent error responses for route failures", async ()
       method: "DELETE",
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /memory delete failed/);
+    assert.equal((await response.json()).error, "Failed to delete long-term memory.");
 
     response = await fetch(`${server.baseUrl}/memory`, {
       method: "DELETE",
@@ -5540,15 +5540,15 @@ test("api routes expose consistent error responses for route failures", async ()
       method: "DELETE",
     });
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /memory clear failed/);
+    assert.equal((await response.json()).error, "Failed to clear long-term memories.");
 
     response = await fetch(`${server.baseUrl}/quality/latest`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /latest failed/);
+    assert.equal((await response.json()).error, "Failed to load the latest quality report.");
 
     response = await fetch(`${server.baseUrl}/quality/history`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /history failed/);
+    assert.equal((await response.json()).error, "Failed to load quality history.");
 
     response = await fetch(`${server.baseUrl}/quality/synthetic`, {
       method: "POST",
@@ -5561,7 +5561,7 @@ test("api routes expose consistent error responses for route failures", async ()
 
     response = await fetch(`${server.baseUrl}/feedback`);
     assert.equal(response.status, 503);
-    assert.match((await response.json()).error, /feedback list failed/);
+    assert.equal((await response.json()).error, "Failed to load answer feedback.");
 
     response = await fetch(`${server.baseUrl}/feedback`, {
       method: "POST",
@@ -5615,6 +5615,76 @@ test("api routes expose consistent error responses for route failures", async ()
     });
     assert.equal(response.status, 422);
     assert.match((await response.json()).error, /ingest failed/);
+  } finally {
+    await server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+// A dependency's error is the server's problem: the client gets the route's
+// fallback text, the log gets the error (once).
+test("a route answers a dependency's error with its fallback text; an app 4xx keeps its status and message", async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "agentai-dependency-errors-"));
+  // What rag/openai-client.js toHttpError throws when the provider refuses
+  // the server's key: the provider's 401 and its text.
+  const providerRefusal = Object.assign(
+    new Error("Incorrect API key provided: sk-proj-AbC1****wXyZ."),
+    { status: 401, upstreamStatus: 401 }
+  );
+  // What pg throws when the database is unreachable: no status.
+  const databaseDown = Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), {
+    code: "ECONNREFUSED",
+  });
+  const app = await createApp({
+    uploadSessionDirectory: path.join(tempRoot, "sessions"),
+    uploadsDirectory: path.join(tempRoot, "uploads"),
+    healthService: okHealthService,
+    ragService: {
+      initializeDocumentRegistry: async () => [],
+      initializeSessionMemory: async () => true,
+      listDocuments: () => [],
+      getDocument: () => null,
+      ingestDocument: async () => {
+        throw providerRefusal;
+      },
+      listLongMemories: async () => {
+        throw databaseDown;
+      },
+      rememberLongMemory: async () => {
+        throw Object.assign(new Error("This memory is already stored."), { status: 409 });
+      },
+    },
+  });
+  const server = await startServer(app);
+  const logged = t.mock.method(console, "error", () => {});
+
+  try {
+    const pdfUpload = new FormData();
+    pdfUpload.append("file", new Blob(["%PDF-1.4 fake"], { type: "application/pdf" }), "paper.pdf");
+
+    let response = await fetch(`${server.baseUrl}/upload`, { method: "POST", body: pdfUpload });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), { error: "Failed to ingest uploaded PDF." });
+
+    response = await fetch(`${server.baseUrl}/memory?userId=user-1`);
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: "Failed to load long-term memories." });
+
+    response = await fetch(`${server.baseUrl}/memory`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "remember this", userId: "user-1" }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: "This memory is already stored." });
+
+    assert.deepEqual(
+      logged.mock.calls.map((call) => call.arguments),
+      [
+        ["Failed to ingest uploaded PDF.", providerRefusal],
+        ["Failed to load long-term memories.", databaseDown],
+      ]
+    );
   } finally {
     await server.close();
     await rm(tempRoot, { recursive: true, force: true });

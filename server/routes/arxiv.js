@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getRequestAccessScope } from "../auth.js";
 import { normalizeArxivMaxResults } from "../rag/arxiv-client.js";
 
-import { serializeError } from "./helpers.js";
+import { serializeError, toErrorStatus } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
 const topicQuerySchema = z.object({
@@ -39,7 +39,7 @@ export const createArxivRouter = (services) => {
         papers,
       });
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to search arXiv."),
       });
     }
@@ -59,7 +59,7 @@ export const createArxivRouter = (services) => {
 
       return res.status(201).json(result);
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to import arXiv papers."),
       });
     }
@@ -79,7 +79,7 @@ export const createArxivRouter = (services) => {
 
       return res.json(result);
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to find arXiv suggestions."),
       });
     }
@@ -93,7 +93,7 @@ export const createArxivRouter = (services) => {
 
       return res.json(result);
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to list saved arXiv suggestions."),
       });
     }
@@ -112,7 +112,7 @@ export const createArxivRouter = (services) => {
 
       return res.json(result);
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to load saved arXiv suggestions."),
       });
     }
@@ -133,7 +133,7 @@ export const createArxivRouter = (services) => {
 
       return res.status(201).json(result);
     } catch (error) {
-      return res.status(error.status ?? 502).json({
+      return res.status(toErrorStatus(error, 502)).json({
         error: serializeError(error, "Failed to import arXiv suggestions."),
       });
     }

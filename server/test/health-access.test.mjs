@@ -411,7 +411,7 @@ describe("GET /health, /ready and /livez", () => {
       state.mode = "throw";
       const thrownHealth = await get(server, "/health");
       assert.equal(thrownHealth.status, 500);
-      assert.deepEqual(thrownHealth.body, { error: THROWN_MESSAGE, status: "error" });
+      assert.deepEqual(thrownHealth.body, { error: "Failed to collect health status.", status: "error" });
     });
   });
 
@@ -477,7 +477,7 @@ describe("GET /health, /ready and /livez", () => {
 
       const viewerHealth = await get(server, "/health", apiKey("viewer-token"));
       assert.equal(viewerHealth.status, 500);
-      assert.deepEqual(viewerHealth.body, { error: THROWN_MESSAGE, status: "error" });
+      assert.deepEqual(viewerHealth.body, { error: "Failed to collect health status.", status: "error" });
     });
   });
 

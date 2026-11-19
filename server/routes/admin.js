@@ -14,6 +14,8 @@ import {
   isPlatformAdminReadScope,
 } from "../rag/data-access-audit.js";
 
+import { toErrorStatus } from "./helpers.js";
+
 /**
  * Runs one controlled admin action (POST /admin/actions/:action) once the
  * permission check has passed. The agent tier of a split deployment mounts it
@@ -30,7 +32,7 @@ export const createAdminActionHandler = ({ adminActionRegistry }) => async (req,
       })
     );
   } catch (error) {
-    return res.status(error.status ?? 500).json({
+    return res.status(toErrorStatus(error)).json({
       error:
         error?.expose === true
           ? error.message

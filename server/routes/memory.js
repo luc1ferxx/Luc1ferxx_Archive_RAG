@@ -5,7 +5,7 @@ import { getRequestAccessScope } from "../auth.js";
 import { DATA_ACCESS_ACTION_IDS } from "../rag/admin-audit.js";
 import { createDataAccessAudit } from "../rag/data-access-audit.js";
 
-import { resolveScopedUserId, serializeError } from "./helpers.js";
+import { resolveScopedUserId, serializeError, toErrorStatus } from "./helpers.js";
 import { parseOrRespond, requiredTrimmedString } from "./validation.js";
 
 const sessionIdSchema = z.object({
@@ -47,8 +47,8 @@ export const createMemoryRouter = (services) => {
         cleared,
       });
     } catch (error) {
-      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
-      return res.status(error.status ?? 500).json({
+      await dataAudit.recordOutcome(req, { ...audited, status: toErrorStatus(error) });
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to clear session memory."),
       });
     }
@@ -77,7 +77,7 @@ export const createMemoryRouter = (services) => {
         memories,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to load long-term memories."),
       });
     }
@@ -112,7 +112,7 @@ export const createMemoryRouter = (services) => {
         memory,
       });
     } catch (error) {
-      return res.status(error.status ?? 500).json({
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to store long-term memory."),
       });
     }
@@ -157,8 +157,8 @@ export const createMemoryRouter = (services) => {
         memory,
       });
     } catch (error) {
-      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
-      return res.status(error.status ?? 500).json({
+      await dataAudit.recordOutcome(req, { ...audited, status: toErrorStatus(error) });
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to delete long-term memory."),
       });
     }
@@ -190,8 +190,8 @@ export const createMemoryRouter = (services) => {
         deletedCount,
       });
     } catch (error) {
-      await dataAudit.recordOutcome(req, { ...audited, status: error.status ?? 500 });
-      return res.status(error.status ?? 500).json({
+      await dataAudit.recordOutcome(req, { ...audited, status: toErrorStatus(error) });
+      return res.status(toErrorStatus(error)).json({
         error: serializeError(error, "Failed to clear long-term memories."),
       });
     }

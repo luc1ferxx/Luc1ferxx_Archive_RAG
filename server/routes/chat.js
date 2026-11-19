@@ -13,7 +13,7 @@ import { toDatabaseTenant } from "../rag/postgres-tenant.js";
 import { runAgentRequestWithCancellation } from "../rag/request-deadline.js";
 import { recordTenantUsage, TENANT_USAGE_METRICS } from "../rag/tenant-usage.js";
 
-import { parseDocIds, resolveScopedUserId, serializeError } from "./helpers.js";
+import { parseDocIds, resolveScopedUserId, serializeError, toErrorStatus } from "./helpers.js";
 import {
   boundedIdList,
   boundedRequiredTrimmedString,
@@ -52,14 +52,15 @@ export const validateChatRequest = (req, res) => parseOrRespond(chatRequestSchem
  * passed: 504 AGENT_DEADLINE_EXCEEDED; the client left: 499) or a dependency
  * outage (503 AGENT_DEPENDENCY_UNAVAILABLE / 504 AGENT_DEPENDENCY_TIMEOUT
  * with Retry-After) gets its stable code and retryable flag
- * (rag/dependency-outage.js); any other error keeps { error: message } and
- * its status. Shared by /chat, /chat/stream and the agent-run action route.
+ * (rag/dependency-outage.js); any other error answers { error } as every
+ * route does (helpers.js serializeError and toErrorStatus). Shared by /chat,
+ * /chat/stream and the agent-run action route.
  */
 export const describeAgentRouteError = (error, fallbackMessage) =>
   describeAgentRequestFailure(error) ?? {
     body: { error: serializeError(error, fallbackMessage) },
     headers: {},
-    status: error?.status ?? 500,
+    status: toErrorStatus(error),
   };
 
 export const sendAgentRouteError = (res, error, fallbackMessage) => {
