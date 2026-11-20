@@ -49,7 +49,7 @@
    - prepareQASourceBundle：每个块和文件名都经 buildScreenedContextSection 过 screenUntrustedText 再进 prompt，citation 保留原文。
    - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。开了 RAG_QA_ANSWER_VERDICT 时还有 readQaAnswerVerdict，再开 override 时有 overrideNotInEvidenceVerdict。模型自判拒答（abstainSource = answer_model）时调 retryQaWithDeeperRetrieval（top 18，只给模型没看过、且过同一门控的块，最多 topK 条，只重试一次）。
 4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖 min(docIds 数, 2) 份文档）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
-5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（默认返回 buildEvidenceRetryQuestion 的 "Re-check the uploaded documents…" 元文本，里面带主调用改写后的问题（没改写就是原问题）和证据问题）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这段补检索问题文本，再加 2 条修复查询，共 3 条）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
+5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（返回主调用改写后的问题，没改写就是原问题；2026-11-19 起不再用 "Re-check the uploaded documents…" 元文本）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这个问题，证据问题只进另外 2 条修复查询，共 3 条；补检索跳过会话改写，门控按问题文本算覆盖）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
 6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支只有测试走得到，2026-11-17 阶段 13 已删除，批准之后的回答就是 Web 搜索 Capability 返回的文本（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
 7. agent-finalization-flow.js：getBoundSelfCheckEvidenceContext 取回 memo，对同样的文本和证据直接命中，开评审时走 judgeClaimSupport。然后 finalizeAgentAnswer（即 finalizeGroundedAnswer）：全部 claim 被支持时原文原样返回；有不被支持的就重建文本，只保留被支持的 claim，formatSupportedClaim 只写已验证的 [Source N]；一条证据 claim 都不剩时输出 GROUNDED_ABSTENTION_TEXT。
 8. /chat/stream 额外的部分：createAnswerDraftReleaser 用 findCompletePrefix 等到句末、来源标签和下一个字符都到了，才对已写出的前缀调 evaluateClaimSupport。通过的句子先 formatSupportedClaim；如果 guardAnswerLinks 会删掉其中的链接，这句就不推；否则 emitAgentEvent(answer_draft)。以 NOT_IN_EVIDENCE: 开头的回复不出草稿。模型重试或切换时发 answer_draft_reset。最后的 result 事件与 /chat 的 body 完全一致，替换掉所有草稿。
@@ -183,7 +183,7 @@
 
 **代价**
 
-默认补检索的问题文本是 'Re-check the uploaded documents…' 这种元文本（它同时是补检索的主查询和门控基准），实测几乎不起作用。修复开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 单开时没有多答出任何一题，默认仍关
+补检索原来用 'Re-check the uploaded documents…' 元文本当问题（它同时是主查询和门控基准），2026-11-19 三次测量 187 次 0 次成功。评审默认打开后测得改问原问题能成功（50 次 8 次、可答 +8、不可答不变），于是问原问题成为唯一做法，开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 删除
 
 **证据**
 
@@ -191,7 +191,7 @@
 - 开关单开（A2）：可答题回答仍是 0/41
 - 出处：CURRENT-TRUTH 3.21；docs/evaluation.md「Agent 答题率开关」，QASPER train 50 题，qwen2.5:7b
 
-**代码**：server/rag/agent-document-loop.js runDocumentRagLoop；server/rag/agent-bootstrap.js DEFAULT_AGENT_MAX_FOLLOW_UPS；server/rag/agent-budget.js DEFAULT_AGENT_BUDGET；server/rag/self-check/gaps.js buildFollowUpQuestion / buildEvidenceRetryQuestion；server/rag/agent-query-planner.js buildAgentRetrievalPlan
+**代码**：server/rag/agent-document-loop.js runDocumentRagLoop；server/rag/agent-bootstrap.js DEFAULT_AGENT_MAX_FOLLOW_UPS；server/rag/agent-budget.js DEFAULT_AGENT_BUDGET；server/rag/self-check/gaps.js buildFollowUpQuestion；server/rag/agent-query-planner.js buildAgentRetrievalPlan
 
 ### D6. 不向客户端流式推原始 token，只推通过 finalizer 同一套校验的整句草稿
 
@@ -508,7 +508,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 不用 Self-RAG：需要微调出反思 token
 - 不用 CRAG：要额外的评估器，而且 Web 兜底在本项目是要审批的单独阶段
 - 不用开放循环：成本和步数没有上限
-- 坦白一个缺陷：默认补检索拿 'Re-check the uploaded documents…' 元文本当问题和主查询，61 次只过 1 次。修复开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 单开也没多答出题，所以默认没改
+- 坦白一个缺陷（2026-11-19 已修）：补检索原来拿 'Re-check the uploaded documents…' 元文本当问题和主查询，诊断时 61 次只过 1 次、三次测量 187 次 0 次；评审默认打开后改问原问题，50 次成功 8 次，于是改成唯一做法
 
 代码：`server/rag/agent-document-loop.js runDocumentRagLoop`；`server/rag/self-check/gaps.js buildFollowUpQuestion`；`server/rag/agent-query-planner.js buildAgentRetrievalPlan`；`server/rag/self-check/evaluate.js selectBetterRagResult`
 
@@ -578,12 +578,12 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 - 让模型用结构化输出直接给出 claim 列表和对应的来源片段 id，而不是从自由文本里用正则切句、猜引用
 - 用人工标注的真实答案校准一个 NLI 或 LLM 评审，报 kappa，再考虑替换 token 重叠规则
-- 默认补检索不再用元文本当问题
+- 补检索不再用元文本当问题（2026-11-19 已做）
 - 区分'能不能答'和'怎么答'：单独训练或校准一个可答性判别信号，而不是靠词面覆盖率
 - 更早接真实模型和外部标注集（QASPER），少做一些不改默认的开关
 - 对比路径改为先让模型输出逐文档的值绑定（结构化），再由引擎渲染文本
 
-代码：`server/rag/self-check/claims.js splitAnswerStructure`；`server/rag/self-check/gaps.js buildEvidenceRetryQuestion`
+代码：`server/rag/self-check/claims.js splitAnswerStructure`；`server/rag/self-check/gaps.js buildFollowUpQuestion`
 
 > ⚠ 不要说'换成 LangChain 或 LlamaIndex 就解决了'。框架不解决校验精度问题。要说出具体换什么信号、用什么数据证明。
 
@@ -621,7 +621,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 对比路径在 qwen2.5:7b 下模型自己写的答案全部被拒，用户看到的是引擎模板；'**Differences**:'（冒号在加粗外）还不被识别成标题
 - 词面门控 AUC 只有约 0.6，QASPER 上约四成可回答题被拒；相关度下限在 nomic 上实测不起作用
 - 答案引用到的证据比上下文里的证据少，配对 −0.106，显著；引用精度 0.32
-- 默认补检索把元文本当问题和主查询，几乎不起作用（61 次过 1 次）；修复开关默认关
+- 补检索原来把元文本当问题和主查询，几乎不起作用（61 次过 1 次）；2026-11-19 起改问原问题（开关已删）
 - 流式草稿机制可用，但在当前校验器下几乎没有延迟收益
 - 提示注入筛查基于模式匹配，刻意改写可以绕过（文档 RAG 出口 3/3）；用例只有 13 个、是自建的；没跑过 BIPIA 或 AgentDojo
 - 近邻替换否决是纯词面的：下位词（recurrent network 对 neural network）也算替换；中文按单字配对
@@ -647,7 +647,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 - **requestFlow 第 5 步**
   - 原以为：buildAgentRetrievalPlan（phase follow_up：原问题加 2 条修复查询）
-  - 实际：主查询就是补检索问题文本（默认是 buildEvidenceRetryQuestion 的元文本，里面带主调用改写后的问题），再加 2 条修复查询，共 3 条
+  - 实际：主查询就是补检索问题文本（就是主调用改写后的问题），再加 2 条修复查询，共 3 条
   - 依据：server/rag/agent-document-loop.js 把 followUpQuestion 作为 question 传给 buildAgentRetrievalPlan；server/rag/agent-retrieval-queries.js buildIntentQueries 的 follow_up 分支 baseQueries 用的是传入的 question
 - **decisions[8]（模型自判拒答）evidence 与 numbers「两段式拒答」**
   - 原以为：只开标记：F1 0.231→0.242，配对 +0.010 [−0.027, +0.048] 不显著；可回答题拒答 +10pp

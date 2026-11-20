@@ -1165,7 +1165,8 @@ export const getQaVerdictOverrideMode = () =>
     : "off";
 
 // ---------------------------------------------------------------------------
-// Answer-rate flags. Each is off by default and changes one thing, so an
+// Answer-rate flags. Each changes one thing (off by default except source
+// inheritance, on since 2026-11-19), so an
 // evaluation can turn them on one at a time and together.
 
 // RAG_QA_GATE_INFLECTION: the single-document QA gate also counts a query word

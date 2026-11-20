@@ -10,8 +10,8 @@
    - 问题：说大了。自动续跑只覆盖外层只剩 custom_skills 的 guarded 图（agent-run-recovery.js hasGraphOnlyStoredExecutionPlan）、v3 guarded run 和无图 checkpoint 的 V1 custom_skill 步骤；主 document_rag 在途会转人工。CAS/claim 挡的是旧 worker 的状态写，不是已发出的副作用。另外整段没提 LangGraph 迁移和外层留在原生循环
    - 改法：改为：运行状态在 PostgreSQL，只在能证明安全时在节点边界续跑；有副作用的步骤不自动重放，写入靠幂等键，旧 worker 的状态写被版本号 CAS 挡住。补一句：custom-Skill DAG 和 v3 图由 LangGraph.js 调度，外层计划因压测 +17.6% 不过门留在原生循环（2026-11-14：v3 统一图已删除，这一条里关于 v3 的说法不能再照着说，见 CURRENT-TRUTH §3.51）
 2. 原句：「有缺口就补检索一轮（最多 3 条查询）」
-   - 问题：没说默认补检索拿「Re-check the uploaded documents…」元文本当问题和主查询，诊断时 61 次只过 1 次；修复开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 单开也没多答题（CURRENT-TRUTH 3.21）
-   - 改法：保留机制描述，但别把补检索讲成有效修复手段；被问到时补充 61 次过 1 次的诊断和开关结果
+   - 问题：没说默认补检索拿「Re-check the uploaded documents…」元文本当问题和主查询，诊断时 61 次只过 1 次；修复开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 单开也没多答题（CURRENT-TRUTH 3.21）。2026-11-19 已修：补检索固定问原问题，开关删除
+   - 改法：讲成已修的缺陷：元文本 61 次过 1 次、187 次 0 次；评审默认打开后改问原问题，50 次成功 8 次
 3. 原句：「启发式 reranker 在真实 embedding 下没有带来提升，全量上还降了约 5 个点，这也是它默认关闭的依据。」
    - 问题：−0.049 [−0.115, +0.014] 不显著，原句没标；而且交叉编码器已在 QASPER dev 上测过（3.14a），不再只是启发式
    - 改法：改为：启发式重排没有带来提升（−0.049，不显著）；交叉编码器在 QASPER 上让上下文证据 +0.063 显著，但 F1 不显著，又要单独服务，所以默认关

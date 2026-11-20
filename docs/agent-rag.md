@@ -182,8 +182,8 @@ Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Ski
 
 **会话记忆只记用户自己的话。** `chat()` 的 `memoryWrites` 选项默认 `true`；传 `false` 时不写会话 turn，也不从问题里提取长期偏好，但会话改写和偏好块照常读取。长期偏好只从明确的指令里提取（“以后用中文回答”“reply in English”“回答简短一点”等）；问题里只是提到语言或长短（“中国供应商的回复”“short-term borrowings”）不会存成偏好。会话写入失败只记日志，不影响已经生成的答案。
 
-- 写入：每个 agent 请求在 run 结束后记一次：`runAgentRag`（`rag/agent.js`）把用户的问题和用户实际看到的文本（`body.agentAnswer`：定稿答案、替换了主答案的 follow-up 答案，或澄清、拒答）交给 `ragService.recordConversationTurn`（一条用户 turn 加一条助手 turn，加上问题里说明的偏好；`routeMode` 取 `body.agentMode`；回答记 `body.ragResolvedQuestion` 作为改写后的检索问题，即主 `document_rag` 调用对用户问题的改写，follow-up 答案替换主答案时也是（`agent-document-loop.js` 把主调用的 `resolvedQuery` 给胜出的 follow-up 结果，客户端看到的也是这个值）；澄清不记），只记 2xx 响应，失败只记日志。取消、依赖故障结束和出错的请求不写；审批答复和启动恢复续跑的 run 也不写。直接调用 `chat()`（默认 `memoryWrites: true`）的仍自己记。
-- 不写入（`memoryWrites: false`）：agent 发起的每个 `chat()`：主 `document_rag` 调用、V1 follow-up（问题是 `gaps.js` 拼的 "Re-check the uploaded documents…"）、每个 `research_question` 子调用、这些 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
+- 写入：每个 agent 请求在 run 结束后记一次：`runAgentRag`（`rag/agent.js`）把用户的问题和用户实际看到的文本（`body.agentAnswer`：定稿答案、替换了主答案的 follow-up 答案，或澄清、拒答）交给 `ragService.recordConversationTurn`（一条用户 turn 加一条助手 turn，加上问题里说明的偏好；`routeMode` 取 `body.agentMode`；回答记 `body.ragResolvedQuestion` 作为改写后的检索问题，即主 `document_rag` 调用对用户问题的改写，follow-up 答案替换主答案时也是（follow-up 问的就是这个改写后的问题、不再改写，所以它的结果报告的也是这个值）；澄清不记），只记 2xx 响应，失败只记日志。取消、依赖故障结束和出错的请求不写；审批答复和启动恢复续跑的 run 也不写。直接调用 `chat()`（默认 `memoryWrites: true`）的仍自己记。
+- 不写入（`memoryWrites: false`）：agent 发起的每个 `chat()`：主 `document_rag` 调用、V1 follow-up（问的是主调用改写后的问题）、每个 `research_question` 子调用、这些 step 的重试、四个自定义 Skill 和 `document.compare_batch` 拼的 prompt。
 - 后台任务：问题不是任务自身问题的迭代（研究 dossier 的阶段问题、agent 规划的 `nextQuestion`）在 `runWithoutConversationMemoryWrites` 下运行，整次迭代只读不写（请求结束时那次记录也不写）。
 
 这三类 step 的 replay 元数据没有因此改动：注入的 `ragService` 或旧的文档 Skill 不一定遵守 `memoryWrites`，证明不了这些 step 什么都不写。重试不写记忆：失败的请求本来就没记，重试也不补记。

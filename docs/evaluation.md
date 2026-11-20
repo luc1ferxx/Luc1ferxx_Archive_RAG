@@ -3029,7 +3029,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 判定：f1 成功 8 ≥ 5、多答 8 ≥ 5，通过；f2 不可答被回答 3 ≤ 10，通过；f3 独立评审（1 个评审，按引用页原文和参考答案）判这 8 题：答对 3、部分对 4、错 1（7/8 ≥ 一半），通过；引用页支撑：有据 6、部分有据 1、无据 1。
 
-**结论**：三条都过。按规则，补检索只保留"问原问题"这一条路：`AGENT_FOLLOW_UP_ORIGINAL_QUESTION` 的行为成为唯一行为，元文本那条路和这个开关删除。
+**结论**：三条都过。按规则，补检索只保留"问原问题"这一条路：`AGENT_FOLLOW_UP_ORIGINAL_QUESTION` 的行为成为唯一行为，元文本那条路和这个开关删除（f61aba37；两份 LangGraph golden 只因补检索问题文本、少一条重复检索查询和 token 估算变化而重录）。
 
 ### API 压测（`npm run eval:load-test:pgvector`）
 
