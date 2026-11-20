@@ -183,7 +183,7 @@
                           "rationale": {
                             "anyOf": [
                               {
-                                "pattern": "^.{0,220}$",
+                                "pattern": "^[^\"\\\\\\x00-\\x1F]{0,220}$",
                                 "type": "string"
                               },
                               {
@@ -404,7 +404,7 @@
                           "rationale": {
                             "anyOf": [
                               {
-                                "pattern": "^.{0,220}$",
+                                "pattern": "^[^\"\\\\\\x00-\\x1F]{0,220}$",
                                 "type": "string"
                               },
                               {
