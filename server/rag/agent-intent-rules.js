@@ -1,7 +1,6 @@
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 import { CAPABILITY_IDS } from "./capabilities/shared.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
-import { isAgentSingleDocumentRoutingEnabled } from "./config.js";
 
 const WEB_SIGNAL_PATTERN =
   /\b(latest|current|currently|today|now|recent|news|live|online|internet|web|search the web|real[-\s]?time)\b|最新|当前|现在|今天|近日|实时|联网|网页|网络|新闻/i;
@@ -80,8 +79,7 @@ export const AGENT_INTENT_IDS = Object.freeze({
   document: "document",
 });
 
-// AGENT_SINGLE_DOCUMENT_ROUTING (default off) narrows three wording rules
-// that sent ordinary single-document questions to a Skill:
+// Four narrowings keep ordinary single-document questions out of a Skill:
 // - comparison wording with exactly one selected document is a question about
 //   that document ("How did DPR compare with BM25?") unless it names another
 //   document to compare against ("the other agreement", "these documents"),
@@ -89,24 +87,32 @@ export const AGENT_INTENT_IDS = Object.freeze({
 // - "sequence" inside a hyphenated name ("RAG-Sequence") is not a timeline
 //   request;
 // - "study" as the paper's own noun ("this study", "the study") is not a
-//   research-brief request.
+//   research-brief request;
+// - a question about the one selected document ("Do they report results only
+//   on English data?") is not a research-brief request; an imperative or a
+//   "Can you ...?" request keeps it.
 const OTHER_DOCUMENT_REFERENCE_PATTERN =
   /\b(?:the\s+other|another|other|second|both|these|those|two|multiple|several|all(?:\s+the)?|each|across(?:\s+the)?|between\s+the|(?:the\s+)?(?:previous|prior|earlier|older|newer|new|old))\s+(?:selected\s+)?(?:documents?|files?|agreements?|contracts?|policies|policy|papers?|reports?|versions?|drafts?|pdfs?)\b|\bthe\s+other\s+one\b|另一|两份|两个(?:文档|文件|合同|协议)|多份|这些(?:文档|文件)/i;
 const HYPHENATED_NAME_PATTERN = /\b[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)+\b/gu;
 const STUDY_NOUN_PATTERN = /\b(?:this|the|our|their|that|in|of)\s+study\b/gi;
+const QUESTION_END_PATTERN = /[?？]\s*$/;
+// shortcut: only the English "can/could/would/will you" opening keeps a
+// question-mark request on research_brief ("能写一份研究简报吗？" goes to
+// document QA), add other openings when one is seen misrouted.
+const REQUEST_OPENING_PATTERN = /^\s*(?:can|could|would|will)\s+you\b/i;
 
 const narrowSingleDocumentSignals = ({ question, docIds, signals }) => {
-  if (!isAgentSingleDocumentRoutingEnabled()) {
-    return signals;
-  }
-
   const comparesOneDocument =
     docIds.length === 1 && !OTHER_DOCUMENT_REFERENCE_PATTERN.test(question);
+  const asksAboutOneDocument =
+    docIds.length === 1 && QUESTION_END_PATTERN.test(question) && !REQUEST_OPENING_PATTERN.test(question);
   const wantsCompareDocuments = signals.wantsCompareDocuments && !comparesOneDocument;
   const wantsTimeline =
     signals.wantsTimeline && TIMELINE_SIGNAL_PATTERN.test(question.replace(HYPHENATED_NAME_PATTERN, " "));
   const wantsResearch =
-    signals.wantsResearch && RESEARCH_SIGNAL_PATTERN.test(question.replace(STUDY_NOUN_PATTERN, " "));
+    signals.wantsResearch &&
+    !asksAboutOneDocument &&
+    RESEARCH_SIGNAL_PATTERN.test(question.replace(STUDY_NOUN_PATTERN, " "));
 
   return {
     ...signals,

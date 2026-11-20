@@ -34,7 +34,6 @@ import {
 // sets the flags it depends on and clears the rest, so the suite means the
 // same under any ambient value.
 const FLAG_KEYS = [
-  "AGENT_SINGLE_DOCUMENT_ROUTING",
   "RAG_QA_GATE_INFLECTION",
   "RAG_CLAIM_HEADING_CONTEXT",
   "RAG_CLAIM_INFLECTION",
@@ -622,7 +621,6 @@ test("the follow-up asks the primary call's resolved question, else the question
 
 test("describeAnswerRateFlags reports every flag, all off by default except source inheritance", () => {
   assert.deepEqual(describeAnswerRateFlags(), {
-    agentSingleDocumentRouting: false,
     claimHeadingContext: false,
     claimInflection: false,
     claimJudgeTemperature: null,
@@ -634,7 +632,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
 
   withFlags(
     {
-      AGENT_SINGLE_DOCUMENT_ROUTING: "true",
       RAG_CLAIM_HEADING_CONTEXT: "true",
       RAG_CLAIM_INFLECTION: "true",
       RAG_CLAIM_JUDGE_TEMPERATURE: "0",
@@ -644,7 +641,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
-        agentSingleDocumentRouting: true,
         claimHeadingContext: true,
         claimInflection: true,
         claimJudgeTemperature: 0,
@@ -710,53 +706,55 @@ test("an agent body answers only when it is neither a clarification nor the grou
 });
 
 // ---------------------------------------------------------------------------
-// Deterministic routing: AGENT_SINGLE_DOCUMENT_ROUTING
+// Deterministic routing (agent-intent-rules.js narrowSingleDocumentSignals)
 
-test("incidental wording routes a single-document question to document QA only with AGENT_SINGLE_DOCUMENT_ROUTING", () => {
-  const cases = [
-    ["How did DPR compare with BM25?", "compare_documents"],
-    ["What is the similarity between relations?", "compare_documents"],
-    ["How does RAG-Sequence differ from RAG-Token?", "extract_timeline"],
-    ["What dataset does this study use?", "research_brief"],
-  ];
+test("incidental wording routes a single-document question to document QA", () => {
+  for (const question of [
+    "How did DPR compare with BM25?",
+    "What is the similarity between relations?",
+    "How does RAG-Sequence differ from RAG-Token?",
+    "What dataset does this study use?",
+    // A question about the one selected paper is not a research-brief request.
+    "Do they report results only on English data?",
+    "How is face and audio data analysis evaluated?",
+    "这篇论文的研究方法是什么？",
+  ]) {
+    const plan = buildPlan({ docIds: ["paper-1"], question });
 
-  for (const [question, mode] of cases) {
-    assert.equal(buildPlan({ docIds: ["paper-1"], question }).mode, mode, question);
+    assert.equal(plan.mode, "document", question);
+    assert.equal(buildPreExecutionClarification({ docIds: ["paper-1"], plan }), null, question);
   }
-
-  withFlags({ AGENT_SINGLE_DOCUMENT_ROUTING: "true" }, () => {
-    for (const [question] of cases) {
-      const plan = buildPlan({ docIds: ["paper-1"], question });
-
-      assert.equal(plan.mode, "document", question);
-      assert.equal(buildPreExecutionClarification({ docIds: ["paper-1"], plan }), null, question);
-    }
-  });
 });
 
-test("with AGENT_SINGLE_DOCUMENT_ROUTING real comparison and timeline requests keep their routes", () => {
-  withFlags({ AGENT_SINGLE_DOCUMENT_ROUTING: "true" }, () => {
-    // One document selected, another one named: the comparison clarification.
-    for (const question of [
-      "Compare this contract against the other agreement.",
-      "Compare these documents.",
-      "What changed from the previous version of the policy?",
-      "比较这两份合同",
-    ]) {
-      const plan = buildPlan({ docIds: ["contract-1"], question });
+test("real comparison, timeline and research requests keep their routes", () => {
+  // One document selected, another one named: the comparison clarification.
+  for (const question of [
+    "Compare this contract against the other agreement.",
+    "Compare these documents.",
+    "What changed from the previous version of the policy?",
+    "比较这两份合同",
+  ]) {
+    const plan = buildPlan({ docIds: ["contract-1"], question });
 
-      assert.equal(plan.wantsCompareDocuments, true, question);
-      assert.equal(
-        buildPreExecutionClarification({ docIds: ["contract-1"], plan })?.reason,
-        "comparison_requires_multiple_documents",
-        question
-      );
-    }
+    assert.equal(plan.wantsCompareDocuments, true, question);
+    assert.equal(
+      buildPreExecutionClarification({ docIds: ["contract-1"], plan })?.reason,
+      "comparison_requires_multiple_documents",
+      question
+    );
+  }
 
-    assert.equal(buildPlan({ docIds: ["a", "b"], question: "How do they compare?" }).wantsCompareDocuments, true);
-    assert.equal(buildPlan({ docIds: ["a"], question: "Build a timeline of the sequence of events." }).mode, "extract_timeline");
-    assert.equal(buildPlan({ docIds: ["a"], question: "Write a research brief on this paper." }).mode, "research_brief");
-  });
+  assert.equal(buildPlan({ docIds: ["a", "b"], question: "How do they compare?" }).wantsCompareDocuments, true);
+  assert.equal(buildPlan({ docIds: ["a"], question: "Build a timeline of the sequence of events." }).mode, "extract_timeline");
+
+  // An imperative or a "Can you ...?" request, or two selected documents, keep the research brief.
+  for (const [docIds, question] of [
+    [["a"], "Write a research brief on this paper."],
+    [["a"], "Can you write a research brief on this paper?"],
+    [["a", "b"], "Do they report results only on English data?"],
+  ]) {
+    assert.equal(buildPlan({ docIds, question }).mode, "research_brief", question);
+  }
 });
 
 // ---------------------------------------------------------------------------

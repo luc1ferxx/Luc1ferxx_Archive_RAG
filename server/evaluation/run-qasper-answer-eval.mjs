@@ -30,10 +30,11 @@
 //
 // On the agent surface each row also carries checks, one per self_check step
 // of the trace (phase primary, follow_up or final): the answer text the check
-// read and, for each claim it rejected, the check's own fields and the cited
-// sources' text as the check compared it (describeAgentChecks in
-// agent-answer-outcome.js). The .md report counts those claims by failure
-// field and the failed checks by reason.
+// read, the claim judge's summary (null without the judge) and, for each claim
+// it rejected, the check's own fields and the cited sources' text as the check
+// compared it (describeAgentChecks in agent-answer-outcome.js). The .md report
+// counts the checks by judge status, those claims by failure field and the
+// failed checks by reason.
 //
 // Two runs over the same sample can be compared question by question:
 // --compare <other report.json> adds a paired bootstrap block (this run minus
@@ -300,7 +301,9 @@ export const describeAnswerOutputLimit = (
 const formatAgentChecks = (agentChecks) => [
   `Agent self-checks (every self_check step of every row; ${
     Object.entries(agentChecks.phases).map(([phase, n]) => `${phase} ${n}`).join(", ") || "none"
-  }): ${agentChecks.failedChecks} of ${agentChecks.checks} failed, with ${agentChecks.unsupportedClaims} unsupported claims. A claim counts once under each failure field or code it carries.`,
+  }): ${agentChecks.failedChecks} of ${agentChecks.checks} failed, with ${agentChecks.unsupportedClaims} unsupported claims. A claim counts once under each failure field or code it carries. Checks by claim judge status: ${
+    Object.entries(agentChecks.judgeStatuses).map(([status, n]) => `${status} ${n}`).join(", ") || "none"
+  }.`,
   "",
   "| Unsupported claims by failure field: code | Claims | Rows |",
   "|---|---|---|",
