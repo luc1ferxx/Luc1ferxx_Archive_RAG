@@ -162,11 +162,11 @@ custom Skill DAG 由 LangGraph.js 调度：按 superstep 进入节点，进程�
 - 一个 custom Skill 如果没有声明类型契约（`effects`、`inputSchema`、`outputSchema`、`requiresAccessScope`、必填且带范围的 `docIds`），就不在授权目录里，不会运行。
 - `AGENT_SKILL_GRAPH_ROLLOUT` 不再选择任何东西：未设置或 `guarded` 照常启动，`off`、`shadow` 和其他任何取值让进程拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。图事件里的 `mode` 仍然写 `guarded`，`fallback` 总是 `null`。
 
-**规划器的开关还在。** DAG 由谁规划跟随 `AGENT_EXECUTION_PLANNER`，LLM 规划失败（格式错误、越界、校验不过）时退回 deterministic graph。`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到。
+**规划器的开关还在。** DAG 由谁规划跟随 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，或 `deterministic`；2026-11-19 起只剩这两个取值，其他取值拒绝启动），LLM 规划失败（格式错误、越界、校验不过）时退回 deterministic graph。`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到。
 
 **动态选择：** 执行规划器能看到已授权的原子 Skill 候选，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段（这正是 `planner_dynamic_skill_graph` 验证的动态选择）；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
 
-DAG planner 复用既有 execution planner 灰度位（`AGENT_EXECUTION_PLANNER` / `AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 或 shadow 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
+DAG planner 和 intent、execution planner 共用一个灰度位（`AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
 
 Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录（`executed`、`fallback`、`mode`、`graph.nodeIds`、`nodeRuns`、`replans`、`status`、`errorCodes`），属于版本化的附加字段，不作为新的 `/chat` 顶层 graph 字段。`agentObservability.selectedSkills`、skill chain、trace 和最终合成会纳入真正执行的 graph Skill，而不会把 catalog 中仅有资格、未执行的 Skill 当作已选；feedback、前端和 recovery 合同保持向后兼容。Node run 事件只保留 `ok` / `abstained` 标记，不复制证据文本——citation 继续随 trace step 走。
 
@@ -338,9 +338,9 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 
 每个发给聊天模型的 prompt 都有一个身份：`id`（这个 prompt 做什么）、`version`（使用的模板版本）和 `fingerprint`（模板原文 SHA-256 的前 12 位）。
 
-- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 10 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
+- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 12 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
 - **fingerprint 怎么算**：模板类 prompt 对未渲染的模板原文算；函数拼出来的 prompt（意图/执行/DAG 规划器、重规划器、claim 评审）对函数在空输入下的输出算，即指令文本加输入字段名，不含请求数据。
-- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 16 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
+- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 20 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一，两个查询扩展 prompt 只在 `RAG_QA_QUERY_EXPANSION` 打开时生效）。
 - **记录位置**：
   - 模型调用把描述符作为 `promptTemplate` 传给 `completeTextWithMetadata`，它进入 LLMOps 事件和模型 span（`llmops.prompt_template.id` / `.version` / `.fingerprint`），不进入请求。
   - 每次运行在 `agentObservability.promptTemplates` 里列出用过的模板和调用次数、token 数。

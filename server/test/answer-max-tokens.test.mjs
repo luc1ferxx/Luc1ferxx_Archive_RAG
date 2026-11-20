@@ -27,11 +27,11 @@ import { completeTextWithMetadata, resetOpenAIProvider } from "../rag/openai.js"
 import { storeSemanticCacheAnswer } from "../rag/semantic-cache.js";
 import { SERVICE_TOKEN_HEADER, signServiceToken } from "../rag/service-identity.js";
 
-// RAG_ANSWER_MAX_TOKENS caps the three document answer calls (QA prose, QA
-// extractive, comparison); unset, every request is what it was. The limit
-// travels in the field RAG_LLM_MAX_TOKENS_FIELD names, directly, streamed and
-// through the model gateway, and a reply the limit cut off (finish_reason
-// "length") marks the answer answerTruncated.
+// RAG_ANSWER_MAX_TOKENS caps the two document answer calls (single-document QA
+// and comparison); unset, every request is what it was. The limit travels in
+// the field RAG_LLM_MAX_TOKENS_FIELD names, directly, streamed and through the
+// model gateway, and a reply the limit cut off (finish_reason "length") marks
+// the answer answerTruncated.
 
 const SECRET = `${"m".repeat(24)}-max-tokens-secret-0123456789`;
 
@@ -54,16 +54,13 @@ useIsolatedAnswerWriterEnvironment({
     "OPENAI_CHAT_MODEL",
     "RAG_ANSWER_MAX_TOKENS",
     "RAG_ANSWER_TEMPERATURE",
-    "RAG_COMPARISON_STRUCTURED_OUTPUT",
     "RAG_INJECTION_SCREEN",
     "RAG_LLM_MAX_TOKENS_FIELD",
     "RAG_LLM_REQUEST_TIMEOUT_MS",
     "RAG_OBSERVABILITY_ENABLED",
     "RAG_QA_ANSWER_VERDICT",
-    "RAG_QA_EXTRACTIVE_OUTPUT",
     "RAG_SEMANTIC_CACHE",
     "RAG_SHARED_STATE",
-    "RAG_STRUCTURED_OUTPUT_ENABLED",
   ],
   prefix: "answer-max-tokens-",
   set: { RAG_OBSERVABILITY_ENABLED: "false", RAG_SHARED_STATE: "memory" },
@@ -126,12 +123,8 @@ const setEnv = (values) => {
 };
 
 // A fake OpenAI-compatible backend recording every request body. Chat answers
-// `content` with `finishReason`, streamed when the request asks for it;
-// `reply(index)` may answer each request differently.
-const startUpstream = async (
-  t,
-  { content: fixedContent = `${POLICY_SENTENCE} [Source 1]`, finishReason: fixedFinishReason = "stop", reply = null } = {}
-) => {
+// `content` with `finishReason`, streamed when the request asks for it.
+const startUpstream = async (t, { content = `${POLICY_SENTENCE} [Source 1]`, finishReason = "stop" } = {}) => {
   const requests = [];
   const server = http.createServer((req, res) => {
     let raw = "";
@@ -142,9 +135,6 @@ const startUpstream = async (
     req.on("end", () => {
       const body = raw ? JSON.parse(raw) : null;
       const usage = { completion_tokens: 8, prompt_tokens: 5, total_tokens: 13 };
-      const { content, finishReason } = reply
-        ? reply(requests.length)
-        : { content: fixedContent, finishReason: fixedFinishReason };
 
       requests.push({ body, path: req.url });
 
@@ -328,9 +318,9 @@ test("a wrong field refuses a capped call before it enters the model-call guard"
   assert.equal(upstream.requests.length, 1);
 });
 
-test("the three answer calls carry the limit only when it is set, and an invalid one refuses before any call", async () => {
+test("the two answer calls carry the limit only when it is set, and an invalid one refuses before any call", async () => {
   const proseReply = `${POLICY_SENTENCE} [Source 1]`;
-  const unset = stubModelReplies([proseReply]);
+  const unset = stubModelReplies(proseReply);
   const unsetAnswer = await writeQa();
 
   assert.equal("maxTokens" in unset[0].options, false);
@@ -338,7 +328,7 @@ test("the three answer calls carry the limit only when it is set, and an invalid
   assert.equal("answerTruncated" in unsetAnswer, false);
 
   process.env.RAG_ANSWER_MAX_TOKENS = "1024";
-  const capped = stubModelReplies([proseReply]);
+  const capped = stubModelReplies(proseReply);
   const cappedAnswer = await writeQa();
 
   assert.equal(capped[0].options.maxTokens, 1024);
@@ -346,32 +336,20 @@ test("the three answer calls carry the limit only when it is set, and an invalid
   assert.equal(cappedAnswer.text, unsetAnswer.text);
   assert.equal("answerTruncated" in cappedAnswer, false);
 
-  // The extractive attempt and its prose fallback.
-  process.env.RAG_QA_EXTRACTIVE_OUTPUT = "true";
-  const extractive = stubModelReplies(["not json", proseReply]);
+  // The comparison call.
+  const comparisonCapped = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
-  await writeQa();
-  assert.deepEqual(extractive.map((call) => call.options.maxTokens), [1024, 1024]);
-  delete process.env.RAG_QA_EXTRACTIVE_OUTPUT;
-
-  // The comparison call, with and without structured output.
-  for (const structured of [false, true]) {
-    if (structured) process.env.RAG_COMPARISON_STRUCTURED_OUTPUT = "true";
-
-    const calls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
-
-    await writeComparison();
-    assert.equal(calls[0].options.maxTokens, 1024, `structured ${structured}`);
-  }
+  await writeComparison();
+  assert.equal(comparisonCapped[0].options.maxTokens, 1024);
 
   delete process.env.RAG_ANSWER_MAX_TOKENS;
-  const comparisonUnset = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  const comparisonUnset = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
   await writeComparison();
   assert.equal("maxTokens" in comparisonUnset[0].options, false);
 
   process.env.RAG_ANSWER_MAX_TOKENS = "1.5";
-  const refused = stubModelReplies([proseReply]);
+  const refused = stubModelReplies(proseReply);
 
   await assert.rejects(writeQa(), /RAG_ANSWER_MAX_TOKENS must be a whole number of tokens/);
   assert.equal(refused.length, 0);
@@ -471,26 +449,6 @@ test("an empty reply the limit cut is an abstention, not the canned answer with 
   assert.deepEqual(answer.citations, []);
   assert.equal(answer.answerTruncated, true);
   assert.equal(answer.trace.answerTruncated, true);
-});
-
-test("a cut extractive attempt keeps the answer marked when the prose fallback writes it", async (t) => {
-  const upstream = await startUpstream(t, {
-    reply: (index) =>
-      index === 0
-        ? { content: '{"answer": "2 days", "quotes": [{"source": 1, "quote": "Employees may', finishReason: "length" }
-        : { content: `${POLICY_SENTENCE} [Source 1]`, finishReason: "stop" },
-  });
-
-  useDirectBackend(upstream);
-  process.env.RAG_ANSWER_MAX_TOKENS = "24";
-  process.env.RAG_QA_EXTRACTIVE_OUTPUT = "true";
-
-  const answer = await writeQa();
-
-  assert.deepEqual(upstream.requests.map(({ body }) => body.max_tokens), [24, 24]);
-  assert.equal(answer.trace.qaStructuredOutput.fallback, "prose");
-  assert.equal(answer.text, `${POLICY_SENTENCE} [Source 1]`);
-  assert.equal(answer.answerTruncated, true);
 });
 
 test("an answer the limit cut off is marked answerTruncated, on the answer and in its trace", async (t) => {

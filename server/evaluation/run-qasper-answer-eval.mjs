@@ -217,8 +217,6 @@ export const describeRagSurfaceAnswer = (result) => {
     citedPages: citedSourcePages({ abstained, citations: result?.citations ?? [], text: result?.text }),
     contextChars: sumTextChars(result?.retrievedContexts, (context) => context?.text),
     contextPages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
-    // RAG_QA_EXTRACTIVE_OUTPUT's short answer; null otherwise.
-    directAnswer: typeof result?.directAnswer === "string" ? result.directAnswer : null,
     text: result?.text,
     verdictOverridden: result?.verdictOverridden === true,
   };
@@ -248,9 +246,6 @@ export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
     citedPages: citedSourcePages({ abstained: !outcome.answered, citations: sources, text: body.agentAnswer }),
     contextChars: null,
     contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
-    // The extractive short answer rides on the body as ragDirectAnswer;
-    // the finalizer never rewrites it.
-    directAnswer: outcome.answered && typeof body.ragDirectAnswer === "string" ? body.ragDirectAnswer : null,
     text: body.agentAnswer,
     verdictOverridden: isAgentVerdictOverridden(body),
   };
@@ -324,7 +319,7 @@ const formatMarkdown = (report) => {
     `Generated ${report.generatedAt}; surface \`${report.config.surface}\`; chat model ${report.config.chatModel}; ${summary.cases} questions (${summary.unanswerableCases} unanswerable), seed ${report.config.seed}; query adapter ${report.config.queryAdapter ?? "none"}.`,
     "",
     `- Answer F1 (official QASPER, best over annotators): ${summary.answerF1}`,
-    `- Answer F1 of the short answer (directAnswer, else the first sentence; not the official figure): ${summary.answerF1Direct}; among answerable questions it answered: ${summary.answerF1DirectWhenAnswered}`,
+    `- Answer F1 of the short answer (the first sentence; not the official figure): ${summary.answerF1Direct}; among answerable questions it answered: ${summary.answerF1DirectWhenAnswered}`,
     `- Cited evidence recall (an evidence paragraph among the pages the answer's [Source N] labels cite; answerable, an abstention cites none): ${summary.citedEvidenceRecall}; among answers actually given: ${summary.citedEvidenceRecallWhenAnswered}`,
     `- Citation precision (share of cited pages holding annotated evidence; answered answerable questions citing a page, n=${summary.citationPrecisionCases}): ${summary.citationPrecision}`,
     `- Answers citing no page (all answered questions): ${summary.noCitationRateWhenAnswered}`,
@@ -580,10 +575,9 @@ const main = async () => {
         citedPages: answer.citedPages,
         contextChars: answer.contextChars ?? null,
         contextEvidenceHit: evidence.contextEvidenceHit,
-        directAnswer: answer.directAnswer ?? null,
         f1: score(prediction),
         f1DashNormalized: Number(qasperAnswerF1DashNormalized(prediction, references).toFixed(4)),
-        // The short-answer score: directAnswer, else the first sentence.
+        // The short-answer score: the first sentence.
         f1Direct: score(toQasperDirectPrediction(answer)),
         id: testCase.id,
         // Whole since 2026-11-10 (cut at 400 characters before), so a person

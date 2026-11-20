@@ -12,11 +12,7 @@ import {
   resolveSelectedCandidate,
   serializePlannerError,
 } from "./agent-intent-validator.js";
-import {
-  getPlannerRolloutMode,
-  getShadowPlannerAdapter,
-  runShadowPlanner,
-} from "./agent-planner-shadow.js";
+import { getPlannerRolloutMode } from "./agent-planner-rollout.js";
 
 export {
   applyExperienceHintsToCandidates,
@@ -51,7 +47,6 @@ export const createAgentIntentPlanResult = async ({
   experienceMemory = {},
   fallbackPlannerAdapter = deterministicIntentPlannerAdapter,
   plannerAdapter = fallbackPlannerAdapter,
-  shadowPlannerAdapter = getShadowPlannerAdapter(plannerAdapter),
   question,
   taskMemory = null,
 } = {}) => {
@@ -98,58 +93,15 @@ export const createAgentIntentPlanResult = async ({
         selectedPlannerId: fallbackPlannerId,
         selectionReason: fallbackSelection.selectionReason,
       }),
-      selectedCandidate: fallbackSelection.selectedCandidate,
     };
   };
-  const attachShadowPlanner = async (result) => {
-    const publicResult = {
-      plan: result.plan,
-      planner: result.planner,
-    };
-    const shadow = await runShadowPlanner({
-      compare: ({ primary, shadow }) =>
-        primary?.selectedCandidate?.id !== shadow?.selectedCandidate?.id,
-      describe: (shadowResult) => ({
-        selectedIntentId: shadowResult.selectedCandidate?.id ?? null,
-        selectedMode: shadowResult.selectedCandidate?.plan?.mode ?? null,
-        selectionReason: shadowResult.selectionReason ?? null,
-      }),
-      execute: async (adapter) => {
-        const selection = await adapter.selectIntentPlan({
-          candidates,
-          docIds,
-          experienceMemory,
-          question,
-          taskMemory,
-        });
-
-        return resolveSelectedCandidate({
-          candidates,
-          selection,
-        });
-      },
-      primary: result,
-      shadowPlannerAdapter,
-    });
-
-    if (!shadow) {
-      return {
-        ...publicResult,
-        planner: withRolloutMetadata(publicResult.planner),
-      };
-    }
-
-    return {
-      ...publicResult,
-      planner: {
-        ...withRolloutMetadata(publicResult.planner),
-        shadow,
-      },
-    };
-  };
+  const attachRolloutMode = ({ plan, planner }) => ({
+    plan,
+    planner: withRolloutMetadata(planner),
+  });
 
   if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
-    return attachShadowPlanner(await createFallbackResult());
+    return attachRolloutMode(await createFallbackResult());
   }
 
   try {
@@ -165,7 +117,7 @@ export const createAgentIntentPlanResult = async ({
       selection,
     });
 
-    return attachShadowPlanner({
+    return attachRolloutMode({
       plan: selected.selectedCandidate.plan,
       planner: buildPlannerSelection({
         candidates,
@@ -177,12 +129,11 @@ export const createAgentIntentPlanResult = async ({
         selectedPlannerId: requestedPlannerId,
         selectionReason: selected.selectionReason,
       }),
-      selectedCandidate: selected.selectedCandidate,
     });
   } catch (error) {
     const fallbackResult = await createFallbackResult();
 
-    return attachShadowPlanner({
+    return attachRolloutMode({
       plan: fallbackResult.plan,
       planner: {
         ...fallbackResult.planner,
@@ -192,7 +143,6 @@ export const createAgentIntentPlanResult = async ({
         selectedPlannerId: fallbackPlannerId,
         status: "fallback",
       },
-      selectedCandidate: fallbackResult.selectedCandidate,
     });
   }
 };

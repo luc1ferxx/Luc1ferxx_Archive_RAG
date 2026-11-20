@@ -75,9 +75,8 @@ export const qasperAnswerF1 = (prediction, references = []) =>
 // normalization drops ASCII punctuation, so a hyphen vanishes inside a token
 // while an en or em dash stays part of it, and a correct answer written with
 // dashes scores 0 against a hyphenated reference. This folds the dash variants
-// to a hyphen on both sides first and drops soft hyphens (foldDashVariants,
-// the folding the answer writer's quote resolution uses). It feeds no summary
-// and no decision rule.
+// to a hyphen on both sides first and drops soft hyphens (foldDashVariants).
+// It feeds no summary and no decision rule.
 export const normalizeQasperDashes = (text) => foldDashVariants(text);
 
 export const qasperAnswerF1DashNormalized = (prediction, references = []) =>
@@ -102,18 +101,12 @@ export const firstSentenceOf = (text) =>
     .find(Boolean) ?? "";
 
 /**
- * The short answer a row is scored on as well: the extractive mode's
- * directAnswer when the response carries one, else the first sentence of the
- * ordinary prediction (the QA prompts lead with the direct answer), so both
- * arms of a comparison get the same short-answer rule. An abstention stays
+ * The short answer a row is scored on as well: the first sentence of the
+ * prediction (the QA prompts lead with the direct answer). An abstention stays
  * "Unanswerable".
  */
-export const toQasperDirectPrediction = ({ abstained, directAnswer, text }) =>
-  abstained
-    ? "Unanswerable"
-    : typeof directAnswer === "string" && directAnswer.trim()
-      ? directAnswer.trim()
-      : firstSentenceOf(toQasperPrediction({ abstained, text }));
+export const toQasperDirectPrediction = ({ abstained, text }) =>
+  abstained ? "Unanswerable" : firstSentenceOf(toQasperPrediction({ abstained, text }));
 
 /**
  * A row's short-answer score, or null for a row of a report written before
@@ -199,9 +192,9 @@ export const summarizeQasperRuns = (rows) => {
 
   return {
     answerF1: mean(rows.map((row) => row.f1)),
-    // The short-answer score (toQasperDirectPrediction): the extractive
-    // directAnswer, else the prediction's first sentence. Not the official
-    // figure; it is what a short-answer prompt is judged on.
+    // The short-answer score (toQasperDirectPrediction): the prediction's
+    // first sentence. Not the official figure; it is what a short-answer
+    // prompt is judged on.
     answerF1Direct: mean(directRows.map((row) => row.f1Direct)),
     answerF1DirectWhenAnswered: mean(
       directRows.filter((row) => !row.shouldAbstain && !row.abstained).map((row) => row.f1Direct)

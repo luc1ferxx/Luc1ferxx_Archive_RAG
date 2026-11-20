@@ -168,8 +168,6 @@ const startMonolith = async (modelUrl, { environment = {}, graceMs }) => {
     cwd: directory,
     env: {
       ...Object.fromEntries(Object.entries(process.env).filter(([name]) => INHERITED_VARIABLES.test(name))),
-      AGENT_EXECUTION_PLANNER: "deterministic",
-      AGENT_INTENT_PLANNER: "deterministic",
       AGENT_PLANNER_ROLLOUT: "deterministic",
       API_AUTH_ENABLED: "true",
       API_AUTH_TOKENS: JSON.stringify({ [API_TOKEN]: { userId: "alice", workspaceId: "ws-a" } }),

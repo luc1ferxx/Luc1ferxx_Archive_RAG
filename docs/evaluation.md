@@ -330,6 +330,8 @@ npm run rollout:readiness -- --json
 
 `rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`（这是它唯一还接受的取值；其他取值下进程拒绝启动，报告里这一项不通过），生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
 
+2026-11-19（用户：“按推荐全做”）起 `AGENT_PLANNER_ROLLOUT` 只剩 `llm`（默认）和 `deterministic`：`configured`、`guarded_llm`、`shadow` 删除，`AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 不再读取，报告里 intent/execution planner 的四个字段都取 rollout 的值（字段和形状不变）；其他取值下进程拒绝启动（`AGENT_PLANNER_ROLLOUT_REMOVED`），这个命令照样生成报告，planner runtime 这一项不通过（和 `AGENT_SKILL_GRAPH_ROLLOUT` 的处理一样）。
+
 ## Skill graph 的评测边界
 
 custom Skill 阶段只由 typed DAG 执行（V1 chain 和 `AGENT_SKILL_GRAPH_ROLLOUT` 的 `off`、`shadow` 已在 2026-11-13 删除，见 ADR 0001 阶段 8），所以 trajectory case 里凡是进入 custom skill 阶段的请求都走 DAG。固定评测覆盖三层：trajectory 的执行语义、planner eval 的独立原子 Skill 选择、runtime smoke 的真实 HTTP + LLM 路径。它们仍只证明 custom Skill 阶段内的 typed DAG；外层 document/Web/built-in/capability 不是同一张图，schema gate 也不等于差异/风险内容的语义真值校验。
@@ -365,7 +367,7 @@ Recovery 与仍需区分的证据：
 
 ```bash
 cd server
-AGENT_PLANNER_ROLLOUT=llm AGENT_INTENT_PLANNER=llm AGENT_EXECUTION_PLANNER=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
+AGENT_PLANNER_ROLLOUT=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
 ```
 
 `runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。`server/.env` 里如果写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程拒绝启动，要先删掉这一行。
@@ -450,6 +452,7 @@ npm run verify:quality
 - 第一版渲染器把每份文档的引文各写一行，三文档用例里 6 行差异 claim 全被判不受支持：`evaluateDifferenceSectionSupport` 只接受能两两配成"不同文档、实质对立"的差异段，奇数行或配不上的行整段作废。现在按组两两配对、同一行可以重复出现，和有依据模板一个写法。
 - compare-hard 自己的 8 项检查两组相同（6/8，失败的是 QA 对照组的措辞和语料外用例的无引用拒答，10-04 就是这样）。
 - 只在 qwen2.5:7b 上测过，更强的模型在闸门下的采纳率没测。开关默认关，确定性评测和锁定基线不受影响。
+- 2026-11-19 删除（用户："按推荐全做"）：更强的模型一直没有测，用户可见的检查两边相同（`verify:quality` 18/18、compare-hard 6/8），变的只有 7B 的闸门采纳率（0/16 → 12/16）。开关、`comparison_answer_structured` 模板、渲染器和它与抽取式模式共用的引文定位代码一起删除，对比只剩散文 prompt 加有依据模板这一条路，残留的设置被忽略。
 
 报告写入 `evaluation/results/latest-doccompare-verification.json` 和 `.md`，并在 artifact 里写明适用范围：它不衡量真实世界文档上的答案质量，不做模型对比，也不覆盖 PostgreSQL 部署。
 
@@ -958,6 +961,8 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 - 延迟：rag 面 QA 调用中位数 0.99 → 1.88 s（回退 37/54，每次多一次模型调用）；agent 面 1.00 → 1.11 s。
 
 **结论**：三轮下来，"模型选证据、服务端写答案"在 7B 上稳定地让 Agent 路径作答（0 → 22–35/86，短答案显著提高），但事先规则里的两条（不可答为 0、作答行引用证据召回 ≥ 0.4）始终过不了，rag 面的短答案提升始终不显著。定位、回退、锚点三种词法手段已经用尽；再往下要么改判定标准（a4 的 0.4 对这个模型不现实），要么换模型。开关保留为可选项、默认关，不再做第四轮词法规则。
+
+2026-11-19 删除（用户："按推荐全做"）：开关、`qa_answer_extractive` 模板、抽取式渲染和散文回退、响应里的 `directAnswer` 和 agent body 的 `ragDirectAnswer` 一起删除，单文档问答只剩散文一条路，残留的设置被忽略；`f1Direct` 保留，以后一律按第一句计分（2026-11-19 两轮的事先规则用它）。
 
 ### Claim 检查两侧对称：逐字引用按构造通过（2026-10-28）
 
@@ -3114,6 +3119,8 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 - 3 处在默认路径上：意图、执行和 DAG 规划器的理由（220 字符）。解析失败时不报错，退回确定性的计划，规划记录里是 `fallback: true`。意图规划器先生成选择、后写理由；执行计划里前一步的理由排在后一步之前；DAG 规划器的 rationale 排在 `scope` 之前。所以后两处换格式可能改变后面的决定，旧的 `.` 允许 `\"`、`\n` 这类合法转义。
 - 3 处在默认关闭的模式里：引文（比较模式和抽取式模式共用）、比较维度、抽取式答案。引文比对原文时会去掉双引号、合并空白，所以只有原文带反斜杠的句子没法逐字引用。抽取式答案原文带反斜杠时（如 Windows 路径、LaTeX）会找不到依据，退回普通作答。
 - 1 处是评测工具：`eval:judge` 的 rationale（300 字符）。
+
+2026-11-19（用户："按推荐全做"）：默认关闭的这 3 处随比较模式和抽取式模式一起删除，现在评审之外剩 4 处：3 个规划器的理由和 `eval:judge` 的 rationale。
 
 规划器 golden 重录：3 个 `decide-*.json` 只改了正则那几行；`digests.json` 94 个里变了 65 个，replan 的一个没变。同样的一次性重录在改动前的代码上做过对照，没有任何变化。这些字段在模型上实际多久出错一次、改后路由有没有变，合并时没有测。
 

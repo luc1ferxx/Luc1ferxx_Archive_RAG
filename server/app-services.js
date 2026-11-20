@@ -73,10 +73,7 @@ import {
   deterministicIntentPlannerAdapter,
   llmIntentPlannerAdapter,
 } from "./rag/agent-intent-planner.js";
-import {
-  withPlannerRollout,
-  withShadowPlanner,
-} from "./rag/agent-planner-shadow.js";
+import { withPlannerRollout } from "./rag/agent-planner-rollout.js";
 import { recordAgentExperienceFromFeedback } from "./rag/agent-experience-memory.js";
 import { createDefaultCapabilityRegistry } from "./rag/capabilities/index.js";
 import {
@@ -88,8 +85,6 @@ import {
   assertAgentRuntimeSupported,
   assertAnswerGenerationSettings,
   assertDocumentFormatSettings,
-  getAgentExecutionPlanner,
-  getAgentIntentPlanner,
   getAgentPlannerRollout,
 } from "./rag/config.js";
 import { createDocumentDeletionCascade } from "./rag/document-deletion-cascade.js";
@@ -123,61 +118,35 @@ import {
 } from "./upload-session-store.js";
 
 export const createRolloutPlannerAdapter = ({
-  configuredPlanner,
   deterministicPlanner,
   llmPlanner,
 } = {}) => {
   const rollout = getAgentPlannerRollout();
 
-  if (rollout === "shadow") {
-    return withPlannerRollout(
-      withShadowPlanner(deterministicPlanner, llmPlanner),
-      rollout
-    );
-  }
-
-  if (rollout === "guarded_llm" || rollout === "llm") {
+  if (rollout === "llm") {
     return withPlannerRollout(llmPlanner, rollout);
   }
 
-  if (rollout === "deterministic") {
-    return withPlannerRollout(deterministicPlanner, rollout);
-  }
-
-  return configuredPlanner();
+  return withPlannerRollout(deterministicPlanner, rollout);
 };
 
 export const createExecutionPlannerAdapter = () =>
   createRolloutPlannerAdapter({
-    configuredPlanner: () =>
-      getAgentExecutionPlanner() === "llm"
-        ? llmPlannerAdapter
-        : deterministicPlannerAdapter,
     deterministicPlanner: deterministicPlannerAdapter,
     llmPlanner: llmPlannerAdapter,
   });
 
 export const createIntentPlannerAdapter = () =>
   createRolloutPlannerAdapter({
-    configuredPlanner: () =>
-      getAgentIntentPlanner() === "llm"
-        ? llmIntentPlannerAdapter
-        : deterministicIntentPlannerAdapter,
     deterministicPlanner: deterministicIntentPlannerAdapter,
     llmPlanner: llmIntentPlannerAdapter,
   });
 
 // Planning a typed DAG is still execution planning, so it reads the dial the
 // operator already set for V1 rather than adding a second switch that could be
-// pointed somewhere else by accident. Under the `shadow` rollout the
-// deterministic graph stays primary and the model plans beside it, which is the
-// same bargain the V1 planner makes.
+// pointed somewhere else by accident.
 export const createDagPlannerAdapter = () =>
   createRolloutPlannerAdapter({
-    configuredPlanner: () =>
-      getAgentExecutionPlanner() === "llm"
-        ? dagPlannerAdapter
-        : deterministicDagPlannerAdapter,
     deterministicPlanner: deterministicDagPlannerAdapter,
     llmPlanner: dagPlannerAdapter,
   });
@@ -186,10 +155,10 @@ export const createDagPlannerAdapter = () =>
  * The replanner exists only where a model is already planning for real.
  *
  * There is no deterministic replanner to fall back to, so wherever the operator
- * has pinned planning to the deterministic graph -- or kept the model in shadow
- * -- a replan would be the one path that let a model shape an executed plan
- * anyway. Reading the resolved planner's id keeps that decision in one place
- * instead of restating the rollout branches here.
+ * has pinned planning to the deterministic graph a replan would be the one path
+ * that let a model shape an executed plan anyway. Reading the resolved
+ * planner's id keeps that decision in one place instead of restating the
+ * rollout branches here.
  */
 export const createReplanAdapter = (
   resolvedDagPlannerAdapter = createDagPlannerAdapter()
@@ -280,6 +249,11 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
   // instead of answering another way regardless (ADR 0001 phases 6, 7, 8 and
   // 10; server.js and startServiceRole check earlier still).
   assertAgentRuntimeSupported();
+  // AGENT_PLANNER_ROLLOUT: a removed value (configured, guarded_llm, shadow)
+  // or a typo refuses here (AGENT_PLANNER_ROLLOUT_REMOVED), before anything
+  // is built and whether or not the caller injects its planners, instead of
+  // letting the model plan as an unknown value used to.
+  getAgentPlannerRollout();
   // RAG_ANSWER_TEMPERATURE, RAG_ANSWER_MAX_TOKENS and RAG_LLM_MAX_TOKENS_FIELD:
   // a wrong value refuses the start rather than failing every answer call,
   // which /chat would carry on past to the Web stage.
