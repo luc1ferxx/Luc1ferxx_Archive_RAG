@@ -420,11 +420,15 @@ const APPROVAL_CITATIONS = [
   cite({ excerpt: "Remote work requires manager approval before the first remote day." }),
 ];
 
-test("an unlabelled sentence takes the labels of its line only with RAG_CLAIM_SOURCE_INHERITANCE", () => {
+test("an unlabelled sentence takes the labels of its line unless RAG_CLAIM_SOURCE_INHERITANCE=false", () => {
   const answerText =
     "Remote work requires manager approval. Remote work requires manager approval before the first remote day [Source 1].";
 
-  assert.deepEqual(claimVerdicts(answerText, APPROVAL_CITATIONS), [false, true]);
+  // On by default since 2026-11-19 (withFlags does not restore, so the default goes first).
+  assert.deepEqual(claimVerdicts(answerText, APPROVAL_CITATIONS), [true, true]);
+  withFlags({ RAG_CLAIM_SOURCE_INHERITANCE: "false" }, () => {
+    assert.deepEqual(claimVerdicts(answerText, APPROVAL_CITATIONS), [false, true]);
+  });
 
   withFlags({ RAG_CLAIM_SOURCE_INHERITANCE: "true" }, () => {
     const claimSupport = evaluateClaimSupport({ answerText, citations: APPROVAL_CITATIONS });
@@ -633,14 +637,14 @@ test("the follow-up question is the meta text by default and the question with t
   });
 });
 
-test("describeAnswerRateFlags reports every flag, all off by default", () => {
+test("describeAnswerRateFlags reports every flag, all off by default except source inheritance", () => {
   assert.deepEqual(describeAnswerRateFlags(), {
     agentFollowUpOriginalQuestion: false,
     agentSingleDocumentRouting: false,
     claimHeadingContext: false,
     claimInflection: false,
     claimJudgeTemperature: null,
-    claimSourceInheritance: false,
+    claimSourceInheritance: true,
     qaExtractiveOutput: false,
     qaGateInflection: false,
     qaVerdictOverride: "off",

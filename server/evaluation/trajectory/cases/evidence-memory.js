@@ -38,7 +38,7 @@ export const createMemoryNotEvidenceCase = () => ({
       telemetry,
       chat: async ({ question }) => ({
         text:
-          "Remote work requires manager approval. Alice prefers 20 remote days. [Source 1]",
+          "Remote work requires manager approval.\nAlice prefers 20 remote days. [Source 1]",
         citations: [
           buildSource({
             docId: "policy-1",

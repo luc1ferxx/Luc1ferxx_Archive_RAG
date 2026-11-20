@@ -152,7 +152,7 @@ export const createFollowUpCase = () => ({
         if (callIndex === 1) {
           return {
             text:
-              "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+              "Remote work requires manager approval.\nThe satellite stipend is 500 dollars. [Source 1]",
             citations: [
               buildSource({
                 docId: "policy-1",
@@ -482,7 +482,7 @@ export const createBudgetCase = () => ({
       telemetry,
       chat: async ({ question }) => ({
         text:
-          "Remote work requires manager approval. The satellite stipend is 500 dollars. [Source 1]",
+          "Remote work requires manager approval.\nThe satellite stipend is 500 dollars. [Source 1]",
         citations: [
           buildSource({
             docId: "policy-1",

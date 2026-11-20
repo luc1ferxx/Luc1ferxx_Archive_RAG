@@ -15,6 +15,8 @@ export const runTrajectoryEvaluation = async ({
   return withEnvironmentOverrides(
     {
       RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
+      // Deterministic: the claim judge would call the configured chat model.
+      RAG_CLAIM_JUDGE: "off",
       RAG_LONG_MEMORY_ENABLED: "false",
     },
     async () => {
