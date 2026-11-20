@@ -11,7 +11,6 @@ import {
   GATE_SETTING_FIELDS,
   assertComparableGateDumps,
   compareGateDumps,
-  describeGateDumpConfigDifferences,
   describeGateDumpRows,
   formatGateDumpComparison,
   pairGateDumpRows,
@@ -121,7 +120,7 @@ test("two files are compared only over the same questions and the gate settings 
   const cases = [{ evidenceRequirementCount: 1, results: [], testCase: testCase("q1", "p1", { pages: [1] }) }];
   const same = dumpOf(cases, retrieval);
 
-  assert.doesNotThrow(() => assertComparableGateDumps(same, dumpOf(cases, { ...retrieval, qaQueryExpansion: "hyde" }), retrieval));
+  assert.doesNotThrow(() => assertComparableGateDumps(same, dumpOf(cases, retrieval), retrieval));
   assert.throws(
     () => assertComparableGateDumps(same, dumpOf([{ ...cases[0], testCase: testCase("q2", "p1") }], retrieval), retrieval),
     /same questions in the same order/
@@ -137,8 +136,8 @@ test("two files are compared only over the same questions and the gate settings 
     );
   }
 
-  // Anything but the expansion differing: another commit, a dirty tree, another
-  // top-K or embedding model, a base from another run's settings.
+  // Anything differing: another commit, a dirty tree, another top-K or
+  // embedding model, a base from another run's settings.
   for (const [label, arm] of [
     ["git.sha", dumpOf(cases, retrieval, { git: { ...GIT, sha: "def456" } })],
     ["git.changedPaths", dumpOf(cases, retrieval, { git: { changedPaths: ["server/rag/x.js"], dirty: true, sha: GIT.sha } })],
@@ -146,21 +145,12 @@ test("two files are compared only over the same questions and the gate settings 
     ["embeddingModel", dumpOf(cases, retrieval, { embeddingModel: "other-model" })],
     ["seed", dumpOf(cases, retrieval, { seed: 2 })],
   ]) {
-    assert.throws(() => assertComparableGateDumps(same, arm, retrieval), new RegExp(`differ in more than the query expansion: .*${label.replace(".", "\\.")}`), label);
+    assert.throws(() => assertComparableGateDumps(same, arm, retrieval), new RegExp(`differ: .*${label.replace(".", "\\.")}`), label);
     assert.ok(
       assertComparableGateDumps(same, arm, retrieval, { allowDifferences: true }).some(({ field }) => field === label),
       label
     );
   }
-
-  // The expansion fields alone are expected to differ.
-  assert.deepEqual(
-    describeGateDumpConfigDifferences(same.config, {
-      ...same.config,
-      retrieval: { ...retrieval, qaQueryExpansion: "multi_query", qaQueryExpansionCount: 3, qaQueryExpansionPrompt: "p", qaQueryExpansionTemperature: 0 },
-    }),
-    []
-  );
 });
 
 test("the comparison: every metric, the retrieval time of each file", () => {
@@ -195,12 +185,11 @@ test("the comparison: every metric, the retrieval time of each file", () => {
   assert.deepEqual(comparison.provenance.base, {
     dirty: false,
     generatedAt: "2026-11-12T00:00:00.000Z",
-    queryExpansion: "off",
     sha: "abc123",
   });
   assert.match(
     formatGateDumpComparison(comparison, { armLabel: "arm.json", baseLabel: "base.json" }),
-    /base: commit abc123, expansion off; arm: commit abc123, expansion off\./
+    /base: commit abc123; arm: commit abc123\./
   );
 });
 

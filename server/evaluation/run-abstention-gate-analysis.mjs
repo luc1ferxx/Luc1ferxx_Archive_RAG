@@ -25,15 +25,10 @@
 //     [--corpus evaluation/generated/qasper-train.json] [--answerable 800]
 //     [--seed 1] [--latest-name latest-abstention-gate-train]
 //     [--dump <candidates.json>] [--replay <candidates.json>]
-//     [--dense-rescue <mode>:<threshold>:<floor>]...
 //
-// The dense rescue section (RAG_QA_DENSE_RESCUE) tries the decile grid of
-// buildDenseRescueGrid, or only the configurations given with --dense-rescue
-// (a dev confirmation runs the one train picked), and pairs the pick (or each
-// given configuration) with the default gate, question by question, with
-// intervals by paper. --dump writes every question's candidates after
-// retrieval; --replay reads such a file instead of ingesting and retrieving,
-// so a rerun needs no embedding model.
+// --dump writes every question's candidates after retrieval; --replay reads
+// such a file instead of ingesting and retrieving, so a rerun needs no
+// embedding model.
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -72,96 +67,6 @@ export const UNANSWERABLE_PRIOR = 0.115;
 
 export const gateCost = ({ answerablePass, unanswerableCatch }) =>
   round((1 - UNANSWERABLE_PRIOR) * (1 - answerablePass) + WRONG_ANSWER_COST * UNANSWERABLE_PRIOR * (1 - unanswerableCatch));
-
-// Dense rescue (RAG_QA_DENSE_RESCUE, docs/evaluation.md "门控换信号"). The
-// threshold grid is the deciles of the question-level value over this run's
-// questions, both classes together, so it is fixed before any label is read;
-// each threshold is tried with each coverage floor. The rescue only ever adds
-// admissions, so it can only raise the answerable pass and lower the
-// unanswerable catch: a configuration qualifies when it catches no more than
-// DENSE_RESCUE_CATCH_TOLERANCE fewer unanswerable questions than the default
-// gate, and the pick is the qualifying one that passes the most answerable
-// questions (then the higher catch, absolute before margin, the higher floor,
-// the higher threshold). The rescue is worth a dev run only when the pick
-// passes at least DENSE_RESCUE_MIN_GAIN more answerable questions.
-export const DENSE_RESCUE_MODES = Object.freeze(["absolute", "margin"]);
-export const DENSE_RESCUE_FLOORS = Object.freeze([0, 0.3]);
-export const DENSE_RESCUE_QUANTILES = Object.freeze([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
-export const DENSE_RESCUE_CATCH_TOLERANCE = 0.02;
-export const DENSE_RESCUE_MIN_GAIN = 0.03;
-
-const isDenseCosine = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
-
-/**
- * A question's dense signals over its QA candidates: the best cosine
- * (`absolute`) and how far it stands above the dense candidates' mean
- * (`margin`; 0 with fewer than two dense candidates), the two quantities the
- * rescue modes compare a chunk with.
- */
-export const describeDenseSignals = (results) => {
-  const cosines = results.map((result) => result?.vectorScore).filter(isDenseCosine);
-
-  if (cosines.length === 0) {
-    return { absolute: 0, margin: 0 };
-  }
-
-  const best = Math.max(...cosines);
-  const mean = cosines.reduce((sum, value) => sum + value, 0) / cosines.length;
-
-  return { absolute: best, margin: cosines.length < 2 ? 0 : best - mean };
-};
-
-/** The value at quantile `q` (nearest rank on the sorted values), 4 decimals. */
-export const quantileOf = (values, q) => {
-  const sorted = [...values].filter(Number.isFinite).sort((left, right) => left - right);
-
-  if (sorted.length === 0) {
-    return null;
-  }
-
-  return round(sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))]);
-};
-
-/** Every (mode, threshold, floor) the dense rescue grid tries, from the run's own signal values. */
-export const buildDenseRescueGrid = (signals) =>
-  DENSE_RESCUE_MODES.flatMap((mode) => {
-    const thresholds = [
-      ...new Set(
-        DENSE_RESCUE_QUANTILES.map((q) => quantileOf(signals.map((signal) => signal[mode]), q)).filter(
-          (value) => value !== null && value > 0
-        )
-      ),
-    ];
-
-    return thresholds.flatMap((threshold) => DENSE_RESCUE_FLOORS.map((floor) => ({ floor, mode, threshold })));
-  });
-
-const MODE_ORDER = new Map(DENSE_RESCUE_MODES.map((mode, index) => [mode, index]));
-
-// The rules compare whole questions (`counts` from summarizeGateSetting), not
-// the reported rates: those are rounded to 4 decimals, and the difference of
-// two rounded rates can miss a gain of exactly the minimum by 0.0001.
-const catchShortfall = (row, baseline) =>
-  (baseline.counts.unanswerableCaught - row.counts.unanswerableCaught) / baseline.counts.unanswerable;
-
-/** The qualifying rescue that passes the most answerable questions (see DENSE_RESCUE_CATCH_TOLERANCE), or null. */
-export const pickDenseRescue = (rows, baseline) =>
-  [...rows]
-    .filter((row) => catchShortfall(row, baseline) <= DENSE_RESCUE_CATCH_TOLERANCE + 1e-9)
-    .sort(
-      (left, right) =>
-        right.counts.answerablePassed - left.counts.answerablePassed ||
-        right.counts.unanswerableCaught - left.counts.unanswerableCaught ||
-        MODE_ORDER.get(left.mode) - MODE_ORDER.get(right.mode) ||
-        right.floor - left.floor ||
-        right.threshold - left.threshold
-    )[0] ?? null;
-
-/** Whether the pick passes enough more answerable questions than the default gate to go on to dev. */
-export const denseRescueGainsEnough = (pick, baseline) =>
-  pick !== null &&
-  (pick.counts.answerablePassed - baseline.counts.answerablePassed) / baseline.counts.answerable >=
-    DENSE_RESCUE_MIN_GAIN - 1e-9;
 
 /**
  * One gate setting against another on the same questions: per class, the
@@ -322,12 +227,9 @@ export const summarizeGateSetting = (decisions) => {
   };
 };
 
-export const withGateEnv = (setting, callback) => {
+const withGateEnv = (setting, callback) => {
   const previous = {
     coverage: process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE,
-    denseRescue: process.env.RAG_QA_DENSE_RESCUE,
-    denseRescueFloor: process.env.RAG_QA_DENSE_RESCUE_FLOOR,
-    denseRescueThreshold: process.env.RAG_QA_DENSE_RESCUE_THRESHOLD,
     partial: process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR,
     rerank: process.env.RAG_QA_MIN_RERANK_PROBABILITY,
     verdict: process.env.RAG_QA_ANSWER_VERDICT,
@@ -339,19 +241,12 @@ export const withGateEnv = (setting, callback) => {
   process.env.RAG_QA_ANSWER_VERDICT = String((setting.partialCoverageFloor ?? 1) < 1);
   process.env.RAG_QA_MIN_RERANK_PROBABILITY = String(setting.minRerankProbability ?? "off");
   process.env.RAG_MIN_RELEVANCE_SCORE = String(setting.minRelevanceScore);
-  // Every setting names its rescue (or none), so an ambient value never leaks in.
-  process.env.RAG_QA_DENSE_RESCUE = setting.denseRescue?.mode ?? "off";
-  process.env.RAG_QA_DENSE_RESCUE_THRESHOLD = setting.denseRescue ? String(setting.denseRescue.threshold) : "";
-  process.env.RAG_QA_DENSE_RESCUE_FLOOR = setting.denseRescue ? String(setting.denseRescue.floor) : "";
 
   try {
     return callback();
   } finally {
     for (const [key, name] of [
       ["coverage", "RAG_MIN_QA_QUERY_TERM_COVERAGE"],
-      ["denseRescue", "RAG_QA_DENSE_RESCUE"],
-      ["denseRescueFloor", "RAG_QA_DENSE_RESCUE_FLOOR"],
-      ["denseRescueThreshold", "RAG_QA_DENSE_RESCUE_THRESHOLD"],
       ["partial", "RAG_QA_PARTIAL_COVERAGE_FLOOR"],
       ["rerank", "RAG_QA_MIN_RERANK_PROBABILITY"],
       ["verdict", "RAG_QA_ANSWER_VERDICT"],
@@ -401,98 +296,8 @@ const formatMarkdown = (report) => {
           "",
           ...(report.rerankGate ? formatRerankGateMarkdown(report.rerankGate) : []),
         ]),
-    ...(report.denseRescue ? formatDenseRescueMarkdown(report.denseRescue) : []),
-    ...(report.queryExpansion ? formatQueryExpansionMarkdown(report.queryExpansion) : []),
   ].join("\n");
 };
-
-const percentile = (sortedValues, share) =>
-  sortedValues.length === 0
-    ? null
-    : sortedValues[Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(share * sortedValues.length) - 1))];
-
-/**
- * What RAG_QA_QUERY_EXPANSION did over a run (the cases' `queryExpansion`,
- * retrieveQaCandidates): how many questions it applied to, why the others got
- * none (skipped: never asked; fallback: asked, nothing usable), how many
- * replies the output limit cut, and the milliseconds the expansion step took
- * before retrieval (nearest-rank percentiles over the questions it ran on).
- * Null when no case carries it (the setting was off).
- */
-export const summarizeQueryExpansion = (cases = []) => {
-  const entries = cases.map((entry) => entry?.queryExpansion).filter(Boolean);
-
-  if (entries.length === 0) {
-    return null;
-  }
-
-  const countBy = (read) =>
-    entries.reduce((counts, entry) => {
-      const key = read(entry);
-
-      return key ? { ...counts, [key]: (counts[key] ?? 0) + 1 } : counts;
-    }, {});
-  const durations = entries
-    .filter((entry) => !entry.skipped)
-    .map((entry) => Number(entry.durationMs))
-    .filter(Number.isFinite)
-    .sort((left, right) => left - right);
-
-  return {
-    applied: entries.filter((entry) => entry.applied === true).length,
-    durationMs:
-      durations.length === 0
-        ? null
-        : {
-            max: durations.at(-1),
-            mean: Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length),
-            p50: percentile(durations, 0.5),
-            p95: percentile(durations, 0.95),
-          },
-    errorCodes: countBy((entry) => entry.errorCode),
-    fallbacks: countBy((entry) => entry.fallback),
-    mode: entries[0].mode,
-    questions: entries.length,
-    // multi_query: questions where at least one rewrite's retrieval failed
-    // and was left out of the fusion.
-    rewriteRetrievalFailures: entries.filter((entry) => Number(entry.failedRewrites) > 0).length,
-    skipped: countBy((entry) => entry.skipped),
-    truncated: entries.filter((entry) => entry.truncated === true).length,
-  };
-};
-
-const formatQueryExpansionMarkdown = (section) => [
-  "",
-  `Query expansion (RAG_QA_QUERY_EXPANSION=${section.mode}): applied to ${section.applied} of ${section.questions} questions; skipped ${JSON.stringify(section.skipped)}, fell back ${JSON.stringify(section.fallbacks)}, cut by the output limit ${section.truncated}.`,
-  section.durationMs
-    ? `Expansion before retrieval: mean ${section.durationMs.mean} ms, p50 ${section.durationMs.p50}, p95 ${section.durationMs.p95}, max ${section.durationMs.max}.`
-    : "Expansion before retrieval: no timed question.",
-  ...(section.applied > 0
-    ? [
-        "No dense rescue section: the expanded candidates' cosines are to a rewrite or to the HyDE vector, not to the question, and the expansion refuses to run with the rescue. The dense similarity AUC above reads those cosines too.",
-      ]
-    : []),
-];
-
-/** `--dense-rescue margin:0.05:0.3` (mode, threshold, coverage floor) as a rescue configuration. */
-export const parseDenseRescueOption = (value) => {
-  const [mode, rawThreshold, rawFloor = "0"] = String(value ?? "").split(":");
-  const threshold = Number(rawThreshold);
-  const floor = Number(rawFloor);
-
-  if (!DENSE_RESCUE_MODES.includes(mode) || !(threshold > 0 && threshold <= 1) || !(floor >= 0 && floor <= 1)) {
-    throw new Error(
-      `--dense-rescue takes <absolute|margin>:<threshold above 0 up to 1>:<floor from 0 to 1>. Received "${value}".`
-    );
-  }
-
-  return { floor, mode, threshold };
-};
-
-const describeRescue = ({ floor, mode, threshold }) => `${mode}:${threshold}:${floor}`;
-
-const formatPairedDelta = (label, delta) =>
-  `| ${label} | ${delta.delta} | [${delta.ci95ByPaper?.join(", ") ?? "n/a"}] | +${delta.flips.won} / -${delta.flips.lost} | ${delta.questions} | ${delta.papers} |`;
 
 const formatPairedCell = ({ ci95ByPaper, delta, flips }) =>
   `${delta} [${ci95ByPaper?.[0] ?? "n/a"}, ${ci95ByPaper?.[1] ?? "n/a"}] (+${flips.won} / -${flips.lost})`;
@@ -526,41 +331,6 @@ export const formatRerankGateMarkdown = ({ candidates = [], costTolerance, paire
   "",
 ];
 
-const formatDenseRescueMarkdown = (section) => [
-  "## Dense rescue (RAG_QA_DENSE_RESCUE)",
-  "",
-  `Signal AUC (answerable vs unanswerable): best dense cosine ${section.auc.absolute}, best cosine above the dense candidates' mean ${section.auc.margin}.`,
-  section.explicit
-    ? `Configurations given on the command line: ${section.explicit.map(describeRescue).join(", ")}.`
-    : `Grid: the deciles of each signal over this run's questions, with coverage floors ${DENSE_RESCUE_FLOORS.join(" and ")}. A configuration qualifies when it catches at most ${DENSE_RESCUE_CATCH_TOLERANCE} fewer unanswerable questions than the default gate; the pick passes the most answerable questions.`,
-  "",
-  "| mode | threshold | floor | answerable pass | ... with evidence admitted | unanswerable caught | Youden J | cost |",
-  "|---|---|---|---|---|---|---|---|",
-  ...section.grid.map(
-    (row) =>
-      `| ${row.mode}${section.pick && describeRescue(row) === describeRescue(section.pick) ? " (picked)" : ""} | ${row.threshold} | ${row.floor} | ${row.answerablePass} | ${row.answerableEvidencePass} | ${row.unanswerableCatch} | ${row.youdenJ} | ${row.cost} |`
-  ),
-  "",
-  ...(section.explicit
-    ? []
-    : [
-        section.pick
-          ? `Pick: ${describeRescue(section.pick)}; answerable pass ${section.pick.answerablePass} against ${section.baseline.answerablePass} for the default gate (${section.gainsEnough ? "at least" : "less than"} the required +${DENSE_RESCUE_MIN_GAIN}).`
-          : "No configuration qualifies.",
-        "",
-      ]),
-  ...section.paired.flatMap((entry) => [
-    `Paired with the default gate, question by question (${describeRescue(entry)}; 95% interval resampling papers):`,
-    "",
-    "| outcome | delta | CI by paper | +/- | questions | papers |",
-    "|---|---|---|---|---|---|",
-    formatPairedDelta("answerable pass", entry.answerablePass),
-    formatPairedDelta("answerable pass with evidence admitted", entry.answerableEvidencePass),
-    formatPairedDelta("unanswerable caught", entry.unanswerableCatch),
-    "",
-  ]),
-];
-
 const DUMP_REPORT_TYPE = "abstention-gate-candidates";
 
 const main = async () => {
@@ -572,11 +342,9 @@ const main = async () => {
     const index = args.indexOf(name);
     return index >= 0 ? args[index + 1] : fallback;
   };
-  const optionValues = (name) => args.flatMap((value, index) => (value === name ? [args[index + 1]] : []));
   const latestName = option("--latest-name", "latest-abstention-gate-train");
   const dumpPath = option("--dump", null);
   const replayPath = option("--replay", null);
-  const explicitRescues = optionValues("--dense-rescue").map(parseDenseRescueOption);
   // The checkout, before the run.
   const git = await describeEvaluationCheckout();
   let candidatesByCase = [];
@@ -656,17 +424,15 @@ const main = async () => {
 
       for (const [index, testCase] of cases.entries()) {
         const startedAt = performance.now();
-        const { evidenceRequirementCount, queryExpansion, results } = await retrieveQaCandidates({
+        const { evidenceRequirementCount, results } = await retrieveQaCandidates({
           docIds: [testCase.docKeys[0]],
           resolvedQuery: testCase.question,
         });
 
         candidatesByCase.push({
           evidenceRequirementCount,
-          // Only with RAG_QA_QUERY_EXPANSION on (summarizeQueryExpansion).
-          ...(queryExpansion ? { queryExpansion } : {}),
           results,
-          // The whole retrieval of this question, expansion included.
+          // The whole retrieval of this question.
           retrievalMs: Math.round(performance.now() - startedAt),
           testCase: {
             docKeys: testCase.docKeys,
@@ -723,9 +489,6 @@ const main = async () => {
   const signals = candidatesByCase.map(({ results, testCase }) => ({
     admission: best(results, getAdmissionScore),
     coverage: best(results, (result) => result.keywordScore),
-    ...Object.fromEntries(
-      Object.entries(describeDenseSignals(results)).map(([key, value]) => [`dense_${key}`, value])
-    ),
     rerank: best(results, (result) =>
       typeof result.crossEncoderScore === "number" ? toRerankProbability(result.crossEncoderScore) : 0
     ),
@@ -793,26 +556,6 @@ const main = async () => {
         pick: pickRerankGate(rerankGrid, defaultSummary),
       }
     : null;
-  // The dense rescue section. The reranker gate replaces the lexical one, and
-  // the rescue never applies there, so it is measured on the lexical gate.
-  // Not on expanded candidates (RAG_QA_QUERY_EXPANSION applied to any
-  // question): their cosines are to a rewrite or to the HyDE vector, not to
-  // the question, and the expansion refuses to run with the rescue.
-  const expanded = candidatesByCase.some((entry) => entry.queryExpansion?.applied === true);
-  const denseSignals = signals.map((signal) => ({ absolute: signal.dense_absolute, margin: signal.dense_margin }));
-  const rescueConfigs = expanded
-    ? []
-    : explicitRescues.length > 0
-      ? explicitRescues
-      : buildDenseRescueGrid(denseSignals);
-  const rescueRows = rescueConfigs.map((denseRescue) => {
-    const decisions = decide({ ...DEFAULT_GATE, denseRescue });
-
-    return { ...denseRescue, ...withCost(summarizeGateSetting(decisions)), decisions };
-  });
-  const stripDecisions = ({ decisions: _decisions, ...row }) => row;
-  const pick = expanded || explicitRescues.length > 0 ? null : pickDenseRescue(rescueRows, defaultSummary);
-  const pairedRows = explicitRescues.length > 0 ? rescueRows : pick ? [pick] : [];
   const answerableCases = candidatesByCase.filter(({ testCase }) => !testCase.shouldAbstain);
   const report = {
     auc: {
@@ -827,26 +570,6 @@ const main = async () => {
       unanswerable: candidatesByCase.length - answerableCases.length,
     },
     default: defaultSummary,
-    // Null when the candidates were expanded (see above).
-    denseRescue: expanded
-      ? null
-      : {
-          auc: { absolute: auc("dense_absolute"), margin: auc("dense_margin") },
-          baseline: { answerablePass: defaultSummary.answerablePass, unanswerableCatch: defaultSummary.unanswerableCatch },
-          catchTolerance: DENSE_RESCUE_CATCH_TOLERANCE,
-          explicit: explicitRescues.length > 0 ? explicitRescues : null,
-          gainsEnough: explicitRescues.length > 0 ? null : denseRescueGainsEnough(pick, defaultSummary),
-          grid: rescueRows.map(stripDecisions),
-          minGain: DENSE_RESCUE_MIN_GAIN,
-          paired: pairedRows.map((row) => ({
-            floor: row.floor,
-            mode: row.mode,
-            threshold: row.threshold,
-            ...pairGateDecisions(row.decisions, defaultDecisions, { iterations: 10000, seed }),
-          })),
-          pick: pick ? stripDecisions(pick) : null,
-        },
-    queryExpansion: summarizeQueryExpansion(candidatesByCase),
     rerankGate,
     rerankGrid,
     rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,

@@ -26,7 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
-| Prompt 版本 | 12 个 prompt、20 个钉住的模板版本（`id@version`；2026-11-19 按代码数的，删掉抽取式问答和结构化对比的 4 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
+| Prompt 版本 | 10 个 prompt、18 个钉住的模板版本（`id@version`；2026-11-20 按代码数的，删掉查询扩展的 2 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，17 张表（再加每个 live 索引版本的分块表和 BM25 统计表）的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移用 owner 登录；进程级缓存加载、跨租户恢复扫描显式标成 system 工作，默认仍以 owner 登录执行，开角色拆分时切到 NOLOGIN 的 system 角色（迁移 035）。strict 上下文和角色拆分都是可选项，默认关（见 3.32） | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js`、`health.js`（`getRowLevelSecurityTables`） |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/langgraph/agent-stream.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
@@ -823,6 +823,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 285b5b7f：开关、工具和事先写的规则；
   - dbcaa780：核查后的修复和规则措辞修订；
   - 结果在其后的提交里，见 docs/evaluation.md "检索补漏"。
+- **已删除（2026-11-20，用户："接着清理"）**：两种都没过规则 A，开关、两个扩展提示词、HyDE 向量和融合代码一起删除，检索前不再调用模型改写问题或写假想段落；讲的时候是"做过、测过、删了"。
 
 ### 3.45 重排在 top-K 10 下重测：门控仍选 0.02，开重排后多答 32 道可回答题（2026-11-12）
 
@@ -869,6 +870,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **结论**：设置保留，默认关，不给推荐值。稠密余弦只比词面覆盖略好，多放行可回答题的同时，也多放行了不可回答题。
 - **面试里的说法**：被问"为什么不用 embedding 相似度判断该不该拒答"：测过。在 nomic-embed-text 上，它区分两类题只比词面覆盖略好（dev AUC 0.657 对 0.638）。按事先写好的规则在 train 上选阈值，dev 上能多放行约 3% 的可回答题，但 95 道不可回答题里门控也多放行了 3 道，超过事先定的上限，所以没采用。规则写在运行之前，差一题也算没过。
 - **提交**：1e5f05b4（开关、工具和事先写的规则）；结果在其后的提交里，见 docs/evaluation.md "门控换信号"。
+- **已删除（2026-11-20，用户："接着清理"）**：dev 确认没过，开关、门控里的补救分支和 `eval:abstention-gate` 的稠密补救一节一起删除，门控不再用稠密余弦放行；讲的时候是"做过、测过、删了"。
 
 ### 3.43 Office 文件对比 Office 自己导出的 PDF：表格直接传 .xlsx 答得更准（2026-11-11）
 

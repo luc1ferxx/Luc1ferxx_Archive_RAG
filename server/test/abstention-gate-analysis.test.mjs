@@ -1,29 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildDenseRescueGrid,
   computeAuc,
   COVERAGE_GRID,
   DEFAULT_GATE,
-  DENSE_RESCUE_CATCH_TOLERANCE,
-  DENSE_RESCUE_FLOORS,
-  DENSE_RESCUE_MIN_GAIN,
-  denseRescueGainsEnough,
-  describeDenseSignals,
   exactGateCost,
   formatRerankGateMarkdown,
   gateCost,
   pairGateDecisions,
-  parseDenseRescueOption,
   PARTIAL_BAND_GATE,
-  pickDenseRescue,
   pickRerankGate,
   pickRerankThreshold,
   RERANK_COST_TOLERANCE,
-  quantileOf,
   RELEVANCE_GRID,
   summarizeGateSetting,
-  withGateEnv,
 } from "../evaluation/run-abstention-gate-analysis.mjs";
 import {
   DEFAULT_MIN_QA_QUERY_TERM_COVERAGE,
@@ -81,100 +71,7 @@ test("the reranker threshold follows the lexical floor's cost rule, most conserv
   );
 });
 
-test("a question's dense signals are its best cosine and how far it stands above the dense candidates' mean", () => {
-  const signals = describeDenseSignals([
-    { vectorScore: 0.8 },
-    { vectorScore: 0.6 },
-    { vectorScore: 0 },
-    { keywordScore: 1 },
-  ]);
-
-  assert.equal(signals.absolute, 0.8);
-  assert.ok(Math.abs(signals.margin - 0.1) < 1e-9);
-  assert.deepEqual(describeDenseSignals([{ vectorScore: 0.7 }]), { absolute: 0.7, margin: 0 });
-  assert.deepEqual(describeDenseSignals([{ keywordScore: 0.5 }]), { absolute: 0, margin: 0 });
-});
-
-test("the rescue grid is the deciles of each signal over the run's questions, with each coverage floor", () => {
-  assert.equal(quantileOf([5, 1, 3, 2, 4], 0.5), 3);
-  assert.equal(quantileOf([1, 2, 3, 4, 5], 0.1), 1);
-  assert.equal(quantileOf([1, 2, 3, 4, 5], 0.9), 5);
-  assert.equal(quantileOf([], 0.5), null);
-
-  const signals = Array.from({ length: 11 }, (_, index) => ({ absolute: 0.5 + index / 100, margin: index / 100 }));
-  const grid = buildDenseRescueGrid(signals);
-  const absolute = grid.filter((entry) => entry.mode === "absolute");
-  const margin = grid.filter((entry) => entry.mode === "margin");
-
-  assert.deepEqual(
-    [...new Set(absolute.map((entry) => entry.threshold))],
-    [0.51, 0.52, 0.53, 0.54, 0.55, 0.56, 0.57, 0.58, 0.59]
-  );
-  assert.deepEqual([...new Set(margin.map((entry) => entry.threshold))], [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09]);
-  assert.equal(grid.length, 18 * DENSE_RESCUE_FLOORS.length);
-  // A threshold of 0 would rescue every chunk; it is left out, and repeats collapse.
-  assert.deepEqual(
-    buildDenseRescueGrid(Array.from({ length: 5 }, () => ({ absolute: 0.7, margin: 0 }))).map((entry) => entry.threshold),
-    DENSE_RESCUE_FLOORS.map(() => 0.7)
-  );
-});
-
-test("the rescue pick passes the most answerable questions among those catching nearly as many unanswerable ones", () => {
-  const counts = (answerablePassed, unanswerableCaught) => ({
-    answerable: 100,
-    answerablePassed,
-    unanswerable: 100,
-    unanswerableCaught,
-  });
-  const baseline = { counts: counts(50, 50) };
-  const row = (mode, threshold, floor, answerablePassed, unanswerableCaught) => ({
-    counts: counts(answerablePassed, unanswerableCaught),
-    floor,
-    mode,
-    threshold,
-  });
-  const rows = [
-    row("absolute", 0.7, 0, 62, 47), // catches too few
-    row("margin", 0.05, 0, 58, 49),
-    row("absolute", 0.75, 0.3, 58, 49),
-    row("absolute", 0.75, 0, 58, 49),
-    row("absolute", 0.8, 0, 58, 48), // exactly at the tolerance: qualifies
-  ];
-
-  assert.equal(DENSE_RESCUE_CATCH_TOLERANCE, 0.02);
-  // Ties on pass go to the higher catch, then absolute, then the higher floor.
-  assert.deepEqual(pickDenseRescue(rows, baseline), rows[2]);
-  assert.deepEqual(pickDenseRescue([rows[0], rows[4]], baseline), rows[4]);
-  assert.equal(pickDenseRescue([rows[0]], baseline), null);
-  assert.equal(DENSE_RESCUE_MIN_GAIN, 0.03);
-  assert.equal(denseRescueGainsEnough(rows[2], baseline), true);
-  assert.equal(denseRescueGainsEnough(row("absolute", 0.75, 0.3, 53, 49), baseline), true);
-  assert.equal(denseRescueGainsEnough(row("absolute", 0.75, 0.3, 52, 49), baseline), false);
-  assert.equal(denseRescueGainsEnough(null, baseline), false);
-});
-
-test("the rescue rules count questions, so rates rounded to 4 decimals cannot misjudge the minimum gain", () => {
-  // 5 and 29 of 800 report as 0.0063 and 0.0362: the rounded rates differ by
-  // 0.0299, while 24 more questions of 800 is exactly the required 0.03.
-  const baseline = summarizeGateSetting(
-    Array.from({ length: 800 }, (_, index) => ({ confident: index < 5, evidenceAdmitted: false, shouldAbstain: false }))
-  );
-  const pick = {
-    ...summarizeGateSetting(
-      Array.from({ length: 800 }, (_, index) => ({ confident: index < 29, evidenceAdmitted: false, shouldAbstain: false }))
-    ),
-    floor: 0,
-    mode: "absolute",
-    threshold: 0.8,
-  };
-
-  assert.equal(baseline.answerablePass, 0.0063);
-  assert.equal(pick.answerablePass, 0.0362);
-  assert.ok(pick.answerablePass - baseline.answerablePass < DENSE_RESCUE_MIN_GAIN - 1e-9);
-  assert.equal(denseRescueGainsEnough(pick, baseline), true);
-});
-
-test("a rescue is paired with the default gate question by question, with intervals by paper", () => {
+test("a gate setting is paired with the default gate question by question, with intervals by paper", () => {
   const decision = (paperId, shouldAbstain, confident, evidenceAdmitted = confident) => ({
     confident,
     evidenceAdmitted,
@@ -188,14 +85,14 @@ test("a rescue is paired with the default gate question by question, with interv
     decision("b", true, false),
     decision("c", true, false),
   ];
-  const rescued = [
+  const other = [
     decision("a", false, true),
     decision("a", false, true),
     decision("b", false, true, false),
     decision("b", true, true),
     decision("c", true, false),
   ];
-  const paired = pairGateDecisions(rescued, baseline, { iterations: 200, seed: 3 });
+  const paired = pairGateDecisions(other, baseline, { iterations: 200, seed: 3 });
 
   assert.equal(paired.answerablePass.delta, 0.6667);
   assert.deepEqual(paired.answerablePass.flips, { lost: 0, won: 2 });
@@ -206,41 +103,6 @@ test("a rescue is paired with the default gate question by question, with interv
   assert.deepEqual(paired.unanswerableCatch.flips, { lost: 1, won: 0 });
   assert.equal(paired.answerablePass.ci95ByPaper.length, 2);
   assert.ok(paired.answerablePass.ci95ByPaper[0] <= paired.answerablePass.ci95ByPaper[1]);
-});
-
-test("--dense-rescue names one configuration, and the gate environment never leaks a rescue", () => {
-  assert.deepEqual(parseDenseRescueOption("margin:0.05:0.3"), { floor: 0.3, mode: "margin", threshold: 0.05 });
-  assert.deepEqual(parseDenseRescueOption("absolute:0.71"), { floor: 0, mode: "absolute", threshold: 0.71 });
-
-  for (const value of ["dense:0.5:0", "absolute:0:0", "absolute:1.2:0", "margin:0.1:2", "margin"]) {
-    assert.throws(() => parseDenseRescueOption(value), /--dense-rescue takes/);
-  }
-
-  const previous = process.env.RAG_QA_DENSE_RESCUE;
-
-  process.env.RAG_QA_DENSE_RESCUE = "margin";
-
-  try {
-    assert.equal(
-      withGateEnv(DEFAULT_GATE, () => process.env.RAG_QA_DENSE_RESCUE),
-      "off"
-    );
-    assert.deepEqual(
-      withGateEnv({ ...DEFAULT_GATE, denseRescue: { floor: 0.3, mode: "absolute", threshold: 0.7 } }, () => [
-        process.env.RAG_QA_DENSE_RESCUE,
-        process.env.RAG_QA_DENSE_RESCUE_THRESHOLD,
-        process.env.RAG_QA_DENSE_RESCUE_FLOOR,
-      ]),
-      ["absolute", "0.7", "0.3"]
-    );
-    assert.equal(process.env.RAG_QA_DENSE_RESCUE, "margin");
-  } finally {
-    if (previous === undefined) {
-      delete process.env.RAG_QA_DENSE_RESCUE;
-    } else {
-      process.env.RAG_QA_DENSE_RESCUE = previous;
-    }
-  }
 });
 
 test("the reranker re-measure picks among the probability thresholds and the lexical gate on whole counts", () => {
