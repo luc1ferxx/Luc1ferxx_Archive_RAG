@@ -520,8 +520,11 @@ export const getAgentRunMaxDurationMs = () =>
 export const getPromptInjectionScreenMode = () =>
   toChoice(process.env.RAG_INJECTION_SCREEN, "on", ["off", "on"]);
 
+// On by default since 2026-11-19: on QASPER (qwen2.5:7b) the lexical check
+// alone let the agent answer 2/176 answerable questions, the judge with source
+// inheritance 39/176 (docs/evaluation.md "语义核对"). "off" restores lexical only.
 export const getClaimJudgeMode = () =>
-  toChoice(process.env.RAG_CLAIM_JUDGE, "off", ["llm", "off"]);
+  toChoice(process.env.RAG_CLAIM_JUDGE, "llm", ["llm", "off"]);
 
 // Planner calls send a JSON Schema response_format. Turn it off only for an
 // OpenAI-compatible endpoint that rejects the parameter; the planners then fall
@@ -1200,7 +1203,7 @@ export const isClaimHeadingContextEnabled = () =>
 // next one, else the previous one) before it is checked. The check itself is
 // unchanged; a sentence in a line with no label still has no source.
 export const isClaimSourceInheritanceEnabled = () =>
-  toBoolean(process.env.RAG_CLAIM_SOURCE_INHERITANCE, false);
+  toBoolean(process.env.RAG_CLAIM_SOURCE_INHERITANCE, true);
 
 // RAG_CLAIM_JUDGE_TEMPERATURE: sampling temperature sent with the claim judge's
 // request. Unset (default) sends none, so the server's default applies.
