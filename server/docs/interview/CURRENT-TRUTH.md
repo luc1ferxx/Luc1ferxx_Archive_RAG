@@ -26,7 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
-| Prompt 版本 | 14 个 prompt、24 个钉住的模板版本（`id@version`；2026-11-14 按代码数的，阶段 10 删掉 `unified_graph_planner@v1` 之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
+| Prompt 版本 | 12 个 prompt、20 个钉住的模板版本（`id@version`；2026-11-19 按代码数的，删掉抽取式问答和结构化对比的 4 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，17 张表（再加每个 live 索引版本的分块表和 BM25 统计表）的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移用 owner 登录；进程级缓存加载、跨租户恢复扫描显式标成 system 工作，默认仍以 owner 登录执行，开角色拆分时切到 NOLOGIN 的 system 角色（迁移 035）。strict 上下文和角色拆分都是可选项，默认关（见 3.32） | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js`、`health.js`（`getRowLevelSecurityTables`） |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/langgraph/agent-stream.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
@@ -1005,6 +1005,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **第三轮（2026-10-28，提交 624a02b1，规则先写再跑，train seed 9，100 题，86 可答 / 14 不可答）**：加"直接答案所在的引文句必须按门控的锚点、共词、近邻替换三条检查回答问题"（trace 码 `answer_unanchored`，同样回退散文），两侧对称修复和逐行检查也一起进入测量。rag 面作答集合仍与基线相同，短答案 +0.006 [−0.035, +0.049]，r1 不过（54 次尝试回退 37 次：新规则 15、未定位 13、无引文 5、定位失败 4，`unsupported` 从第二轮的 7 降到 0）；agent 面 2 → 22/86（+0.233 [0.151, 0.326]）、短答案 +0.055 [0.023, 0.093]、不可答被答 1/14（"Which languages do they focus on?" 答 "African languages"，标注边界题）、引用证据召回 0.32，a3、a4 不过。停在阶段 1，开关默认关，不再做第四轮词法规则：定位、回退、锚点三种手段用尽，a4 的 0.4 对这个模型始终过不了。
 - **面试里的说法（三轮合并）**：三轮都按事先写好的规则判定为不通过、没有改默认，这本身是方法论证据；能稳定复现的收益是 Agent 路径从几乎不作答到作答 22–35/86 且短答案显著更好，稳定复现的代价是不可答题多答 1–3 道、作答行引用证据召回 0.3 上下。
 - **面试里的说法**：这是"按构造通过校验"思路的第二次应用，证明了它能让 Agent 路径作答，也暴露了代价：模型总能挑出一句引文，不可答题会被多答；"直接答案必须定位"把错答从 3/12 压到 2/14 但压不到 0，因为模型会从相关句子里挑片段。要主动说：只在 7B 上测过，两轮都停在阶段 1，默认关；离线复放发现词法校验对逐字原句也有一到三成拒绝率，这是下一步的优化点。
+- **已删除（2026-11-19，用户："按推荐全做"）**：三轮都没过事先规则，开关和抽取式代码一起删除，响应不再有 `directAnswer`，单文档问答只剩散文一条路；`f1Direct` 保留，改为一律按第一句计分。
 
 ### 3.33 对比答案结构化输出：模型选证据、服务端写答案（2026-10-21）
 
@@ -1014,6 +1015,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **没变好的**：语料外用例模型返回空列表，和以前一样拒答；另有一轮里一个两文档用例的两条引文都改了措辞、定位不到证据，回退模板，答案和基线相同。
 - **一个坑**：第一版把每份文档各写一行，三文档用例 6 行全被判不受支持：差异段的校验要求能两两配成"不同文档、实质对立"的对子，奇数行整段作废，所以改成按组两两配对（同一行可重复），和模板同一写法。
 - **面试里的说法**：7B 写不出能过词法校验的对比散文，但能选对证据；把"写"交给服务端，校验就按构造通过，闸门一行没改。要主动说：只在 7B 上测过；近重复的漏引是服务端用"同一句话"的硬条件补的，不是模型学会了。
+- **已删除（2026-11-19，用户："按推荐全做"）**：更强的模型一直没测，用户可见的检查两边相同（`verify:quality` 18/18、compare-hard 6/8），变的只有 7B 的闸门采纳率；开关、模板、渲染器和引文定位一起删除，对比只剩散文 prompt 加有依据模板。讲的时候是"做过、测过、删了"。
 
 ### 3.32 多租户加固阶段 1–5（2026-10-18）
 
