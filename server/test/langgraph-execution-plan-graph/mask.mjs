@@ -85,12 +85,15 @@ export const withEnv = async (overrides, work) => {
 // The answer-rate flags change pinned response projections when on
 // (test/trajectory-eval.test.mjs pins them off for the same reason), so every
 // pass runs with every one of them off whatever the ambient environment says.
+// The goldens were frozen with the lexical check only: source inheritance and
+// the claim judge (both on by default since 2026-11-19) are pinned off too.
 export const ANSWER_RATE_FLAGS_OFF = Object.freeze({
   AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined,
   AGENT_SINGLE_DOCUMENT_ROUTING: undefined,
   RAG_CLAIM_HEADING_CONTEXT: undefined,
   RAG_CLAIM_INFLECTION: undefined,
+  RAG_CLAIM_JUDGE: "off",
   RAG_CLAIM_JUDGE_TEMPERATURE: undefined,
-  RAG_CLAIM_SOURCE_INHERITANCE: undefined,
+  RAG_CLAIM_SOURCE_INHERITANCE: "false",
   RAG_QA_GATE_INFLECTION: undefined,
 });
