@@ -1154,30 +1154,6 @@ export const getMinQaQueryTermCoverage = () =>
     toPositiveNumber(process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE, DEFAULT_MIN_QA_QUERY_TERM_COVERAGE)
   );
 
-// The QA answer model's own abstention (answer-verdict.js): the QA prompt asks
-// it to open with NOT_IN_EVIDENCE: when the evidence does not answer, and the
-// reply becomes an abstention. Off by default: with qwen2.5:7b, even with the
-// deeper-retrieval retry, QASPER dev caught fewer unanswerable questions (85%
-// -> 70%) at flat answer F1, which fails the pre-declared cost rule. See
-// docs/evaluation.md.
-export const isQaAnswerVerdictEnabled = () =>
-  toBoolean(process.env.RAG_QA_ANSWER_VERDICT, false);
-
-// RAG_QA_VERDICT_OVERRIDE (off | supported; default off; only read while
-// RAG_QA_ANSWER_VERDICT is on). With "supported", a reply that opens with
-// NOT_IN_EVIDENCE: is still answered when the text after the marker, with its
-// evidence-absence hedges removed, holds at least one cited factual claim and
-// every factual claim passes the lexical claim check; the claims must name
-// every anchor and name of the question, one claim must carry the answer,
-// and neither they nor the evidence they cite may swap a query word for a
-// rival; a question the decomposer split into parts is never overridden
-// (answer-verdict-override.js). The LLM claim judge is never asked. Any other
-// value is off.
-export const getQaVerdictOverrideMode = () =>
-  String(process.env.RAG_QA_VERDICT_OVERRIDE ?? "").trim().toLowerCase() === "supported"
-    ? "supported"
-    : "off";
-
 // ---------------------------------------------------------------------------
 // Answer-rate flags. Each changes one thing (off by default except source
 // inheritance, on since 2026-11-19), so an
@@ -1328,7 +1304,6 @@ export const describeAnswerRateFlags = () => ({
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),
   qaGateInflection: isQaGateInflectionEnabled(),
-  qaVerdictOverride: getQaVerdictOverrideMode(),
 });
 
 // ---------------------------------------------------------------------------
@@ -1371,14 +1346,6 @@ export const getSemanticCacheTtlMs = () =>
     ? 60 * 60 * 1000
     : Math.floor(toNonNegativeNumber(process.env.RAG_SEMANTIC_CACHE_TTL_MS, 60 * 60 * 1000));
 
-// With the verdict on, single-document QA also admits a chunk whose coverage
-// lies between this floor and the one above, unless a query term was replaced
-// in it by a rival on the same head word ("parental leave" -> "annual leave");
-// see findQueryTermSubstitution in confidence.js. The band admits chunks the
-// lexical gate cannot vouch for, so it opens only when the answer model can
-// refuse. A value at or above the QA coverage floor turns it off.
-export const DEFAULT_QA_PARTIAL_COVERAGE_FLOOR = 0.3;
-
 // With cross-encoder reranking on, single-document QA decides whether to
 // answer from the reranker's relevance probability instead of query-term
 // coverage (confidence.js). "0" or "off" keeps the lexical gate. Applies only
@@ -1412,27 +1379,6 @@ export const getCrossEncoderScoreScale = () =>
   String(process.env.RAG_CROSS_ENCODER_SCORES ?? "").trim().toLowerCase() === "probabilities"
     ? "probabilities"
     : "logits";
-
-// With the verdict on, a NOT_IN_EVIDENCE reply triggers one more retrieval
-// this deep; the chunks the model has not seen yet that pass the gate get one
-// more answer attempt. The model mostly refuses when the retrieved context
-// lacks the evidence (70% of its QASPER refusals), not when the paper does.
-// 0 turns the retry off.
-export const DEFAULT_QA_VERDICT_RETRY_TOP_K = 18;
-
-export const getQaVerdictRetryTopK = () => {
-  const rawValue = process.env.RAG_QA_VERDICT_RETRY_TOP_K;
-
-  return rawValue === undefined || String(rawValue).trim() === ""
-    ? DEFAULT_QA_VERDICT_RETRY_TOP_K
-    : Math.floor(toNonNegativeNumber(rawValue, DEFAULT_QA_VERDICT_RETRY_TOP_K));
-};
-
-export const getQaPartialCoverageFloor = () =>
-  Math.min(
-    1,
-    toPositiveNumber(process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR, DEFAULT_QA_PARTIAL_COVERAGE_FLOOR)
-  );
 
 export const isQueryDecompositionEnabled = () =>
   toBoolean(process.env.RAG_QUERY_DECOMPOSITION_ENABLED, true);

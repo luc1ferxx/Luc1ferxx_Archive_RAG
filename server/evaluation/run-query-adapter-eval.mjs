@@ -335,7 +335,7 @@ const main = async () => {
       let stampedQuestions = 0;
 
       for (const testCase of [...cases, ...unanswerableCases]) {
-        const { evidenceRequirementCount, results } = await retrieveQaCandidates({
+        const { results } = await retrieveQaCandidates({
           docIds: [testCase.docKeys[0]],
           resolvedQuery: testCase.question,
         });
@@ -360,7 +360,7 @@ const main = async () => {
           vectorScoreDrift.maxAbsDiff = Math.max(vectorScoreDrift.maxAbsDiff, drift.maxAbsDiff);
         }
 
-        const confidence = assessQaConfidence({ evidenceRequirementCount, queryText: testCase.question, results });
+        const confidence = assessQaConfidence({ queryText: testCase.question, results });
 
         if (testCase.shouldAbstain) {
           unanswerableRows.push({ candidateCount: results.length, gateConfident: confidence.confident, id: testCase.id });

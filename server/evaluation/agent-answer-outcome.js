@@ -54,15 +54,6 @@ export const describeAgentFollowUp = (body = {}) => {
 const RAG_STEP_TYPES = new Set(["document_rag", "follow_up_retrieval"]);
 
 /**
- * True when a document RAG call of the run answered a NOT_IN_EVIDENCE reply
- * through RAG_QA_VERDICT_OVERRIDE (its trace step output says so).
- */
-export const isAgentVerdictOverridden = (body = {}) =>
-  (Array.isArray(body?.agentTrace) ? body.agentTrace : []).some(
-    (step) => RAG_STEP_TYPES.has(step?.type) && step?.output?.verdictOverridden === true
-  );
-
-/**
  * True when an output limit cut off the answer model's reply in a document RAG
  * call of the run (RAG_ANSWER_MAX_TOKENS; its trace step output says so).
  */

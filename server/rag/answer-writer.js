@@ -7,9 +7,7 @@ import {
   getAnswerTemperature,
   getMaxComparisonSources,
   getPromptVersion,
-  getQaVerdictOverrideMode,
   isNearDuplicateGuardEnabled,
-  isQaAnswerVerdictEnabled,
 } from "./config.js";
 import {
   attachRetrievedEvidence,
@@ -34,11 +32,6 @@ import {
   screenUntrustedText,
 } from "./prompt-injection-screen.js";
 import { createAnswerDraftReleaser } from "./answer-drafts.js";
-import { QA_NOT_IN_EVIDENCE_MARKER, readQaAnswerVerdict } from "./answer-verdict.js";
-import {
-  describeVerdictOverride,
-  overrideNotInEvidenceVerdict,
-} from "./answer-verdict-override.js";
 import { NAIVE_SENTENCE_BOUNDARY, normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
@@ -59,13 +52,9 @@ const COMPARISON_CLAIM_SAFETY_RULES = `${EVIDENCE_CLAIM_SAFETY_RULES}
 - Do not replace those explicit document-value bindings with an abstract relation-only claim such as "approval authority differs".
 - If there is no evidence-backed gap, leave the Gaps or uncertainty section body empty; never write "None identified", "No gaps", or similar filler.`;
 
-// The QA prompts only: comparison keeps its own insufficiency rules. With
-// RAG_QA_ANSWER_VERDICT on, the model may abstain with the marker.
-const QA_NOT_IN_EVIDENCE_RULE = `If the evidence does not answer the question, reply with only ${QA_NOT_IN_EVIDENCE_MARKER} followed by one short sentence, in the language of the question, naming what the documents do not state. If it answers only part of the question, answer that part and say exactly what is missing. Never guess.`;
-
-const buildQaPromptV1 = (insufficientEvidenceRule) => createPromptTemplate(
+const qaPromptV1 = createPromptTemplate(
   `You answer questions using only retrieved document evidence.
-${insufficientEvidenceRule}
+If the evidence is insufficient, say so directly.
 Do not substitute adjacent topics for the asked topic.
 Use long-term memory only for user preferences or stable notes, never as document evidence.
 ${EVIDENCE_CLAIM_SAFETY_RULES}
@@ -81,9 +70,6 @@ Retrieved Evidence:
 
 Grounded Answer:`
 );
-
-const qaPromptV1 = buildQaPromptV1("If the evidence is insufficient, say so directly.");
-const qaVerdictPromptV1 = buildQaPromptV1(QA_NOT_IN_EVIDENCE_RULE);
 
 const comparisonPromptV1 = createPromptTemplate(
   `You compare uploaded documents using only the provided evidence.
@@ -154,7 +140,7 @@ Differences:
 Gaps or uncertainty:`
 );
 
-const buildQaPromptV2 = (insufficientEvidenceRule) => createChatPromptTemplate([
+const qaPromptV2 = createChatPromptTemplate([
   [
     "system",
     `You are a document-grounded assistant for uploaded PDFs.
@@ -165,7 +151,7 @@ Follow these rules strictly:
 - Use the resolved retrieval question only to clarify references or scope.
 - Use long-term memory only for user preferences or stable notes, never as document evidence or a citation source.
 - Do not substitute related topics, adjacent policies, or likely assumptions for the asked topic.
-- ${insufficientEvidenceRule}
+- If the evidence is insufficient, say exactly what is missing and do not guess.
 ${EVIDENCE_CLAIM_SAFETY_RULES}
 - Every evidence-based sentence must end with citations like [Source 1].
 - Do not cite a source unless it directly supports the sentence.
@@ -184,11 +170,6 @@ Retrieved evidence:
 Grounded Answer:`,
   ],
 ]);
-
-const qaPromptV2 = buildQaPromptV2(
-  "If the evidence is insufficient, say exactly what is missing and do not guess."
-);
-const qaVerdictPromptV2 = buildQaPromptV2(QA_NOT_IN_EVIDENCE_RULE);
 
 const comparisonPromptV2 = createChatPromptTemplate([
   [
@@ -329,16 +310,6 @@ const QA_PROMPTS = defineAnswerPrompts({
   v2Template: qaPromptV2,
   versions: { v1: "v1.2", v2: "v2.2" },
 });
-// v1.3 / v2.3 (RAG_QA_ANSWER_VERDICT on) let the model abstain with
-// QA_NOT_IN_EVIDENCE_MARKER.
-const QA_VERDICT_PROMPTS = defineAnswerPrompts({
-  id: PROMPT_IDS.qaAnswer,
-  v1Template: qaVerdictPromptV1,
-  v2Template: qaVerdictPromptV2,
-  versions: { v1: "v1.3", v2: "v2.3" },
-});
-
-const selectQaPrompts = () => (isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS);
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,
   v1Template: comparisonPromptV1,
@@ -364,14 +335,13 @@ const selectComparisonPrompt = () =>
 export const listAnswerPromptDescriptors = () =>
   [
     QA_PROMPTS,
-    QA_VERDICT_PROMPTS,
     COMPARISON_PROMPTS,
     GUARDED_COMPARISON_PROMPTS,
   ].flatMap((variants) => Object.values(variants).map(({ descriptor }) => descriptor));
 
 /** The templates the current configuration would send. */
 export const getActiveAnswerPromptDescriptors = () => [
-  selectPrompt(selectQaPrompts()).descriptor,
+  selectPrompt(QA_PROMPTS).descriptor,
   selectComparisonPrompt().descriptor,
 ];
 
@@ -1153,9 +1123,6 @@ export const writeQaAnswer = async ({
   resolvedQuery,
   bundle,
   preferenceBlock = "",
-  // How many parts the query decomposer split the question into; read only
-  // by the verdict override, which never answers a multi-part question.
-  evidenceRequirementCount = 1,
 }) => {
   const blocks = {
     questionBlock: buildQuestionBlock({
@@ -1177,7 +1144,7 @@ export const writeQaAnswer = async ({
       retrievedContexts: bundle.retrievedContexts ?? [],
     }),
   });
-  const qaPrompt = selectPrompt(selectQaPrompts());
+  const qaPrompt = selectPrompt(QA_PROMPTS);
   const prompt = qaPrompt.render(blocks);
   const completion = await completeAnswerText(prompt, {
     ...drafts?.completionOptions,
@@ -1186,63 +1153,12 @@ export const writeQaAnswer = async ({
   // Models often group sources as [Source 1, Source 3]; every downstream reader
   // (self-check, finalizer, citation projection) parses one rank per bracket.
   const guarded = guardAnswerLinks(normalizeGroupedSourceLabels(completion.text), { allowedText });
-  const verdict = isQaAnswerVerdictEnabled()
-    ? readQaAnswerVerdict(guarded.text)
-    : { abstained: false, text: guarded.text };
   const injectionScreen = buildInjectionScreenResult(bundle, guarded.removed);
-
-  if (verdict.abstained) {
-    // RAG_QA_VERDICT_OVERRIDE=supported (answer-verdict-override.js): the
-    // reply is answered anyway when the claims after the marker prove it. It
-    // was never drafted (the releaser skips a reply opening with the marker)
-    // and drafts.finish is not called, so it is not drafted now either.
-    const override =
-      getQaVerdictOverrideMode() === "supported"
-        ? overrideNotInEvidenceVerdict({
-            citations: attachRetrievedEvidence({
-              citations: bundle.citations,
-              retrievedContexts: bundle.retrievedContexts ?? [],
-            }),
-            questionPartCount: evidenceRequirementCount,
-            questions: [resolvedQuery, query],
-            replyText: guarded.text,
-          })
-        : null;
-
-    if (override?.overridden) {
-      return markTruncated(
-        {
-          text: override.text,
-          citations: bundle.citations,
-          injectionScreen,
-          abstainSource: null,
-          verdictOverridden: true,
-          trace: { verdictOverride: describeVerdictOverride(override) },
-        },
-        completion.truncated
-      );
-    }
-
-    return markTruncated(
-      {
-        text: verdict.reason,
-        citations: [],
-        abstained: true,
-        abstainReason: verdict.reason,
-        abstainSource: "answer_model",
-        injectionScreen,
-        ...(override ? { trace: { verdictOverride: describeVerdictOverride(override) } } : {}),
-      },
-      completion.truncated
-    );
-  }
-
-  const text = verdict.text;
+  const text = guarded.text;
 
   // A reply the output limit cut before it wrote anything (a reasoning model
   // can spend the whole budget out of sight) is no answer: an abstention, not
-  // the canned sentence below with every citation. Not "answer_model", so the
-  // deeper retrieval retry does not spend another capped call on it.
+  // the canned sentence below with every citation.
   if (completion.truncated && !text.trim()) {
     const reason = "The answer model reached its output limit before it wrote an answer.";
 

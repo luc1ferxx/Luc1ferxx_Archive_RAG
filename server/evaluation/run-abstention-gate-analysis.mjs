@@ -46,16 +46,8 @@ export const RELEVANCE_GRID = Object.freeze([0.2, 0.24, 0.28, 0.32, 0.36, 0.4, 0
 // 0.01 means "at least one query term"; the setting cannot be 0.
 export const COVERAGE_GRID = Object.freeze([0.01, 0.1, 0.2, 0.3, 0.4, 0.51, 0.6]);
 // The gate before tuning: the report's first row. The tuned QA floor is
-// DEFAULT_MIN_QA_QUERY_TERM_COVERAGE in rag/config.js. The grid measures the
-// coverage floor alone (partial coverage band off, partialCoverageFloor 1);
-// the second row adds the band RAG_QA_ANSWER_VERDICT opens, before the answer
-// model's own verdict, which this analysis does not call.
-export const DEFAULT_GATE = Object.freeze({
-  minQueryTermCoverage: 0.51,
-  minRelevanceScore: 0.32,
-  partialCoverageFloor: 1,
-});
-export const PARTIAL_BAND_GATE = Object.freeze({ ...DEFAULT_GATE, partialCoverageFloor: 0.3 });
+// DEFAULT_MIN_QA_QUERY_TERM_COVERAGE in rag/config.js.
+export const DEFAULT_GATE = Object.freeze({ minQueryTermCoverage: 0.51, minRelevanceScore: 0.32 });
 // With --rerank-gate (candidates reranked by a cross-encoder): thresholds on
 // the reranker's relevance probability (RAG_QA_MIN_RERANK_PROBABILITY).
 export const RERANK_PROBABILITY_GRID = Object.freeze([0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
@@ -230,15 +222,11 @@ export const summarizeGateSetting = (decisions) => {
 const withGateEnv = (setting, callback) => {
   const previous = {
     coverage: process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE,
-    partial: process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR,
     rerank: process.env.RAG_QA_MIN_RERANK_PROBABILITY,
-    verdict: process.env.RAG_QA_ANSWER_VERDICT,
     relevance: process.env.RAG_MIN_RELEVANCE_SCORE,
   };
 
   process.env.RAG_MIN_QA_QUERY_TERM_COVERAGE = String(setting.minQueryTermCoverage);
-  process.env.RAG_QA_PARTIAL_COVERAGE_FLOOR = String(setting.partialCoverageFloor ?? 1);
-  process.env.RAG_QA_ANSWER_VERDICT = String((setting.partialCoverageFloor ?? 1) < 1);
   process.env.RAG_QA_MIN_RERANK_PROBABILITY = String(setting.minRerankProbability ?? "off");
   process.env.RAG_MIN_RELEVANCE_SCORE = String(setting.minRelevanceScore);
 
@@ -247,9 +235,7 @@ const withGateEnv = (setting, callback) => {
   } finally {
     for (const [key, name] of [
       ["coverage", "RAG_MIN_QA_QUERY_TERM_COVERAGE"],
-      ["partial", "RAG_QA_PARTIAL_COVERAGE_FLOOR"],
       ["rerank", "RAG_QA_MIN_RERANK_PROBABILITY"],
-      ["verdict", "RAG_QA_ANSWER_VERDICT"],
       ["relevance", "RAG_MIN_RELEVANCE_SCORE"],
     ]) {
       if (previous[key] === undefined) {
@@ -277,10 +263,9 @@ const formatMarkdown = (report) => {
     "| minRelevanceScore | minQueryTermCoverage | answerable pass | ... with evidence admitted | unanswerable caught | Youden J |",
     "|---|---|---|---|---|---|",
     row({ ...report.default, label: "default" }),
-    row({ ...report.partialBand, minQueryTermCoverage: `${report.partialBand.minQueryTermCoverage} (band ${report.partialBand.partialCoverageFloor})` }),
     ...top.map(row),
     "",
-    "First row: the coverage floor alone at 0.51 (the default). Second: with RAG_QA_ANSWER_VERDICT on, which also admits single-part questions' chunks in the partial coverage band unless a query word was replaced by a rival; the answer model's verdict comes after this gate and is not simulated. Then the eight floor-only settings with the highest Youden J.",
+    "First row: the gate before tuning (0.51). Then the eight settings with the highest Youden J.",
     "",
     ...(report.rerankGrid.length === 0
       ? []
@@ -424,13 +409,12 @@ const main = async () => {
 
       for (const [index, testCase] of cases.entries()) {
         const startedAt = performance.now();
-        const { evidenceRequirementCount, results } = await retrieveQaCandidates({
+        const { results } = await retrieveQaCandidates({
           docIds: [testCase.docKeys[0]],
           resolvedQuery: testCase.question,
         });
 
         candidatesByCase.push({
-          evidenceRequirementCount,
           results,
           // The whole retrieval of this question.
           retrievalMs: Math.round(performance.now() - startedAt),
@@ -502,9 +486,8 @@ const main = async () => {
     );
   const decide = (setting) =>
     withGateEnv(setting, () =>
-      candidatesByCase.map(({ evidenceRequirementCount, results, testCase }) => {
+      candidatesByCase.map(({ results, testCase }) => {
         const confidence = assessQaConfidence({
-          evidenceRequirementCount,
           queryText: testCase.question,
           results,
         });
@@ -573,7 +556,6 @@ const main = async () => {
     rerankGate,
     rerankGrid,
     rerankPick: reranked ? pickRerankThreshold(rerankGrid) : null,
-    partialBand: { ...PARTIAL_BAND_GATE, ...evaluateSetting(PARTIAL_BAND_GATE) },
     evidenceRetrieved: rate(
       answerableCases.filter(({ results, testCase }) =>
         results.some((result) => expectedPagesOf(testCase).has(pageOf(result)))

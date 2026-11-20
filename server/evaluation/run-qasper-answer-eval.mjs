@@ -76,7 +76,6 @@ import {
   describeAgentChecks,
   describeAgentFollowUp,
   isAgentAnswerTruncated,
-  isAgentVerdictOverridden,
   summarizeAgentChecks,
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
@@ -208,8 +207,8 @@ export const describeRagSurfaceAnswer = (result) => {
 
   return {
     abstained,
-    // "answer_model" when the model said the evidence does not answer;
-    // otherwise an abstention is the confidence gate's.
+    // "output_limit" when an output limit cut the reply before it wrote
+    // anything; otherwise an abstention is the confidence gate's.
     abstainSource: abstained ? result.abstainSource ?? "gate" : null,
     // An output limit (RAG_ANSWER_MAX_TOKENS, or the endpoint's own) cut the
     // answer model's reply off.
@@ -218,7 +217,6 @@ export const describeRagSurfaceAnswer = (result) => {
     contextChars: sumTextChars(result?.retrievedContexts, (context) => context?.text),
     contextPages: (result?.retrievedContexts ?? []).map((context) => Number(context.pageNumber)),
     text: result?.text,
-    verdictOverridden: result?.verdictOverridden === true,
   };
 };
 
@@ -247,18 +245,6 @@ export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
     contextChars: null,
     contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
     text: body.agentAnswer,
-    verdictOverridden: isAgentVerdictOverridden(body),
-  };
-};
-
-// RAG_QA_VERDICT_OVERRIDE: answers given although the answer model opened with
-// NOT_IN_EVIDENCE:, split by whether the question was answerable.
-const summarizeVerdictOverrides = (rows) => {
-  const answered = rows.filter((row) => row.verdictOverridden && !row.abstained);
-
-  return {
-    answeredAnswerable: answered.filter((row) => !row.shouldAbstain).length,
-    answeredUnanswerable: answered.filter((row) => row.shouldAbstain).length,
   };
 };
 
@@ -333,7 +319,6 @@ const formatMarkdown = (report) => {
           `- Agent answered (not a clarification or grounded abstention): ${summary.agentOutcomes.answered}/${summary.agentOutcomes.cases}; abstentions by source: ${Object.entries(summary.agentOutcomes.abstainSources).map(([source, n]) => `${source} ${n}`).join(", ") || "none"}; follow-ups run / resolved: ${summary.agentOutcomes.followUpRuns} / ${summary.agentOutcomes.followUpResolved}`,
         ]
       : []),
-    `- Answers through the verdict override (RAG_QA_VERDICT_OVERRIDE): answerable ${summary.verdictOverrides?.answeredAnswerable ?? 0}, unanswerable ${summary.verdictOverrides?.answeredUnanswerable ?? 0}`,
     `- Answer replies cut off at an output limit: answerable ${summary.answerTruncations?.answerable ?? 0}, unanswerable ${summary.answerTruncations?.unanswerable ?? 0}`,
     `- Answer-rate flags: ${JSON.stringify(report.config.answerRateFlags ?? null)}; claim judge: ${report.config.claimJudge ?? "off"}; answer temperature: ${report.config.answerTemperature ?? "not sent (the endpoint's default)"}; answer output limit: ${
       report.config.answerMaxTokens ? `${report.config.answerMaxTokens} tokens (${report.config.answerMaxTokensField})` : "not sent (the endpoint's own)"
@@ -585,7 +570,6 @@ const main = async () => {
         prediction,
         references: testCase.referenceAnswers,
         shouldAbstain: Boolean(testCase.shouldAbstain),
-        verdictOverridden: answer.verdictOverridden === true,
       };
 
       rows.push(row);
@@ -642,7 +626,6 @@ const main = async () => {
       ...summarizeQasperRuns(rows),
       ...(surface === "agent" ? { agentChecks: summarizeAgentChecks(rows), agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
       answerTruncations: summarizeAnswerTruncations(rows),
-      verdictOverrides: summarizeVerdictOverrides(rows),
     },
   };
 

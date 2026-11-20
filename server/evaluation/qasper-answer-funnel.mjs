@@ -7,7 +7,7 @@
 //
 //   not_retrieved   no annotated evidence paragraph among the candidates
 //   refused         evidence among the candidates, but no answer (the gate,
-//                   or the answer model when the verdict is on)
+//                   or an output limit cut the reply before it wrote anything)
 //   not_in_context  answered, but the evidence was not in the model's context
 //   in_context      answered with the evidence in the context
 //
@@ -17,14 +17,11 @@
 //
 // Whether the evidence was among the candidates comes from the retrieval
 // report alone (an answer row does not record it), so that stage is as good as
-// the match between the two runs' retrieval. Two things can break the match
+// the match between the two runs' retrieval. One thing can break the match
 // without showing as a settings difference: on the local index the sparse
 // statistics span everything the run ingested, which can change the candidates
 // when top-K is below the dense pool (top-K 6 picks from the dense top 8;
-// from top-K 8 on the candidates are the dense top-K whatever was ingested);
-// and with RAG_QA_ANSWER_VERDICT on, an answer written after the verdict's
-// deeper retrieval retry read chunks the retrieval report does not describe.
-// The second is said in the output when the report shows the verdict was on.
+// from top-K 8 on the candidates are the dense top-K whatever was ingested).
 //
 // Usage:
 //   node evaluation/qasper-answer-funnel.mjs <answers report.json> <retrieval report.json>
@@ -138,10 +135,12 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
   }
 
   const staged = answerable.map((row) => ({ retrieval: retrievalById.get(row.id), row }));
-  // The retrieval run stops at the gate, so a refusal after it -- the answer
-  // model's (verdict on), or a reply the output limit cut before it wrote
-  // anything (RAG_ANSWER_MAX_TOKENS) -- is no disagreement with it.
-  const comparable = ({ row }) => !["answer_model", "output_limit"].includes(row.abstainSource ?? null);
+  // The retrieval run stops at the gate, so only an answer or the gate's own
+  // refusal can disagree with it; a refusal after the gate -- a reply the
+  // output limit cut before it wrote anything (RAG_ANSWER_MAX_TOKENS), or the
+  // answer model's own in a report from before 2026-11-20 -- is no
+  // disagreement.
+  const comparable = ({ row }) => [null, "gate"].includes(row.abstainSource ?? null);
   const stages = FUNNEL_STAGES.map((id) => {
     const members = staged.filter(({ retrieval, row }) => classifyFunnelStage(row, retrieval) === id);
     const answered = members.filter(({ row }) => readAnswered(row));
@@ -209,9 +208,6 @@ export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 
       cases: unanswerable.length,
       refused: unanswerable.filter((row) => !readAnswered(row)).length,
     },
-    // The report does not record RAG_QA_ANSWER_VERDICT; a refusal by the answer
-    // model, or an overridden one, shows it was on.
-    verdictSeen: answerReport.rows.some((row) => row.abstainSource === "answer_model" || row.verdictOverridden === true),
   };
 };
 
@@ -246,11 +242,6 @@ export const formatFunnelMarkdown = (funnel) => {
           `The reports differ, or cannot be shown to match, in ${funnel.configDifferences
             .map(({ current, field, other }) => `${field} (${JSON.stringify(current)} vs ${JSON.stringify(other)})`)
             .join("; ")}.`,
-        ]
-      : []),
-    ...(funnel.verdictSeen
-      ? [
-          "This run had the answer verdict on: an answer written after the verdict's deeper retrieval retry read other chunks than the retrieval report describes, so it may sit in the wrong stage and count as a disagreement.",
         ]
       : []),
     // The recorded settings say nothing about uncommitted code.

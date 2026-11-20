@@ -358,18 +358,18 @@ test("nothing crosses tenant, doc set, document version, answer mode, prompt con
     delete process.env.OPENAI_CHAT_MODEL_SAVED;
   }
 
-  process.env.RAG_QA_ANSWER_VERDICT_SAVED = process.env.RAG_QA_ANSWER_VERDICT ?? "";
-  process.env.RAG_QA_ANSWER_VERDICT = "true";
+  process.env.RAG_PROMPT_VERSION_SAVED = process.env.RAG_PROMPT_VERSION ?? "";
+  process.env.RAG_PROMPT_VERSION = "v1";
   try {
     assert.equal((await lookup()).hit, false, "answer prompt / config");
   } finally {
-    if (process.env.RAG_QA_ANSWER_VERDICT_SAVED) {
-      process.env.RAG_QA_ANSWER_VERDICT = process.env.RAG_QA_ANSWER_VERDICT_SAVED;
+    if (process.env.RAG_PROMPT_VERSION_SAVED) {
+      process.env.RAG_PROMPT_VERSION = process.env.RAG_PROMPT_VERSION_SAVED;
     } else {
-      delete process.env.RAG_QA_ANSWER_VERDICT;
+      delete process.env.RAG_PROMPT_VERSION;
     }
 
-    delete process.env.RAG_QA_ANSWER_VERDICT_SAVED;
+    delete process.env.RAG_PROMPT_VERSION_SAVED;
   }
 
   assert.equal((await lookup()).hit, true, "the original key still hits");

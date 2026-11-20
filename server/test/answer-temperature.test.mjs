@@ -18,7 +18,6 @@ import { describeAnswerRunDifferences } from "../evaluation/compare-qasper-answe
 useIsolatedAnswerWriterEnvironment({
   keys: [
     "RAG_ANSWER_TEMPERATURE",
-    "RAG_QA_ANSWER_VERDICT",
     "RAG_INJECTION_SCREEN",
   ],
   prefix: "answer-temperature-",

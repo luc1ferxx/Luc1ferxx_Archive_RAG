@@ -40,9 +40,6 @@ const FLAG_KEYS = [
   "RAG_CLAIM_SOURCE_INHERITANCE",
   "RAG_CLAIM_JUDGE_TEMPERATURE",
   "RAG_CLAIM_JUDGE",
-  "RAG_QA_ANSWER_VERDICT",
-  "RAG_QA_VERDICT_OVERRIDE",
-  "RAG_QA_PARTIAL_COVERAGE_FLOOR",
   "RAG_MIN_QA_QUERY_TERM_COVERAGE",
   "RAG_MIN_RELEVANCE_SCORE",
   "RAG_QA_MIN_RERANK_PROBABILITY",
@@ -248,29 +245,6 @@ test("with RAG_QA_GATE_INFLECTION a topic-only chunk of a multi-part question st
 
     assert.equal(assessment.confident, false);
   });
-});
-
-test("with the answer verdict on, RAG_QA_GATE_INFLECTION keeps the substitution veto in the partial band", () => {
-  withFlags(
-    {
-      RAG_QA_ANSWER_VERDICT: "true",
-      RAG_QA_GATE_INFLECTION: "true",
-      RAG_QA_PARTIAL_COVERAGE_FLOOR: "0.3",
-    },
-    () => {
-      for (const [queryText, text] of [
-        ["What is the amber ceiling?", "Archive serial cobalt ceilings: approved amount is 3600 dollars per cycle."],
-        ["What is the parental leave policy?", "Annual leave policy: employees receive 10 paid annual leave days each year."],
-      ]) {
-        const assessment = assessQaConfidence({
-          queryText,
-          results: [makeResult({ id: "neighbour", queryText, text })],
-        });
-
-        assert.equal(assessment.confident, false, queryText);
-      }
-    }
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -625,7 +599,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
     claimJudgeTemperature: null,
     claimSourceInheritance: true,
     qaGateInflection: false,
-    qaVerdictOverride: "off",
   });
 
   withFlags(
@@ -635,7 +608,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
       RAG_CLAIM_JUDGE_TEMPERATURE: "0",
       RAG_CLAIM_SOURCE_INHERITANCE: "true",
       RAG_QA_GATE_INFLECTION: "true",
-      RAG_QA_VERDICT_OVERRIDE: "supported",
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
@@ -644,7 +616,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
         claimJudgeTemperature: 0,
         claimSourceInheritance: true,
         qaGateInflection: true,
-        qaVerdictOverride: "supported",
       });
     }
   );

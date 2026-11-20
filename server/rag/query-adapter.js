@@ -71,7 +71,7 @@ let failedLoad = null;
 // embedding cache's own space tags.
 let adaptedVectors = new WeakMap();
 // model vector -> { fingerprint, vector } of its adapted form, so the
-// sub-queries and the verdict retry of one question do not redo W q.
+// sub-queries of one question do not redo W q.
 let adaptedByModelVector = new WeakMap();
 // vector -> the embedding space the embedding model produced it in
 // (markModelQueryVector). A vector without an entry is never adapted.

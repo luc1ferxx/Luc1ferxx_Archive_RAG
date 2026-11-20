@@ -1,7 +1,6 @@
 import {
   getComparisonTopKPerDoc,
   getHybridFusionMethod,
-  getQaVerdictRetryTopK,
   getRerankCandidateMultiplier,
   getRerankProvider,
   getRerankWeight,
@@ -294,8 +293,8 @@ export const normalizeRetrievalPlan = (retrievalPlan = null) => {
 };
 
 // The retrieval seam. Every chunk the document RAG path reads -- the QA and
-// comparison retrievals, the QA verdict retry, the gap plan's supplemental
-// searches, and retrieveQaCandidates for the evaluation entry points -- comes
+// comparison retrievals, the gap plan's supplemental searches, and
+// retrieveQaCandidates for the evaluation entry points -- comes
 // through retrieveGlobalContextForQueries,
 // retrievePerDocumentContextForQueries or searchGlobalContext below. In
 // process they run the *InProcess functions against this process's vector
@@ -791,7 +790,6 @@ const executeQaRag = async ({
     });
   const confidence = assessQaConfidence({
     coverageFromQueryText,
-    evidenceRequirementCount: evidenceRequirements?.length ?? 1,
     results: retrievalResults,
     queryText: resolvedQuery,
   });
@@ -864,137 +862,30 @@ const executeQaRag = async ({
     resolvedQuery,
     bundle,
     preferenceBlock,
-    evidenceRequirementCount: evidenceRequirements?.length ?? 1,
   });
-  const retry =
-    answer.abstainSource === "answer_model"
-      ? await retryQaWithDeeperRetrieval({
-          accessScope,
-          coverageFromQueryText,
-          docIds,
-          evidenceRequirementCount: evidenceRequirements?.length ?? 1,
-          plannedRetrievalQueries,
-          preferenceBlock,
-          query,
-          queryAdapterScope,
-          queryVector,
-          resolvedQuery,
-          retrievalOptions,
-          shownResults: contextResults,
-        })
-      : null;
 
-  // The writer's trace-only diagnostics (the RAG_QA_VERDICT_OVERRIDE decision;
-  // codes and counts only) go to the trace, never into the response; an
-  // applied override also marks the answer verdictOverridden: true.
-  Object.assign(traceFields, answer.trace);
+  // The answer's trace fields go to the RAG trace, never into the response.
+  const { trace: answerTrace, ...response } = answer;
 
-  if (retry) {
-    traceFields.verdictRetry = retry.trace;
-  }
-
-  const final = retry?.answer ? retry : { answer, bundle };
-  const { trace: _answerTrace, ...finalAnswer } = final.answer;
+  Object.assign(traceFields, answerTrace);
 
   return {
     routeMode: route.mode,
     traceFields,
     response: {
-      ...finalAnswer,
-      // A first reply the output limit cut off keeps the answer marked when
-      // the verdict retry wrote it, as a cut comparison call does when a
-      // fallback wrote the text. The trace keeps each attempt's own mark: the
-      // first at the top, the retry's under verdictRetry.
-      ...(answer.answerTruncated === true ? { answerTruncated: true } : {}),
-      retrievedContexts: final.bundle.retrievedContexts,
+      ...response,
+      retrievedContexts: bundle.retrievedContexts,
       evidenceSummary,
       retrieval,
     },
   };
 };
 
-// The answer model said the evidence does not answer (RAG_QA_ANSWER_VERDICT).
-// On QASPER most such refusals had the answer outside the retrieved chunks, so
-// retrieve once more at RAG_QA_VERDICT_RETRY_TOP_K and give the model the
-// chunks it has not seen that pass the same gate, at most one normal context's
-// worth. One retry only; if nothing new passes, the refusal stands.
 // Further candidates need no query term of their own: a paragraph answering in
 // other words ("We evaluate on SQuAD" for "What datasets do they use?") often
 // shares none. On QASPER train this floor put the most evidence in the context
 // (0.335 against 0.318 at one shared term and 0.23 before widening).
 export const QA_CONTEXT_MIN_COVERAGE = 0;
-
-const retryQaWithDeeperRetrieval = async ({
-  accessScope = null,
-  coverageFromQueryText = false,
-  docIds,
-  evidenceRequirementCount,
-  plannedRetrievalQueries,
-  preferenceBlock,
-  query,
-  queryAdapterScope = null,
-  queryVector,
-  resolvedQuery,
-  retrievalOptions,
-  shownResults,
-}) => {
-  const contextSize = retrievalOptions.topK ?? getRetrievalTopK();
-  const topK = getQaVerdictRetryTopK();
-
-  if (topK <= contextSize) {
-    return null;
-  }
-
-  const shownKeys = new Set(shownResults.map((result) => getResultKey(result)));
-  const { results } = await retrieveGlobalContextForQueries({
-    accessScope,
-    primaryQueryVector: queryVector,
-    primaryQueryText: resolvedQuery,
-    retrievalQueries: plannedRetrievalQueries,
-    retrievalOptions: { ...retrievalOptions, topK },
-    docIds,
-    queryAdapterScope,
-  });
-  const unseen = results.filter((result) => !shownKeys.has(getResultKey(result)));
-  const confidence = assessQaConfidence({
-    coverageFromQueryText,
-    evidenceRequirementCount,
-    queryText: resolvedQuery,
-    results: unseen,
-  });
-  const trace = {
-    topK,
-    unseenCandidateCount: unseen.length,
-    admittedCount: Math.min(confidence.usableResults.length, contextSize),
-    answered: false,
-  };
-
-  if (!confidence.confident) {
-    return { answer: null, trace };
-  }
-
-  const bundle = prepareQASourceBundle({
-    results: selectQaContext({
-      confidence,
-      limit: contextSize,
-      minCoverage: QA_CONTEXT_MIN_COVERAGE,
-      queryText: resolvedQuery,
-      results: unseen,
-    }).slice(0, contextSize),
-  });
-  const answer = await writeQaAnswer({
-    query,
-    resolvedQuery,
-    bundle,
-    preferenceBlock,
-    evidenceRequirementCount,
-  });
-
-  trace.answered = !answer.abstained;
-  Object.assign(trace, answer.trace);
-
-  return { answer, bundle, trace };
-};
 
 const runDocumentRag = ({
   accessScope,
