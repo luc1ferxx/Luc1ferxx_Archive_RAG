@@ -330,7 +330,7 @@ npm run rollout:readiness -- --json
 
 `rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`（这是它唯一还接受的取值；其他取值下进程拒绝启动，报告里这一项不通过），生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
 
-2026-11-19（用户：“按推荐全做”）起 `AGENT_PLANNER_ROLLOUT` 只剩 `llm`（默认）和 `deterministic`：`configured`、`guarded_llm`、`shadow` 删除，`AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 不再读取，报告里 intent/execution planner 的四个字段都取 rollout 的值（字段和形状不变）；其他取值下这个命令和进程一样直接报错退出（`AGENT_PLANNER_ROLLOUT_REMOVED`），不生成报告。
+2026-11-19（用户：“按推荐全做”）起 `AGENT_PLANNER_ROLLOUT` 只剩 `llm`（默认）和 `deterministic`：`configured`、`guarded_llm`、`shadow` 删除，`AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 不再读取，报告里 intent/execution planner 的四个字段都取 rollout 的值（字段和形状不变）；其他取值下进程拒绝启动（`AGENT_PLANNER_ROLLOUT_REMOVED`），这个命令照样生成报告，planner runtime 这一项不通过（和 `AGENT_SKILL_GRAPH_ROLLOUT` 的处理一样）。
 
 ## Skill graph 的评测边界
 
