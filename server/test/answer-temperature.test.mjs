@@ -41,8 +41,8 @@ const qaBundle = () =>
     ],
   });
 
-const writeQa = async (replies) => {
-  const calls = stubModelReplies(replies);
+const writeQa = async (reply) => {
+  const calls = stubModelReplies(reply);
   const response = await writeQaAnswer({ bundle: qaBundle(), query: QUERY, resolvedQuery: QUERY });
 
   return { calls, response };
@@ -87,13 +87,13 @@ test("unset or empty, no temperature is sent; a number from 0 to 2 is; anything 
 });
 
 test("the QA answer call carries the temperature only when it is set", async () => {
-  const unset = await writeQa([`${POLICY_SENTENCE} [Source 1]`]);
+  const unset = await writeQa(`${POLICY_SENTENCE} [Source 1]`);
 
   assert.equal(unset.calls.length, 1);
   assert.equal("temperature" in unset.calls[0].options, false);
 
   process.env.RAG_ANSWER_TEMPERATURE = "0";
-  const zero = await writeQa([`${POLICY_SENTENCE} [Source 1]`]);
+  const zero = await writeQa(`${POLICY_SENTENCE} [Source 1]`);
 
   assert.equal(zero.calls[0].options.temperature, 0);
   // Same answer either way: the setting changes the request, not what is done with the reply.
@@ -101,17 +101,17 @@ test("the QA answer call carries the temperature only when it is set", async () 
 
   // A value the endpoint would refuse never reaches it.
   process.env.RAG_ANSWER_TEMPERATURE = "5";
-  await assert.rejects(writeQa([`${POLICY_SENTENCE} [Source 1]`]), /RAG_ANSWER_TEMPERATURE must be a number from 0 to 2/);
+  await assert.rejects(writeQa(`${POLICY_SENTENCE} [Source 1]`), /RAG_ANSWER_TEMPERATURE must be a number from 0 to 2/);
 });
 
 test("the comparison answer call carries it too", async () => {
   const { analysis, bundle } = comparison();
-  const unsetCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  const unsetCalls = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
   await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });
   assert.equal("temperature" in unsetCalls[0].options, false);
 
-  const zeroCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  const zeroCalls = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
   process.env.RAG_ANSWER_TEMPERATURE = "0";
   await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });

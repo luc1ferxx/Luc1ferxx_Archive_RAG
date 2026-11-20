@@ -320,7 +320,7 @@ test("a wrong field refuses a capped call before it enters the model-call guard"
 
 test("the two answer calls carry the limit only when it is set, and an invalid one refuses before any call", async () => {
   const proseReply = `${POLICY_SENTENCE} [Source 1]`;
-  const unset = stubModelReplies([proseReply]);
+  const unset = stubModelReplies(proseReply);
   const unsetAnswer = await writeQa();
 
   assert.equal("maxTokens" in unset[0].options, false);
@@ -328,7 +328,7 @@ test("the two answer calls carry the limit only when it is set, and an invalid o
   assert.equal("answerTruncated" in unsetAnswer, false);
 
   process.env.RAG_ANSWER_MAX_TOKENS = "1024";
-  const capped = stubModelReplies([proseReply]);
+  const capped = stubModelReplies(proseReply);
   const cappedAnswer = await writeQa();
 
   assert.equal(capped[0].options.maxTokens, 1024);
@@ -337,19 +337,19 @@ test("the two answer calls carry the limit only when it is set, and an invalid o
   assert.equal("answerTruncated" in cappedAnswer, false);
 
   // The comparison call.
-  const comparisonCapped = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  const comparisonCapped = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
   await writeComparison();
   assert.equal(comparisonCapped[0].options.maxTokens, 1024);
 
   delete process.env.RAG_ANSWER_MAX_TOKENS;
-  const comparisonUnset = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  const comparisonUnset = stubModelReplies("Differences:\n- alpha says 2 days [Source 1]");
 
   await writeComparison();
   assert.equal("maxTokens" in comparisonUnset[0].options, false);
 
   process.env.RAG_ANSWER_MAX_TOKENS = "1.5";
-  const refused = stubModelReplies([proseReply]);
+  const refused = stubModelReplies(proseReply);
 
   await assert.rejects(writeQa(), /RAG_ANSWER_MAX_TOKENS must be a whole number of tokens/);
   assert.equal(refused.length, 0);

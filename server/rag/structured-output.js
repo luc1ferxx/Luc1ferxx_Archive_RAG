@@ -26,8 +26,7 @@
 // longer JSON (21 of 137 claim-judge replies on qwen2.5:7b, docs/evaluation.md
 // "评审输出格式修正"). JSON forbids a raw control character in a string as
 // well, and without the backslash a line break could only be written raw
-// (Ollama's `.` left out LF and CR). So a value never holds any of them, and a
-// verbatim quote cannot copy a backslash from its source.
+// (Ollama's `.` left out LF and CR). So a value never holds any of them.
 
 export const boundedString = (maxLength) => ({
   pattern: `^[^"\\\\\\x00-\\x1F]{0,${maxLength}}$`,

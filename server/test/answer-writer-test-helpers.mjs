@@ -47,11 +47,10 @@ export const useIsolatedAnswerWriterEnvironment = ({ keys, prefix, set = {} }) =
 };
 
 /**
- * A stand-in model answering one reply per call, the last one repeated.
- * Returns the calls it received ({ options, prompt }).
+ * A stand-in model answering `reply` to every call. Returns the calls it
+ * received ({ options, prompt }).
  */
-export const stubModelReplies = (replies) => {
-  const queue = [...replies];
+export const stubModelReplies = (reply) => {
   const calls = [];
 
   configureOpenAIProvider({
@@ -60,7 +59,7 @@ export const stubModelReplies = (replies) => {
     completeText: async (prompt, options) => {
       calls.push({ options, prompt });
 
-      return queue.length > 1 ? queue.shift() : queue[0];
+      return reply;
     },
   });
 
