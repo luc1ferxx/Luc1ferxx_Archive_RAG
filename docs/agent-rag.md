@@ -338,9 +338,9 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 
 每个发给聊天模型的 prompt 都有一个身份：`id`（这个 prompt 做什么）、`version`（使用的模板版本）和 `fingerprint`（模板原文 SHA-256 的前 12 位）。
 
-- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 10 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
+- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 12 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
 - **fingerprint 怎么算**：模板类 prompt 对未渲染的模板原文算；函数拼出来的 prompt（意图/执行/DAG 规划器、重规划器、claim 评审）对函数在空输入下的输出算，即指令文本加输入字段名，不含请求数据。
-- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 16 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
+- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 20 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一，两个查询扩展 prompt 只在 `RAG_QA_QUERY_EXPANSION` 打开时生效）。
 - **记录位置**：
   - 模型调用把描述符作为 `promptTemplate` 传给 `completeTextWithMetadata`，它进入 LLMOps 事件和模型 span（`llmops.prompt_template.id` / `.version` / `.fingerprint`），不进入请求。
   - 每次运行在 `agentObservability.promptTemplates` 里列出用过的模板和调用次数、token 数。

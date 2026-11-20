@@ -554,7 +554,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 代码：`server/rag/prompt-registry.js definePrompt`；`server/rag/prompt-registry.js hashPromptSet`；`server/rag/prompt-catalog.js describeActivePromptTemplates`；`server/test/prompt-registry.test.mjs PINNED_PROMPT_TEMPLATES`；`server/evaluation/release-evidence-gate.js buildPromptLineageCheck`
 
-> ⚠ 现在代码里是 11 个 prompt id、19 个钉住的 id@version，CURRENT-TRUTH 写的 10/16 已经过时。这套只做归因，没有线上 A/B 或灰度。
+> ⚠ 这套只做归因，没有线上 A/B 或灰度。
 
 ### Q15. QPS 放大 100 倍，这条自检链路哪里先扛不住？如果评审模型挂了、超时或者输出乱码，会发生什么？
 
