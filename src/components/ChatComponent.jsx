@@ -12,7 +12,6 @@ import SpeechRecognition, {
   useSpeechRecognition,
 } from "react-speech-recognition";
 import { streamChatAnswer } from "../archiveApi";
-import { DEMO_CONVERSATION } from "../demoWorkbench";
 
 const { Search } = Input;
 
@@ -33,7 +32,6 @@ const ChatComponent = (props) => {
     userId,
     handleResp,
     inputId,
-    isDemoWorkbench = false,
     isLoading,
     onAttach,
     onChatScopeModeChange,
@@ -59,7 +57,7 @@ const ChatComponent = (props) => {
   const speechRef = useRef(null);
   const initPromiseRef = useRef(null);
   const sourceControlRef = useRef(null);
-  const hasDocuments = isDemoWorkbench || docIds.length > 0;
+  const hasDocuments = docIds.length > 0;
 
   // Hook must be called unconditionally; dynamic import("speak-tts") is intercepted by the test mock
   const { transcript, listening, resetTranscript, browserSupportsSpeechRecognition } =
@@ -169,21 +167,6 @@ const ChatComponent = (props) => {
 
       setSearchValue("");
 
-      if (isDemoWorkbench) {
-        const demoAnswer = {
-          ...DEMO_CONVERSATION[0].answer,
-          agentAnswer: DEMO_CONVERSATION[0].answer.agentAnswer,
-        };
-
-        handleResp(trimmedQuestion, demoAnswer);
-
-        if (isChatModeOn) {
-          talk(demoAnswer.agentAnswer);
-        }
-
-        return;
-      }
-
       abortControllerRef.current?.abort();
       const controller = new AbortController();
       abortControllerRef.current = controller;
@@ -269,7 +252,6 @@ const ChatComponent = (props) => {
     [
       docIds,
       handleResp,
-      isDemoWorkbench,
       isChatModeOn,
       sessionId,
       setIsLoading,
@@ -453,11 +435,7 @@ const ChatComponent = (props) => {
           ) : null}
         </div>
       ) : null}
-      <div
-        className={`archive-composer-bar ${isDemoWorkbench ? "is-demo" : ""} ${
-          isLoading ? "is-running" : ""
-        }`}
-      >
+      <div className={`archive-composer-bar ${isLoading ? "is-running" : ""}`}>
         <div className="archive-composer-controls">
           {showQuickActions ? (
             <Input
@@ -521,13 +499,9 @@ const ChatComponent = (props) => {
                 </button>
               ) : null}
 
-              <div className="archive-composer-transcript">
-                {isDemoWorkbench
-                  ? t("chat.demoTranscript")
-                  : transcriptLabel}
-              </div>
+              <div className="archive-composer-transcript">{transcriptLabel}</div>
 
-              {!isDemoWorkbench && chatScopeOptions.length > 0 ? (
+              {chatScopeOptions.length > 0 ? (
                 showQuickActions ? (
                   <div
                     className="archive-sources-control"

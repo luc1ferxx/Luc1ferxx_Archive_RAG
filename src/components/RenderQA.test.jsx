@@ -881,12 +881,12 @@ describe("RenderQA", () => {
     expect(handleSelectTurn).not.toHaveBeenCalled();
   });
 
-  test("demo mode without onSelectTurn renders article without tabIndex", () => {
+  test("renders the article without tabIndex when onSelectTurn is not given", () => {
     render(
       <RenderQA
         conversation={[
           {
-            question: "Demo question",
+            question: "Read-only question",
             answer: {
               ragAnswer: "Document answer.",
               ragSources: [],

@@ -19,41 +19,9 @@
 
 .archive-global-header {
   grid-area: global;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 0 22px;
   background: rgba(255, 255, 255, 0.94);
-}
-
-.archive-breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  color: var(--archive-text-muted);
-  font-size: 0.84rem;
-}
-
-.archive-breadcrumb strong {
-  min-width: 0;
-  color: var(--archive-text-primary);
-  font-weight: 760;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.archive-private-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid var(--archive-border-subtle);
-  border-radius: 6px;
-  background: #f8fafc;
-  color: var(--archive-text-muted);
-  font-size: 0.74rem;
-  font-weight: 680;
 }
 
 .archive-header-actions {
@@ -83,24 +51,6 @@
   border-color: #dbe4f0;
   background: #f3f7fc;
   outline: none;
-}
-
-.archive-user-avatar {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
-  background: #49556d;
-  color: #ffffff;
-  font-size: 0.74rem;
-  font-weight: 760;
-}
-
-.archive-header-actions .archive-user-avatar:hover,
-.archive-header-actions .archive-user-avatar:focus-visible {
-  background: #344155;
-  color: #ffffff;
 }
 
 .archive-workbench-tabs {
@@ -271,29 +221,6 @@
 
 .document-profile {
   display: none;
-}
-
-.document-status-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: #16a34a;
-}
-
-.document-status-dot.is-idle {
-  background: #c4ccd7;
-}
-
-.archive-show-more-button {
-  justify-self: start;
-  padding: 2px 0;
-  border: none;
-  background: transparent;
-  color: #66758c;
-  font: inherit;
-  font-size: 0.78rem;
-  cursor: pointer;
 }
 
 .archive-sidebar-footer {

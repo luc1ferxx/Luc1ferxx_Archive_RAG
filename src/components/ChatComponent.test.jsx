@@ -36,19 +36,6 @@ vi.mock("../archiveApi", () => ({
   streamChatAnswer: (...args) => mockStreamChatAnswer(...args),
 }));
 
-vi.mock("../demoWorkbench", () => ({
-  DEMO_CONVERSATION: [
-    {
-      question: "Demo question",
-      answer: {
-        agentAnswer: "Demo answer",
-        ragAnswer: "Demo document answer",
-        ragSources: [],
-      },
-    },
-  ],
-}));
-
 const { default: ChatComponent } = await import("./ChatComponent");
 const { createTranslator } = await import("../archiveI18n");
 
@@ -125,6 +112,23 @@ describe("ChatComponent", () => {
     );
     // The final answer replaces the live panel.
     expect(screen.queryByTestId("live-answer")).not.toBeInTheDocument();
+  });
+
+  test("asks the server even when the workspace has no documents", async () => {
+    renderChat({ docIds: [] });
+
+    await userEvent.type(screen.getByRole("searchbox"), "What is indexed?");
+    await userEvent.keyboard("{Enter}");
+
+    expect(mockStreamChatAnswer).toHaveBeenCalledWith(
+      expect.objectContaining({ docIds: [], question: "What is indexed?" })
+    );
+    await waitFor(() =>
+      expect(handleResp).toHaveBeenCalledWith(
+        "What is indexed?",
+        expect.objectContaining({ agentAnswer: "Answer" })
+      )
+    );
   });
 
   test("ignores stream events from a request that has been superseded", async () => {

@@ -808,6 +808,30 @@ describe("App", () => {
     );
   });
 
+  test("opens a workspace without documents on its empty state", async () => {
+    axios.get.mockImplementation((url) => {
+      if (url.endsWith("/agent-runs/recovery")) {
+        return Promise.resolve({ data: { runs: [] } });
+      }
+
+      if (url.endsWith("/tasks")) {
+        return Promise.resolve({ data: { tasks: [] } });
+      }
+
+      return Promise.resolve({ data: [] });
+    });
+    render(<App />);
+    await openWorkspace();
+
+    expect(await screen.findByText("No documents yet")).toBeInTheDocument();
+    expect(screen.getByText("Agent workspace is empty")).toBeInTheDocument();
+    expect(screen.getByText("Upload mock")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear workspace" })).toBeDisabled();
+    // The header no longer carries a placeholder workspace name or account.
+    expect(screen.queryByText("Finance Policy QA")).not.toBeInTheDocument();
+    expect(screen.queryByText("AK")).not.toBeInTheDocument();
+  });
+
   test("posts answer feedback from the conversation panel", async () => {
     render(<App />);
     await openWorkspace();

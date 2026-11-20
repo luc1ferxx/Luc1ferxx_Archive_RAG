@@ -21,8 +21,9 @@ const defaultT = createTranslator("en");
 const formatTabLabel = (singular, plural, count) =>
   count > 1 ? `${plural} ${count}` : singular;
 
-// The cited text itself, never a demo description: the evidence panel of a
-// file without an inline preview shows only what the answer cited.
+// The cited text itself, never the preview's fallback description: the
+// evidence panel of a file without an inline preview shows only what the
+// answer cited.
 const getCitedText = (source = {}) =>
   String(source.excerpt ?? source.text ?? source.pageContent ?? "").trim();
 
@@ -43,13 +44,11 @@ const getPreviewTabs = (evidence, t) => [
 ];
 
 const getObjectTags = (evidence) =>
-  evidence.previewTags.length > 0
-    ? evidence.previewTags
-    : [
-        Number.isFinite(evidence.rank) ? `rank ${evidence.rank}` : null,
-        Number.isFinite(evidence.chunkIndex) ? `chunk ${evidence.chunkIndex}` : null,
-        evidence.score ? `score ${evidence.score}` : null,
-      ].filter(Boolean);
+  [
+    Number.isFinite(evidence.rank) ? `rank ${evidence.rank}` : null,
+    Number.isFinite(evidence.chunkIndex) ? `chunk ${evidence.chunkIndex}` : null,
+    evidence.score ? `score ${evidence.score}` : null,
+  ].filter(Boolean);
 
 const getChunkLabel = (chunk, index) => {
   if (typeof chunk === "string") {
@@ -82,7 +81,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [zoom, setZoom] = useState(100);
 
   const evidence = useMemo(
     () => (source ? buildSourceEvidenceObject(source, { t }) : null),
@@ -96,7 +94,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
   // is fetched for the inline viewer. A Word, PowerPoint or Excel file is
   // fetched only when the user asks to download it.
   const hasInlinePreview = evidence?.hasInlinePreview ?? true;
-  const hasProtectedFile = Boolean(evidence?.filePath && !source?.demoPreview);
+  const hasProtectedFile = Boolean(evidence?.filePath);
   const hasProtectedPdf = hasInlinePreview && hasProtectedFile;
   const hasDocumentId = Boolean(String(source?.docId ?? "").trim());
   const canLoadProtectedPdf = Boolean(hasProtectedPdf && hasDocumentId);
@@ -118,7 +116,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
     setIsSearchOpen(false);
     setIsExpanded(false);
     setSearchQuery("");
-    setZoom(100);
   }, [source?.docId, source?.chunkIndex, source?.pageNumber]);
 
   if (!source || !evidence) {
@@ -139,10 +136,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
 
   const updatePage = (delta) => {
     setDisplayPage((currentPage) => Math.max(1, currentPage + delta));
-  };
-
-  const updateZoom = (delta) => {
-    setZoom((currentZoom) => Math.min(140, Math.max(80, currentZoom + delta)));
   };
 
   const renderEvidenceObject = () => {
@@ -174,67 +167,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
       </div>
     );
   };
-
-  const renderDemoPage = () => (
-    <div className="archive-demo-pdf-page">
-      <div
-        className="archive-demo-pdf-content"
-        style={{ transform: `scale(${zoom / 100})` }}
-      >
-        <h2>6.0 Travel and Entertainment</h2>
-        <h3>6.1 International Travel</h3>
-        <p>
-          All international travel must be pre-approved by the employee's
-          department head and booked through the corporate travel program.
-        </p>
-        <ul>
-          <li>Economy class is required for flights under 8 hours.</li>
-          <li>Business class requires VP approval.</li>
-          <li>Non-refundable tickets are discouraged unless necessary.</li>
-          <li>Travel insurance is required for all international trips.</li>
-        </ul>
-
-        <h3>6.2 Per Diem Limits</h3>
-        <p>
-          Daily per diem limits are based on location cost tier as defined
-          below. Limits are inclusive of meals and incidental expenses.
-        </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Tier</th>
-              <th>Location Examples</th>
-              <th>Total Per Diem (USD)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Tier 1</td>
-              <td>Switzerland, Norway, Japan</td>
-              <td>$320</td>
-            </tr>
-            <tr>
-              <td>Tier 2</td>
-              <td>Germany, France, UAE</td>
-              <td>$260</td>
-            </tr>
-            <tr>
-              <td>Tier 3</td>
-              <td>India, Mexico, Brazil</td>
-              <td>$180</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <h3>6.3 Expense Rules</h3>
-        <ul>
-          <li>Receipts are required for expenses over $75.</li>
-          <li>Alcohol is not reimbursable.</li>
-          <li>Personal expenses must not be charged to corporate accounts.</li>
-        </ul>
-      </div>
-    </div>
-  );
 
   // A Word, PowerPoint or Excel file: the browser has no viewer for it, so
   // the panel names the file and where the citation points, offers the
@@ -281,10 +213,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
   };
 
   const renderPagePanel = () => {
-    if (source.demoPreview) {
-      return renderDemoPage();
-    }
-
     if (!hasInlinePreview) {
       return renderDownloadPanel();
     }
@@ -421,11 +349,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
   };
 
   return (
-    <div
-      className={`archive-preview-wrap ${
-        evidence.isDemoPreview ? "archive-preview-wrap-demo" : ""
-      } ${isExpanded ? "is-expanded" : ""}`}
-    >
+    <div className={`archive-preview-wrap ${isExpanded ? "is-expanded" : ""}`}>
       <div className="archive-preview-document-head">
         <div>
           <div className="archive-preview-file">{evidence.fileName}</div>
@@ -477,17 +401,6 @@ const PdfPreview = ({ source, t = defaultT }) => {
             {pageLabel}
             <button type="button" aria-label="Next page" onClick={() => updatePage(1)}>
               ›
-            </button>
-          </span>
-        ) : null}
-        {source.demoPreview ? (
-          <span className="archive-zoom-stepper">
-            <button type="button" aria-label="Zoom out" onClick={() => updateZoom(-10)}>
-              −
-            </button>
-            {zoom}%
-            <button type="button" aria-label="Zoom in" onClick={() => updateZoom(10)}>
-              +
             </button>
           </span>
         ) : null}

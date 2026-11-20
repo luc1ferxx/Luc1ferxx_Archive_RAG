@@ -430,163 +430,6 @@ const AgentRunTimeline = ({ steps }) => {
   );
 };
 
-const DemoWorkbenchAnswer = ({ answer, onSelectSource, t }) => {
-  const sources = answer.ragSources ?? [];
-  const trace = answer.agentTrace ?? [];
-  const [showAllSources, setShowAllSources] = useState(false);
-  const [isTraceVisible, setIsTraceVisible] = useState(true);
-  const [isDetailVisible, setIsDetailVisible] = useState(false);
-  const extendedSources = [
-    ...sources,
-    {
-      docId: "demo-procurement",
-      fileName: "Procurement Guidelines.docx",
-      filePath: "",
-      // A Word citation points at a section (its position and heading), not
-      // a page.
-      pageNumber: 4,
-      locationUnit: "section",
-      locationLabel: "Travel purchases",
-      chunkIndex: 7,
-      rank: 4,
-      excerpt: "Vendor travel purchases require manager approval above policy thresholds.",
-    },
-    {
-      docId: "demo-vendor-management",
-      fileName: "Vendor Management Policy.pdf",
-      filePath: "",
-      pageNumber: 9,
-      chunkIndex: 5,
-      rank: 5,
-      excerpt: "Vendor reimbursement terms should be checked against active contracts.",
-    },
-  ];
-  const visibleSources = showAllSources ? extendedSources : sources;
-
-  return (
-    <SpotlightCard
-      as="div"
-      className="archive-demo-answer-card"
-      spotlightColor="rgba(39, 110, 241, 0.08)"
-    >
-      <div className="archive-demo-answer-head">
-        <div className="archive-demo-agent">
-          <span className="archive-agent-avatar">◎</span>
-          <strong>AgentRAG (v1)</strong>
-          <span>10:42 AM</span>
-          <span className="archive-status-dot" />
-        </div>
-        <span>2.8s</span>
-      </div>
-
-      <div className="archive-answer-text archive-agent-answer">
-        {answer.agentAnswer}
-      </div>
-
-      <div className="archive-demo-table-block">
-        <strong>Per diem limits (daily)</strong>
-        <table className="archive-demo-answer-table">
-          <thead>
-            <tr>
-              <th>Tier</th>
-              <th>Location Examples</th>
-              <th>Total Per Diem (USD)</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Tier 1 (High Cost)</td>
-              <td>Switzerland, Norway, Japan</td>
-              <td>$320</td>
-            </tr>
-            <tr>
-              <td>Tier 2 (Mid Cost)</td>
-              <td>Germany, France, UAE</td>
-              <td>$260</td>
-            </tr>
-            <tr>
-              <td>Tier 3 (Lower Cost)</td>
-              <td>India, Mexico, Brazil</td>
-              <td>$180</td>
-            </tr>
-          </tbody>
-        </table>
-        <p>Receipts are required for expenses over $75. Alcohol is not reimbursable.</p>
-        <p>See policy for full details and exceptions.</p>
-      </div>
-
-      <div className="archive-demo-source-row">
-        {visibleSources.map((source, sourceIndex) => (
-          <button
-            key={`${source.docId}-${source.rank}`}
-            type="button"
-            className="archive-demo-source-chip"
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelectSource?.(source);
-            }}
-          >
-            <span>{sourceIndex + 1}</span>
-            <strong>{source.fileName}</strong>
-            {getLocationUnit(source) ? (
-              <small>{formatDocumentLocation(source, t, { withLabel: false })}</small>
-            ) : (
-              <small>pp. {source.pageNumber}</small>
-            )}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="archive-demo-source-chip is-more"
-          onClick={() => setShowAllSources((isExpanded) => !isExpanded)}
-        >
-          {showAllSources ? "Show top 3 sources" : "View all 5 sources"}
-        </button>
-      </div>
-
-      <div className="archive-demo-trace-panel">
-        <div className="archive-demo-trace-head">
-          <button
-            type="button"
-            onClick={() => setIsTraceVisible((isVisible) => !isVisible)}
-          >
-            {isTraceVisible ? "⌃ Hide trace" : "⌄ Show trace"}
-          </button>
-        </div>
-        {isTraceVisible ? (
-          <AgentTraceOverview
-            answer={answer}
-            evidenceSummary={answer.ragEvidenceSummary}
-            sourceCount={sources.length}
-            stepCount={trace.length}
-          />
-        ) : null}
-        {isDetailVisible ? (
-          <div className="archive-demo-detail-panel">
-            {trace.map((step) => (
-              <div key={`detail-${step.id}`}>
-                <strong>{step.label}</strong>
-                <span>{step.summary}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        <div className="archive-demo-metric-footer">
-          <span>Groundedness 91%</span>
-          <span>Context coverage 92%</span>
-          <span>Tokens 1,732 ↓ 23%</span>
-          <button
-            type="button"
-            onClick={() => setIsDetailVisible((isVisible) => !isVisible)}
-          >
-            {isDetailVisible ? "Hide details" : "View details"}
-          </button>
-        </div>
-      </div>
-    </SpotlightCard>
-  );
-};
-
 const RenderQA = (props) => {
   const {
     conversation,
@@ -678,14 +521,6 @@ const RenderQA = (props) => {
             </div>
 
             <section className="archive-response">
-              {each.answer?.demoWorkbench ? (
-                <DemoWorkbenchAnswer
-                  answer={each.answer}
-                  onSelectSource={onSelectSource}
-                  t={t}
-                />
-              ) : (
-                <>
               {each.answer?.agentAnswer ? (
                 <SpotlightCard
                   as="div"
@@ -949,8 +784,6 @@ const RenderQA = (props) => {
 
                 <div className="archive-answer-text">{each.answer.mcpAnswer}</div>
               </SpotlightCard>
-                </>
-              )}
             </section>
           </article>
         );

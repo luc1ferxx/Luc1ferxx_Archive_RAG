@@ -25,7 +25,6 @@ describe("buildSourceEvidenceObject", () => {
       filePath: "documents/renewal-policy/file",
       fileType: "PDF",
       hasInlinePreview: true,
-      isDemoPreview: false,
       locationText: "Page 4",
       metadataRows: [
         { label: "Document", value: "Renewal Policy.pdf" },
