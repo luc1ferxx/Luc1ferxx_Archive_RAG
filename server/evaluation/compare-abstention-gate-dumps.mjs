@@ -32,7 +32,6 @@ export const GATE_SETTING_FIELDS = Object.freeze([
   "crossEncoderScores",
   "minQaQueryTermCoverage",
   "minRelevanceScore",
-  "qaGateInflection",
   "qaMinRerankProbability",
 ]);
 

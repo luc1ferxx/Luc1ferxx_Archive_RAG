@@ -1,6 +1,5 @@
 import {
   getClaimJudgeMode,
-  isClaimInflectionEnabled,
   isClaimSourceInheritanceEnabled,
 } from "../config.js";
 import { judgeClaimSupport } from "./claim-judge.js";
@@ -59,16 +58,15 @@ export const evaluateClaimSupport = ({
     ? evidenceContext
     : getActiveSelfCheckEvidenceContext() ?? createSelfCheckEvidenceContext();
   const result = runWithSelfCheckEvidenceContext(context, () => {
-    // RAG_CLAIM_SOURCE_INHERITANCE and RAG_CLAIM_INFLECTION apply to answers
-    // that are not comparisons; a comparison answer is checked as before.
+    // RAG_CLAIM_SOURCE_INHERITANCE applies to answers that are not
+    // comparisons; a comparison answer is checked as before.
     const comparisonAnswer = Boolean(comparisonAnalysisSummary);
-    const inflection = !comparisonAnswer && isClaimInflectionEnabled();
     const inheritSourceLabels =
       !comparisonAnswer && isClaimSourceInheritanceEnabled();
     const inputId = getClaimSupportInputId({
       citations,
       comparisonAnalysisSummary,
-      flags: [inflection, inheritSourceLabels],
+      flags: [inheritSourceLabels],
     });
 
     return memoizeInEvidenceContext(
@@ -79,7 +77,6 @@ export const evaluateClaimSupport = ({
           answerText,
           citations,
           comparisonAnalysisSummary,
-          inflection,
           inheritSourceLabels,
           inputId,
         }),
@@ -99,7 +96,6 @@ const computeClaimSupport = ({
   answerText,
   citations,
   comparisonAnalysisSummary,
-  inflection,
   inheritSourceLabels,
   inputId,
 }) => {
@@ -181,7 +177,6 @@ const computeClaimSupport = ({
       claimText,
       citations: scopedCitations,
       documentLabelCitations: citations,
-      inflection,
     });
     const contrastSupport = evaluateContrastClaimSupport({
       claimText,
@@ -245,7 +240,6 @@ const computeClaimSupport = ({
         claimText,
         citations: [citation],
         documentLabelCitations: citations,
-        inflection,
       }).supported;
     });
     const verifiedSourceRanks = (relationSupport

@@ -88,9 +88,7 @@ export const withEnv = async (overrides, work) => {
 // The goldens were frozen with the lexical check only: source inheritance and
 // the claim judge (both on by default since 2026-11-19) are pinned off too.
 export const ANSWER_RATE_FLAGS_OFF = Object.freeze({
-  RAG_CLAIM_INFLECTION: undefined,
   RAG_CLAIM_JUDGE: "off",
   RAG_CLAIM_JUDGE_TEMPERATURE: undefined,
   RAG_CLAIM_SOURCE_INHERITANCE: "false",
-  RAG_QA_GATE_INFLECTION: undefined,
 });

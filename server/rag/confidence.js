@@ -4,7 +4,6 @@ import {
   getMinRelevanceScore,
   getCrossEncoderScoreScale,
   getQaMinRerankProbability,
-  isQaGateInflectionEnabled,
 } from "./config.js";
 import { getAdmissionScore, getResultKey } from "./citations.js";
 import {
@@ -14,7 +13,6 @@ import {
   normalizeSearchText,
   tokenize,
 } from "./text-utils.js";
-import { buildInflectionIndex } from "./inflection.js";
 
 const FALLBACK_THRESHOLD_RATIO = 0.8;
 
@@ -194,11 +192,10 @@ const buildSearchableResultText = (result) =>
 
 /**
  * The share of the query's meaningful terms a text contains: the vector
- * stores' keywordScore (same terms, same searchable text), optionally counting
- * an inflected form as a match (rag/inflection.js). Null for a query with no
- * meaningful term, as the stores return.
+ * stores' keywordScore (same terms, same searchable text). Null for a query
+ * with no meaningful term, as the stores return.
  */
-export const computeQueryTermCoverage = ({ queryText = "", resultText = "", inflection = false } = {}) => {
+export const computeQueryTermCoverage = ({ queryText = "", resultText = "" } = {}) => {
   const queryTerms = buildTermSet(queryText);
 
   if (queryTerms.size === 0) {
@@ -211,11 +208,10 @@ export const computeQueryTermCoverage = ({ queryText = "", resultText = "", infl
     return 0;
   }
 
-  const index = inflection ? buildInflectionIndex(entryTerms) : entryTerms;
   let overlap = 0;
 
   for (const term of queryTerms) {
-    if (index.has(term)) {
+    if (entryTerms.has(term)) {
       overlap += 1;
     }
   }
@@ -236,15 +232,10 @@ export const computeResultQueryTermCoverage = (result, queryText) =>
 // the candidate won the merge. `fromQueryText` (the agent's follow-up) replaces
 // it with the coverage of the gate's own question, since the follow-up's other
 // retrieval queries carry the unsupported claim text and would score a chunk
-// against the model's words.
-// `inflection` (RAG_QA_GATE_INFLECTION) acts only on a chunk that has some
-// query word in another inflected form only (the inflection-aware coverage of
-// the gate's question exceeds its exact coverage); such a chunk is read at the
-// higher of its stored score and that inflection-aware coverage. Any other
-// chunk keeps its stored score, and no score is lowered. A candidate without a
-// numeric keywordScore keeps it.
-const buildQaCoverageReader = ({ fromQueryText = false, inflection = false, queryText = "" }) => {
-  if (!fromQueryText && !inflection) {
+// against the model's words. A candidate without a numeric keywordScore keeps
+// it.
+const buildQaCoverageReader = ({ fromQueryText = false, queryText = "" }) => {
+  if (!fromQueryText) {
     return null;
   }
 
@@ -259,15 +250,7 @@ const buildQaCoverageReader = ({ fromQueryText = false, inflection = false, quer
       return memo.get(result);
     }
 
-    const resultText = buildSearchableResultText(result);
-    const recomputed = computeQueryTermCoverage({ inflection, queryText, resultText });
-    let coverage = result.keywordScore;
-
-    if (recomputed !== null && fromQueryText) {
-      coverage = recomputed;
-    } else if (recomputed !== null && recomputed > computeQueryTermCoverage({ queryText, resultText })) {
-      coverage = Math.max(result.keywordScore, recomputed);
-    }
+    const coverage = computeResultQueryTermCoverage(result, queryText) ?? result.keywordScore;
 
     memo.set(result, coverage);
     return coverage;
@@ -511,18 +494,18 @@ export const assessQaConfidence = ({
     minRerankProbability !== null &&
     results.length > 0 &&
     results.every((result) => typeof result?.crossEncoderScore === "number");
-  const gateInflection = isQaGateInflectionEnabled();
   const coverageOf = rerankGate
     ? null
     : buildQaCoverageReader({
         fromQueryText: coverageFromQueryText,
-        inflection: gateInflection,
         queryText,
       });
   // Recorded only when coverage is not the stored keywordScore, so default
-  // traces keep their shape.
+  // traces keep their shape. `inflection` is always false since
+  // RAG_QA_GATE_INFLECTION went (2026-11-20); kept so the follow-up's trace
+  // does not change.
   const coverageBasis = coverageOf
-    ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: gateInflection } }
+    ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: false } }
     : {};
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })

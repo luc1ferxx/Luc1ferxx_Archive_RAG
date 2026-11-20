@@ -4,11 +4,6 @@ import {
   describeAnswerRateFlags,
   getClaimJudgeTemperature,
 } from "../rag/config.js";
-import {
-  buildInflectionIndex,
-  getInflectionBases,
-  isInflectionMatch,
-} from "../rag/inflection.js";
 import { assessQaConfidence, computeQueryTermCoverage } from "../rag/confidence.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 import { splitAnswerStructure } from "../rag/self-check/claims.js";
@@ -30,8 +25,6 @@ import {
 // sets the flags it depends on and clears the rest, so the suite means the
 // same under any ambient value.
 const FLAG_KEYS = [
-  "RAG_QA_GATE_INFLECTION",
-  "RAG_CLAIM_INFLECTION",
   "RAG_CLAIM_SOURCE_INHERITANCE",
   "RAG_CLAIM_JUDGE_TEMPERATURE",
   "RAG_CLAIM_JUDGE",
@@ -71,57 +64,8 @@ const withFlags = (flags, callback) => {
 };
 
 // ---------------------------------------------------------------------------
-// rag/inflection.js
-
-test("inflection matching joins inflected forms of one word", () => {
-  for (const [left, right] of [
-    ["governs", "governed"],
-    ["govern", "governed"],
-    ["law", "laws"],
-    ["metric", "metrics"],
-    ["propose", "proposed"],
-    ["proposes", "proposing"],
-    ["study", "studies"],
-    ["apply", "applied"],
-    ["match", "matches"],
-    ["stop", "stopped"],
-    ["ceiling", "ceilings"],
-    ["use", "used"],
-    ["train", "trained"],
-  ]) {
-    assert.equal(isInflectionMatch(left, right), true, `${left} ~ ${right}`);
-    assert.equal(isInflectionMatch(right, left), true, `${right} ~ ${left}`);
-  }
-});
-
-test("inflection matching never strips derivations, prefixes, numbers or identifiers", () => {
-  for (const [left, right] of [
-    ["large", "larger"],
-    ["paid", "unpaid"],
-    ["approve", "approval"],
-    ["terminate", "termination"],
-    ["parental", "annual"],
-    ["amber", "cobalt"],
-    ["us", "used"],
-    ["fee", "feed"],
-    ["see", "seed"],
-    ["12", "twelve"],
-    ["30", "30s"],
-    ["re-ranker", "re-rankers"],
-    ["status", "stat"],
-    ["analysis", "analysi"],
-  ]) {
-    assert.equal(isInflectionMatch(left, right), false, `${left} !~ ${right}`);
-  }
-
-  assert.deepEqual([...getInflectionBases("bert")], ["bert"]);
-  assert.deepEqual([...getInflectionBases("2024s")], ["2024s"]);
-  assert.equal(buildInflectionIndex(["governed", "laws"]).has("governs"), true);
-  assert.equal(buildInflectionIndex(["governed", "laws"]).has("state"), false);
-});
-
-// ---------------------------------------------------------------------------
-// QA gate: RAG_QA_GATE_INFLECTION
+// QA gate: exact query words (RAG_QA_GATE_INFLECTION, which also counted
+// inflected forms, was deleted on 2026-11-20)
 
 const makeResult = ({ id, text, keywordScore, vectorScore = 0.465, queryText = null }) => {
   const result = {
@@ -146,7 +90,7 @@ const makeResult = ({ id, text, keywordScore, vectorScore = 0.465, queryText = n
 const GOVERNING_LAW_QUESTION = "Which state's law governs the agreement?";
 const GOVERNING_LAW_CHUNK = "This Agreement shall be governed by the laws of the State of Delaware.";
 
-test("the QA gate counts inflected query words only with RAG_QA_GATE_INFLECTION", () => {
+test("the QA gate counts exact query words: an inflected form is no match", () => {
   const results = [
     makeResult({ id: "law", queryText: GOVERNING_LAW_QUESTION, text: GOVERNING_LAW_CHUNK }),
   ];
@@ -154,92 +98,11 @@ test("the QA gate counts inflected query words only with RAG_QA_GATE_INFLECTION"
   // "governs" and "law" appear only as "governed" and "laws": exact coverage 0.5.
   assert.equal(results[0].keywordScore, 0.5);
 
-  const off = assessQaConfidence({ queryText: GOVERNING_LAW_QUESTION, results });
+  const assessment = assessQaConfidence({ queryText: GOVERNING_LAW_QUESTION, results });
 
-  assert.equal(off.confident, false);
-  assert.equal("coverageBasis" in off, false);
-  assert.equal("coverageBasis" in buildConfidenceTrace(off), false);
-
-  withFlags({ RAG_QA_GATE_INFLECTION: "true" }, () => {
-    const on = assessQaConfidence({ queryText: GOVERNING_LAW_QUESTION, results });
-
-    assert.equal(on.confident, true);
-    assert.deepEqual(on.coverageBasis, { fromQueryText: false, inflection: true });
-    assert.deepEqual(buildConfidenceTrace(on).coverageBasis, { fromQueryText: false, inflection: true });
-  });
-});
-
-test("with RAG_QA_GATE_INFLECTION adjacent topics, rivals and anchors are still refused", () => {
-  withFlags({ RAG_QA_GATE_INFLECTION: "true" }, () => {
-    for (const [queryText, text] of [
-      ["What is the parental leave policy?", "Annual leave policy: employees receive 10 paid annual leave days each year."],
-      ["What is the amber ceiling?", "Archive serial cobalt ceilings: approved amount is 3600 dollars per cycle."],
-      ["How much notice ends the lease?", "Either party may terminate the employment agreement upon written notice."],
-    ]) {
-      const assessment = assessQaConfidence({
-        queryText,
-        results: [makeResult({ id: "neighbour", queryText, text })],
-      });
-
-      assert.equal(assessment.confident, false, queryText);
-    }
-
-    // An identifier must still appear exactly: "re-ranker" is not "re-rankers".
-    const anchored = assessQaConfidence({
-      queryText: "How are the re-rankers trained?",
-      results: [
-        makeResult({
-          id: "anchor",
-          keywordScore: 1,
-          text: "The re-ranker is trained with hard negatives.",
-        }),
-      ],
-    });
-
-    assert.equal(anchored.confident, false);
-    assert.deepEqual(
-      anchored.missingAnchorGroups.map((group) => group.label),
-      ["re-rankers"]
-    );
-  });
-});
-
-test("RAG_QA_GATE_INFLECTION changes only chunks with an inflected query word and never lowers a score", () => {
-  withFlags({ RAG_QA_GATE_INFLECTION: "true" }, () => {
-    // The stored score came from another retrieval query and is lower than the
-    // chunk's coverage of the question; the flag does not re-measure it.
-    const thin = assessQaConfidence({
-      queryText: "What are the liability caps?",
-      results: [makeResult({ id: "thin", keywordScore: 0.25, text: "Liability is described in the schedule." })],
-    });
-
-    assert.equal(thin.confident, false);
-
-    // A stored score above the chunk's own coverage of the question is never
-    // lowered.
-    const high = assessQaConfidence({
-      queryText: "What are the liability caps?",
-      results: [makeResult({ id: "high", keywordScore: 0.75, text: "Liability is described in the schedule." })],
-    });
-
-    assert.equal(high.confident, true);
-  });
-});
-
-test("with RAG_QA_GATE_INFLECTION a topic-only chunk of a multi-part question stays below the floor", () => {
-  const queryText = "When does the refund policy take effect and which regions does it apply to?";
-
-  withFlags({ RAG_QA_GATE_INFLECTION: "true" }, () => {
-    const assessment = assessQaConfidence({
-      evidenceRequirementCount: 2,
-      queryText,
-      results: [
-        makeResult({ id: "topic-only", queryText, text: "Refunds are issued back to the original payment method." }),
-      ],
-    });
-
-    assert.equal(assessment.confident, false);
-  });
+  assert.equal(assessment.confident, false);
+  assert.equal("coverageBasis" in assessment, false);
+  assert.equal("coverageBasis" in buildConfidenceTrace(assessment), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -298,7 +161,8 @@ test("coverageFromQueryText judges a follow-up candidate by the question, not by
 });
 
 // ---------------------------------------------------------------------------
-// Claim check: RAG_CLAIM_INFLECTION
+// Claim check: exact claim words (RAG_CLAIM_INFLECTION, which also accepted
+// inflected forms, was deleted on 2026-11-20)
 
 const cite = ({ docId = "doc-1", excerpt, fileName = "contract.pdf", rank }) => ({
   docId,
@@ -313,7 +177,7 @@ const claimVerdicts = (answerText, citations, options = {}) =>
 
 const GOVERNING_LAW_CITATIONS = [cite({ excerpt: GOVERNING_LAW_CHUNK })];
 
-test("the claim check accepts inflected claim words only with RAG_CLAIM_INFLECTION", () => {
+test("the claim check reads exact claim words: an inflected form is no support", () => {
   const answers = [
     ["The laws of Delaware govern the agreement. [Source 1]", GOVERNING_LAW_CITATIONS],
     [
@@ -325,58 +189,6 @@ test("the claim check accepts inflected claim words only with RAG_CLAIM_INFLECTI
   for (const [answerText, citations] of answers) {
     assert.deepEqual(claimVerdicts(answerText, citations), [false], answerText);
   }
-
-  withFlags({ RAG_CLAIM_INFLECTION: "true" }, () => {
-    for (const [answerText, citations] of answers) {
-      assert.deepEqual(claimVerdicts(answerText, citations), [true], answerText);
-    }
-  });
-});
-
-test("with RAG_CLAIM_INFLECTION wrong facts are still refused", () => {
-  const notice = [cite({ excerpt: "Either party may terminate this Agreement upon thirty (30) days written notice." })];
-  const approval = [cite({ excerpt: "Remote work requires manager approval before the first remote day." })];
-  const payment = [cite({ excerpt: "The Vendor pays the Client a monthly fee." })];
-  const leave = [cite({ excerpt: "Annual leave: employees receive 10 paid annual leave days each year." })];
-  const twoHandbooks = [
-    cite({
-      docId: "doc-alpha",
-      excerpt: "Employees may work remotely 2 days per week with manager approval.",
-      fileName: "handbook-alpha.pdf",
-      rank: 1,
-    }),
-    cite({
-      docId: "doc-gamma",
-      excerpt: "Employees may work remotely 3 days per week with manager approval.",
-      fileName: "handbook-gamma.pdf",
-      rank: 2,
-    }),
-  ];
-
-  withFlags({ RAG_CLAIM_INFLECTION: "true" }, () => {
-    for (const [label, answerText, citations] of [
-      ["wrong number", "Either party may terminate the agreement with sixty days notices. [Source 1]", notice],
-      ["swapped party", "The Client pays the Vendor a monthly fee. [Source 1]", payment],
-      ["negation", "Remote work does not require manager approval. [Source 1]", approval],
-      ["added condition", "Remote work requires manager approval and HR approvals. [Source 1]", approval],
-      ["adjacent topic", "Parental leaves are 10 paid days each year. [Source 1]", leave],
-      ["wrong source", "Employees may work remotely 2 days per week with manager approvals. [Source 2]", twoHandbooks],
-      ["mis-attribution", "According to handbook-gamma.pdf, employees may work remotely 2 days per week with manager approvals. [Source 1]", twoHandbooks],
-    ]) {
-      assert.deepEqual(claimVerdicts(answerText, citations), [false], label);
-    }
-  });
-});
-
-test("RAG_CLAIM_INFLECTION does not touch comparison answers", () => {
-  withFlags({ RAG_CLAIM_INFLECTION: "true" }, () => {
-    assert.deepEqual(
-      claimVerdicts("The laws of Delaware govern the agreement. [Source 1]", GOVERNING_LAW_CITATIONS, {
-        comparisonAnalysisSummary: { status: "analyzed" },
-      }),
-      [false]
-    );
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -589,25 +401,19 @@ test("the follow-up asks the primary call's resolved question, else the question
 
 test("describeAnswerRateFlags reports every flag, all off by default except source inheritance", () => {
   assert.deepEqual(describeAnswerRateFlags(), {
-    claimInflection: false,
     claimJudgeTemperature: null,
     claimSourceInheritance: true,
-    qaGateInflection: false,
   });
 
   withFlags(
     {
-      RAG_CLAIM_INFLECTION: "true",
       RAG_CLAIM_JUDGE_TEMPERATURE: "0",
       RAG_CLAIM_SOURCE_INHERITANCE: "true",
-      RAG_QA_GATE_INFLECTION: "true",
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
-        claimInflection: true,
         claimJudgeTemperature: 0,
         claimSourceInheritance: true,
-        qaGateInflection: true,
       });
     }
   );
@@ -735,40 +541,4 @@ const NAMED_SECTION_ANSWER =
 
 test("a claim naming the section it answers from is checked against the sentence, not its heading", () => {
   assert.deepEqual(claimVerdicts(NAMED_SECTION_ANSWER, CONTRACT_CITATIONS), [false]);
-});
-
-// ---------------------------------------------------------------------------
-// Review regressions: each case below was a wrong answer that a flag accepted.
-
-test("inflection never joins number words or words whose apparent base is another word", () => {
-  for (const [left, right] of [
-    ["second", "seconds"],
-    ["third", "thirds"],
-    ["ten", "tens"],
-    ["hundred", "hundreds"],
-    ["quarter", "quarters"],
-    ["new", "news"],
-    ["unit", "united"],
-    ["units", "united"],
-    ["mean", "means"],
-    ["mean", "meaning"],
-    ["even", "evening"],
-    ["good", "goods"],
-    ["premise", "premises"],
-  ]) {
-    assert.equal(isInflectionMatch(left, right), false, `${left} !~ ${right}`);
-    assert.equal(isInflectionMatch(right, left), false, `${right} !~ ${left}`);
-  }
-});
-
-test("with RAG_CLAIM_INFLECTION a number word in another sense is still refused", () => {
-  withFlags({ RAG_CLAIM_INFLECTION: "true" }, () => {
-    for (const [label, answerText, excerpt] of [
-      ["two thirds is not a third", "A third of the board must approve the merger. [Source 1]", "Two thirds of the board must approve the merger."],
-      ["seconds is not the second payment", "The second payment is processed on signing. [Source 1]", "Each payment is processed within seconds of signing."],
-      ["the United Kingdom is not units", "The fund invests in units. [Source 1]", "The fund invests in the United Kingdom."],
-    ]) {
-      assert.deepEqual(claimVerdicts(answerText, [cite({ excerpt })]), [false], label);
-    }
-  });
 });

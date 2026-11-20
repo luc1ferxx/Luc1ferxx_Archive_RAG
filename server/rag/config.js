@@ -1159,19 +1159,6 @@ export const getMinQaQueryTermCoverage = () =>
 // inheritance, on since 2026-11-19), so an
 // evaluation can turn them on one at a time and together.
 
-// RAG_QA_GATE_INFLECTION: the single-document QA gate also counts a query word
-// as covered when the chunk has an inflected form of it ("governs" against
-// "governed", "metrics" against "metric"; rag/inflection.js). Anchors and
-// numbers stay exact. Comparison and the rerank gate are unchanged.
-export const isQaGateInflectionEnabled = () =>
-  toBoolean(process.env.RAG_QA_GATE_INFLECTION, false);
-
-// RAG_CLAIM_INFLECTION: the lexical claim check accepts an inflected form of a
-// claim word in its evidence. Numbers, anchors, polarity, modality, relation
-// order and attribution checks are unchanged.
-export const isClaimInflectionEnabled = () =>
-  toBoolean(process.env.RAG_CLAIM_INFLECTION, false);
-
 // RAG_CLAIM_SOURCE_INHERITANCE: an answer sentence with no [Source N] label
 // takes the labels of the nearest labelled sentence in the same line (the
 // next one, else the previous one) before it is checked. The check itself is
@@ -1291,10 +1278,8 @@ export const assertAnswerGenerationSettings = () => {
 
 /** The answer-rate flags as an evaluation report records them. */
 export const describeAnswerRateFlags = () => ({
-  claimInflection: isClaimInflectionEnabled(),
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),
-  qaGateInflection: isQaGateInflectionEnabled(),
 });
 
 // ---------------------------------------------------------------------------
