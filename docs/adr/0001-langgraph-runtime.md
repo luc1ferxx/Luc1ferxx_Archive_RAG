@@ -1313,7 +1313,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - **第一个 custom Skill 失败时要不要照样跑第二个**（阶段 8 起的默认行为）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）。删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户选了 B，已做**，见本节最后的“用户决定”。
 - **需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。** Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）**2026-11-17 数过之后用户选了删除（方案 A），见阶段 13。**
-- **规划器的灰度开关**（`AGENT_PLANNER_ROLLOUT`：默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
+- **规划器的灰度开关**（`AGENT_PLANNER_ROLLOUT`：默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。**2026-11-19 用户回复“按推荐全做”，按调查推荐的方案 B 删除了 `guarded_llm`、`shadow`、`configured`，只剩 `llm`（默认）和 `deterministic`。** 调查测得 `guarded_llm` 建出的适配器和 `llm` 完全一样，只差记录里的标签；`shadow` 每个请求另外最多调 3 次模型，结果（`planner.shadow`）没有任何报告、指标或前端读取；`configured` 是唯一读 `AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 的取值，这两个变量随之不再读取；拼错的值以前静默当作 `llm`。现在这三个值和其他任何取值都让 `createAppServices` 在建任何服务之前拒绝（`AGENT_PLANNER_ROLLOUT_REMOVED`）。默认部署和 `deterministic` 部署的规划和记录不变，graph golden 没有重录。
 
 ### 证据
 

@@ -330,6 +330,8 @@ npm run rollout:readiness -- --json
 
 `rollout:readiness` 会读取 `latest-planner-real.json`、`latest-planner-mock.json`、`latest-trajectory.json`、`latest-recovery-observability.json` 和 `latest-runtime-smoke.json`，检查当前 runtime 是纯 LLM target（`AGENT_PLANNER_ROLLOUT=llm`，effective intent/execution planner 均为 `llm`）且 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`（这是它唯一还接受的取值；其他取值下进程拒绝启动，报告里这一项不通过），生成 `latest-rollout-readiness.*`。real-provider `planner_dynamic_skill_graph` 必须由 `llm_dag` 真正规划并执行 compare+risk、无 fallback；runtime smoke 的两次 HTTP `/chat` 也必须由 LLM 规划并执行 guarded DAG、无 fallback。缺少报告、trajectory/recovery gate 失败、unexpected fallback、mock/real 分歧或上述条件任一不满足，都会标成 `not_ready` 并以非零状态退出。只想生成报告时可用 `npm run rollout:readiness -- --no-fail`；该参数不是 PASS。
 
+2026-11-19（用户：“按推荐全做”）起 `AGENT_PLANNER_ROLLOUT` 只剩 `llm`（默认）和 `deterministic`：`configured`、`guarded_llm`、`shadow` 删除，`AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 不再读取，报告里 intent/execution planner 的四个字段都取 rollout 的值（字段和形状不变）；其他取值下这个命令和进程一样直接报错退出（`AGENT_PLANNER_ROLLOUT_REMOVED`），不生成报告。
+
 ## Skill graph 的评测边界
 
 custom Skill 阶段只由 typed DAG 执行（V1 chain 和 `AGENT_SKILL_GRAPH_ROLLOUT` 的 `off`、`shadow` 已在 2026-11-13 删除，见 ADR 0001 阶段 8），所以 trajectory case 里凡是进入 custom skill 阶段的请求都走 DAG。固定评测覆盖三层：trajectory 的执行语义、planner eval 的独立原子 Skill 选择、runtime smoke 的真实 HTTP + LLM 路径。它们仍只证明 custom Skill 阶段内的 typed DAG；外层 document/Web/built-in/capability 不是同一张图，schema gate 也不等于差异/风险内容的语义真值校验。
@@ -365,7 +367,7 @@ Recovery 与仍需区分的证据：
 
 ```bash
 cd server
-AGENT_PLANNER_ROLLOUT=llm AGENT_INTENT_PLANNER=llm AGENT_EXECUTION_PLANNER=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
+AGENT_PLANNER_ROLLOUT=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
 ```
 
 `runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。`server/.env` 里如果写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程拒绝启动，要先删掉这一行。

@@ -369,7 +369,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **留给用户决定的**：
   - 第一个 custom Skill 失败时要不要照样跑第二个（阶段 8 起的默认行为，见 3.49“失去、且没有替代的”）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）；删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户回复“改成 B”，同一天做了**：失败的依赖只给下游提供可选输入、下游的 `when` 也不读它时，下游照常运行，这些输入留空；因依赖故障失败的依赖（否则第二个会再撞一次挂掉的模型或存储）、必填输入、纯顺序边、被跳过的依赖、`fail_fast` 之后的中止仍然阻塞。确定性图里第一个 Skill 失败时，第二个用原问题运行，调用 2 次，以它的结果回答（之前调用 1 次、弃答）；三个确定性评测与改动前一致，覆盖率门 4,459 个测试 0 失败。
   - 需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）2026-11-17 数过之后删掉了（阶段 13，38 处里删 36 处，留下的 2 处生产走得到）：需审批的内置 Skill 只走到门上，批准后的 arXiv 导入和文档发现在 `capability_call` 步骤里用格式化的结果作答。
-  - 规划器的灰度开关 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
+  - 规划器的灰度开关 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。2026-11-19（用户：“按推荐全做”）已删除 `guarded_llm`、`shadow`、`configured`：只剩 `llm`（默认）和 `deterministic`，其他取值（包括以前静默当作 `llm` 的拼错值）让 `createAppServices` 拒绝启动（`AGENT_PLANNER_ROLLOUT_REMOVED`），`AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 不再读取。
 - **证据**（本机 Node 24.21.0）：
   - 三个确定性 agent 评测（d9a3612e 与本分支各一个干净 worktree，屏蔽 UUID、时间戳和耗时之后比较）：trajectory 15/15、planner 6/6 逐字节一致，用例之外也一致；recovery-observability 只多了 `skillGraphRejectedCount: 0`（`recovery` 和 `observability.recovery` 两处）。
   - `quality:current` 按 CI 的 `quality-gate` 步骤在 ab98c509 的干净 worktree 上运行：通过（trajectory 15/15、63 项检查，planner 6/6、22 项，recovery-observability 8/8、27 项）。没有在 b35629fa 上重跑：复核修正动的是 replanner、报告计数和预热，三个 agent 评测已经重跑过，另外两个评测（synthetic、feedback）不经过这些代码。
@@ -384,7 +384,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 被问“为什么不顺手把第一个 Skill 失败的行为也改了”：那会改变用户看到的答案，是产品决定，不是清理。调查给了三个选项，推荐 B（失败的依赖只喂可选输入时不阻塞，约 25 行）；用户选了 B，单独提交、单独验证、单独复核。
   - 被问“custom Skill 能不能绕过图被调用”：能这样做的唯一一处代码是 `rag/langgraph/tools.js`，从来没接进生产，这一步删了。
   - 被问冷启动：承载 agent tier 的进程在 listen 之后后台加载 LangGraph，第一个 agent 请求不再付约 100–180 ms；代价是进程一启动就多约 60 MB RSS，listen 之后约 100–180 ms 里到达的请求要等模块求值完。不经过 listen 的进程内调用方（例如直接调 `runAgentRag` 的评测 runner）仍在第一次调用时加载，这是读代码得出的。
-  - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支，2026-11-17 阶段 13 已删除；`AGENT_PLANNER_ROLLOUT` 还在，它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
+  - 要主动说的：需审批的 Capability 在外层计划里直接执行成功之后的分支，2026-11-17 阶段 13 已删除；`AGENT_PLANNER_ROLLOUT` 还在（2026-11-19 起只剩 `llm` 和 `deterministic`），它不是第二种运行时；真实浏览器、真实模型的规划器和 replanner、PostgreSQL 上跨进程的 run 没有验证。
 
 ### 3.52 LangGraph 迁移阶段 11：删除共用图模块里只有 v3 用过的代码（2026-11-15）
 
@@ -697,7 +697,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 套件 manifest 版本随之从 1.15.0 升到 1.16.0（提交 9c3c3de8）。
 - **失去、且没有替代的**：
   - 手动重试某个失败的 custom Skill 步骤。只有顺序链的步骤支持；图运行的步骤拒绝单独重试（409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`）。默认走图是 2026-09-25 起的事，所以默认配置下它已经七周不可用，现在彻底没有。图里的替代是有限 replan，只在模型规划器是主规划器时存在；确定性规划器下，失败的节点留下 partial 的图，没有重试。
-  - `shadow` 对照（链回答，旁边规划一张图来比较）。规划器自己的 shadow（`AGENT_PLANNER_ROLLOUT=shadow`）不受影响。
+  - `shadow` 对照（链回答，旁边规划一张图来比较）。规划器自己的 shadow（`AGENT_PLANNER_ROLLOUT=shadow`）不受影响（它在 2026-11-19 也删除了，见 3.53）。
   - 统一图用例里链和 DAG 的并排对照。
   - 没有类型契约的 custom Skill：以前靠顺序链照跑，现在不运行。仓库里的四个 custom Skill 都有契约。
   - 前一个 Skill 失败后照样跑后一个：只有链这样做；图里后一个节点依赖前一个，前一个失败它就被跳过。默认路径七周以来一直是图的表现，能用 `off` 换回链的表现这一点现在没有了。（2026-11-16 起改了：方案 B，第二个 Skill 照样用原问题运行，见 3.53；因故障失败和被跳过的依赖仍然阻塞。）
