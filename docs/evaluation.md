@@ -3031,6 +3031,23 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 **结论**：三条都过。按规则，补检索只保留"问原问题"这一条路：`AGENT_FOLLOW_UP_ORIGINAL_QUESTION` 的行为成为唯一行为，元文本那条路和这个开关删除（f61aba37；两份 LangGraph golden 只因补检索问题文本、少一条重复检索查询和 token 估算变化而重录）。
 
+### 单文档路由成为唯一行为（2026-11-19，规则先于运行）
+
+**为什么测**：查剩下的丢分时（同一份 seed 12 样本，rag 面答了、agent 没答的 54 道可答题），13 道在检索前就停了：eval 走确定性意图规则，11 道因为 same、different、between、difference、compare 这类词被当成"对比两份文档"、反问再选一份；2 道因为 "report"（动词）、"data analysis" 被转去 research brief。离线重放确认全部 13 道；已有的单文档收窄（`AGENT_SINGLE_DOCUMENT_ROUTING`，默认关）能修 11 道，再加一条"只选一份文档的问句不当研究请求"修另 2 道。用户同意把收窄变成唯一行为、删掉开关（"照这个做"），同时修评审失败的记录（解析不出结论时记为失败，eval 记评审摘要）。
+
+**臂**：TC1：agent 面，含这两处改动的提交，配置同 TB1（默认的评审 + 来源继承 + 补检索问原问题，`RAG_CLAIM_JUDGE_TEMPERATURE=0`）。基线用上一节的 TB1 报告（12bb746a），不重跑：路由没变的题应与 TB1 逐题相同，作为核对；不相同就在改动前的 main（59b41b46）上重跑基线再判。
+
+**环境与样本**：同上一节（train `--cases 200 --seed 12`，排除同样 20 份报告：176 可答 / 24 不可答）。
+
+**事先定好的规则**（TC1 对 TB1）：
+- g1 路由：那 13 道全部走到文档检索（记录了主检查）。
+- g2 多答：TC1 比 TB1 净多答 ≥ 3 道可答题（按题配对：TC1 答而 TB1 没答的，减去反过来的）。
+- g3 安全：TC1 回答的不可答题 ≤ R0（rag 面）的 10/24。
+- g4 答得对：TC1 比 TB1 多答的题由独立评审按引用原文和参考答案逐题判，答对或部分对的 ≥ 一半。
+- 四条都过：两处改动都合并。任一条不过：只合并评审失败的记录，路由改动不合并。
+
+只记录、不判定：评审状态分布（新记录）、路由变了但 TB1 原本答了的题、每题延迟。
+
 ### API 压测（`npm run eval:load-test:pgvector`）
 
 `server/evaluation/run-api-load-bench.mjs` 用 `createApp()` 和真实 services 在子进程里启动应用，做闭环压测。
