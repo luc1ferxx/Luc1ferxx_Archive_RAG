@@ -1,7 +1,7 @@
-// Shared by the answer-writer suites (comparison-structured-output,
-// qa-extractive-output): each test runs in its own RAG data directory with
-// the suite's environment variables cleared, and the model is a stand-in that
-// answers scripted replies. Not a test suite.
+// Shared by the answer-writer suites (answer-max-tokens, answer-temperature,
+// comparison-structured-output): each test runs in its own RAG data directory
+// with the suite's environment variables cleared, and the model is a stand-in
+// that answers scripted replies. Not a test suite.
 import { afterEach, beforeEach } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";

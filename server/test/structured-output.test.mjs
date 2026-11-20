@@ -15,10 +15,7 @@ import {
   buildPlannerResponseFormat,
   llmPlannerAdapter,
 } from "../rag/agent-llm-planner-adapter.js";
-import {
-  buildComparisonStructuredResponseFormat,
-  buildQaExtractiveResponseFormat,
-} from "../rag/answer-writer.js";
+import { buildComparisonStructuredResponseFormat } from "../rag/answer-writer.js";
 import { createChatClient } from "../rag/openai-client.js";
 import {
   completeTextWithMetadata,
@@ -115,7 +112,6 @@ test("every structured response format stays inside the bounded strict subset", 
     buildDagPlannerResponseFormat(dagContext()),
     buildIntentPlannerResponseFormat({ candidates: [{ id: "qa" }, { id: "compare_documents" }] }),
     buildComparisonStructuredResponseFormat([1, 2]),
-    buildQaExtractiveResponseFormat([1, 2]),
     buildClaimJudgeResponseFormat([0, 2]),
   ];
 

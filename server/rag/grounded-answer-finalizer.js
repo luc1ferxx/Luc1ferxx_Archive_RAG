@@ -76,9 +76,7 @@ export const normalizeGroundedClaimSupportForHeadings = (claimSupport) => {
 export const normalizeClaimSupportForHeadings =
   normalizeGroundedClaimSupportForHeadings;
 
-// Exported for the extractive answer renderer, whose lines must read exactly
-// as the finalizer would write them.
-export const ensureTerminalPunctuation = (value = "") =>
+const ensureTerminalPunctuation = (value = "") =>
   SENTENCE_END_PATTERN.test(value) ? value : `${value}.`;
 
 // Exported for answer drafts, so a streamed sentence reads exactly as the

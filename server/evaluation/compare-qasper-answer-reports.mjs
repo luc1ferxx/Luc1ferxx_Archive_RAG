@@ -182,7 +182,7 @@ export const compareQasperAnswerReports = (
 const METRIC_LABELS = Object.freeze({
   answerF1: "Answer F1 (official, all questions)",
   answerableF1: "Answer F1 on answerable questions (abstention = 0)",
-  answerF1Direct: "Short-answer F1 (directAnswer, else first sentence; all questions)",
+  answerF1Direct: "Short-answer F1 (first sentence; all questions)",
   answerableF1Direct: "Short-answer F1 on answerable questions (abstention = 0)",
   answerRate: "Answer rate (answerable questions)",
   unanswerableAnswered: "Unanswerable questions answered",

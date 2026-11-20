@@ -27,7 +27,6 @@ export const PROMPT_IDS = Object.freeze({
   intentPlanner: "intent_planner",
   memoryQueryRewrite: "memory_query_rewrite",
   qaAnswer: "qa_answer",
-  qaAnswerExtractive: "qa_answer_extractive",
   qaQueryHyde: "qa_query_hyde",
   qaQueryMultiQuery: "qa_query_multi_query",
   replanner: "replanner",

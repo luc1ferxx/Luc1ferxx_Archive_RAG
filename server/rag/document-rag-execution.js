@@ -1189,10 +1189,9 @@ const executeQaRag = async ({
         })
       : null;
 
-  // The writer's trace-only diagnostics (the RAG_QA_VERDICT_OVERRIDE decision,
-  // the counts of an extractive reply; codes and counts only) go to the
-  // trace, never into the response; an applied override also marks the
-  // answer verdictOverridden: true.
+  // The writer's trace-only diagnostics (the RAG_QA_VERDICT_OVERRIDE decision;
+  // codes and counts only) go to the trace, never into the response; an
+  // applied override also marks the answer verdictOverridden: true.
   Object.assign(traceFields, answer.trace);
 
   if (retry) {
@@ -1208,9 +1207,9 @@ const executeQaRag = async ({
     response: {
       ...finalAnswer,
       // A first reply the output limit cut off keeps the answer marked when
-      // the verdict retry wrote it, as a cut extractive or comparison call
-      // does when a fallback wrote the text. The trace keeps each attempt's
-      // own mark: the first at the top, the retry's under verdictRetry.
+      // the verdict retry wrote it, as a cut comparison call does when a
+      // fallback wrote the text. The trace keeps each attempt's own mark: the
+      // first at the top, the retry's under verdictRetry.
       ...(answer.answerTruncated === true ? { answerTruncated: true } : {}),
       retrievedContexts: final.bundle.retrievedContexts,
       evidenceSummary,
