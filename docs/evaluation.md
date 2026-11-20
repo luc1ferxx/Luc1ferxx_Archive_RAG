@@ -3115,7 +3115,14 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 - 3 处在默认关闭的模式里：引文（比较模式和抽取式模式共用）、比较维度、抽取式答案。引文比对原文时会去掉双引号、合并空白，所以只有原文带反斜杠的句子没法逐字引用。抽取式答案原文带反斜杠时（如 Windows 路径、LaTeX）会找不到依据，退回普通作答。
 - 1 处是评测工具：`eval:judge` 的 rationale（300 字符）。
 
-规划器 golden 重录：3 个 `decide-*.json` 只改了正则那几行；`digests.json` 94 个里变了 65 个，replan 的一个没变。同样的一次性重录在改动前的代码上做过对照，没有任何变化。这些字段在模型上实际多久出错一次、改后路由有没有变，没有测。
+规划器 golden 重录：3 个 `decide-*.json` 只改了正则那几行；`digests.json` 94 个里变了 65 个，replan 的一个没变。同样的一次性重录在改动前的代码上做过对照，没有任何变化。这些字段在模型上实际多久出错一次、改后路由有没有变，合并时没有测。
+
+**探针**（2026-11-19，用户"先验证新正则"；本机 Ollama 0.34.4 + qwen2.5:7b，温度 0，28 次请求；脚本留在本机，没进仓库）：
+
+- 合成 schema：理由上限 40 字符，提示故意要求长文、双引号、LaTeX、换行和 Windows 路径。新正则、TD1 用的 `^[^"\\]{0,40}$`、旧的 `^.{0,40}$` 各跑 5 次，全是合法 JSON，理由都在第 40 个字符处被截住，没有引号、反斜杠或控制字符。
+- 对照组：用 Ollama 不支持的 `(?!x)` 写法，5 次全被放弃，理由长到 252–1,657 字符。Ollama 日志每次都写 `WARNING: JSON schema conversion was incomplete: pattern … is not supported (unsupported group syntax), accepting any string`。新正则没有这条警告。所以 Ollama 放弃正则时不报错，只在日志里留这条警告，查正则有没有生效可以搜它。
+- 真实 schema：评审 3 次、意图 2 次、执行规划 1 次、比较 1 次、抽取式 1 次，全是合法 JSON，没有超上限，也没有被排除的字符。模型会把 `\` 换成 `/` 或直接去掉（`C:/Temp/setup.log`、`$langle s, r rangle$`），把双引号换成单引号，或者在双引号处结束引文。引文在双引号处截断时仍是原句的子串，还能对上原文；所以在比较和抽取式模式里，对不上原文的只有反斜杠被改写的句子。
+- 没测：改后规划器的路由有没有变（要整轮评测），以及 CI 用的 Ollama 0.40.3。
 
 ### API 压测（`npm run eval:load-test:pgvector`）
 
