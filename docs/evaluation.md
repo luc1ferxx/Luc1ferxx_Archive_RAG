@@ -2954,6 +2954,27 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 **结论**：agent 和 10-28 一样几乎不答。主因不是检索，而是 claim 检查只认字面重合：7B 模型改写原文、不给每句标来源，整题就被拒；补检索拿元文本当问题，从来没成功过。下一步要先定规则：是否接受语义判断带来的少量错答（10-03 那轮就是因为"不可答被回答不能增加"这一条没放行评审）。
 
+### 语义核对：claim 评审加标签继承（2026-11-19，规则先于运行）
+
+**为什么测**：上一节查明，agent 被拒的 47 个答案里 16 个答对、17 个部分正确，差的是语义判断（措辞不同、没逐句标来源）。用户决定放宽"不可答被回答不能增加"这条（"放宽并测一轮"），测已有的两个开关一起开的效果。
+
+**臂**（同一个干净提交、同一份样本，依次跑）：
+- R0：rag 面，默认配置（不可答题上限的参照）。
+- TA0：agent 面，默认配置（基线）。
+- TA1：agent 面，`RAG_CLAIM_JUDGE=llm`、`RAG_CLAIM_JUDGE_TEMPERATURE=0`、`RAG_CLAIM_SOURCE_INHERITANCE=true`。补检索不变（仍是元文本），不在本轮。
+
+**环境**：同上一节（Ollama 0.34.4，qwen2.5:7b + nomic-embed-text，`env -i`、`DOTENV_CONFIG_PATH=/dev/null`、`VECTOR_STORE_PROVIDER=local`、`RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024`）。评审用同一个模型。
+
+**样本**：train `--cases 200 --seed 12`，排除上一节的诊断样本和此前全部 agent 答题率报告（`--exclude-report` 共 20 份：`latest-qasper-answers-ar1119-agent` 和 `latest-qasper-answers-agent-ar-*`），得到 200 题（181 可答 / 19 不可答，184 篇论文）。跑模型前选定。
+
+**事先定好的规则**（TA1 对 TA0，`compare:qasper-answers`，配对 bootstrap 10000 次，seed 12345；任一条不过，默认值不动）：
+- a1：可答题答题率差值的区间下界 > 0。
+- a2：可答题 `f1Direct`（拒答记 0）差值的区间下界 > 0。
+- a3（放宽后的这一条）：TA1 回答的不可答题数 ≤ R0（rag 面）在同一批 19 题上回答的数。原规则是"≤ 基线"，基线为 0 时必须为 0。
+- a4：TA1 作答的可答题里，引用证据召回 ≥ R0 作答的可答题里的引用证据召回减 0.10。
+
+只记录、不判定：每题延迟、补检索次数和成功数、`checks` 里评审改判的 claim 数；TA1 比 TA0 多答的题再由独立评审按引用原文和参考答案逐题判对错。
+
 ### API 压测（`npm run eval:load-test:pgvector`）
 
 `server/evaluation/run-api-load-bench.mjs` 用 `createApp()` 和真实 services 在子进程里启动应用，做闭环压测。
