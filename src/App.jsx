@@ -3,9 +3,7 @@ import { Layout, Typography, message } from "antd";
 import {
   BellOutlined,
   BranchesOutlined,
-  DownOutlined,
   FileSearchOutlined,
-  LockOutlined,
   QuestionCircleOutlined,
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
@@ -853,17 +851,6 @@ const App = () => {
       <Layout className="archive-layout">
         <Content className="archive-app">
           <header className="archive-global-header">
-            <div className="archive-breadcrumb">
-              <span>{t("app.workspaces")}</span>
-              <span>/</span>
-              <strong>{t("workbench.financePolicyQa")}</strong>
-              <DownOutlined />
-              <span className="archive-private-chip">
-                <LockOutlined />
-                {t("app.private")}
-              </span>
-            </div>
-
             <div
               className="archive-workbench-tabs"
               aria-label={t("app.workspaceSummary")}
@@ -918,14 +905,6 @@ const App = () => {
                 onClick={() => message.info(t("app.noNotifications"))}
               >
                 <BellOutlined />
-              </button>
-              <button
-                type="button"
-                className="archive-user-avatar"
-                aria-label={t("app.account")}
-                onClick={() => message.info(t("app.signedInDemo"))}
-              >
-                AK
               </button>
             </div>
           </header>

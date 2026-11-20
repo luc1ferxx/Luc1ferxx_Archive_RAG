@@ -38,7 +38,7 @@
 .archive-global-header {
   grid-area: global;
   display: grid;
-  grid-template-columns: minmax(230px, 304px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 18px;
   min-width: 0;

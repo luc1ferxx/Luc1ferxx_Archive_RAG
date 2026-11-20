@@ -827,6 +827,9 @@ describe("App", () => {
     expect(screen.getByText("Agent workspace is empty")).toBeInTheDocument();
     expect(screen.getByText("Upload mock")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Clear workspace" })).toBeDisabled();
+    // The header no longer carries a placeholder workspace name or account.
+    expect(screen.queryByText("Finance Policy QA")).not.toBeInTheDocument();
+    expect(screen.queryByText("AK")).not.toBeInTheDocument();
   });
 
   test("posts answer feedback from the conversation panel", async () => {

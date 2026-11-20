@@ -600,10 +600,6 @@
     grid-template-rows: 58px minmax(0, 1fr) minmax(360px, 42vh);
   }
 
-  .archive-global-header {
-    grid-template-columns: minmax(220px, 288px) minmax(0, 1fr) auto;
-  }
-
   .archive-preview-column {
     border-top: 1px solid var(--archive-border-subtle);
     border-left: none;
