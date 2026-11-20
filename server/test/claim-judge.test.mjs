@@ -377,7 +377,17 @@ test("the judge output is constrained to the claims it was asked about", () => {
   assert.equal(format.json_schema.strict, true);
   assert.deepEqual(verdict.items.properties.claim.enum, [0, 2]);
   assert.equal(verdict.maxItems, 2);
+  // Every claim asked about needs a verdict: an empty or partial array is not a reply.
+  assert.equal(verdict.minItems, 2);
   assert.match(verdict.items.properties.reason.pattern, /\{0,160\}/);
+
+  // A local model's grammar applies the pattern to the raw JSON text, so the
+  // reason may hold neither a quote nor a backslash (LaTeX) that would break it.
+  const reason = new RegExp(verdict.items.properties.reason.pattern);
+  assert.equal(reason.test("Source 2 states it in other words."), true);
+  assert.equal(reason.test('Source 2 says "soft version".'), false);
+  assert.equal(reason.test("the form $\\langle s, r \\rangle$"), false);
+  assert.equal(reason.test("x".repeat(161)), false);
 });
 
 test("comparison answers keep their own checks", async (t) => {

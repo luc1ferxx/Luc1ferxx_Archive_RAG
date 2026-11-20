@@ -16,7 +16,6 @@ import {
 } from "../shared-state.js";
 import {
   boundedArray,
-  boundedString,
   buildJsonSchemaResponseFormat,
   parseFirstJsonValue,
   strictObject,
@@ -332,18 +331,30 @@ export const getClaimJudgePromptDescriptor = () =>
     version: "v2",
   }));
 
+// A local model's constrained decoding applies the reason's pattern to the raw
+// JSON text: `.` let it write a bare quote or backslash (LaTeX) and cut the
+// string, so the reply was not JSON; with no minItems it could answer []. The
+// reason therefore excludes quotes and backslashes, and every claim needs a verdict.
+const JUDGE_REASON_SCHEMA = {
+  pattern: `^[^"\\\\]{0,${MAX_REASON_CHARS}}$`,
+  type: "string",
+};
+
 export const buildClaimJudgeResponseFormat = (claimIndexes) =>
   buildJsonSchemaResponseFormat({
     name: "claim_verdicts",
     schema: strictObject({
-      verdicts: boundedArray(
-        strictObject({
-          claim: { enum: claimIndexes, type: "integer" },
-          reason: boundedString(MAX_REASON_CHARS),
-          supported: { type: "boolean" },
-        }),
-        claimIndexes.length
-      ),
+      verdicts: {
+        ...boundedArray(
+          strictObject({
+            claim: { enum: claimIndexes, type: "integer" },
+            reason: JUDGE_REASON_SCHEMA,
+            supported: { type: "boolean" },
+          }),
+          claimIndexes.length
+        ),
+        minItems: claimIndexes.length,
+      },
     }),
   });
 
