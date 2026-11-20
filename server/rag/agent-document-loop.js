@@ -316,7 +316,6 @@ export const runDocumentRagLoop = async ({
     const followUpQuestion = buildFollowUpQuestion({
       question,
       resolvedQuestion,
-      check: primaryCheck,
     });
     const followUpRetrievalPlan = buildAgentRetrievalPlan({
       question: followUpQuestion,
@@ -505,16 +504,6 @@ export const runDocumentRagLoop = async ({
         primary: primaryRagResult,
         retry: followUpRagResult,
       });
-
-      // The follow-up may have asked text the agent composed (gaps.js): its
-      // answer still reports the user's question as the primary call resolved
-      // it, which session memory records (rag/agent.js).
-      if (ragResult === followUpRagResult) {
-        ragResult = {
-          ...ragResult,
-          value: { ...ragResult.value, resolvedQuery: resolvedQuestion },
-        };
-      }
     }
   } else if (primaryCheck.retryRecommended) {
     executionLoop.stoppedReason = "follow_up_limit_reached";

@@ -306,6 +306,11 @@ const runTrajectoryCase = async (createCase) => {
 // invocation. Every case's outcome, agent events and runs must equal the
 // golden.
 const TRAJECTORY_CASES = [
+  // Its golden was rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1) when
+  // the follow-up retrieval started asking the question instead of the
+  // evidence-retry meta text: the follow-up plan's primary query is now the
+  // question the primary call already checked, so working memory lists 4
+  // checked queries, not 5. Nothing else in it changed.
   ["document_follow_up_retrieval", createFollowUpCase, "document QA with a follow-up retrieval"],
   [
     "skill_chain_contract_review",

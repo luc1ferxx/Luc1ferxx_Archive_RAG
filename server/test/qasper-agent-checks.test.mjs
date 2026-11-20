@@ -40,7 +40,8 @@ const check = (value) => evaluateDocumentEvidence({ docIds: ["paper-1"], ragResu
 
 test("an agent row records each self-check, its rejected claims and the cited text the check compared", () => {
   const question = "Which datasets is the model trained and evaluated on?";
-  const followUpQuestion = "Re-check the uploaded documents for cited support before answering.";
+  // The follow-up asks the question again; replies pair with steps in call order.
+  const followUpQuestion = question;
   const primary = reply("We train the model on SQuAD [Source 1]. It is evaluated on TriviaQA [Source 1][Source 2].");
   const followUp = reply("We train the model on SQuAD [Source 1].");
   const primaryCheck = check(primary);

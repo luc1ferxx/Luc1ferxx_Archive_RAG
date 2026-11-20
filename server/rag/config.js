@@ -1167,15 +1167,6 @@ export const getQaVerdictOverrideMode = () =>
 // ---------------------------------------------------------------------------
 // Answer-rate flags. Each is off by default and changes one thing, so an
 // evaluation can turn them on one at a time and together.
-//
-// AGENT_FOLLOW_UP_ORIGINAL_QUESTION: the agent's follow-up retrieval asks the
-// answer model the primary call's resolved question instead of the
-// "Re-check the uploaded documents..." meta text; the evidence gaps go only into
-// the follow-up retrieval queries; the follow-up call skips the session-memory
-// rewrite; and its QA gate measures query-term coverage against that question
-// rather than against whichever retrieval query a candidate came from.
-export const isAgentFollowUpOriginalQuestionEnabled = () =>
-  toBoolean(process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION, false);
 
 // RAG_QA_GATE_INFLECTION: the single-document QA gate also counts a query word
 // as covered when the chunk has an inflected form of it ("governs" against
@@ -1324,7 +1315,6 @@ export const isAgentSingleDocumentRoutingEnabled = () =>
 
 /** The answer-rate flags as an evaluation report records them. */
 export const describeAnswerRateFlags = () => ({
-  agentFollowUpOriginalQuestion: isAgentFollowUpOriginalQuestionEnabled(),
   agentSingleDocumentRouting: isAgentSingleDocumentRoutingEnabled(),
   claimHeadingContext: isClaimHeadingContextEnabled(),
   claimInflection: isClaimInflectionEnabled(),

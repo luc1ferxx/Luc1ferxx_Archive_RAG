@@ -4464,7 +4464,7 @@ test("persisted registry, vector data, and session memory survive reloads", asyn
   );
 });
 
-test("an agent follow-up keeps its resolved question out of the session rewrite only with AGENT_FOLLOW_UP_ORIGINAL_QUESTION", async () => {
+test("an agent follow-up keeps its resolved question out of the session rewrite", async () => {
   await ingestFixture({
     docId: "benefits-2025",
     fileName: "benefits-2025.pdf",
@@ -4496,36 +4496,31 @@ test("an agent follow-up keeps its resolved question out of the session rewrite 
     ],
     retrievalOptions: { profile: "narrow", topK: 4, topKPerDoc: 2 },
   };
-  const ask = () =>
+  const ask = (options = {}) =>
     chat(["benefits-2025"], "And approval?", {
-      retrievalPlan: followUpPlan,
       sessionId: "follow-up-session",
+      ...options,
     });
 
-  // Default: the follow-up's question goes through the session rewrite.
-  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined }, async () => {
-    const response = await ask();
+  // Without the follow-up plan the question goes through the session rewrite.
+  const rewritten = await ask();
 
-    assert.equal(response.memoryApplied, true);
-    assert.equal(response.resolvedQuery, "What is the remote work approval policy?");
-  });
+  assert.equal(rewritten.memoryApplied, true);
+  assert.equal(rewritten.resolvedQuery, "What is the remote work approval policy?");
 
-  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, async () => {
-    const response = await ask();
+  const followUp = await ask({ retrievalPlan: followUpPlan });
 
-    assert.equal(response.memoryApplied, false);
-    assert.equal(response.resolvedQuery, "And approval?");
-  });
+  assert.equal(followUp.memoryApplied, false);
+  assert.equal(followUp.resolvedQuery, "And approval?");
 });
 
-// Agent sub-calls (follow-up retrieval, research questions) send text the agent
-// composed. They read conversation memory but must never write it: the session
-// keeps exactly the user's exchange, and long-term preferences come only from
-// the user's own message.
+// Agent sub-calls (follow-up retrieval, research questions) read conversation
+// memory but must never write it: the session keeps exactly the user's
+// exchange, and long-term preferences come only from the user's own message.
+// Research questions are text the agent composed.
 const MEMORY_SESSION_ID = "memory-writes-session";
 const MEMORY_USER_ID = "memory-writes-user";
-const AGENT_TEXT_PATTERN =
-  /Re-check the uploaded documents|Original question:|Unsupported claims:|Evidence issue:|What are the most important facts|Focus on these documents/;
+const AGENT_TEXT_PATTERN = /What are the most important facts|Focus on these documents/;
 
 const withConversationMemory = async (callback) => {
   const sessionStore = createFakeSessionMemoryStore();
@@ -4640,9 +4635,8 @@ test("chat with memoryWrites false reads conversation memory but writes none", a
 });
 
 test("an agent follow-up retrieval writes no session turn or long-term preference", async () => {
-  // The answer cites nothing, so the evidence check asks for a follow-up whose
-  // question (gaps.js) quotes this unsupported claim, "reply ... Chinese"
-  // included: before memoryWrites it flipped reply_language from system text.
+  // The answer cites nothing, so the evidence check asks for a follow-up; its
+  // "reply ... Chinese" must not become a reply_language preference.
   configureOpenAIProvider({
     ...provider,
     completeText: async (prompt) => {
@@ -4768,36 +4762,30 @@ test("the session keeps the answer the user was given, not an unchecked primary 
 test("a follow-up answer that replaces the primary answer is the one the session keeps", async () => {
   configureAnswers([HR_DIRECTOR_ANSWER, LINE_MANAGER_ANSWER]);
 
-  // The follow-up asks the user's question (the default meta text never
-  // clears the QA gate here), so its supported answer replaces the primary.
-  await withEnv({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, () =>
-    withConversationMemory(async ({ readSession }) => {
-      await ingestRemoteApprovalPolicy();
+  // The follow-up asks the user's question, so its supported answer replaces
+  // the primary.
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestRemoteApprovalPolicy();
 
-      const response = await askRemoteApproval();
+    const response = await askRemoteApproval();
 
-      assert.ok(
-        response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
-        "the run took a follow-up retrieval"
-      );
-      assert.match(response.body.agentAnswer, /line manager/);
-      assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, {
-        answer: response.body.agentAnswer,
-      });
-    })
-  );
+    assert.ok(
+      response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
+      "the run took a follow-up retrieval"
+    );
+    assert.match(response.body.agentAnswer, /line manager/);
+    assertOnlyUserExchange(await readSession(), REMOTE_APPROVAL_QUESTION, {
+      answer: response.body.agentAnswer,
+    });
+  });
 });
 
 // A follow-up question after one recorded exchange. `rewriteFollowUp` rewrites
-// it to REWRITTEN_FOLLOW_UP, and the evidence-retry text (gaps.js) to a
-// question of its own. askFollowUp resolves to the response and the user turn
-// it recorded.
+// it to REWRITTEN_FOLLOW_UP. askFollowUp resolves to the response and the user
+// turn it recorded.
 const FOLLOW_UP_QUESTION = "And who approves those requests?";
 const REWRITTEN_FOLLOW_UP = "Who approves remote work requests?";
-const rewriteFollowUp = (prompt) =>
-  prompt.includes("Original question:")
-    ? "Which manager approves remote work requests?"
-    : REWRITTEN_FOLLOW_UP;
+const rewriteFollowUp = () => REWRITTEN_FOLLOW_UP;
 const askFollowUp = async (readSession, question = FOLLOW_UP_QUESTION) => {
   await recordConversationTurn({
     answer: LINE_MANAGER_ANSWER,
@@ -4827,27 +4815,24 @@ test("a follow-up question's rewrite is the resolved question its user turn keep
   });
 });
 
-test("a follow-up answer that replaces the primary one keeps the user's rewrite, never the evidence retry's", async () => {
-  // Default flag: the follow-up asks the evidence-retry text (rewritten too),
-  // and its supported answer replaces the primary one. The retry's retrieval
-  // queries are mostly instructions, so the QA gate's coverage floor is lowered.
+test("a follow-up answer that replaces the primary one keeps the user's rewrite", async () => {
+  // The follow-up asks the user's rewrite, and its supported answer replaces
+  // the primary one.
   configureAnswers([HR_DIRECTOR_ANSWER, LINE_MANAGER_ANSWER], { rewrite: rewriteFollowUp });
 
-  await withEnv({ RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.01" }, () =>
-    withConversationMemory(async ({ readSession }) => {
-      await ingestRemoteApprovalPolicy();
+  await withConversationMemory(async ({ readSession }) => {
+    await ingestRemoteApprovalPolicy();
 
-      const { response, userTurn } = await askFollowUp(readSession);
+    const { response, userTurn } = await askFollowUp(readSession);
 
-      assert.ok(
-        response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
-        "the run took a follow-up retrieval"
-      );
-      assert.match(response.body.agentAnswer, /line manager/);
-      assert.equal(response.body.ragResolvedQuestion, REWRITTEN_FOLLOW_UP);
-      assert.equal(userTurn.resolvedQuery, REWRITTEN_FOLLOW_UP);
-    })
-  );
+    assert.ok(
+      response.body.agentTrace.some((step) => step.type === "follow_up_retrieval"),
+      "the run took a follow-up retrieval"
+    );
+    assert.match(response.body.agentAnswer, /line manager/);
+    assert.equal(response.body.ragResolvedQuestion, REWRITTEN_FOLLOW_UP);
+    assert.equal(userTurn.resolvedQuery, REWRITTEN_FOLLOW_UP);
+  });
 });
 
 test("a clarification keeps no resolved question", async () => {
@@ -4878,8 +4863,7 @@ const QUICK_FOLLOW_UP = "And how quickly?";
 const QUICK_FOLLOW_UP_REWRITE = "How quickly does the line manager decide remote work requests?";
 const DECISION_TIME_ANSWER =
   "The line manager decides remote work requests within five business days. [Source 1]";
-const rewriteQuickFollowUp = (prompt) =>
-  prompt.includes("Original question:") ? provider.completeText(prompt) : QUICK_FOLLOW_UP_REWRITE;
+const rewriteQuickFollowUp = () => QUICK_FOLLOW_UP_REWRITE;
 const ingestDecisionTimePolicy = () =>
   ingestFixture({
     docId: REMOTE_APPROVAL_DOC_ID,
@@ -4920,8 +4904,7 @@ test("a follow-up's evidence retry asks its rewrite, not its raw words", async (
     const followUp = response.body.agentTrace.find((step) => step.type === "follow_up_retrieval");
 
     assert.ok(followUp, "the run took a follow-up retrieval");
-    assert.ok(followUp.detail.followUpQuestion.includes(`Original question: ${QUICK_FOLLOW_UP_REWRITE}`));
-    assert.ok(!followUp.detail.followUpQuestion.includes(QUICK_FOLLOW_UP));
+    assert.equal(followUp.detail.followUpQuestion, QUICK_FOLLOW_UP_REWRITE);
     assert.equal(
       followUp.detail.retrievalPlan.retrievalQueries.find((query) => query.id === "follow-up-source-check")
         .query,

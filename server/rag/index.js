@@ -6,7 +6,6 @@ import { buildAgentRetrievalQueries } from "./agent-retrieval-queries.js";
 import { chunkDocumentWithConfig } from "./chunker.js";
 import { describeChunkProfile, readOfficeParse, stampChunkProfile } from "./chunk-profile.js";
 import {
-  isAgentFollowUpOriginalQuestionEnabled,
   isDocumentTrashEnabled,
   isRagIngestDedupEnabled,
 } from "./config.js";
@@ -1613,10 +1612,10 @@ const chat = async (docIds, query, options = {}) => {
       console.error("Failed to load long-term memory context.", error);
     }
 
-    // The agent's follow-up (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) passes the
-    // question its primary call already resolved, so it is not rewritten again.
+    // The agent's follow-up passes the question its primary call already
+    // resolved, so it is not rewritten again.
     const memoryResolution =
-      agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled()
+      agentRetrievalPlan?.phase === "follow_up"
         ? { resolvedQuery: query, memoryApplied: false }
         : await resolveQueryWithSessionMemory({
             accessScope,

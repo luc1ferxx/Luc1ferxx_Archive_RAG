@@ -291,10 +291,10 @@ export const computeResultQueryTermCoverage = (result, queryText) =>
 
 // How the QA gate reads a candidate's query-term coverage. By default it is the
 // stored keywordScore, measured against whichever retrieval query's copy of
-// the candidate won the merge. `fromQueryText` (the agent's follow-up with
-// AGENT_FOLLOW_UP_ORIGINAL_QUESTION) replaces it with the coverage of the
-// gate's own question, since the follow-up's other retrieval queries carry the
-// unsupported claim text and would score a chunk against the model's words.
+// the candidate won the merge. `fromQueryText` (the agent's follow-up) replaces
+// it with the coverage of the gate's own question, since the follow-up's other
+// retrieval queries carry the unsupported claim text and would score a chunk
+// against the model's words.
 // `inflection` (RAG_QA_GATE_INFLECTION) acts only on a chunk that has some
 // query word in another inflected form only (the inflection-aware coverage of
 // the gate's question exceeds its exact coverage); such a chunk is read at the

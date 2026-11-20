@@ -429,6 +429,13 @@ test("a sentence the claim check does not support is never drafted, and the stre
 
   const stream = await streamOnce(t, { ragService: createDraftingRagService() });
 
+  // The golden was rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1) when
+  // the follow-up retrieval started asking the question instead of the
+  // evidence-retry meta text: the follow-up step's question, followUpQuestion
+  // and its plan's primary query are the question; working memory lists that
+  // query once (4 checked queries, not 5); and the run's estimated tokens fall
+  // from 1292 to 1226 with the shorter follow-up prompt. Drafts, answer and
+  // outcome are unchanged.
   assertStreamMatchesGolden("unsupported-sentence", stream);
   assert.ok(draftTexts(stream.frames).length > 0, "some sentence was drafted");
   for (const text of draftTexts(stream.frames)) {

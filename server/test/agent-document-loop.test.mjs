@@ -18,22 +18,6 @@ const documentRagSkill = {
   },
 };
 
-// This test asserts the default follow-up question; the flag that changes it
-// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
-// not change what is asserted.
-const pinDefaultFollowUpQuestion = (t) => {
-  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-
-  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
-  t.after(() => {
-    if (previous === undefined) {
-      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-    } else {
-      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
-    }
-  });
-};
-
 const createLoopHarness = ({
   agentBudget,
   docIds = ["doc-1"],
@@ -124,8 +108,7 @@ const createLoopHarness = ({
   };
 };
 
-test("document loop runs focused follow-up when primary evidence lacks claim support", async (t) => {
-  pinDefaultFollowUpQuestion(t);
+test("document loop runs focused follow-up when primary evidence lacks claim support", async () => {
   const harness = createLoopHarness({
     ragResponses: [
       {
@@ -160,7 +143,7 @@ test("document loop runs focused follow-up when primary evidence lacks claim sup
   assert.equal(result.documentEvidenceClarification, null);
   assert.match(result.ragResult.value.text, /before the first remote day/i);
   assert.equal(harness.askedQuestions.length, 2);
-  assert.match(harness.askedQuestions[1], /claim lacks citation support/i);
+  assert.equal(harness.askedQuestions[1], "What does remote work require?");
   assert.deepEqual(
     harness.trace.map((step) => step.type),
     ["document_rag", "self_check", "gap_analysis", "follow_up_retrieval", "self_check"]
@@ -214,18 +197,7 @@ test("document loop returns clarification when follow-up budget is exhausted", a
   assert.equal(harness.workingMemory.unresolvedGaps[0].type, "unsupported_claim");
 });
 
-test("with AGENT_FOLLOW_UP_ORIGINAL_QUESTION the follow-up asks the resolved question and puts the gaps only in retrieval", async (t) => {
-  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-
-  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "true";
-  t.after(() => {
-    if (previous === undefined) {
-      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-    } else {
-      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
-    }
-  });
-
+test("the follow-up asks the resolved question and puts the gaps only in retrieval", async () => {
   const citations = [
     {
       docId: "doc-1",
@@ -256,10 +228,8 @@ test("with AGENT_FOLLOW_UP_ORIGINAL_QUESTION the follow-up asks the resolved que
 
   assert.equal(result.documentEvidenceClarification, null);
   assert.equal(harness.askedQuestions.length, 2);
-  // The answer model is asked the primary call's resolved question, not the
-  // "Re-check the uploaded documents..." text.
+  // The answer model is asked the primary call's resolved question.
   assert.equal(harness.askedQuestions[1], "What does remote work require for employees?");
-  assert.doesNotMatch(harness.askedQuestions[1], /Re-check|claim lacks citation support/i);
   assert.equal(followUpStep.detail.retrievalPlan.phase, "follow_up");
   assert.equal(queries[0].query, "What does remote work require for employees?");
   assert.ok(
@@ -270,18 +240,7 @@ test("with AGENT_FOLLOW_UP_ORIGINAL_QUESTION the follow-up asks the resolved que
   assert.equal(harness.executionLoop.stoppedReason, "follow_up_resolved");
 });
 
-test("with AGENT_FOLLOW_UP_ORIGINAL_QUESTION an unsupported follow-up answer still ends in a clarification", async (t) => {
-  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-
-  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "true";
-  t.after(() => {
-    if (previous === undefined) {
-      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-    } else {
-      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
-    }
-  });
-
+test("an unsupported follow-up answer still ends in a clarification", async () => {
   const citations = [
     {
       docId: "doc-1",

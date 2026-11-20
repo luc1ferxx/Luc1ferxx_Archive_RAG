@@ -1,5 +1,3 @@
-import { isAgentFollowUpOriginalQuestionEnabled } from "../config.js";
-
 export function buildEvidenceGaps(check = {}) {
   const gaps = [];
   const answerLabel = check.answerLabel ?? "Document answer";
@@ -68,40 +66,14 @@ export function buildEvidenceGaps(check = {}) {
       }));
 }
 
-export const buildEvidenceRetryQuestion = ({ question, check } = {}) => {
-  const reasonText = check?.reasons?.length
-    ? check.reasons.join(" ")
-    : "The first answer did not provide enough grounded evidence.";
-
-  return [
-    "Re-check the uploaded documents for cited support before answering.",
-    `Original question: ${question}`,
-    `Evidence issue: ${reasonText}`,
-    check?.claimSupport?.unsupportedClaimCount
-      ? `Unsupported claims: ${check.claimSupport.claims
-          .filter((claim) => !claim.supported)
-          .map((claim) => claim.text)
-          .join(" | ")}`
-      : "",
-    "Return the best answer only if it is backed by page-level citations.",
-  ].filter(Boolean).join("\n");
-};
-
 /**
- * The question a follow-up document RAG call asks. By default it is the
- * "Re-check the uploaded documents..." text above, which the answer model,
- * the QA gate and the primary retrieval query all read. With
- * AGENT_FOLLOW_UP_ORIGINAL_QUESTION on it is the question itself; the evidence
- * issue then reaches only the follow-up retrieval queries
- * (agent-retrieval-queries.js). Either way the question is the primary call's
- * resolved question when there is one: "And how quickly?" alone finds nothing.
+ * The question a follow-up document RAG call asks: the question itself, as the
+ * primary call resolved it when there is one ("And how quickly?" alone finds
+ * nothing). The evidence issues reach only the follow-up retrieval queries
+ * (agent-retrieval-queries.js).
  */
-export const buildFollowUpQuestion = ({ question, resolvedQuestion = null, check } = {}) => {
+export const buildFollowUpQuestion = ({ question, resolvedQuestion = null } = {}) => {
   const resolved = typeof resolvedQuestion === "string" ? resolvedQuestion.trim() : "";
-
-  if (!isAgentFollowUpOriginalQuestionEnabled()) {
-    return buildEvidenceRetryQuestion({ question: resolved || question, check });
-  }
 
   return resolved || question;
 };

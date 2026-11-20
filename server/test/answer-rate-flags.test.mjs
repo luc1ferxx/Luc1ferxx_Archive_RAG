@@ -16,7 +16,7 @@ import {
   buildHeadingScopedSupportSentences,
   readHeadingTitle,
 } from "../rag/self-check/attribution.js";
-import { buildEvidenceRetryQuestion, buildFollowUpQuestion } from "../rag/self-check/gaps.js";
+import { buildFollowUpQuestion } from "../rag/self-check/gaps.js";
 import { judgeClaimSupport, resetClaimJudgeCache } from "../rag/self-check/claim-judge.js";
 import { finalizeGroundedAnswer } from "../rag/grounded-answer-finalizer.js";
 import { buildConfidenceTrace } from "../rag/observability.js";
@@ -34,7 +34,6 @@ import {
 // sets the flags it depends on and clears the rest, so the suite means the
 // same under any ambient value.
 const FLAG_KEYS = [
-  "AGENT_FOLLOW_UP_ORIGINAL_QUESTION",
   "AGENT_SINGLE_DOCUMENT_ROUTING",
   "RAG_QA_GATE_INFLECTION",
   "RAG_CLAIM_HEADING_CONTEXT",
@@ -608,38 +607,21 @@ test("the chat client sends temperature only when given one", async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Follow-up question: AGENT_FOLLOW_UP_ORIGINAL_QUESTION
+// Follow-up question (self-check/gaps.js)
 
-test("the follow-up question is the meta text by default and the question with the flag", () => {
-  const check = {
-    claimSupport: {
-      claims: [{ supported: false, text: "The satellite stipend is 500 dollars" }],
-      unsupportedClaimCount: 1,
-    },
-    reasons: ["1 answer claim lacks citation support."],
-  };
+test("the follow-up asks the primary call's resolved question, else the question", () => {
   const question = "What does remote work require?";
 
-  // The meta text asks the primary call's resolved question when there is one.
-  assert.equal(buildFollowUpQuestion({ check, question }), buildEvidenceRetryQuestion({ check, question }));
+  assert.equal(buildFollowUpQuestion({ question }), question);
   assert.equal(
-    buildFollowUpQuestion({ check, question, resolvedQuestion: "What does remote work require for staff?" }),
-    buildEvidenceRetryQuestion({ check, question: "What does remote work require for staff?" })
+    buildFollowUpQuestion({ question, resolvedQuestion: "What does remote work require for staff?" }),
+    "What does remote work require for staff?"
   );
-
-  withFlags({ AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true" }, () => {
-    assert.equal(buildFollowUpQuestion({ check, question }), question);
-    assert.equal(
-      buildFollowUpQuestion({ check, question, resolvedQuestion: "What does remote work require for staff?" }),
-      "What does remote work require for staff?"
-    );
-    assert.equal(buildFollowUpQuestion({ check, question, resolvedQuestion: "  " }), question);
-  });
+  assert.equal(buildFollowUpQuestion({ question, resolvedQuestion: "  " }), question);
 });
 
 test("describeAnswerRateFlags reports every flag, all off by default except source inheritance", () => {
   assert.deepEqual(describeAnswerRateFlags(), {
-    agentFollowUpOriginalQuestion: false,
     agentSingleDocumentRouting: false,
     claimHeadingContext: false,
     claimInflection: false,
@@ -652,7 +634,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
 
   withFlags(
     {
-      AGENT_FOLLOW_UP_ORIGINAL_QUESTION: "true",
       AGENT_SINGLE_DOCUMENT_ROUTING: "true",
       RAG_CLAIM_HEADING_CONTEXT: "true",
       RAG_CLAIM_INFLECTION: "true",
@@ -663,7 +644,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
-        agentFollowUpOriginalQuestion: true,
         agentSingleDocumentRouting: true,
         claimHeadingContext: true,
         claimInflection: true,
