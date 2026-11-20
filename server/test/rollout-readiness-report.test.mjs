@@ -500,6 +500,33 @@ test("planner runtime gate requires pure LLM rollout target", () => {
   assert.ok(gate.failedReasons.includes("plannerRollout_mismatch"));
 });
 
+// The app refuses these values at start; the report is still written, not ready.
+test("planner runtime gate fails rather than throws on a refused rollout", () => {
+  const previous = process.env.AGENT_PLANNER_ROLLOUT;
+
+  try {
+    for (const value of ["shadow", "determinstic"]) {
+      process.env.AGENT_PLANNER_ROLLOUT = value;
+      const gate = buildPlannerRuntimeGate();
+
+      assert.equal(gate.status, "fail", value);
+      assert.equal(gate.current.plannerRollout, value);
+      assert.ok(gate.failedReasons.includes("plannerRollout_mismatch"), value);
+    }
+
+    process.env.AGENT_PLANNER_ROLLOUT = " LLM ";
+    assert.equal(buildPlannerRuntimeGate().status, "pass");
+    delete process.env.AGENT_PLANNER_ROLLOUT;
+    assert.equal(buildPlannerRuntimeGate().status, "pass");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AGENT_PLANNER_ROLLOUT;
+    } else {
+      process.env.AGENT_PLANNER_ROLLOUT = previous;
+    }
+  }
+});
+
 test("readiness rejects an off graph runtime and a claimed DAG result without observed execution", () => {
   assert.equal(buildSkillGraphRuntimeGate({ mode: "off" }).status, "fail");
 

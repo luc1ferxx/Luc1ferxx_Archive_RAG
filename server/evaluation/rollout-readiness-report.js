@@ -7,7 +7,6 @@ import {
 } from "./planner-provider-gate.js";
 import { buildRecoveryGate } from "./quality-recovery-gate.js";
 import { buildTrajectoryGate } from "./quality-trajectory-gate.js";
-import { getAgentPlannerRollout } from "../rag/config.js";
 import {
   attachEvaluationEvidence,
   buildSourceReportReference,
@@ -204,9 +203,12 @@ const normalizeRuntimeValue = (value) =>
   String(value ?? "").trim().toLowerCase();
 
 // AGENT_PLANNER_ROLLOUT picks every planner, so all five fields the release
-// contract keeps (release-report-contract-validation.js) are the rollout.
+// contract keeps (release-report-contract-validation.js) are the rollout. Read
+// raw like the Skill graph rollout above: a value the app refuses at start
+// (rag/config.js getAgentPlannerRollout) fails the gate rather than the report.
 export const getCurrentPlannerRuntime = () => {
-  const plannerRollout = getAgentPlannerRollout();
+  const plannerRollout =
+    normalizeRuntimeValue(process.env.AGENT_PLANNER_ROLLOUT) || "llm";
 
   return {
     executionPlanner: plannerRollout,
