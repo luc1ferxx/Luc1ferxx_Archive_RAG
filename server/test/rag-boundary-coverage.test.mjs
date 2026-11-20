@@ -305,7 +305,6 @@ test("QA gate reads a Russian question: an off-topic Russian chunk is not enough
     {
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
-      RAG_QA_DENSE_RESCUE: undefined,
       RAG_QA_MIN_RERANK_PROBABILITY: undefined,
       RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },

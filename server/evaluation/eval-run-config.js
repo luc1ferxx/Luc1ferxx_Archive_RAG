@@ -74,20 +74,11 @@ export const describeRetrievalConfig = async () => {
     import("../rag/service-topology.js"),
     import("../rag/query-expansion.js"),
   ]);
-  const denseRescue = config.getQaDenseRescue();
   const queryExpansion = config.getQaQueryExpansion();
 
   return {
-    // Only with RAG_QA_DENSE_RESCUE on, so a default report keeps its shape
-    // and compares equal with reports from before the setting.
-    ...(denseRescue
-      ? {
-          qaDenseRescue: denseRescue.mode,
-          qaDenseRescueFloor: denseRescue.floor,
-          qaDenseRescueThreshold: denseRescue.threshold,
-        }
-      : {}),
-    // Only with RAG_QA_QUERY_EXPANSION on, likewise; the prompt as
+    // Only with RAG_QA_QUERY_EXPANSION on, so a default report keeps its shape
+    // and compares equal with reports from before the setting; the prompt as
     // id@version#fingerprint, since the expansion's text comes from it.
     ...(queryExpansion
       ? {
@@ -165,9 +156,6 @@ const RETRIEVAL_FIELDS = Object.freeze([
   "qaGateInflection",
   "qaAnswerVerdict",
   "qaMinRerankProbability",
-  "qaDenseRescue",
-  "qaDenseRescueThreshold",
-  "qaDenseRescueFloor",
   "qaQueryExpansion",
   "qaQueryExpansionCount",
   "qaQueryExpansionPrompt",

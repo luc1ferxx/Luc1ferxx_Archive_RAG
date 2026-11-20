@@ -49,8 +49,6 @@ const ENV_KEYS = [
   "RAG_RETRIEVAL_ROUTE",
   "RAG_RERANK_ENABLED",
   "RAG_RETRIEVAL_TOP_K",
-  "RAG_QA_DENSE_RESCUE",
-  "RAG_QA_DENSE_RESCUE_THRESHOLD",
   "RAG_QA_QUERY_EXPANSION",
   "RAG_QA_QUERY_EXPANSION_COUNT",
   "RAG_QA_QUERY_EXPANSION_TEMPERATURE",
@@ -247,8 +245,6 @@ test("combinations that would mix in scores against something other than the que
   const conflict = { code: "RAG_QA_QUERY_EXPANSION_CONFLICT" };
 
   for (const [values, refused] of [
-    [{ RAG_QA_DENSE_RESCUE: "absolute", RAG_QA_DENSE_RESCUE_THRESHOLD: "0.7", RAG_QA_QUERY_EXPANSION: "multi_query" }, true],
-    [{ RAG_QA_DENSE_RESCUE: "absolute", RAG_QA_DENSE_RESCUE_THRESHOLD: "0.7", RAG_QA_QUERY_EXPANSION: "hyde" }, true],
     [{ RETRIEVAL_SERVICE_URL: "http://127.0.0.1:5002", RAG_QA_QUERY_EXPANSION: "hyde" }, true],
     [{ RETRIEVAL_SERVICE_URL: "http://127.0.0.1:5002", RAG_QA_QUERY_EXPANSION: "multi_query" }, false],
     [{ RAG_EMBEDDING_QUERY_ADAPTER: "/tmp/adapter.json", RAG_QA_QUERY_EXPANSION: "hyde" }, true],
@@ -258,8 +254,6 @@ test("combinations that would mix in scores against something other than the que
   ]) {
     withEnv({
       RAG_EMBEDDING_QUERY_ADAPTER: undefined,
-      RAG_QA_DENSE_RESCUE: undefined,
-      RAG_QA_DENSE_RESCUE_THRESHOLD: undefined,
       RAG_RERANK_ENABLED: undefined,
       RETRIEVAL_SERVICE_URL: undefined,
       ...values,
@@ -276,8 +270,8 @@ test("combinations that would mix in scores against something other than the que
   withEnv({ RETRIEVAL_SERVICE_URL: undefined, RAG_RERANK_ENABLED: undefined, RAG_EMBEDDING_QUERY_ADAPTER: undefined });
 
   for (const [values, code] of [
-    [{ RAG_QA_QUERY_EXPANSION: "hyde", RAG_QA_DENSE_RESCUE: "margin", RAG_QA_DENSE_RESCUE_THRESHOLD: "0.05" }, "RAG_QA_QUERY_EXPANSION_CONFLICT"],
-    [{ RAG_QA_QUERY_EXPANSION: "fusion", RAG_QA_DENSE_RESCUE: undefined }, "RAG_QA_QUERY_EXPANSION_INVALID"],
+    [{ RAG_QA_QUERY_EXPANSION: "multi_query", RAG_RERANK_ENABLED: "true" }, "RAG_QA_QUERY_EXPANSION_CONFLICT"],
+    [{ RAG_QA_QUERY_EXPANSION: "fusion", RAG_RERANK_ENABLED: undefined }, "RAG_QA_QUERY_EXPANSION_INVALID"],
   ]) {
     withEnv(values);
     assert.throws(() => createAppServices(untouchable, { uploadsDirectory: "/nonexistent" }), { code }, code);

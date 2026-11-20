@@ -3,7 +3,6 @@ import {
   getMinQueryTermCoverage,
   getMinRelevanceScore,
   getCrossEncoderScoreScale,
-  getQaDenseRescue,
   getQaMinRerankProbability,
   getQaPartialCoverageFloor,
   isQaAnswerVerdictEnabled,
@@ -171,39 +170,11 @@ export const findQueryTermSubstitution = (queryText, evidenceText) => {
 // about a neighbouring thing -- which the coverage fraction alone cannot.
 // Whether the chunk actually answers is then the answer model's call
 // (QA_NOT_IN_EVIDENCE_MARKER in answer-verdict.js).
-// The dense candidates' mean cosine, which `margin` mode measures a chunk
-// against: nomic-style models give every chunk of a paper a similar, high
-// cosine to a question about it, so how far a chunk stands out from the rest
-// may say more than its cosine alone. Null with fewer than two dense
-// candidates, where no chunk can stand out.
-const meanDenseCosine = (results) => {
-  const cosines = results
-    .map((result) => result?.vectorScore)
-    .filter((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
-
-  return cosines.length < 2 ? null : cosines.reduce((sum, value) => sum + value, 0) / cosines.length;
-};
-
-const isDenseRescued = (result, { meanCosine, mode, threshold }) => {
-  const cosine = result?.vectorScore;
-
-  if (typeof cosine !== "number" || !Number.isFinite(cosine) || cosine <= 0) {
-    return false;
-  }
-
-  if (mode === "absolute") {
-    return cosine >= threshold;
-  }
-
-  return meanCosine !== null && cosine - meanCosine >= threshold;
-};
-
 const hasEnoughQueryCoverage = (
   result,
   {
     allowSemanticBypass = false,
     coverageOf = null,
-    denseRescue = null,
     minCoverage = getMinQueryTermCoverage(),
     partialCoverage = null,
   } = {}
@@ -223,13 +194,6 @@ const hasEnoughQueryCoverage = (
       partialCoverage.queryText,
       buildSubstitutionEvidenceText(result)
     );
-  }
-
-  // Dense rescue (RAG_QA_DENSE_RESCUE): a chunk worded differently from the
-  // question, which the coverage floor refuses, comes in on its dense
-  // similarity, under the same rival-substitution veto as the partial band.
-  if (denseRescue && coverage >= denseRescue.floor && isDenseRescued(result, denseRescue)) {
-    return !findQueryTermSubstitution(denseRescue.queryText, buildSubstitutionEvidenceText(result));
   }
 
   return (
@@ -452,7 +416,6 @@ const selectUsableResults = ({
   queryText = "",
   allowSemanticBypass = false,
   coverageOf = null,
-  denseRescue = null,
   minCoverage = getMinQueryTermCoverage(),
   partialCoverageFloor = null,
 }) => {
@@ -460,7 +423,6 @@ const selectUsableResults = ({
   const coverageOptions = {
     allowSemanticBypass,
     coverageOf,
-    denseRescue: denseRescue ? { ...denseRescue, meanCosine: meanDenseCosine(results), queryText } : null,
     minCoverage,
     partialCoverage:
       partialCoverageFloor !== null && partialCoverageFloor < minCoverage
@@ -612,44 +574,17 @@ export const assessQaConfidence = ({
   const coverageBasis = coverageOf
     ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: gateInflection } }
     : {};
-  // Read on every call, under the reranker gate too, so a bad setting fails
-  // the question instead of waiting for a question the rescue would apply to.
-  const configuredDenseRescue = getQaDenseRescue();
-  // The reranker's probability replaces coverage, so the rescue never applies there.
-  const denseRescueSetting = rerankGate ? null : configuredDenseRescue;
-  // Like the partial band, a single-part question only: in a multi-part one,
-  // low coverage means an unanswered part and drives the gap planner.
-  const denseRescue = denseRescueSetting && evidenceRequirementCount <= 1 ? denseRescueSetting : null;
-  const partialCoverageFloor =
-    evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null;
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
     : selectUsableResults({
         coverageOf,
-        denseRescue,
         minCoverage,
-        partialCoverageFloor,
+        partialCoverageFloor:
+          evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
         results,
         queryText,
       });
   const gate = rerankGate ? "rerank" : "lexical";
-  const coverageOfResult = (result) => (coverageOf ? coverageOf(result) : result?.keywordScore);
-  // Recorded only with the rescue on, so default traces keep their shape:
-  // admitted chunks below the coverage floor that the partial band did not
-  // take, i.e. the ones only the dense rescue let in.
-  const denseRescueCount = denseRescueSetting
-    ? {
-        denseRescueResultCount: selection.usableResults.filter((result) => {
-          const coverage = coverageOfResult(result);
-
-          return (
-            typeof coverage === "number" &&
-            coverage < minCoverage &&
-            !(partialCoverageFloor !== null && partialCoverageFloor < minCoverage && coverage >= partialCoverageFloor)
-          );
-        }).length,
-      }
-    : {};
 
   if (selection.usableResults.length === 0) {
     return {
@@ -667,7 +602,6 @@ export const assessQaConfidence = ({
       gate,
       missingAnchorGroups: selection.missingAnchorGroups,
       ...coverageBasis,
-      ...denseRescueCount,
     };
   }
 
@@ -675,15 +609,12 @@ export const assessQaConfidence = ({
     confident: true,
     gate,
     ...coverageBasis,
-    ...denseRescueCount,
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
-    // Admitted below the coverage floor: through the partial coverage band,
-    // or, with RAG_QA_DENSE_RESCUE on, the dense rescue (denseRescueResultCount
-    // counts those apart).
+    // Admitted through the partial coverage band rather than the floor.
     partialCoverageResultCount: selection.usableResults.filter((result) => {
-      const coverage = coverageOfResult(result);
+      const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
 
       return typeof coverage === "number" && coverage < minCoverage;
     }).length,

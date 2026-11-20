@@ -1,7 +1,6 @@
 import { createPromptTemplate } from "../lib/prompt-template.js";
 import {
   getEmbeddingQueryAdapterPath,
-  getQaDenseRescue,
   getQaQueryExpansion,
   isRerankEnabled,
 } from "./config.js";
@@ -98,10 +97,6 @@ export const describeQueryExpansionPrompt = (mode) => {
 };
 
 const describeConflict = ({ mode }) => {
-  if (getQaDenseRescue()) {
-    return "cannot run with RAG_QA_DENSE_RESCUE: the rescue's threshold is a cosine to the question's own vector, and expanded candidates carry cosines to another vector.";
-  }
-
   if (mode === "hyde" && isRemoteRetrievalEnabled()) {
     return "cannot run with a retrieval tier (RETRIEVAL_SERVICE_URL): HyDE searches with a vector, and a remote retrieval carries query texts only.";
   }
