@@ -118,28 +118,16 @@ test("the high-F1 bar is an option and the stage of one question follows its two
   assert.equal(classifyFunnelStage({ abstained: false, evidenceHit: true, id: "a" }, { hitAtAll: true }), "in_context");
 });
 
-test("a refusal by the answer model is a refusal, and no disagreement with the retrieval run's gate", () => {
+test("a refusal after the gate is a refusal, and no disagreement with the retrieval run's gate", () => {
   const { answers, retrieval } = buildReports();
 
-  answers.rows[4] = answerRow("q5", { abstained: true, abstainSource: "answer_model" });
+  answers.rows[4] = answerRow("q5", { abstained: true, abstainSource: "output_limit" });
+  // A report from before 2026-11-20 can hold the answer model's own refusal.
+  answers.rows[5] = answerRow("q6", { abstained: true, abstainSource: "answer_model" });
   const funnel = buildQasperAnswerFunnel(answers, retrieval);
 
-  assert.deepEqual(stageOf(funnel, "refused").refusedBySource, { answer_model: 1, gate: 1 });
+  assert.deepEqual(stageOf(funnel, "refused").refusedBySource, { answer_model: 1, gate: 1, output_limit: 1 });
   assert.deepEqual(funnel.answerable.inconsistent, { context: 0, gate: 0 });
-});
-
-test("a run with the answer verdict on is said to be one, because its retried answers read other chunks", () => {
-  const { answers, retrieval } = buildReports();
-
-  assert.equal(buildQasperAnswerFunnel(answers, retrieval).verdictSeen, false);
-  answers.rows[4] = answerRow("q5", { abstained: true, abstainSource: "answer_model" });
-  assert.equal(buildQasperAnswerFunnel(answers, retrieval).verdictSeen, true);
-  assert.match(formatFunnelMarkdown(buildQasperAnswerFunnel(answers, retrieval)).join("\n"), /This run had the answer verdict on: an answer written after the verdict's deeper retrieval retry/);
-
-  const overridden = buildReports();
-
-  overridden.answers.rows[4].verdictOverridden = true;
-  assert.equal(buildQasperAnswerFunnel(overridden.answers, overridden.retrieval).verdictSeen, true);
 });
 
 test("the settings that must match are the retrieval's, the chunking's, the corpus, the embedding model and the query adapter", () => {
@@ -226,7 +214,6 @@ test("the Markdown names every stage, the refusal sources and the unanswerable q
   assert.match(markdown, /Unanswerable questions: 1 of 2 refused, 1 answered\./);
   assert.match(markdown, /The reports differ, or cannot be shown to match, in git\.sha \("answers-sha" vs "retrieval-sha"\)\./);
   assert.doesNotMatch(markdown, /disagree/);
-  assert.doesNotMatch(markdown, /answer verdict/);
   // Both reports came from a clean checkout.
   assert.doesNotMatch(markdown, /checkout/);
 });

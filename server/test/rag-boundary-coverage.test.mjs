@@ -266,14 +266,11 @@ test("single-document QA gets no semantic bypass of its coverage floor", async (
   // The dense-score bypass is deliberately NOT extended to QA. There, low
   // coverage carries real information: it marks a chunk answering only part of
   // a multi-aspect question, which is what drives the gap-suggestion machinery.
-  // Granting the bypass here made a correct abstention silently disappear. The
-  // partial coverage band, QA's own narrower relief, is off here and tested
-  // below.
+  // Granting the bypass here made a correct abstention silently disappear.
   await withEnv(
     {
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
-      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },
     async () => {
       const assessment = assessQaConfidence({
@@ -306,7 +303,6 @@ test("QA gate reads a Russian question: an off-topic Russian chunk is not enough
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
       RAG_QA_MIN_RERANK_PROBABILITY: undefined,
-      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },
     async () => {
       const queryText = "Какой срок уведомления о расторжении договора?";
@@ -335,70 +331,9 @@ test("QA gate reads a Russian question: an off-topic Russian chunk is not enough
   );
 });
 
-test("QA admits a reworded chunk in the partial coverage band but not a neighbouring topic", async () => {
-  const gate = {
-    RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
-    RAG_MIN_RELEVANCE_SCORE: "0.32",
-    RAG_QA_ANSWER_VERDICT: "true",
-    RAG_QA_PARTIAL_COVERAGE_FLOOR: "0.3",
-  };
-  const chunk = (id, text, keywordScore) => ({
-    ...makeResult({ id, text, score: 0.5, keywordScore }),
-    vectorScore: 0.465,
-  });
-
-  await withEnv(gate, async () => {
-    // Other words for the same thing: "caps" is "shall not exceed".
-    const reworded = assessQaConfidence({
-      queryText: "What are the liability caps?",
-      results: [chunk("reworded", "The total liability of Vendor A shall not exceed the fees paid.", 0.5)],
-    });
-
-    assert.equal(reworded.confident, true);
-    assert.equal(reworded.partialCoverageResultCount, 1);
-
-    // The same coverage, but the asked word was replaced on its head word.
-    for (const [queryText, text] of [
-      ["What is the amber ceiling?", "Archive serial cobalt ceiling: approved amount is 3600 dollars per cycle."],
-      ["What is the parental leave policy?", "Annual leave policy: employees receive 10 paid annual leave days each year."],
-    ]) {
-      const neighbour = assessQaConfidence({ queryText, results: [chunk("neighbour", text, 0.5)] });
-
-      assert.equal(neighbour.confident, false, queryText);
-    }
-
-    // Below the band, for a question the decomposer split into parts, and
-    // without the answer model's verdict to back it, the floor alone decides.
-    assert.equal(
-      assessQaConfidence({
-        queryText: "What are the liability caps?",
-        results: [chunk("thin", "Liability is described in the schedule.", 0.25)],
-      }).confident,
-      false
-    );
-    assert.equal(
-      assessQaConfidence({
-        evidenceRequirementCount: 2,
-        queryText: "When does the refund policy take effect and which regions does it apply to?",
-        results: [chunk("topic-only", "Refunds are issued back to the original payment method.", 0.34)],
-      }).confident,
-      false
-    );
-  });
-  await withEnv({ ...gate, RAG_QA_ANSWER_VERDICT: undefined }, async () => {
-    assert.equal(
-      assessQaConfidence({
-        queryText: "What are the liability caps?",
-        results: [chunk("reworded", "The total liability of Vendor A shall not exceed the fees paid.", 0.5)],
-      }).confident,
-      false
-    );
-  });
-});
-
 test("once the gate answers, the context adds reworded candidates but not neighbouring topics", async () => {
   await withEnv(
-    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32", RAG_QA_ANSWER_VERDICT: undefined },
+    { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32" },
     async () => {
       const admitted = makeResult({ id: "admitted", text: "The amber ceiling is 2400 dollars.", keywordScore: 1 });
       const reworded = makeResult({ id: "reworded", text: "Approved amounts above that need a director.", keywordScore: 0 });
@@ -526,7 +461,6 @@ test("QA and comparison read separate coverage floors", async () => {
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.4",
       RAG_MIN_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
-      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },
     async () => {
       assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, true);
@@ -538,7 +472,6 @@ test("QA and comparison read separate coverage floors", async () => {
       RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
       RAG_MIN_QUERY_TERM_COVERAGE: "0.4",
       RAG_MIN_RELEVANCE_SCORE: "0.32",
-      RAG_QA_PARTIAL_COVERAGE_FLOOR: "1",
     },
     async () => {
       assert.equal(assessQaConfidence({ queryText: "liability cap", results: [halfCoverage] }).confident, false);

@@ -6,18 +6,17 @@
 
 ## 30 秒讲法
 
-这块只负责一件事：证据够就带页级引用作答，证据不够就拒答，不让模型编。调模型之前先过确定性门控（assessQaConfidence：问题实词覆盖 ≥0.51、相关度下限、编号/引号短语必须出现），过了才写答案。模型输出先统一来源标签、删掉没出处的链接；在 agent 的 /chat 路径上，再由词法 claim 校验器逐句核对数字、主语、否定、情态和所引片段对不对得上，不支持就补检索一轮，最后由 finalizer 删掉无支持的句子，全删光就回固定拒答文本（MCP archive_ask 直接返回的单文档答案不经过这层自检）。多文档对比更严，模型答案过不了结构化门就换成引擎按证据拼的模板。证据进 prompt 前先过确定性注入筛查，流式只推校验通过的整句。要主动说的是：词法校验对正确改写太严，本地 qwen2.5:7b 下 agent 路径答题率很低。LLM 评审、模型自判拒答及其复核、7 个答题率开关都按事先定的规则测过，每轮都会多答 1–4 道不可答题，所以全部默认关闭。
+这块只负责一件事：证据够就带页级引用作答，证据不够就拒答，不让模型编。调模型之前先过确定性门控（assessQaConfidence：问题实词覆盖 ≥0.51、相关度下限、编号/引号短语必须出现），过了才写答案。模型输出先统一来源标签、删掉没出处的链接；在 agent 的 /chat 路径上，再由词法 claim 校验器逐句核对数字、主语、否定、情态和所引片段对不对得上，不支持就补检索一轮，最后由 finalizer 删掉无支持的句子，全删光就回固定拒答文本（MCP archive_ask 直接返回的单文档答案不经过这层自检）。多文档对比更严，模型答案过不了结构化门就换成引擎按证据拼的模板。证据进 prompt 前先过确定性注入筛查，流式只推校验通过的整句。要主动说的是：词法校验对正确改写太严，本地 qwen2.5:7b 下 agent 路径答题率很低。LLM 评审、模型自判拒答及其复核、7 个答题率开关都按事先定的规则测过，每轮都会多答 1–4 道不可答题，所以当时都没改默认；模型自判拒答、复核和三个词面开关（门控和结论校验的词形变化、章节标题）2026-11-20 已删除（D9、Q12），评审、来源继承和评审 temperature 还在。
 
 ## 关键文件
 
 | 文件 | 作用 |
 | --- | --- |
 | `server/rag/confidence.js` | QA/对比门控：assessQaConfidence（覆盖率+相关度+anchor，可选重排概率门 selectByRerankProbability）、selectQaContext（判定与上下文分开）、findQueryTermSubstitution（近邻替换否决）、assessComparisonConfidence |
-| `server/rag/document-rag-execution.js` | 答案路由主干：executeDocumentRag → runDocumentRag → executeQaRag / executeComparisonRag；门控不过时 buildQaGapPlan；模型拒答后 retryQaWithDeeperRetrieval；QA_CONTEXT_MIN_COVERAGE |
+| `server/rag/document-rag-execution.js` | 答案路由主干：executeDocumentRag → runDocumentRag → executeQaRag / executeComparisonRag；门控不过时 buildQaGapPlan；QA_CONTEXT_MIN_COVERAGE |
 | `server/rag/answer-writer.js` | prompt 模板与写作：writeQaAnswer、writeComparisonAnswer、assessStructuredDifferenceAnswer、模板兜底 buildGroundedDifferenceAnswer / buildNoMaterialDifferenceAnswer、证据筛查 prepareQASourceBundle / buildScreenedContextSection、UNTRUSTED_EVIDENCE_RULES |
 | `server/rag/self-check/text.js` | normalizeGroupedSourceLabels：把 [Source 1, Source 3] 归一成一括号一个标签（answer-writer.js 和 answer-drafts.js 引用它） |
-| `server/rag/answer-verdict.js` | NOT_IN_EVIDENCE: 拒答标记解析（readQaAnswerVerdict / QA_NOT_IN_EVIDENCE_MARKER），RAG_QA_ANSWER_VERDICT 默认关（config.js isQaAnswerVerdictEnabled） |
-| `server/rag/answer-verdict-override.js` | overrideNotInEvidenceVerdict：标记后的句子能被确定性证明时改判作答（RAG_QA_VERDICT_OVERRIDE 默认关，config.js getQaVerdictOverrideMode） |
+| `server/rag/answer-verdict.js` | startsWithNotInEvidenceVerdict：流式草稿不发以 NOT_IN_EVIDENCE: 开头的回复（拒答标记 RAG_QA_ANSWER_VERDICT 和它的解析、覆盖 2026-11-20 已删除，见 D9） |
 | `server/rag/self-check/evaluate.js` | evaluateClaimSupport / computeClaimSupport：逐 claim 核对；evaluateDocumentEvidence 产出 passed/retryRecommended；evaluateDocumentEvidenceWithJudge；selectBetterRagResult |
 | `server/rag/self-check/support.js` | evaluateClaimAgainstCitations：数字锚点、情态、主语绑定、极性、关系方向、词重叠 ≥0.6 的核心词法判定（约 1800 行） |
 | `server/rag/self-check/claims.js` | splitAnswerStructure / splitAnswerClaims：按标题/句号/分号（CLAIM_SPLIT_PATTERN）和 splitCoordinatedClaim 切 claim，识别 Differences 段 |
@@ -33,7 +32,7 @@
 | `server/rag/gap-planner.js` | planQaEvidenceGap：拒答时说明'找到了什么、缺什么'，生成补充查询 |
 | `server/rag/prompt-registry.js` | definePrompt / fingerprintPromptSource（SHA-256 前 12 位）/ hashPromptSet / PROMPT_IDS（10 个） |
 | `server/rag/prompt-catalog.js` | listPromptTemplates / describeActivePromptTemplates 汇总全部模板和当前生效集 |
-| `server/test/prompt-registry.test.mjs` | PINNED_PROMPT_TEMPLATES 钉死 18 个 id@version 的指纹 |
+| `server/test/prompt-registry.test.mjs` | PINNED_PROMPT_TEMPLATES 钉死 16 个 id@version 的指纹 |
 | `server/evaluation/release-evidence-gate.js` | buildPromptLineageCheck：发布报告必须同一 prompt setHash |
 | `server/evaluation/agent-answer-outcome.js` | classifyAgentAnswer：澄清、grounded abstention、空答案都不算回答（评测口径） |
 
@@ -47,7 +46,7 @@
    - 不通过：buildQaGapPlan / planQaEvidenceGap 生成"找到了什么、缺什么"的说明（可能再跑补充检索，但只用于说明），返回 abstained: true，不调用答案模型。
    - 通过：selectQaContext 先放门控放行的块，再按检索顺序补候选，补到 topK 为止（要求过相关度回退下限、命中 anchor、没有近邻替换；QA_CONTEXT_MIN_COVERAGE = 0）。
    - prepareQASourceBundle：每个块和文件名都经 buildScreenedContextSection 过 screenUntrustedText 再进 prompt，citation 保留原文。
-   - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。开了 RAG_QA_ANSWER_VERDICT 时还有 readQaAnswerVerdict，再开 override 时有 overrideNotInEvidenceVerdict。模型自判拒答（abstainSource = answer_model）时调 retryQaWithDeeperRetrieval（top 18，只给模型没看过、且过同一门控的块，最多 topK 条，只重试一次）。
+   - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。
 4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖 min(docIds 数, 2) 份文档）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
 5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（返回主调用改写后的问题，没改写就是原问题；2026-11-19 起不再用 "Re-check the uploaded documents…" 元文本）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这个问题，证据问题只进另外 2 条修复查询，共 3 条；补检索跳过会话改写，门控按问题文本算覆盖）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
 6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支只有测试走得到，2026-11-17 阶段 13 已删除，批准之后的回答就是 Web 搜索 Capability 返回的文本（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
@@ -70,7 +69,7 @@
 
 **为什么不用主流替代方案**
 
-- 让 LLM 自己判断能不能答：已实现为 RAG_QA_ANSWER_VERDICT，7B 模型会拒掉写对了的答案，默认关
+- 让 LLM 自己判断能不能答：实现过（RAG_QA_ANSWER_VERDICT），7B 模型会拒掉写对了的答案，三轮都没过事先规则，2026-11-20 删除（D9）
 - 交叉编码器概率做门：已实现，只在开重排时生效（开重排时默认用它），因为需要单独的模型服务
 - 降低阈值：0.2 时 F1 显著变差；阈值 ≤0.5 会让 5 个行为测试翻转，其中 2 个是真实的相邻话题退化
 
@@ -271,7 +270,9 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 **代码**：server/rag/prompt-injection-screen.js screenUntrustedText / guardAnswerLinks / SENTENCE_RULES；server/rag/answer-writer.js UNTRUSTED_EVIDENCE_RULES / buildScreenedContextSection；server/rag/self-check/claim-judge.js buildClaimJudgePrompt；server/rag/config.js getPromptInjectionScreenMode
 
-### D9. 答案模型自判拒答（NOT_IN_EVIDENCE: 标记），再加一层确定性复核 override，两者默认都关
+### D9. 答案模型自判拒答（NOT_IN_EVIDENCE: 标记），再加一层确定性复核 override（2026-11-20 已删除）
+
+- **已删除（2026-11-20，用户："清理这 4 个"）**：三轮都没过事先规则，标记、补救区、扩大检索重试和 override 一起删除；讲的时候是"做过、测过、删了"。下面是当时的理由和证据。
 
 **为什么**
 
@@ -294,7 +295,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 候选全开（B2）时 verify:quality 14/18
 - override 在 QASPER 上判断了 42 次，作答 0 次（CURRENT-TRUTH 3.21）
 
-**代码**：server/rag/answer-verdict.js readQaAnswerVerdict / QA_NOT_IN_EVIDENCE_MARKER；server/rag/answer-verdict-override.js overrideNotInEvidenceVerdict / QA_VERDICT_OVERRIDE_REASONS；server/rag/document-rag-execution.js retryQaWithDeeperRetrieval
+**代码**：server/rag/answer-verdict.js 的 readQaAnswerVerdict、server/rag/answer-verdict-override.js、server/rag/document-rag-execution.js 的 retryQaWithDeeperRetrieval 都在 2026-11-20 删除；现在只剩 server/rag/answer-verdict.js startsWithNotInEvidenceVerdict（流式草稿不发以标记开头的回复）
 
 ### D10. 每个 prompt 模板一个描述符 id@version#fingerprint（未渲染模板原文 SHA-256 的前 12 位），测试钉死
 
@@ -523,9 +524,10 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 第二轮开发集：答题率 0→0.363，显著；但不可答题被回答 0/9→2/9，超过'基线 + 1'的上限
 - 用户要求补跑护栏：verify:quality 14/18，没通过
 - 第三轮 override：train 上不可答题 1/7，第一阶段就没过
-- 收获：先纠正了评测口径（classifyAgentAnswer）；定位到瓶颈是词法校验加 7B 模型；换更强的模型时开关可以直接重测
+- 收获：先纠正了评测口径（classifyAgentAnswer）；定位到瓶颈是词法校验加 7B 模型；换更强的模型时剩下的开关可以直接重测
+- 2026-11-20（用户："清理这 4 个"）：模型自判、override 和三个从没多答一道题的开关（门控和结论校验的词形变化、章节标题）已删除
 
-代码：`server/rag/config.js describeAnswerRateFlags`；`server/rag/answer-verdict-override.js overrideNotInEvidenceVerdict`；`server/evaluation/agent-answer-outcome.js classifyAgentAnswer`
+代码：`server/rag/config.js describeAnswerRateFlags`；`server/evaluation/agent-answer-outcome.js classifyAgentAnswer`（override 的 `answer-verdict-override.js` 2026-11-20 已删除）
 
 > ⚠ 既不要说'开了更好'，也不要说'白做'。安全说法：'每轮都能把答题率拉到两三成到四成、F1 显著上升，但都会多答 1–4 道不可答题，按事先定的规则不改默认。规则没有因为结果不好看而改。'
 
@@ -538,7 +540,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 那道被误答的不可答题走的是普通作答路径，和 override 无关
 - 另做过独立审查：用合成反例攻击规则，堵住 7 类情况（多子问题、别的实体、复述问题、指向'见附表'、名词短语后半句、注入删掉的句子等），每条都先写了修复前失败的测试
 
-代码：`server/rag/answer-verdict-override.js overrideNotInEvidenceVerdict`；`server/rag/answer-verdict-override.js extractQuestionNames`
+代码：`server/rag/answer-verdict-override.js overrideNotInEvidenceVerdict` / `extractQuestionNames`（2026-11-20 已删除）
 
 > ⚠ 要主动承认还有已知漏洞：同一主题另一方面的、有引用的事实，在问题没有 anchor 和名称时仍会被当成答案；小写写的实体名不算名称；单个问题只答了一部分也会通过。
 
@@ -610,7 +612,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 | Prompt 归因 | 35/35 个 completion 事件能归到模板（改前 0） | CURRENT-TRUTH 3.9 | 样本小，只说明能归因 |
 | 重排概率做拒答门 | 可回答题拒答 37.8%→13.9%；不可回答题识别 80%→45%；F1 0.257→0.261 不显著 | CURRENT-TRUTH 3.14b | 需要开交叉编码器重排服务 |
 | 对比答案门（7B） | 进门的模型对比答案 6/6 判为 unsupported_claims，5 次退回模板、1 次拒答 | AGENTS.md「Comparison answer gate」（2026-10-04 实测） | qwen2.5:7b；verify:quality 1 次加 compare-hard 5 次 |
-| 代码常量 | QA 覆盖下限 0.51；补救区下限 0.3；相关度下限 0.32；回退档系数 0.8；词重叠阈值 0.6；补检索最多 1 轮；documentRag 预算 2；模型拒答后重试检索 top 18；默认检索 topK 10（2026-10-29 前是 6）；评审单段证据最多 2000 字符；评审进程内缓存 500 条、Redis 7 天；近重复 Jaccard 0.75 / 句子重叠 0.6 | server/rag/config.js DEFAULT_MIN_QA_QUERY_TERM_COVERAGE / DEFAULT_QA_PARTIAL_COVERAGE_FLOOR / getMinRelevanceScore / DEFAULT_QA_VERDICT_RETRY_TOP_K / getRetrievalTopK；server/rag/confidence.js FALLBACK_THRESHOLD_RATIO；server/rag/self-check/patterns.js SUPPORT_TOKEN_OVERLAP_THRESHOLD；server/rag/agent-bootstrap.js DEFAULT_AGENT_MAX_FOLLOW_UPS；server/rag/agent-budget.js DEFAULT_AGENT_BUDGET.maxDocumentRagCalls；server/rag/self-check/claim-judge.js MAX_EVIDENCE_CHARS / CACHE_LIMIT / SHARED_VERDICT_TTL_MS；server/rag/comparison-engine.js NEAR_DUPLICATE_TERM_JACCARD / NEAR_DUPLICATE_SENTENCE_OVERLAP | 0.32 和 topK 10 是环境变量默认值，可覆盖 |
+| 代码常量 | QA 覆盖下限 0.51；相关度下限 0.32；回退档系数 0.8；词重叠阈值 0.6；补检索最多 1 轮；documentRag 预算 2；默认检索 topK 10（2026-10-29 前是 6）；评审单段证据最多 2000 字符；评审进程内缓存 500 条、Redis 7 天；近重复 Jaccard 0.75 / 句子重叠 0.6 | server/rag/config.js DEFAULT_MIN_QA_QUERY_TERM_COVERAGE / getMinRelevanceScore / getRetrievalTopK；server/rag/confidence.js FALLBACK_THRESHOLD_RATIO；server/rag/self-check/patterns.js SUPPORT_TOKEN_OVERLAP_THRESHOLD；server/rag/agent-bootstrap.js DEFAULT_AGENT_MAX_FOLLOW_UPS；server/rag/agent-budget.js DEFAULT_AGENT_BUDGET.maxDocumentRagCalls；server/rag/self-check/claim-judge.js MAX_EVIDENCE_CHARS / CACHE_LIMIT / SHARED_VERDICT_TTL_MS；server/rag/comparison-engine.js NEAR_DUPLICATE_TERM_JACCARD / NEAR_DUPLICATE_SENTENCE_OVERLAP | 0.32 和 topK 10 是环境变量默认值，可覆盖 |
 
 ## 要主动说出口的边界
 
@@ -625,7 +627,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 流式草稿机制可用，但在当前校验器下几乎没有延迟收益
 - 提示注入筛查基于模式匹配，刻意改写可以绕过（文档 RAG 出口 3/3）；用例只有 13 个、是自建的；没跑过 BIPIA 或 AgentDojo
 - 近邻替换否决是纯词面的：下位词（recurrent network 对 neural network）也算替换；中文按单字配对
-- 拒答标记 override 是看着 verify:quality 的失败样例写的，那份数据不是它的独立证据；QASPER 上作答 0 次；仍有已知漏洞（同一主题另一方面的事实、小写实体名）
+- 拒答标记、override 和三个词面开关都测过、没过事先规则，2026-11-20 已删除；讲的时候是"做过、测过、删了"（override 是看着 verify:quality 的失败样例写的，QASPER 上作答 0 次）
 - 只用本地 qwen2.5:7b 验证过，没有 GPT 级模型和生产流量的数据
 - claim memo 的加速是在假模型、短答案上测的，真实长答案没测
 - 代码里看到、还没测过影响：evaluateDocumentEvidence 要求引用覆盖 min(docIds 数, 2) 份文档。如果前端在多文档范围内把所有 docIds 发进来，单文档事实题可能被判 document_coverage 缺口，从而触发补检索或澄清，需要自己确认

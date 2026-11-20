@@ -525,8 +525,8 @@ const main = async () => {
     const retrieve = async ({ arm, docId, docIds, expectedPages, id, question, route, scope = null }) => {
       const run = () =>
         withArm({ arm, pruneDfFraction, route }, () => retrieveQaCandidates({ docIds, resolvedQuery: question }));
-      const { evidenceRequirementCount, results } = scope ? await tenant.runWithDatabaseTenant(scope, run) : await run();
-      const confidence = assessQaConfidence({ evidenceRequirementCount, queryText: question, results });
+      const { results } = scope ? await tenant.runWithDatabaseTenant(scope, run) : await run();
+      const confidence = assessQaConfidence({ queryText: question, results });
 
       return recallRow({ confidence, docId, expectedPages, id, results });
     };

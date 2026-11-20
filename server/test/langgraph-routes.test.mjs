@@ -113,8 +113,6 @@ const BASE_ENV = Object.freeze({
   POSTGRES_DATABASE_URL: undefined,
   RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
   RAG_LONG_MEMORY_ENABLED: "false",
-  RAG_QA_ANSWER_VERDICT: undefined,
-  RAG_QA_VERDICT_OVERRIDE: undefined,
   RETRIEVAL_SERVICE_URL: undefined,
 });
 

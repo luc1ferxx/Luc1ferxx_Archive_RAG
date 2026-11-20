@@ -57,7 +57,6 @@ test("rows: evidence among the candidates, at rank 1, in the top 3, admitted, an
   const [row, refused] = describeGateDumpRows(
     dumpOf([
       {
-        evidenceRequirementCount: 1,
         // Page 2 clears the coverage floor and opens the gate; the evidence
         // (page 5) does not, so it is not admitted, but the context selection
         // lets it in as a further candidate.
@@ -65,7 +64,6 @@ test("rows: evidence among the candidates, at rank 1, in the top 3, admitted, an
         testCase: testCase("q1", "p1", { pages: [5] }),
       },
       {
-        evidenceRequirementCount: 1,
         results: [candidate("p2", 1, 0.1), candidate("p2", 4, 0)],
         testCase: testCase("q2", "p2", { pages: [4] }),
       },
@@ -117,7 +115,7 @@ test("pairs: arm minus base over the selected rows, flips counted, papers resamp
 
 test("two files are compared only over the same questions and the gate settings they ran with", async () => {
   const retrieval = await describeRetrievalConfig();
-  const cases = [{ evidenceRequirementCount: 1, results: [], testCase: testCase("q1", "p1", { pages: [1] }) }];
+  const cases = [{ results: [], testCase: testCase("q1", "p1", { pages: [1] }) }];
   const same = dumpOf(cases, retrieval);
 
   assert.doesNotThrow(() => assertComparableGateDumps(same, dumpOf(cases, retrieval), retrieval));
@@ -156,13 +154,11 @@ test("two files are compared only over the same questions and the gate settings 
 test("the comparison: every metric, the retrieval time of each file", () => {
   const cases = (evidencePage) => [
     {
-      evidenceRequirementCount: 1,
       results: [candidate("p1", 2, 0.6), candidate("p1", evidencePage, 0.1)],
       retrievalMs: evidencePage === 5 ? 1200 : 10,
       testCase: testCase("q1", "p1", { pages: [5] }),
     },
     {
-      evidenceRequirementCount: 1,
       results: [candidate("p2", 1, 0.1)],
       retrievalMs: evidencePage === 5 ? 800 : 12,
       testCase: testCase("q2", "p2", { shouldAbstain: true }),
@@ -200,7 +196,6 @@ test("the command reads two files and prints the comparison without reading serv
     const retrieval = await describeRetrievalConfig();
     const cases = [
       {
-        evidenceRequirementCount: 1,
         results: [candidate("p1", 2, 0.6), candidate("p1", 5, 0.1)],
         retrievalMs: 5,
         testCase: testCase("q1", "p1", { pages: [5] }),

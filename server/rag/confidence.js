@@ -4,9 +4,6 @@ import {
   getMinRelevanceScore,
   getCrossEncoderScoreScale,
   getQaMinRerankProbability,
-  getQaPartialCoverageFloor,
-  isQaAnswerVerdictEnabled,
-  isQaGateInflectionEnabled,
 } from "./config.js";
 import { getAdmissionScore, getResultKey } from "./citations.js";
 import {
@@ -16,7 +13,6 @@ import {
   normalizeSearchText,
   tokenize,
 } from "./text-utils.js";
-import { buildInflectionIndex } from "./inflection.js";
 
 const FALLBACK_THRESHOLD_RATIO = 0.8;
 
@@ -95,11 +91,10 @@ const isSpellingVariant = (asked, found) =>
  * different word in that place ("annual leave", "cobalt ceiling") and never
  * the asked one. Returns the first such pair, or null.
  *
- * Only single-document QA reads it, and only to refuse a chunk in the partial
- * coverage band, which the coverage floor alone would refuse too; a false
- * positive therefore costs nothing against the stricter gate. It is lexical:
- * a hyponym ("neural network" against "recurrent network") also counts as a
- * rival.
+ * Only single-document QA reads it, to keep such a chunk out of the answer
+ * model's context (selectQaContext); it never decides whether to answer. It is
+ * lexical: a hyponym ("neural network" against "recurrent network") also
+ * counts as a rival.
  */
 export const findQueryTermSubstitution = (queryText, evidenceText) => {
   const queryStems = new Set(extractMeaningfulTokens(queryText).map(stemTerm));
@@ -161,22 +156,12 @@ export const findQueryTermSubstitution = (queryText, evidenceText) => {
 // This does NOT weaken the anchor check: a query naming a specific identifier is
 // still rejected when the identifier is absent, by analyzeAnchorCoverage, which
 // runs after this filter and is tested independently.
-//
-// Single-document QA has its own, narrower relief (partialCoverage), open only
-// with RAG_QA_ANSWER_VERDICT on: a chunk between the partial floor and the
-// coverage floor is admitted unless it swaps a query word for a rival on the
-// same head word (findQueryTermSubstitution). That separates the two reasons a
-// chunk misses query terms -- it says the same thing in other words, or it is
-// about a neighbouring thing -- which the coverage fraction alone cannot.
-// Whether the chunk actually answers is then the answer model's call
-// (QA_NOT_IN_EVIDENCE_MARKER in answer-verdict.js).
 const hasEnoughQueryCoverage = (
   result,
   {
     allowSemanticBypass = false,
     coverageOf = null,
     minCoverage = getMinQueryTermCoverage(),
-    partialCoverage = null,
   } = {}
 ) => {
   const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
@@ -187,13 +172,6 @@ const hasEnoughQueryCoverage = (
 
   if (coverage >= minCoverage) {
     return true;
-  }
-
-  if (partialCoverage && coverage >= partialCoverage.floor) {
-    return !findQueryTermSubstitution(
-      partialCoverage.queryText,
-      buildSubstitutionEvidenceText(result)
-    );
   }
 
   return (
@@ -214,11 +192,10 @@ const buildSearchableResultText = (result) =>
 
 /**
  * The share of the query's meaningful terms a text contains: the vector
- * stores' keywordScore (same terms, same searchable text), optionally counting
- * an inflected form as a match (rag/inflection.js). Null for a query with no
- * meaningful term, as the stores return.
+ * stores' keywordScore (same terms, same searchable text). Null for a query
+ * with no meaningful term, as the stores return.
  */
-export const computeQueryTermCoverage = ({ queryText = "", resultText = "", inflection = false } = {}) => {
+export const computeQueryTermCoverage = ({ queryText = "", resultText = "" } = {}) => {
   const queryTerms = buildTermSet(queryText);
 
   if (queryTerms.size === 0) {
@@ -231,11 +208,10 @@ export const computeQueryTermCoverage = ({ queryText = "", resultText = "", infl
     return 0;
   }
 
-  const index = inflection ? buildInflectionIndex(entryTerms) : entryTerms;
   let overlap = 0;
 
   for (const term of queryTerms) {
-    if (index.has(term)) {
+    if (entryTerms.has(term)) {
       overlap += 1;
     }
   }
@@ -256,15 +232,10 @@ export const computeResultQueryTermCoverage = (result, queryText) =>
 // the candidate won the merge. `fromQueryText` (the agent's follow-up) replaces
 // it with the coverage of the gate's own question, since the follow-up's other
 // retrieval queries carry the unsupported claim text and would score a chunk
-// against the model's words.
-// `inflection` (RAG_QA_GATE_INFLECTION) acts only on a chunk that has some
-// query word in another inflected form only (the inflection-aware coverage of
-// the gate's question exceeds its exact coverage); such a chunk is read at the
-// higher of its stored score and that inflection-aware coverage. Any other
-// chunk keeps its stored score, and no score is lowered. A candidate without a
-// numeric keywordScore keeps it.
-const buildQaCoverageReader = ({ fromQueryText = false, inflection = false, queryText = "" }) => {
-  if (!fromQueryText && !inflection) {
+// against the model's words. A candidate without a numeric keywordScore keeps
+// it.
+const buildQaCoverageReader = ({ fromQueryText = false, queryText = "" }) => {
+  if (!fromQueryText) {
     return null;
   }
 
@@ -279,15 +250,7 @@ const buildQaCoverageReader = ({ fromQueryText = false, inflection = false, quer
       return memo.get(result);
     }
 
-    const resultText = buildSearchableResultText(result);
-    const recomputed = computeQueryTermCoverage({ inflection, queryText, resultText });
-    let coverage = result.keywordScore;
-
-    if (recomputed !== null && fromQueryText) {
-      coverage = recomputed;
-    } else if (recomputed !== null && recomputed > computeQueryTermCoverage({ queryText, resultText })) {
-      coverage = Math.max(result.keywordScore, recomputed);
-    }
+    const coverage = computeResultQueryTermCoverage(result, queryText) ?? result.keywordScore;
 
     memo.set(result, coverage);
     return coverage;
@@ -324,20 +287,6 @@ const getMatchedAnchorIndexes = (result, anchorGroups) => {
   }
 
   return matchedIndexes;
-};
-
-/**
- * The QA gate's anchor check (identifiers and quoted phrases, matched as in
- * analyzeAnchorCoverage) applied to one text: the anchor groups of the
- * question the text does not name. Empty when the question has no anchors.
- */
-export const findUncoveredQueryAnchors = ({ queryText = "", text = "" } = {}) => {
-  const anchorGroups = extractAnchorGroups(String(queryText ?? ""));
-  const matchedIndexes = new Set(
-    getMatchedAnchorIndexes({ document: { pageContent: String(text ?? "") } }, anchorGroups)
-  );
-
-  return anchorGroups.filter((_group, index) => !matchedIndexes.has(index));
 };
 
 const analyzeAnchorCoverage = (results, anchorGroups) => {
@@ -415,17 +364,12 @@ const selectUsableResults = ({
   allowSemanticBypass = false,
   coverageOf = null,
   minCoverage = getMinQueryTermCoverage(),
-  partialCoverageFloor = null,
 }) => {
   const minimumScore = getMinRelevanceScore();
   const coverageOptions = {
     allowSemanticBypass,
     coverageOf,
     minCoverage,
-    partialCoverage:
-      partialCoverageFloor !== null && partialCoverageFloor < minCoverage
-        ? { floor: partialCoverageFloor, queryText }
-        : null,
   };
   const anchorGroups = extractAnchorGroups(queryText);
   const strongAnchorAnalysis = analyzeAnchorCoverage(
@@ -537,20 +481,11 @@ const selectByRerankProbability = ({ minProbability, queryText, results }) => {
   };
 };
 
-// The partial coverage band opens only with RAG_QA_ANSWER_VERDICT on, since it
-// admits chunks whose answer only the model can confirm.
-// evidenceRequirementCount is how many parts the query decomposer split the
-// question into. The partial coverage band is for a single-part question: in a
-// multi-part one ("when does it take effect and which regions does it apply
-// to"), a chunk matching only the topic word answers none of the parts, and low
-// coverage is what drives the gap planner's per-part suggestions.
-//
 // coverageFromQueryText: measure coverage against queryText itself (see
 // buildQaCoverageReader); only the agent's follow-up retrieval sets it.
 export const assessQaConfidence = ({
   results,
   queryText = "",
-  evidenceRequirementCount = 1,
   coverageFromQueryText = false,
 }) => {
   const minCoverage = getMinQaQueryTermCoverage();
@@ -559,26 +494,24 @@ export const assessQaConfidence = ({
     minRerankProbability !== null &&
     results.length > 0 &&
     results.every((result) => typeof result?.crossEncoderScore === "number");
-  const gateInflection = isQaGateInflectionEnabled();
   const coverageOf = rerankGate
     ? null
     : buildQaCoverageReader({
         fromQueryText: coverageFromQueryText,
-        inflection: gateInflection,
         queryText,
       });
   // Recorded only when coverage is not the stored keywordScore, so default
-  // traces keep their shape.
+  // traces keep their shape. `inflection` is always false since
+  // RAG_QA_GATE_INFLECTION went (2026-11-20); kept so the follow-up's trace
+  // does not change.
   const coverageBasis = coverageOf
-    ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: gateInflection } }
+    ? { coverageBasis: { fromQueryText: Boolean(coverageFromQueryText), inflection: false } }
     : {};
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
     : selectUsableResults({
         coverageOf,
         minCoverage,
-        partialCoverageFloor:
-          evidenceRequirementCount <= 1 && isQaAnswerVerdictEnabled() ? getQaPartialCoverageFloor() : null,
         results,
         queryText,
       });
@@ -610,7 +543,7 @@ export const assessQaConfidence = ({
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
-    // Admitted through the partial coverage band rather than the floor.
+    // Admitted below the coverage floor, which only the rerank gate does.
     partialCoverageResultCount: selection.usableResults.filter((result) => {
       const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
 

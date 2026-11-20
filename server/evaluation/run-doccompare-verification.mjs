@@ -157,7 +157,6 @@ const runChildQuery = async ({ docIds, question }) => {
   const payload = JSON.stringify({
     documentCount: documents.length,
     abstained: Boolean(response.abstained),
-    verdictOverridden: response.verdictOverridden === true,
     text: response.text ?? "",
     citations: (response.citations ?? []).map((citation) => ({
       docId: citation.docId,
@@ -353,7 +352,7 @@ const main = async () => {
   }
 
   const { default: chat, ingestDocument, initializeDocumentRegistry } = await import("../chat.js");
-  const { describeAnswerRateFlags, getClaimJudgeMode, isQaAnswerVerdictEnabled } = await import("../rag/config.js");
+  const { describeAnswerRateFlags, getClaimJudgeMode } = await import("../rag/config.js");
 
   try {
     const fixtures = await writeDocCompareFixtures(fixtureDirectory);
@@ -388,11 +387,7 @@ const main = async () => {
       id: "single.answers",
       description: "answers a question its corpus can support",
       passed: !single.abstained && normalize(single.text).length > 0,
-      // verdictOverridden: answered through RAG_QA_VERDICT_OVERRIDE although the
-      // answer model opened with NOT_IN_EVIDENCE: (answer-verdict-override.js).
-      detail:
-        `abstained=${single.abstained} reason=${single.abstainReason ?? "-"}` +
-        (single.verdictOverridden === true ? " verdictOverridden=true" : ""),
+      detail: `abstained=${single.abstained} reason=${single.abstainReason ?? "-"}`,
     });
     record({
       id: "single.cites",
@@ -615,7 +610,6 @@ const main = async () => {
       ),
       detail: childResult
         ? `abstained=${childResult.abstained} citations=${childResult.citations.length} ` +
-          (childResult.verdictOverridden === true ? "verdictOverridden=true " : "") +
           `answer: ${normalize(childResult.text).slice(0, 240)}`
         : childFailureDetail,
     });
@@ -647,7 +641,6 @@ const main = async () => {
       config: {
         answerRateFlags: describeAnswerRateFlags(),
         claimJudge: getClaimJudgeMode(),
-        qaAnswerVerdict: isQaAnswerVerdictEnabled(),
       },
       totalChecks: checks.length,
       passed: checks.filter((check) => check.passed).length,

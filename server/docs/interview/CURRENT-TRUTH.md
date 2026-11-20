@@ -26,7 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
-| Prompt 版本 | 10 个 prompt、18 个钉住的模板版本（`id@version`；2026-11-20 按代码数的，删掉查询扩展的 2 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
+| Prompt 版本 | 10 个 prompt、16 个钉住的模板版本（`id@version`；2026-11-20 按代码数的，删掉查询扩展和拒答标记各 2 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，17 张表（再加每个 live 索引版本的分块表和 BM25 统计表）的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移用 owner 登录；进程级缓存加载、跨租户恢复扫描显式标成 system 工作，默认仍以 owner 登录执行，开角色拆分时切到 NOLOGIN 的 system 角色（迁移 035）。strict 上下文和角色拆分都是可选项，默认关（见 3.32） | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js`、`health.js`（`getRowLevelSecurityTables`） |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/langgraph/agent-stream.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
@@ -241,6 +241,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 作答时上下文里有证据：+0.18，显著（上下文指标，见 3.23）。
   - 打开开关时 `verify:quality` 18/18。
   - 但不可回答题识别从 85% 降到 70%，代价 0.467 高于基线 0.421。按事先定的三条规则，仍默认关闭，默认行为完全不变。
+- **已删除（2026-11-20，用户："清理这 4 个"）**：这一轮和后来 3.21 的第二、三轮都没过事先规则，开关、补救区、扩大检索重试、`qa_answer` v1.3 / v2.3 模板和标记复核 `RAG_QA_VERDICT_OVERRIDE` 一起删除；近邻替换否决留着给选上下文用，以标记开头的回复仍不作为流式草稿发出。讲的时候是"做过、测过、删了"。
 
 面试里这是第二个"测了、没上默认"的例子。先定位原因：模型拒答主要是检索没召回。再针对它做重试，把拒答率拉回基线。最后按事先定的规则判断，不可回答题识别变差，所以不采用。整个过程没有改标准。
 
@@ -1191,6 +1192,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
   - 复核逻辑在 QASPER 上判断了 42 次、**作答 0 次**（7B 的标记回复里大多没有带来源的事实句），它只对 `verify:quality` 那种"标记 + 值"的回复有效；那道被误答的不可答题走的是普通作答路径，和复核无关。
 - **结论**：瓶颈是词法校验，7B 上"评审 + 先判断"能把 Agent 路径从几乎不答变成答三成左右，F1 显著上升，但每一轮都会多答一两道没有答案的题，三轮都没通过事先定的规则，所以默认全部保持关闭。要两头都顾，需要更强的答案或评审模型。
 - 测试：后端全量在 Node 24 和 Node 20 下都是 2575 个（通过 2561、跳过 14、失败 0）；覆盖率门禁通过；`eval:trajectory` 84 项检查不变。
+- **已删除（2026-11-20，用户："清理这 4 个"）**：从没多答一道题的词形变化（门控、结论校验各一个开关）和章节标题这三个开关，连同第二轮的拒答标记 `RAG_QA_ANSWER_VERDICT` 和第三轮的复核 `RAG_QA_VERDICT_OVERRIDE`，一起删除；评审、来源继承和评审 temperature 还在。讲的时候是"做过、测过、删了"。
 
 ### 3.20 读副本、按服务的非对称身份、端到端截止时间、指标与 SLO 告警（2026-10-02）
 

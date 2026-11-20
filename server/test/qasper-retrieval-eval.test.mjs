@@ -239,8 +239,6 @@ test("a comparison lists the retrieval settings that differ, and says when only 
     maxQueryRequirements: 4,
     minQaQueryTermCoverage: 0.51,
     minRelevanceScore: 0.32,
-    qaAnswerVerdict: false,
-    qaGateInflection: false,
     qaMinRerankProbability: 0.02,
     queryDecomposition: true,
     rerankCandidateMultiplier: 3,

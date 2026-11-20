@@ -1075,6 +1075,7 @@ QA prompt 原来写的是"最多五句"，现在改成：先用尽量少的词�
 - 没加重试时，`verify:quality` 还出现过一次阻断失败（17/18）：模型写出了正确的 12 个月责任上限，却以 `NOT_IN_EVIDENCE:` 开头，被当成拒答。
 - 默认关闭时，prompt 仍是 v1.2 / v2.2，门控也和以前一样，默认行为完全不变。
 - 这套机制适合在换更强的模型，或检索召回提高之后重新测。比如模型判定为"证据里没有"时，扩大检索范围再答一次。
+- 2026-11-20 删除（用户："清理这 4 个"）：开关、补救区下限（`RAG_QA_PARTIAL_COVERAGE_FLOOR`）、扩大检索重试（`RAG_QA_VERDICT_RETRY_TOP_K`）、`qa_answer` v1.3 / v2.3 模板和后来加的覆盖（`RAG_QA_VERDICT_OVERRIDE`，见下文"拒答标记覆盖"）一起删除，残留的设置被忽略；`eval:abstention-gate` 去掉补救区那一行，报告不再记 `qaAnswerVerdict`、`qaPartialCoverageFloor`、`verdictOverridden`。近邻替换否决（`findQueryTermSubstitution`）留下，选上下文时仍用它挡掉近邻话题的段落；以 `NOT_IN_EVIDENCE:` 开头的回复仍不作为流式草稿发出，这条检查本来就不看开关。
 
 ### 检索召回：embedding 任务前缀
 
@@ -2438,6 +2439,7 @@ train 上（400 题）的损失拆解：
 - A1：答题率和 F1 显著上升，但不可答题被回答 2/9 对 0/9，违反第三条。
 - C2：答题率和 F1 显著上升，但不可答题被回答 4/9 对 0/9，区间不含 0，是显著上升。
 - **没有候选，7 个开关和 `RAG_CLAIM_JUDGE` 都保持关闭**。按规则没有跑 dev（留作以后新候选的干净确认集），也没有跑护栏。
+- 2026-11-20 删除（用户："清理这 4 个"）：A3、A4、A6 的开关（`RAG_QA_GATE_INFLECTION`、`RAG_CLAIM_INFLECTION`、`RAG_CLAIM_HEADING_CONTEXT`）单开都没多答一道题，后两轮带着它们的候选也都没过，开关、`rag/inflection.js`、章节标题拼接和报告里的 `qaGateInflection`、`claimInflection`、`claimHeadingContext` 一起删除，残留的设置被忽略。A2、A8 在 2026-11-19 已成为唯一行为，A5、A7 仍是开关。
 
 **只用于理解、不影响判定**：
 
@@ -2472,6 +2474,8 @@ node evaluation/run-qasper-answer-eval.mjs --corpus evaluation/generated/qasper-
 **结论：没有通过，不改任何默认值**。train 上选出了候选 B2（评审 + 拒答标记 + 7 个开关），但 dev 上它答了 2/9 道不可答题，基线是 0/9，超过了"基线 + 1"的上限，按规则停止，没有跑护栏。7 个开关、`RAG_CLAIM_JUDGE` 和 `RAG_QA_ANSWER_VERDICT` 都保持关闭。
 
 之后用户决定补跑护栏：三条都通过，就作为产品决定把 B2 改成默认值。**护栏没有全部通过**（`verify:quality` 14/18），所以默认值仍然不变。见本节末尾"阶段 3 护栏：用户决定补跑"。
+
+2026-11-20 删除（用户："清理这 4 个"）：`RAG_QA_ANSWER_VERDICT` 和 B2 里的三个词面开关（`RAG_QA_GATE_INFLECTION`、`RAG_CLAIM_INFLECTION`、`RAG_CLAIM_HEADING_CONTEXT`）已删除，B2 / D2 这套配置不能再原样复现。
 
 **规则**（第一次模型调用前写好，之后没改）：
 
@@ -2734,6 +2738,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 - dev 和护栏都没跑。
 - 以下开关仍然默认关闭：7 个答题率开关、`RAG_CLAIM_JUDGE`、`RAG_QA_ANSWER_VERDICT`、`RAG_QA_VERDICT_OVERRIDE`。
 - 另外，覆盖在这个样本里一次都没有作答。
+- 2026-11-20 删除（用户："清理这 4 个"）：覆盖（`answer-verdict-override.js`）、拒答标记和候选 E 里的三个词面开关一起删除，报告不再记 `verdictOverridden` / `verdictOverrides`，`verify:quality` 不再记 `config.qaAnswerVerdict`，残留的设置被忽略。
 
 **规则**（第一次模型调用前写好，之后没改）：
 

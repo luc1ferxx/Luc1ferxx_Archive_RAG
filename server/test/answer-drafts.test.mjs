@@ -23,7 +23,6 @@ import {
   DEFAULT_ACCESS_SCOPE,
   sameTrajectoryScope as sameScope,
 } from "../evaluation/trajectory/checks.js";
-import { isAgentVerdictOverridden } from "../evaluation/agent-answer-outcome.js";
 
 const CITATION = {
   docId: "contract-1",
@@ -415,14 +414,9 @@ test("an unverifiable claim is never drafted, and the result can still withdraw 
   assert.equal(streamed.body.agentMode, "clarification");
 });
 
-// RAG_QA_VERDICT_OVERRIDE=supported: a reply that opened with NOT_IN_EVIDENCE:
-// is never streamed, even when the override then answers with its claims.
-test("a reply opening with the not-in-evidence marker is never drafted, even when the override answers it", async (t) => {
-  withEnv(t, {
-    RAG_CLAIM_SOURCE_INHERITANCE: "",
-    RAG_QA_ANSWER_VERDICT: "true",
-    RAG_QA_VERDICT_OVERRIDE: "supported",
-  });
+// A reply that opens with NOT_IN_EVIDENCE: is never streamed (answer-verdict.js).
+test("a reply opening with the not-in-evidence marker is never drafted", async (t) => {
+  withEnv(t, { RAG_CLAIM_SOURCE_INHERITANCE: "" });
   const write = async (answer) => {
     configureOpenAIProvider({
       completeText: async (_input, { onAttemptStart, onTextDelta } = {}) => {
@@ -446,79 +440,10 @@ test("a reply opening with the not-in-evidence marker is never drafted, even whe
 
   const fact = "The agreement renews every 12 months. [Source 1]";
   const plain = await write(`${fact}\n`);
-  const overridden = await write(`NOT_IN_EVIDENCE: The documents do not state a renewal fee.\n${fact}\n`);
+  const marked = await write(`NOT_IN_EVIDENCE: The documents do not state a renewal fee.\n${fact}\n`);
 
   // The channel is open: the same sentence without the marker is drafted.
   assert.deepEqual(draftTexts(plain.events), [fact]);
-  assert.equal(overridden.result.verdictOverridden, true);
-  assert.equal(overridden.result.text, fact);
-  assert.deepEqual(draftTexts(overridden.events), []);
-  assert.equal(overridden.events.some((event) => event.type === "answer_draft_reset"), false);
-});
-
-// The same through the agent: the document loop checks the overridden answer
-// like any other, the document_rag step output says verdictOverridden, and
-// nothing is drafted. With the override off the step output keeps its shape.
-test("through the agent, an overridden reply answers without drafts and its RAG step says so", async (t) => {
-  withEnv(t, { RAG_CLAIM_SOURCE_INHERITANCE: "", RAG_QA_ANSWER_VERDICT: "true", RAG_QA_VERDICT_OVERRIDE: "off" });
-  t.after(() => resetOpenAIProvider());
-
-  const question = "How often does the agreement renew?";
-  const fact = "The agreement renews every 12 months. [Source 1]";
-  const reply = `NOT_IN_EVIDENCE: The documents do not state a renewal fee.\n${fact}\n`;
-
-  configureOpenAIProvider({
-    completeText: async (_input, { onAttemptStart, onTextDelta } = {}) => {
-      onAttemptStart?.();
-      for (const piece of reply.match(/[\s\S]{1,6}/g)) onTextDelta?.(piece);
-      return reply;
-    },
-  });
-
-  const ask = () =>
-    runAgentRag({
-      accessScope: DEFAULT_ACCESS_SCOPE,
-      docIds: ["contract-1"],
-      question,
-      ragService: buildScopedRagService({
-        chat: async ({ question: asked }) => {
-          const written = await writeQaAnswer({
-            bundle: { citations: [CITATION], context: `[Source 1]\n${CITATION.excerpt}` },
-            query: asked,
-            resolvedQuery: asked,
-          });
-          return { ...written, abstained: Boolean(written.abstained), memoryApplied: false, resolvedQuery: asked };
-        },
-        documents: [{ docId: "contract-1", fileName: CITATION.fileName }],
-        sameScope,
-        telemetry: createEvalTelemetry(),
-      }),
-      sessionId: "verdict-override-session",
-      userId: DEFAULT_ACCESS_SCOPE.userId,
-      webChatService: async () => ({ text: "" }),
-    });
-  const ragStepOutputs = (body) =>
-    body.agentTrace
-      .filter((step) => step.type === "document_rag" || step.type === "follow_up_retrieval")
-      .map((step) => step.output);
-
-  process.env.RAG_QA_VERDICT_OVERRIDE = "off";
-  const off = await ask();
-
-  assert.ok(ragStepOutputs(off.body).length > 0);
-  for (const output of ragStepOutputs(off.body)) {
-    assert.deepEqual(Object.keys(output), ["abstained", "citationCount", "text"]);
-    assert.equal(output.abstained, true);
-  }
-  assert.equal(isAgentVerdictOverridden(off.body), false);
-
-  process.env.RAG_QA_VERDICT_OVERRIDE = "supported";
-  const { events, result: on } = await captureEvents(ask);
-  const [primary] = ragStepOutputs(on.body);
-
-  assert.deepEqual(primary, { abstained: false, citationCount: 1, text: fact, verdictOverridden: true });
-  assert.equal(isAgentVerdictOverridden(on.body), true);
-  assert.equal(on.body.agentMode, "document");
-  assert.ok(on.body.agentAnswer.includes("renews every 12 months"), on.body.agentAnswer);
-  assert.deepEqual(draftTexts(events), []);
+  assert.deepEqual(draftTexts(marked.events), []);
+  assert.equal(marked.events.some((event) => event.type === "answer_draft_reset"), false);
 });

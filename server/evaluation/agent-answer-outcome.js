@@ -54,15 +54,6 @@ export const describeAgentFollowUp = (body = {}) => {
 const RAG_STEP_TYPES = new Set(["document_rag", "follow_up_retrieval"]);
 
 /**
- * True when a document RAG call of the run answered a NOT_IN_EVIDENCE reply
- * through RAG_QA_VERDICT_OVERRIDE (its trace step output says so).
- */
-export const isAgentVerdictOverridden = (body = {}) =>
-  (Array.isArray(body?.agentTrace) ? body.agentTrace : []).some(
-    (step) => RAG_STEP_TYPES.has(step?.type) && step?.output?.verdictOverridden === true
-  );
-
-/**
  * True when an output limit cut off the answer model's reply in a document RAG
  * call of the run (RAG_ANSWER_MAX_TOKENS; its trace step output says so).
  */
@@ -73,8 +64,8 @@ export const isAgentAnswerTruncated = (body = {}) =>
 
 // What the claim check reads of a cited source (self-check/support.js,
 // attribution.js): its text fields, the attached chunk text (evidenceText)
-// among them, and the heading RAG_CLAIM_HEADING_CONTEXT puts before them.
-const CHECKED_SOURCE_FIELDS = ["pageNumber", "sectionHeading", ...CHECKABLE_CITATION_FIELDS];
+// among them.
+const CHECKED_SOURCE_FIELDS = ["pageNumber", ...CHECKABLE_CITATION_FIELDS];
 
 // [Source N] as the check resolves it (self-check/evaluate.js): the first
 // citation whose own rank, or else position, is N.

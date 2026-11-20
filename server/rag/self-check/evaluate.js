@@ -1,7 +1,5 @@
 import {
   getClaimJudgeMode,
-  isClaimHeadingContextEnabled,
-  isClaimInflectionEnabled,
   isClaimSourceInheritanceEnabled,
 } from "../config.js";
 import { judgeClaimSupport } from "./claim-judge.js";
@@ -60,17 +58,15 @@ export const evaluateClaimSupport = ({
     ? evidenceContext
     : getActiveSelfCheckEvidenceContext() ?? createSelfCheckEvidenceContext();
   const result = runWithSelfCheckEvidenceContext(context, () => {
-    // RAG_CLAIM_SOURCE_INHERITANCE and RAG_CLAIM_INFLECTION apply to answers
-    // that are not comparisons; a comparison answer is checked as before.
+    // RAG_CLAIM_SOURCE_INHERITANCE applies to answers that are not
+    // comparisons; a comparison answer is checked as before.
     const comparisonAnswer = Boolean(comparisonAnalysisSummary);
-    const inflection = !comparisonAnswer && isClaimInflectionEnabled();
-    const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
     const inheritSourceLabels =
       !comparisonAnswer && isClaimSourceInheritanceEnabled();
     const inputId = getClaimSupportInputId({
       citations,
       comparisonAnalysisSummary,
-      flags: [inflection, headingContext, inheritSourceLabels],
+      flags: [inheritSourceLabels],
     });
 
     return memoizeInEvidenceContext(
@@ -81,8 +77,6 @@ export const evaluateClaimSupport = ({
           answerText,
           citations,
           comparisonAnalysisSummary,
-          headingContext,
-          inflection,
           inheritSourceLabels,
           inputId,
         }),
@@ -102,8 +96,6 @@ const computeClaimSupport = ({
   answerText,
   citations,
   comparisonAnalysisSummary,
-  headingContext,
-  inflection,
   inheritSourceLabels,
   inputId,
 }) => {
@@ -185,8 +177,6 @@ const computeClaimSupport = ({
       claimText,
       citations: scopedCitations,
       documentLabelCitations: citations,
-      headingContext,
-      inflection,
     });
     const contrastSupport = evaluateContrastClaimSupport({
       claimText,
@@ -250,8 +240,6 @@ const computeClaimSupport = ({
         claimText,
         citations: [citation],
         documentLabelCitations: citations,
-        headingContext,
-        inflection,
       }).supported;
     });
     const verifiedSourceRanks = (relationSupport

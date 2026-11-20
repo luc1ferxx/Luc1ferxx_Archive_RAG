@@ -30,7 +30,7 @@ export const readAnswered = (row) =>
 
 // The config fields two answer runs are compared on, each with its reader: the
 // scalar settings, the answer-rate flags and the prompt set (a prompt version
-// is this project's usual A/B, and RAG_QA_ANSWER_VERDICT shows only there).
+// is this project's usual A/B).
 const COMPARED_CONFIG_FIELDS = Object.freeze([
   // answerTemperature, answerMaxTokens, answerMaxTokensField: a report from
   // before the field ran without one, as null says.

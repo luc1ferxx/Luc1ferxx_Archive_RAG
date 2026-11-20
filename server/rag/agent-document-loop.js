@@ -29,17 +29,14 @@ import {
 
 const noop = () => {};
 
-// verdictOverridden appears only when RAG_QA_VERDICT_OVERRIDE answered a
-// NOT_IN_EVIDENCE reply (answer-verdict-override.js), and answerTruncated only
-// when an output limit cut the answer model's reply off, so with the flag off
-// and no reply cut the step output keeps its shape.
+// answerTruncated appears only when an output limit cut the answer model's
+// reply off, so with no reply cut the step output keeps its shape.
 const buildRagStepOutput = (result = {}) =>
   result.ok
     ? {
         abstained: Boolean(result.value?.abstained),
         citationCount: result.value?.citations?.length ?? 0,
         text: result.text ?? result.value?.text ?? "",
-        ...(result.value?.verdictOverridden === true ? { verdictOverridden: true } : {}),
         ...(result.value?.answerTruncated === true ? { answerTruncated: true } : {}),
       }
     : null;

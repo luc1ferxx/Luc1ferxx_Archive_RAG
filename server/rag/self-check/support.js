@@ -1,5 +1,4 @@
-import { extractMeaningfulTokens, normalizeSearchText } from "../text-utils.js";
-import { buildInflectionIndex } from "../inflection.js";
+import { normalizeSearchText } from "../text-utils.js";
 import { filterCitationsToSourceRanks } from "../source-labels.js";
 import {
   BARE_BOTH_AGREEMENT_PATTERN,
@@ -56,7 +55,6 @@ import {
 import {
   buildCitationSupportSegments,
   buildCitationSupportSentences,
-  buildHeadingScopedSupportSentences,
   getCitationDocIds,
   getCitationDocumentAliases,
   getCitationIdentity,
@@ -474,20 +472,11 @@ const isClaimAnchorSupported = ({
   );
 };
 
-// `headingContext` (RAG_CLAIM_HEADING_CONTEXT, likewise): sentences under a
-// section heading are also checked with the heading's title in front.
-// `inflection` (RAG_CLAIM_INFLECTION, passed by evaluateClaimSupport for
-// non-comparison answers): a claim word also counts as present when the
-// evidence segment has an inflected form of it (rag/inflection.js). It only
-// widens which words count as present; numbers, anchors, modality, polarity,
-// relation order and the attribution checks read the text as before.
 export const evaluateClaimAgainstCitations = ({
   claimText,
   citations = [],
   documentLabelCitations = citations,
   forceComparisonClaim = false,
-  headingContext = false,
-  inflection = false,
 } = {}) => {
   const documentAliases = documentLabelCitations.flatMap((citation) =>
     getCitationDocumentAliases(citation)
@@ -572,11 +561,6 @@ export const evaluateClaimAgainstCitations = ({
     ...parentSupportSegments,
     ...exactEvidenceSupportSegments,
     ...compoundSupportSegments,
-    // RAG_CLAIM_HEADING_CONTEXT (attribution.js): each sentence also read
-    // under its section heading's title.
-    ...(headingContext
-      ? buildHeadingScopedSupportSentences(citations, { claimText: factualInputClaim, inflection })
-      : []),
   ]);
   const exactEvidenceSupportKeys = new Set(
     exactEvidenceSupportSegments.map((segment) =>
@@ -597,13 +581,6 @@ export const evaluateClaimAgainstCitations = ({
     claimText: factualInputClaim,
     documentAttributionTerms,
   });
-  // Every word the term checks below can ask about.
-  const inflectableClaimTerms = inflection
-    ? uniqueValues([
-        ...extractFactTerms(factualInputClaim),
-        ...extractMeaningfulTokens(factualInputClaim),
-      ])
-    : [];
   const claimTermCandidates =
     evaluationSegments.length > 0
       ? buildClaimTerms({
@@ -620,16 +597,6 @@ export const evaluateClaimAgainstCitations = ({
     const numericAnchorSupportCache = new Map();
     const orderedSupportTerms = extractFactTerms(segment);
     const supportTerms = new Set(orderedSupportTerms);
-
-    if (inflectableClaimTerms.length > 0) {
-      const inflectionIndex = buildInflectionIndex(orderedSupportTerms);
-
-      for (const term of inflectableClaimTerms) {
-        if (!supportTerms.has(term) && inflectionIndex.has(term)) {
-          supportTerms.add(term);
-        }
-      }
-    }
     const claimTerms = selectClaimTerms(claimTermCandidates, supportTerms);
     const missingAnchors = anchors
       .filter(

@@ -229,7 +229,7 @@ export const assertComparableSample = (config, otherConfig = {}, { label = "the 
 
 const formatRetrieval = (retrieval) =>
   retrieval
-    ? `${retrieval.route}${retrieval.hybridEnabled ? `/${retrieval.fusion}${retrieval.fusion === "rrf" ? ` k=${retrieval.rrfK}` : ""} weights ${retrieval.denseWeight}/${retrieval.sparseWeight}, sparse top-K ${retrieval.sparseTopK}` : " (hybrid off)"}, rerank ${retrieval.rerankEnabled ? `${retrieval.rerankProvider} x${retrieval.rerankCandidateMultiplier} w=${retrieval.rerankWeight}` : "off"}, decomposition ${retrieval.queryDecomposition ? `up to ${retrieval.maxQueryRequirements}` : "off"}, BM25 k1=${retrieval.bm25K1} b=${retrieval.bm25B}, gate relevance ${retrieval.minRelevanceScore} coverage ${retrieval.minQaQueryTermCoverage}${retrieval.qaGateInflection ? " inflection" : ""}${retrieval.qaAnswerVerdict ? " verdict" : ""}`
+    ? `${retrieval.route}${retrieval.hybridEnabled ? `/${retrieval.fusion}${retrieval.fusion === "rrf" ? ` k=${retrieval.rrfK}` : ""} weights ${retrieval.denseWeight}/${retrieval.sparseWeight}, sparse top-K ${retrieval.sparseTopK}` : " (hybrid off)"}, rerank ${retrieval.rerankEnabled ? `${retrieval.rerankProvider} x${retrieval.rerankCandidateMultiplier} w=${retrieval.rerankWeight}` : "off"}, decomposition ${retrieval.queryDecomposition ? `up to ${retrieval.maxQueryRequirements}` : "off"}, BM25 k1=${retrieval.bm25K1} b=${retrieval.bm25B}, gate relevance ${retrieval.minRelevanceScore} coverage ${retrieval.minQaQueryTermCoverage}`
     : "unknown";
 
 const formatChunking = (chunking) =>
@@ -410,7 +410,6 @@ const main = async () => {
       const { hitDenseRank, hitRank, hitSparseRank } = describeEvidenceHit(results, expected);
       const sparseOnlyCandidateCount = countSparseOnlyCandidates(results);
       const confidence = assessQaConfidence({
-        evidenceRequirementCount,
         queryText: testCase.question,
         results,
       });

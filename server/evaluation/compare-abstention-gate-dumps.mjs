@@ -32,10 +32,7 @@ export const GATE_SETTING_FIELDS = Object.freeze([
   "crossEncoderScores",
   "minQaQueryTermCoverage",
   "minRelevanceScore",
-  "qaAnswerVerdict",
-  "qaGateInflection",
   "qaMinRerankProbability",
-  "qaPartialCoverageFloor",
 ]);
 
 // Same fallbacks as citations.js and eval:abstention-gate read a page number with.
@@ -132,10 +129,10 @@ export const assertComparableGateDumps = (base, arm, currentRetrieval, { allowDi
  * the context the answer model would read (none when the gate refuses).
  */
 export const describeGateDumpRows = (dump, { assessQaConfidence, minContextCoverage, selectQaContext, topK }) =>
-  dump.cases.map(({ evidenceRequirementCount, results = [], testCase }) => {
+  dump.cases.map(({ results = [], testCase }) => {
     const expected = expectedPagesOf(testCase);
     const hasEvidence = (items) => items.some((result) => expected.has(pageOf(result)));
-    const confidence = assessQaConfidence({ evidenceRequirementCount, queryText: testCase.question, results });
+    const confidence = assessQaConfidence({ queryText: testCase.question, results });
     const context = confidence.confident
       ? selectQaContext({
           confidence,
