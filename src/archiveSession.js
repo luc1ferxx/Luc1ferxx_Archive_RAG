@@ -1,5 +1,4 @@
 const SESSION_STORAGE_KEY = "archive-session-id";
-const USER_STORAGE_KEY = "archive-user-id";
 
 const createStableId = (prefix) =>
   (typeof crypto !== "undefined" && crypto.randomUUID
@@ -8,8 +7,6 @@ const createStableId = (prefix) =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 export const createSessionId = () => createStableId("session");
-
-const createUserId = () => createStableId("user");
 
 const readStoredId = (storageKey, fallbackFactory) => {
   try {
@@ -31,9 +28,5 @@ const persistStoredId = (storageKey, value) => {
 export const readStoredSessionId = () =>
   readStoredId(SESSION_STORAGE_KEY, createSessionId);
 
-export const readStoredUserId = () => readStoredId(USER_STORAGE_KEY, createUserId);
-
 export const persistSessionId = (sessionId) =>
   persistStoredId(SESSION_STORAGE_KEY, sessionId);
-
-export const persistUserId = (userId) => persistStoredId(USER_STORAGE_KEY, userId);

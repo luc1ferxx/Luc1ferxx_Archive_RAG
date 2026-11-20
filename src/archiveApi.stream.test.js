@@ -24,7 +24,7 @@ const stubFetch = (response) => {
   return fetchMock;
 };
 
-const request = { docIds: ["doc-1"], question: "Q?", sessionId: "s", userId: "u" };
+const request = { docIds: ["doc-1"], question: "Q?", sessionId: "s" };
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -57,11 +57,12 @@ describe("streamChat", () => {
     expect(result).toEqual({ body: { agentAnswer: "Final" }, status: 200 });
     expect(onEvent.mock.calls.map(([event]) => event.event)).toEqual(["trace_step", "answer_draft"]);
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/chat\/stream$/);
+    // No userId: the browser acts for its credential's user (none with auth
+    // off); a random one of its own hid every unowned upload from chat.
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       docIds: "doc-1",
       question: "Q?",
       sessionId: "s",
-      userId: "u",
     });
   });
 
@@ -103,7 +104,7 @@ describe("streamChatAnswer", () => {
     await expect(streamChatAnswer(request)).resolves.toEqual({ agentAnswer: "Final" });
   });
 
-  test("rejects a non-2xx result like requestChat would", async () => {
+  test("rejects a non-2xx result like an axios POST /chat would", async () => {
     stubFetch(
       streamingResponse([sse("result", { body: { error: { message: "Bad scope." } }, status: 400 })])
     );

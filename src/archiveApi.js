@@ -189,17 +189,6 @@ export const requestAnswerFeedback = async (payload) => {
   return apiPost("/feedback", payload);
 };
 
-export const requestChat = async ({ docIds, question, sessionId, userId, signal }) => {
-  const payload = {
-    question,
-    docIds: docIds.join(","),
-    sessionId,
-    userId,
-  };
-
-  return apiPost("/chat", payload, { signal, timeout: 0 });
-};
-
 // Parses a server-sent-events buffer into complete events plus the unparsed tail.
 export const parseServerSentEvents = (buffer) => {
   const blocks = buffer.split(/\r?\n\r?\n/);
@@ -231,13 +220,13 @@ export const parseServerSentEvents = (buffer) => {
  * as the run records it, and resolves with the same { status, body } that
  * /chat returns once the verified answer is ready.
  */
-export const streamChat = async ({ docIds, question, sessionId, userId, signal, onEvent }) => {
+export const streamChat = async ({ docIds, question, sessionId, signal, onEvent }) => {
   // Read once: the retry after a 401 asks the same workspace even if the tab
   // switched while the token was refreshed (only Authorization is rebuilt).
   const workspaceId = getActiveWorkspaceId();
   const openStream = () =>
     fetch(`${API_DOMAIN}/chat/stream`, {
-      body: JSON.stringify({ question, docIds: docIds.join(","), sessionId, userId }),
+      body: JSON.stringify({ question, docIds: docIds.join(","), sessionId }),
       headers: buildApiRequestConfig({
         headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
         workspaceId,
@@ -262,7 +251,7 @@ export const streamChat = async ({ docIds, question, sessionId, userId, signal, 
       error.body = withForbiddenMessage(error.body);
       error.permissionDenied = true;
     }
-    // Same shape as an axios error, so callers of requestChat need no change.
+    // Same shape as an axios error, so callers read it like any other API error.
     error.response = { data: error.body, status: response.status };
     throw error;
   }
@@ -302,8 +291,8 @@ export const streamChat = async ({ docIds, question, sessionId, userId, signal, 
 
 /**
  * The chat UI's request: streams progress and verified answer drafts to
- * onEvent, and resolves with the /chat body or rejects the way requestChat
- * does. Drafts are provisional; only the resolved body is the answer.
+ * onEvent, and resolves with the /chat body or rejects the way an axios POST
+ * /chat would. Drafts are provisional; only the resolved body is the answer.
  */
 export const streamChatAnswer = async (options) => {
   const { status, body } = await streamChat(options);

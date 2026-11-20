@@ -101,7 +101,6 @@ const App = () => {
     setActiveTurnIndex,
     setIsLoading,
     updateTurnByRunId,
-    userId,
   } = useChatSession();
   const {
     activeDocuments,
@@ -302,7 +301,6 @@ const App = () => {
           ...feedback,
           docIds: feedback.docIds ?? chatDocIds,
           sessionId,
-          userId,
         });
       } catch (error) {
         const backendMessage =
@@ -310,7 +308,7 @@ const App = () => {
         message.error(backendMessage);
       }
     },
-    [chatDocIds, sessionId, t, userId]
+    [chatDocIds, sessionId, t]
   );
 
   const activeDocumentIdsKey = useMemo(
@@ -795,7 +793,6 @@ const App = () => {
         docIds={chatDocIds}
         docLabel={chatDocLabel}
         sessionId={sessionId}
-        userId={userId}
         handleResp={handleResp}
         inputId={inputId}
         isLoading={isLoading}

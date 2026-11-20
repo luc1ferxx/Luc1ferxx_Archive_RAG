@@ -3,9 +3,7 @@ import { requestSessionClear } from "../archiveApi";
 import {
   createSessionId,
   persistSessionId,
-  persistUserId,
   readStoredSessionId,
-  readStoredUserId,
 } from "../archiveSession";
 
 export const useChatSession = () => {
@@ -14,17 +12,12 @@ export const useChatSession = () => {
   const [activeTurnIndex, setActiveTurnIndex] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState(() => readStoredSessionId());
-  const [userId] = useState(() => readStoredUserId());
 
   conversationRef.current = conversation;
 
   useEffect(() => {
     persistSessionId(sessionId);
   }, [sessionId]);
-
-  useEffect(() => {
-    persistUserId(userId);
-  }, [userId]);
 
   useEffect(() => {
     if (conversation.length === 0) {
@@ -110,6 +103,5 @@ export const useChatSession = () => {
     setActiveTurnIndex,
     setIsLoading,
     updateTurnByRunId,
-    userId,
   };
 };

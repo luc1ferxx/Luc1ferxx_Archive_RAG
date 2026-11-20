@@ -187,7 +187,7 @@ Agent experience memory 只进入 planner hints，不进入 citations/evidence�
 各个 store 在应用层按 user/workspace 过滤。迁移 `013_enable_tenant_row_level_security.sql` 让 PostgreSQL 也执行同样的规则，这样即使某条查询漏写了过滤条件，也读不到、写不进其他租户的行。
 
 - **覆盖的表**：文档、切块、任务、任务事件、Agent run、run 事件、审批快照、workspace artifacts、长期记忆（迁移 013），ingest jobs 及其阶段产物（015/017），会话记忆（031），admin audit（032：租户只读本 workspace 的事件，没有 workspace 时只读自己的；只能追加以自己名义的记录，不能改也不能删），答案反馈（034）。文档和切块沿用 `documentMatchesAccessScope` 的规则（owner 和 workspace 都为空的行对任何租户不可见）；其余表按 `(user, workspace)` 精确匹配；长期记忆只按用户匹配。
-- **会话记忆**：session id 由客户端选择，本身不是租户边界。开启 API auth 时，`rag/memory.js` 把会话存在 `tenant:` + sha256(userId \0 workspaceId \0 sessionId) 下，所有 session store（PostgreSQL、内存、standalone）都一样，所以两个租户用同一个 sessionId 是两个会话，同一用户在两个 workspace 也是两个会话；读、写、`DELETE /sessions/:sessionId` 都按调用方的 scope 推导同一个 key（没传 scope 的调用用当前数据库租户）。迁移 031 再加 `owner_user_id` / `workspace_id` 列和 `tenant_isolation` 策略，PostgreSQL store 按当前数据库租户写 owner 列，一条语句追加这一轮并只留最近 6 条（同一会话同时写入的几轮都会保留），租户角色即使直接写 SQL 也读不到、改不了、删不掉别的租户的会话行。关闭 auth 时仍用原始 sessionId（本地前端 chat 带 userId、DELETE 不带，两者要指向同一会话）；没有租户的调用方（auth 关闭，或既无 user 也无 workspace 的凭据，语句走 owner 路径、不受策略约束）传来以 `tenant:` 开头的 sessionId 时不对应任何会话，否则拿到别人的 user、workspace 和 sessionId 就能直接按推导出的 key 读写那个会话。split 部署里各 tier 的 `API_AUTH_ENABLED` 要一致，否则后台任务（存储的 scope 不带 `authenticated`）推导的 key 会不同。迁移前写入的会话行 owner 为空：租户看不到，只有 owner 路径（auth 关闭且不带 userId、系统工作）能读；升级后租户丢失升级前会话的上下文，这些行由以 owner 身份运行的 6 小时 TTL 清理删除。租户对这种不可见行的 upsert 会被策略拒绝，此时该轮不记录、回答照常返回。
+- **会话记忆**：session id 由客户端选择，本身不是租户边界。开启 API auth 时，`rag/memory.js` 把会话存在 `tenant:` + sha256(userId \0 workspaceId \0 sessionId) 下，所有 session store（PostgreSQL、内存、standalone）都一样，所以两个租户用同一个 sessionId 是两个会话，同一用户在两个 workspace 也是两个会话；读、写、`DELETE /sessions/:sessionId` 都按调用方的 scope 推导同一个 key（没传 scope 的调用用当前数据库租户）。迁移 031 再加 `owner_user_id` / `workspace_id` 列和 `tenant_isolation` 策略，PostgreSQL store 按当前数据库租户写 owner 列，一条语句追加这一轮并只留最近 6 条（同一会话同时写入的几轮都会保留），租户角色即使直接写 SQL 也读不到、改不了、删不掉别的租户的会话行。关闭 auth 时仍用原始 sessionId（客户端可以在 chat 里指定用户、DELETE 时不指定，两者要指向同一会话；网页界面从不发送 userId）；没有租户的调用方（auth 关闭，或既无 user 也无 workspace 的凭据，语句走 owner 路径、不受策略约束）传来以 `tenant:` 开头的 sessionId 时不对应任何会话，否则拿到别人的 user、workspace 和 sessionId 就能直接按推导出的 key 读写那个会话。split 部署里各 tier 的 `API_AUTH_ENABLED` 要一致，否则后台任务（存储的 scope 不带 `authenticated`）推导的 key 会不同。迁移前写入的会话行 owner 为空：租户看不到，只有 owner 路径（auth 关闭且不带 userId、系统工作）能读；升级后租户丢失升级前会话的上下文，这些行由以 owner 身份运行的 6 小时 TTL 清理删除。租户对这种不可见行的 upsert 会被策略拒绝，此时该轮不记录、回答照常返回。
 - **四种上下文**：`tenant`（切到租户角色）、`system`（`runAsDatabaseSystem`）、`unscoped`（请求或任务的范围里没有租户：auth 关闭、单个共享 token、平台 admin 路由）、`unbound`（什么都没绑定）。后三种都以 owner 身份执行；`POSTGRES_TENANT_CONTEXT=strict` 时 `unbound` 直接报错。
 - **`_sparse_rank` 函数**：迁移 033 重建了每张切块表的 `_sparse_rank`，在租户角色下先按文档表的策略收窄 doc id，直接拿别的租户的 id 调用也排不出任何结果。
 - **生效方式**：鉴权之后的中间件把请求的访问范围放进 `AsyncLocalStorage`。`rag/postgres.js` 看到租户时，把这条语句放进一个短事务：`SET LOCAL ROLE` 切到租户角色，并设置 `archive_rag.user_id` / `archive_rag.workspace_id`，事务结束后自动恢复，不会残留在连接池里。
@@ -519,11 +519,13 @@ API_AUTH_JWT_AUDIENCE=archive-rag
 - 不开鉴权、单个 `API_AUTH_TOKEN`、或者 `API_AUTH_TOKENS` 条目写了 `"allowClientUserId": true`：按请求里的 userId 处理，和以前一样。只认 JSON 的 `true`，字符串 `"true"` 不算。
 - 其他不带 `userId` 的凭证（例如只写了 `workspaceId` 的 `API_AUTH_TOKENS` 条目）：不代表任何用户；请求里一旦写了非空的 userId，就返回 403。唯一的例外是 `GET /admin/audit` 的 `userId` 查询参数，它是筛选条件。
 
-这是一个不兼容的变化：以前不带 `userId` 的 token 条目可以用 `x-user-id` 冒充任何用户，读写、删除他的文档和长期记忆。依赖这种用法的部署，要给条目加上 `userId`，或者明确写 `"allowClientUserId": true`。前端每次 `/chat` 都会在 body 里带一个本地生成的 `userId`，所以和前端一起用的条目必须是这两种之一：
+这是一个不兼容的变化：以前不带 `userId` 的 token 条目可以用 `x-user-id` 冒充任何用户，读写、删除他的文档和长期记忆。依赖这种用法的部署，要给条目加上 `userId`，或者明确写 `"allowClientUserId": true`：
 
 ```env
 API_AUTH_TOKENS={"shared-token":{"workspaceId":"workspace-a","allowClientUserId":true}}
 ```
+
+网页界面不发送 `userId`，它代表的用户只由凭证决定。凭证不带 `userId` 时（不开鉴权、单个 `API_AUTH_TOKEN`、不带 `userId` 的 token 条目）它不代表任何用户，浏览器里的对话和反馈也就不读写长期记忆和 Agent experience memory（两者都按用户存）。
 
 Admin 端点还会读取 token principal 或 JWT claims 上的 `roles` / `roleIds` 和 `permissions` / `permissionIds`。内置角色包括 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`；也可以直接授予 `admin.status.read`、`admin.audit.read`、`admin.actions.recovery_scan`、`admin.actions.quality_refresh`、`admin.actions.recover_tasks` 等权限：
 
