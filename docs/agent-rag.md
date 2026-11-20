@@ -27,7 +27,7 @@ flowchart LR
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
-- Self-check 检查关键 claim 是否能被 citation excerpt 支持。
+- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。
 - Gap analysis 把 unsupported claim 转成 focused retrieval plan。
 - Budget guard 阻止无限 follow-up。
 - Finalizer 删除或降级仍未被 citation 支持的 claim。

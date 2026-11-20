@@ -64,6 +64,12 @@ const buildLifecycleStepError = (result = {}, fallbackMessage) => {
 
 const DOCUMENT_RAG_PRIMARY_STEP_ID = "document_rag:primary";
 
+// Only a comparison must cite two documents: a question one document answers
+// passes on that document's citations however many are in scope. Without a
+// plan the intent is unknown, so the default of two stays.
+const getMaxRequiredDocCoverage = (retrievalPlan) =>
+  retrievalPlan && retrievalPlan.intent !== "comparison" ? 1 : 2;
+
 // Both phases call ragService.chat with the live session/user identity and
 // memoryWrites: false (the agent records the user's exchange once, after
 // finalizing), but keep a conservative declaration: an injected legacy Skill
@@ -261,6 +267,7 @@ export const runDocumentRagLoop = async ({
     ragResult: primaryRagResult,
     docIds,
     evidenceContext,
+    maxRequiredDocCoverage: getMaxRequiredDocCoverage(retrievalPlan),
   });
 
   if (primaryBudget.ok) {
@@ -445,6 +452,9 @@ export const runDocumentRagLoop = async ({
           ragResult: followUpRagResult,
           docIds,
           evidenceContext,
+          maxRequiredDocCoverage: getMaxRequiredDocCoverage(
+            followUpRetrievalPlan
+          ),
         });
         recordWorkingMemoryClaimSupport({
           skill: documentRagSkill,

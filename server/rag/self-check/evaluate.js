@@ -381,6 +381,8 @@ export const evaluateAnswerEvidence = ({
   normalizeClaimSupport = (claimSupport) => claimSupport,
   requireCheckableCitationText = false,
   requireDocCoverage = true,
+  // The most documents the citations must cover (fewer when docIds has fewer).
+  maxRequiredDocCoverage = 2,
   retryRecommended = false,
   unsupportedClaimReason = (claimCount) =>
     `${claimCount} answer claim${claimCount === 1 ? "" : "s"} lacks citation support.`,
@@ -391,7 +393,7 @@ export const evaluateAnswerEvidence = ({
   const safeCitations = Array.isArray(citations) ? citations : [];
   const safeDocIds = Array.isArray(docIds) ? docIds : [];
   const requiredDocCoverage = requireDocCoverage
-    ? Math.min(Math.max(safeDocIds.length, 1), 2)
+    ? Math.min(Math.max(safeDocIds.length, 1), maxRequiredDocCoverage)
     : 0;
   const claimSupport = normalizeClaimSupport(
     precomputedClaimSupport ??
@@ -497,6 +499,7 @@ export const selectBetterRagResult = ({ primary, retry, evidenceContext = null }
 export const evaluateDocumentEvidence = ({
   ragResult,
   docIds = [],
+  maxRequiredDocCoverage = 2,
   claimSupport = null,
   evidenceContext = null,
 } = {}) => {
@@ -508,7 +511,7 @@ export const evaluateDocumentEvidence = ({
       citationCount: 0,
       citedDocCount: 0,
       requiredCitationCount: 1,
-      requiredDocCoverage: Math.min(Math.max(docIds.length, 1), 2),
+      requiredDocCoverage: Math.min(Math.max(docIds.length, 1), maxRequiredDocCoverage),
       gaps: [
         {
           type: "skill_failure",
@@ -536,6 +539,7 @@ export const evaluateDocumentEvidence = ({
     initialReasons: value.abstained
       ? ["Document RAG explicitly reported insufficient evidence."]
       : [],
+    maxRequiredDocCoverage,
     missingCitationReason: "Document answer has no citations.",
     requireDocCoverage: true,
     retryRecommended: false,
@@ -556,10 +560,16 @@ export const evaluateDocumentEvidence = ({
 export const evaluateDocumentEvidenceWithJudge = async ({
   ragResult,
   docIds = [],
+  maxRequiredDocCoverage,
   evidenceContext = null,
 } = {}) => {
   if (getClaimJudgeMode() !== "llm" || !ragResult?.ok) {
-    return evaluateDocumentEvidence({ docIds, evidenceContext, ragResult });
+    return evaluateDocumentEvidence({
+      docIds,
+      evidenceContext,
+      maxRequiredDocCoverage,
+      ragResult,
+    });
   }
 
   const value = ragResult.value ?? {};
@@ -578,6 +588,12 @@ export const evaluateDocumentEvidenceWithJudge = async ({
     comparisonAnalysisSummary: value.comparisonAnalysisSummary,
   });
 
-  return evaluateDocumentEvidence({ claimSupport, docIds, evidenceContext, ragResult });
+  return evaluateDocumentEvidence({
+    claimSupport,
+    docIds,
+    evidenceContext,
+    maxRequiredDocCoverage,
+    ragResult,
+  });
 };
 

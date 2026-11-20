@@ -47,7 +47,7 @@
    - 通过：selectQaContext 先放门控放行的块，再按检索顺序补候选，补到 topK 为止（要求过相关度回退下限、命中 anchor、没有近邻替换；QA_CONTEXT_MIN_COVERAGE = 0）。
    - prepareQASourceBundle：每个块和文件名都经 buildScreenedContextSection 过 screenUntrustedText 再进 prompt，citation 保留原文。
    - writeQaAnswer：completeText 带 qa_answer 模板描述符和 drafts 的 onTextDelta。输出依次经过 normalizeGroupedSourceLabels 和 guardAnswerLinks。
-4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖 min(docIds 数, 2) 份文档）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
+4. 回到 runDocumentRagLoop：evaluateDocumentEvidenceWithJudge 调 evaluateDocumentEvidence → evaluateAnswerEvidence → evaluateClaimSupport（另要求引用覆盖的文档数：检索计划意图是 comparison 时 min(docIds 数, 2)，否则 1，即 maxRequiredDocCoverage）。evaluateClaimSupport 先 splitAnswerClaims，再对每条 claim 做 evaluateClaimAgainstCitations 和关系检查（对比、一致、排他、无差异）。RAG_CLAIM_JUDGE=llm 时再走 judgeClaimSupport。
 5. 补检索：retryRecommended（= 没通过且不是拒答；拒答的不算）且 followUpsRun < maxFollowUps（1）时，调 buildFollowUpQuestion（返回主调用改写后的问题，没改写就是原问题；2026-11-19 起不再用 "Re-check the uploaded documents…" 元文本）和 buildAgentRetrievalPlan（phase follow_up：主查询就是这个问题，证据问题只进另外 2 条修复查询，共 3 条；补检索跳过会话改写，门控按问题文本算覆盖）。两次 executeObservedSkill 都带 memoryWrites:false，结果再自检一遍，然后 selectBetterRagResult 选优。仍不通过就 buildEvidenceClarification；计划没要 Web（!plan.wantsWeb）时直接返回澄清。
 6. 主答拒答或失败：webSearch 阶段 state.shouldRunWeb 成立，Web 需要审批：请求不再带批准（2026-11-16 阶段 12 之前还能用请求带的常设批准直接放行），所以 Web 停在审批门上，批准之后由 step executor 作为排好的 capability_call 步骤执行；外层计划里直接用 Web 结果合成 document_web 答案的分支只有测试走得到，2026-11-17 阶段 13 已删除，批准之后的回答就是 Web 搜索 Capability 返回的文本（CURRENT-TRUTH 3.53）。依赖故障则直接以 503/504 结束，不转 Web。
 7. agent-finalization-flow.js：getBoundSelfCheckEvidenceContext 取回 memo，对同样的文本和证据直接命中，开评审时走 judgeClaimSupport。然后 finalizeAgentAnswer（即 finalizeGroundedAnswer）：全部 claim 被支持时原文原样返回；有不被支持的就重建文本，只保留被支持的 claim，formatSupportedClaim 只写已验证的 [Source N]；一条证据 claim 都不剩时输出 GROUNDED_ABSTENTION_TEXT。
@@ -630,7 +630,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 拒答标记、override 和三个词面开关都测过、没过事先规则，2026-11-20 已删除；讲的时候是"做过、测过、删了"（override 是看着 verify:quality 的失败样例写的，QASPER 上作答 0 次）
 - 只用本地 qwen2.5:7b 验证过，没有 GPT 级模型和生产流量的数据
 - claim memo 的加速是在假模型、短答案上测的，真实长答案没测
-- 代码里看到、还没测过影响：evaluateDocumentEvidence 要求引用覆盖 min(docIds 数, 2) 份文档。如果前端在多文档范围内把所有 docIds 发进来，单文档事实题可能被判 document_coverage 缺口，从而触发补检索或澄清，需要自己确认
+- 多文档范围里的单文档事实题曾被 min(docIds 数, 2) 的引用覆盖要求转成澄清（浏览器冒烟测试里出现过）；2026-11-20 起文档循环只对 comparison 意图要求两份。问题里带 between、same、different 这类对比词时仍按对比处理、仍要两份；最终自检（skill_chain/custom/research）也仍是 min(docIds 数, 2)
 - 多子问题只看覆盖率下限；单个问题只答了一部分（比如漏了条款的例外）也可能通过校验
 
 ## 只能当推理讲的内容
@@ -641,7 +641,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - Self-RAG 需要微调反思 token、CRAG 需要额外检索评估器：属于对外部方法的一般性描述，仓库里没有对这两者的实现或测量，只能作为不选的理由，不能说'测过不如'
 - '评审已是每个答案一次批量调用'以外的扩容方案（入库时预计算切句和数字归一化、跨请求合批）：是提议，代码里没有，也没测
 - '删句后可能不连贯'：设计层面的推断，没有可读性评测
-- '代码里看到、还没测过影响：evaluateDocumentEvidence 要求引用覆盖 min(docIds 数, 2) 份文档'：代码行为已确认（evaluateAnswerEvidence requiredDocCoverage），但它对多文档范围内单文档问题答题率的实际影响没有测量，保留为待确认
+- '多文档范围内单文档事实题会被引用覆盖要求转成澄清'：浏览器冒烟测试（假模型）里出现过，2026-11-20 起文档循环只对 comparison 意图要求两份；这条规则改前改后对答题率的实际影响都没有测量，保留为待确认
 
 ## 容易记错的地方
 
