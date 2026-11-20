@@ -353,7 +353,7 @@ const main = async () => {
   }
 
   const { default: chat, ingestDocument, initializeDocumentRegistry } = await import("../chat.js");
-  const { describeAnswerRateFlags, isQaAnswerVerdictEnabled } = await import("../rag/config.js");
+  const { describeAnswerRateFlags, getClaimJudgeMode, isQaAnswerVerdictEnabled } = await import("../rag/config.js");
 
   try {
     const fixtures = await writeDocCompareFixtures(fixtureDirectory);
@@ -646,7 +646,7 @@ const main = async () => {
       // The answer settings this run used, so a report shows which flags were on.
       config: {
         answerRateFlags: describeAnswerRateFlags(),
-        claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
+        claimJudge: getClaimJudgeMode(),
         qaAnswerVerdict: isQaAnswerVerdictEnabled(),
       },
       totalChecks: checks.length,
