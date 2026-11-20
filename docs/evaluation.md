@@ -2928,6 +2928,32 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 两个脚本都只在一次性数据库上运行：wrapper 用 Postgres.app 的二进制在 `$TMPDIR` 下 initdb 一个集群，端口由系统分配（碰到 5432 或 5434 直接退出）。无论跑完还是失败都会停库并删除数据目录。两个脚本都不读 `server/.env`。报告写入 `evaluation/results/latest-load-test.*` 和 `latest-pgvector-scale.*`，都已加入忽略。
 
+### Agent 答题率复测与拒答原因（QASPER train seed 9，2026-11-19）
+
+**怎么测的**：用户点名复测（"测答题率"，随后"先查拒答原因"）。main bd68f544（第二次 agent 运行在 34fdb956，只多了逐题记录），干净 worktree，Ollama 0.34.4，qwen2.5:7b + nomic-embed-text，`env -i` 加 `DOTENV_CONFIG_PATH=/dev/null`、`VECTOR_STORE_PROVIDER=local`、`RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024`，`--corpus qasper-train.json --cases 100 --seed 9`（10-28 第三轮阶段 1 的样本：86 可答 / 14 不可答）。报告在已忽略的 `evaluation/results/latest-qasper-answers-ar1119-{rag,agent}` 和 `latest-qasper-answers-ar1119b-agent`（带逐题核对记录）。10-28 的报告已经不在，只能对照上文的数字；那时还没有温度 0 和输出上限。两次 agent 运行 100 题逐题相同。
+
+| | rag | agent |
+| --- | --- | --- |
+| 回答的可答题 | 50/86（10-28：48/86） | 2/86（2/86） |
+| 不可答被回答 | 6/14（6/14） | 0/14（0/14） |
+| 官方 F1 | 0.205（0.196） | 0.141（0.147） |
+
+配对差（agent 减 rag，10000 次）：答题率 −0.558 [−0.674, −0.454]，不可答被回答 −0.429 [−0.714, −0.143]。
+
+**agent 的 98 道没答停在哪**（`--surface agent` 的每行现在带 `checks`：每次 self_check 的结果、被拒 claim 的失败字段和它引用的原文；报告末尾按失败字段和原因汇总）：
+- 46 道：主检索的 QA 门控就拒了（rag 同样拒了其中 43 道）。
+- 47 道：主答案被 claim 检查拒掉，补检索一次后仍不过，转成澄清。47 次补检索全部报"证据不足"：默认的补检索问题是 "Re-check the uploaded documents…" 元文本，门控和回答都把它当成问题本身（回答例如 "I found material related to Re-check, but I still cannot confirm Re-check and page-level reliably."），所以补检索在这个样本上一次也没成功。
+- 6 道：没走到文档检索，3 道在规划阶段就反问，3 道被转去 research brief 或自定义 Skill（rag 答了其中 5 道）。
+
+**被拒的 47 个答案对不对**（4 个评审按引用原文和参考答案逐句判；判定文件不在仓库）：
+- 整题：16 个答对了却被拒，17 个部分正确，10 个错或没有依据（拒得对），4 个是不可答题（拒得对）。
+- 被拒的 120 句：没有 `[Source N]` 标签的 58 句（21 句是 "Based on the provided evidence"、"The baselines used are:" 这类没有事实的引导句，37 句有事实内容）；意思被引用原文支持、只是措辞不同的 21 句；规则误伤的 8 句（数字写法、否定、多个来源各管一半等）；部分支持的 12 句；真正没有依据的 21 句。
+- 删掉被拒的句子、只留通过的部分（finalizer 的做法），只有 4/47 还能正确回答问题。
+
+**各修法能放出多少**（按评审分类估算，没有跑模型）：只豁免引导句：0 个答案；再加标签继承（`RAG_CLAIM_SOURCE_INHERITANCE`）：答对的 2 个、部分正确的 2 个；再接受措辞不同和规则误伤（要语义判断，例如 `RAG_CLAIM_JUDGE=llm`）：答对的 14 个、部分正确的 8 个，同时放出错答 2 个、不可答题 1 个。差的是语义判断，词法规则本身改不出这些答案（与"抽取式作答"三轮的结论一致）。
+
+**结论**：agent 和 10-28 一样几乎不答。主因不是检索，而是 claim 检查只认字面重合：7B 模型改写原文、不给每句标来源，整题就被拒；补检索拿元文本当问题，从来没成功过。下一步要先定规则：是否接受语义判断带来的少量错答（10-03 那轮就是因为"不可答被回答不能增加"这一条没放行评审）。
+
 ### API 压测（`npm run eval:load-test:pgvector`）
 
 `server/evaluation/run-api-load-bench.mjs` 用 `createApp()` 和真实 services 在子进程里启动应用，做闭环压测。
