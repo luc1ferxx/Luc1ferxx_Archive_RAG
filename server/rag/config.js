@@ -1307,16 +1307,8 @@ export const assertAnswerGenerationSettings = () => {
   getLlmMaxTokensField();
 };
 
-// AGENT_SINGLE_DOCUMENT_ROUTING: the deterministic intent rules stop sending
-// single-document questions to a Skill on incidental wording (comparison words
-// with one selected document and no other document named, "sequence" inside a
-// hyphenated name, "this study"); see agent-intent-rules.js.
-export const isAgentSingleDocumentRoutingEnabled = () =>
-  toBoolean(process.env.AGENT_SINGLE_DOCUMENT_ROUTING, false);
-
 /** The answer-rate flags as an evaluation report records them. */
 export const describeAnswerRateFlags = () => ({
-  agentSingleDocumentRouting: isAgentSingleDocumentRoutingEnabled(),
   claimHeadingContext: isClaimHeadingContextEnabled(),
   claimInflection: isClaimInflectionEnabled(),
   claimJudgeTemperature: getClaimJudgeTemperature(),
