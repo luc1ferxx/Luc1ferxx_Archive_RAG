@@ -5,12 +5,7 @@ import {
   createExecutionGraph,
   validateExecutionGraph,
 } from "./agent-execution-graph.js";
-import {
-  getPlannerRolloutMode,
-  getShadowPlannerAdapter,
-  runShadowPlanner,
-  sameStringList,
-} from "./agent-planner-shadow.js";
+import { getPlannerRolloutMode } from "./agent-planner-rollout.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completePlannerText } from "./langgraph/planner-model.js";
 import { definePrompt, normalizePromptDescriptor, PROMPT_IDS } from "./prompt-registry.js";
@@ -568,12 +563,12 @@ const capNodesToBudget = ({ budgetRemaining, limits, selectedSkills }) => {
     : limits;
 };
 
-// withPlannerRollout and withShadowPlanner return a copy of the adapter they
-// wrap, so under AGENT_PLANNER_ROLLOUT=deterministic|shadow the deterministic
-// planner arrives as a different object. Its createExecutionGraph is still the
-// deterministic one, and it plans from the selected Skill contracts (the
-// fallback context), not the redacted view; handed the redacted view it would
-// build an empty graph and the request would be recorded as a fallback.
+// withPlannerRollout returns a copy of the adapter it wraps, so under
+// AGENT_PLANNER_ROLLOUT=deterministic the deterministic planner arrives as a
+// different object. Its createExecutionGraph is still the deterministic one,
+// and it plans from the selected Skill contracts (the fallback context), not
+// the redacted view; handed the redacted view it would build an empty graph
+// and the request would be recorded as a fallback.
 const isFallbackPlanner = (plannerAdapter, fallbackPlannerAdapter) =>
   plannerAdapter === fallbackPlannerAdapter ||
   (typeof plannerAdapter?.createExecutionGraph === "function" &&
@@ -589,7 +584,6 @@ export const createAgentExecutionGraphResult = async ({
   plannerContext = {},
   registry,
   selectedSkills = plannerContext.selectedSkills ?? [],
-  shadowPlannerAdapter = getShadowPlannerAdapter(plannerAdapter),
 } = {}) => {
   const fallbackPlannerId = normalizePlannerId(fallbackPlannerAdapter);
   const requestedPlannerId = normalizePlannerId(plannerAdapter);
@@ -650,41 +644,11 @@ export const createAgentExecutionGraphResult = async ({
   const createFallbackGraph = () =>
     createValidatedGraph(fallbackPlannerAdapter, fallbackContext);
 
-  const attachShadowPlanner = async (result) => {
-    const shadow = await runShadowPlanner({
-      compare: ({ primary, shadow: shadowGraph }) =>
-        !sameStringList(
-          toArray(primary?.graph?.nodes).map((node) => node.nodeId),
-          toArray(shadowGraph?.nodes).map((node) => node.nodeId)
-        ),
-      describe: (shadowGraph) => ({
-        nodeIds: toArray(shadowGraph?.nodes).map((node) => node.nodeId),
-      }),
-      execute: async (adapter) => {
-        const shadowResult = await createValidatedGraph(
-          adapter,
-          adapter === fallbackPlannerAdapter ? fallbackContext : redactedContext
-        );
-
-        return shadowResult.graph;
-      },
-      primary: result,
-      shadowPlannerAdapter,
-    });
-
-    const planner = withRolloutMetadata(result.planner);
-
-    return {
-      ...result,
-      planner: shadow ? { ...planner, shadow } : planner,
-    };
-  };
-
-  const buildAcceptedResult = ({ fallback, fallbackReason, graphResult, selectedId }) =>
-    attachShadowPlanner({
-      errors: [],
-      graph: graphResult.graph,
-      planner: buildPlannerSelection({
+  const buildAcceptedResult = ({ fallback, fallbackReason, graphResult, selectedId }) => ({
+    errors: [],
+    graph: graphResult.graph,
+    planner: withRolloutMetadata(
+      buildPlannerSelection({
         fallback,
         fallbackReason,
         fallbackReasonCodes: (fallbackReason?.validationErrors ?? []).map(
@@ -695,8 +659,9 @@ export const createAgentExecutionGraphResult = async ({
         promptTemplate: graphResult.promptTemplate,
         requestedPlannerId,
         selectedPlannerId: selectedId,
-      }),
-    });
+      })
+    ),
+  });
 
   if (!plannerAdapter || isFallbackPlanner(plannerAdapter, fallbackPlannerAdapter)) {
     try {

@@ -73,7 +73,7 @@ import {
   deterministicIntentPlannerAdapter,
   llmIntentPlannerAdapter,
 } from "./rag/agent-intent-planner.js";
-import { withPlannerRollout } from "./rag/agent-planner-shadow.js";
+import { withPlannerRollout } from "./rag/agent-planner-rollout.js";
 import { recordAgentExperienceFromFeedback } from "./rag/agent-experience-memory.js";
 import { createDefaultCapabilityRegistry } from "./rag/capabilities/index.js";
 import {
