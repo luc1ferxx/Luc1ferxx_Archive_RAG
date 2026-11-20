@@ -80,14 +80,12 @@ test("an agent row records each self-check, its rejected claims and the cited te
     excerpt: "We train the model on SQuAD.",
     pageNumber: 3,
     rank: 1,
-    sectionHeading: null,
   };
   const source2 = {
     evidenceText: "Results are reported on the development set.",
     excerpt: "Results are reported on the development set.",
     pageNumber: 5,
     rank: 2,
-    sectionHeading: null,
   };
 
   assert.deepEqual(answer.agent.checks, [

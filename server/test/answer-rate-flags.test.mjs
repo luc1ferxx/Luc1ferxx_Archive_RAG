@@ -12,10 +12,6 @@ import {
 import { assessQaConfidence, computeQueryTermCoverage } from "../rag/confidence.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 import { splitAnswerStructure } from "../rag/self-check/claims.js";
-import {
-  buildHeadingScopedSupportSentences,
-  readHeadingTitle,
-} from "../rag/self-check/attribution.js";
 import { buildFollowUpQuestion } from "../rag/self-check/gaps.js";
 import { judgeClaimSupport, resetClaimJudgeCache } from "../rag/self-check/claim-judge.js";
 import { finalizeGroundedAnswer } from "../rag/grounded-answer-finalizer.js";
@@ -35,7 +31,6 @@ import {
 // same under any ambient value.
 const FLAG_KEYS = [
   "RAG_QA_GATE_INFLECTION",
-  "RAG_CLAIM_HEADING_CONTEXT",
   "RAG_CLAIM_INFLECTION",
   "RAG_CLAIM_SOURCE_INHERITANCE",
   "RAG_CLAIM_JUDGE_TEMPERATURE",
@@ -594,7 +589,6 @@ test("the follow-up asks the primary call's resolved question, else the question
 
 test("describeAnswerRateFlags reports every flag, all off by default except source inheritance", () => {
   assert.deepEqual(describeAnswerRateFlags(), {
-    claimHeadingContext: false,
     claimInflection: false,
     claimJudgeTemperature: null,
     claimSourceInheritance: true,
@@ -603,7 +597,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
 
   withFlags(
     {
-      RAG_CLAIM_HEADING_CONTEXT: "true",
       RAG_CLAIM_INFLECTION: "true",
       RAG_CLAIM_JUDGE_TEMPERATURE: "0",
       RAG_CLAIM_SOURCE_INHERITANCE: "true",
@@ -611,7 +604,6 @@ test("describeAnswerRateFlags reports every flag, all off by default except sour
     },
     () => {
       assert.deepEqual(describeAnswerRateFlags(), {
-        claimHeadingContext: true,
         claimInflection: true,
         claimJudgeTemperature: 0,
         claimSourceInheritance: true,
@@ -726,7 +718,8 @@ test("real comparison, timeline and research requests keep their routes", () => 
 });
 
 // ---------------------------------------------------------------------------
-// Claim check: RAG_CLAIM_HEADING_CONTEXT
+// Claim check: a section heading supplies no claim word (RAG_CLAIM_HEADING_CONTEXT,
+// which let it, was deleted on 2026-11-20)
 
 const CONTRACT_PAGE = [
   "Section 7. Limitation of Liability.",
@@ -740,79 +733,8 @@ const CONTRACT_CITATIONS = [cite({ excerpt: CONTRACT_PAGE, fileName: "vendor-a.p
 const NAMED_SECTION_ANSWER =
   "The limitation of liability is that the total liability of Vendor A shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]";
 
-test("a claim naming the section it answers from is supported only with RAG_CLAIM_HEADING_CONTEXT", () => {
+test("a claim naming the section it answers from is checked against the sentence, not its heading", () => {
   assert.deepEqual(claimVerdicts(NAMED_SECTION_ANSWER, CONTRACT_CITATIONS), [false]);
-
-  withFlags({ RAG_CLAIM_HEADING_CONTEXT: "true" }, () => {
-    assert.deepEqual(claimVerdicts(NAMED_SECTION_ANSWER, CONTRACT_CITATIONS), [true]);
-  });
-});
-
-test("with RAG_CLAIM_HEADING_CONTEXT heading numbers, other sections and wrong facts are still refused", () => {
-  withFlags({ RAG_CLAIM_HEADING_CONTEXT: "true" }, () => {
-    for (const [label, answerText] of [
-      ["wrong number", NAMED_SECTION_ANSWER.replace("twelve (12)", "six (6)")],
-      ["section number as a value", NAMED_SECTION_ANSWER.replace("twelve (12)", "7")],
-      ["fact from another section", "The limitation of liability is thirty days notice. [Source 1]"],
-      ["swapped party", "The limitation of liability is that the total liability of the Client shall not exceed the fees paid in the twelve (12) months preceding the claim. [Source 1]"],
-      ["negation", "The limitation of liability is that the total liability of Vendor A is not limited. [Source 1]"],
-    ]) {
-      assert.deepEqual(claimVerdicts(answerText, CONTRACT_CITATIONS), [false], label);
-    }
-
-    // A neighbouring section's title does not cover a sentence of this one.
-    const leave = [
-      cite({
-        excerpt: [
-          "Section 3. Parental Leave.",
-          "Parental leave is described in the family policy.",
-          "Section 4. Annual Leave.",
-          "Employees receive 10 paid leave days each year.",
-        ].join("\n"),
-      }),
-    ];
-
-    assert.deepEqual(claimVerdicts("Employees receive 10 paid parental leave days each year. [Source 1]", leave), [false]);
-    assert.deepEqual(claimVerdicts("Employees receive 10 paid annual leave days each year. [Source 1]", leave), [true]);
-
-    // A comparison answer is checked as before.
-    assert.deepEqual(
-      claimVerdicts(NAMED_SECTION_ANSWER, CONTRACT_CITATIONS, {
-        comparisonAnalysisSummary: { status: "analyzed" },
-      }),
-      [false]
-    );
-  });
-});
-
-test("only Title Case section lines without negation count as headings", () => {
-  assert.equal(readHeadingTitle("Limitation of Liability."), "Limitation of Liability");
-  assert.equal(readHeadingTitle("No Refunds"), null);
-  assert.equal(readHeadingTitle("Employees may work remotely"), null);
-  // Digits are dropped first; what is left must still read as a title.
-  assert.equal(readHeadingTitle("30-Day Notice"), null);
-  assert.equal(readHeadingTitle("Section Twelve Governing Law"), "Section Twelve Governing Law");
-
-  assert.deepEqual(
-    buildHeadingScopedSupportSentences([
-      cite({
-        excerpt: [
-          "1. Employees may work remotely 2 days per week.",
-          "Section 2. No Refunds.",
-          "Fees are paid in advance.",
-          "Article IV. Governing Law.",
-          "This agreement is governed by the laws of Delaware.",
-        ].join("\n"),
-      }),
-    ]),
-    ["Governing Law: This agreement is governed by the laws of Delaware."]
-  );
-  assert.deepEqual(
-    buildHeadingScopedSupportSentences([
-      { excerpt: "We evaluate on SQuAD.", sectionHeading: "Datasets and Metrics" },
-    ]),
-    ["Datasets and Metrics: We evaluate on SQuAD."]
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -848,71 +770,5 @@ test("with RAG_CLAIM_INFLECTION a number word in another sense is still refused"
     ]) {
       assert.deepEqual(claimVerdicts(answerText, [cite({ excerpt })]), [false], label);
     }
-  });
-});
-
-test("with RAG_CLAIM_HEADING_CONTEXT a heading never supplies a party, a list item or another section", () => {
-  withFlags({ RAG_CLAIM_HEADING_CONTEXT: "true" }, () => {
-    for (const [label, answerText, citation] of [
-      [
-        "list item read as a heading",
-        "Interns receive 12 weeks of parental leave. [Source 1]",
-        cite({
-          excerpt: [
-            "The following roles are excluded:",
-            "1. Contract Workers",
-            "2. Interns",
-            "All other employees receive 12 weeks of parental leave.",
-          ].join("\n"),
-        }),
-      ],
-      [
-        "heading names the other party",
-        "The Customer may terminate on 30 days notice. [Source 1]",
-        cite({ excerpt: "Section 9. Termination by Customer\nThe Supplier may terminate on 30 days notice." }),
-      ],
-      [
-        "heading names the other party, claim repeats the heading",
-        "Termination by customer: the Customer may terminate on 30 days notice. [Source 1]",
-        cite({ excerpt: "Section 9. Termination by Customer\nThe Supplier may terminate on 30 days notice." }),
-      ],
-      [
-        "a Section line with a rejected title ends the previous section",
-        "The annual leave is that employees receive 12 weeks of leave. [Source 1]",
-        cite({
-          excerpt: [
-            "Section 3. Annual Leave",
-            "Employees receive 20 paid days each year.",
-            "Section 4. Leave for parents of newborn children",
-            "Employees receive 12 weeks of leave.",
-          ].join("\n"),
-        }),
-      ],
-      [
-        "an unnumbered heading ends the chunk's section",
-        "The annual leave is that employees receive 12 weeks of leave. [Source 1]",
-        {
-          ...cite({
-            excerpt: "Annual Leave\n\nEmployees receive 20 paid days.\n\nParental Leave\n\nEmployees receive 12 weeks of leave.",
-          }),
-          sectionHeading: "Annual Leave",
-        },
-      ],
-    ]) {
-      assert.deepEqual(claimVerdicts(answerText, [citation]), [false], label);
-    }
-
-    // The section the claim names still supports what that section says.
-    assert.deepEqual(
-      claimVerdicts("The annual leave is that employees receive 20 paid days. [Source 1]", [
-        {
-          ...cite({
-            excerpt: "Annual Leave\n\nEmployees receive 20 paid days.\n\nParental Leave\n\nEmployees receive 12 weeks of leave.",
-          }),
-          sectionHeading: "Annual Leave",
-        },
-      ]),
-      [true]
-    );
   });
 });

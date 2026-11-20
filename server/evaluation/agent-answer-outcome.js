@@ -64,8 +64,8 @@ export const isAgentAnswerTruncated = (body = {}) =>
 
 // What the claim check reads of a cited source (self-check/support.js,
 // attribution.js): its text fields, the attached chunk text (evidenceText)
-// among them, and the heading RAG_CLAIM_HEADING_CONTEXT puts before them.
-const CHECKED_SOURCE_FIELDS = ["pageNumber", "sectionHeading", ...CHECKABLE_CITATION_FIELDS];
+// among them.
+const CHECKED_SOURCE_FIELDS = ["pageNumber", ...CHECKABLE_CITATION_FIELDS];
 
 // [Source N] as the check resolves it (self-check/evaluate.js): the first
 // citation whose own rank, or else position, is N.

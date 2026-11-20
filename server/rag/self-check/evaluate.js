@@ -1,6 +1,5 @@
 import {
   getClaimJudgeMode,
-  isClaimHeadingContextEnabled,
   isClaimInflectionEnabled,
   isClaimSourceInheritanceEnabled,
 } from "../config.js";
@@ -64,13 +63,12 @@ export const evaluateClaimSupport = ({
     // that are not comparisons; a comparison answer is checked as before.
     const comparisonAnswer = Boolean(comparisonAnalysisSummary);
     const inflection = !comparisonAnswer && isClaimInflectionEnabled();
-    const headingContext = !comparisonAnswer && isClaimHeadingContextEnabled();
     const inheritSourceLabels =
       !comparisonAnswer && isClaimSourceInheritanceEnabled();
     const inputId = getClaimSupportInputId({
       citations,
       comparisonAnalysisSummary,
-      flags: [inflection, headingContext, inheritSourceLabels],
+      flags: [inflection, inheritSourceLabels],
     });
 
     return memoizeInEvidenceContext(
@@ -81,7 +79,6 @@ export const evaluateClaimSupport = ({
           answerText,
           citations,
           comparisonAnalysisSummary,
-          headingContext,
           inflection,
           inheritSourceLabels,
           inputId,
@@ -102,7 +99,6 @@ const computeClaimSupport = ({
   answerText,
   citations,
   comparisonAnalysisSummary,
-  headingContext,
   inflection,
   inheritSourceLabels,
   inputId,
@@ -185,7 +181,6 @@ const computeClaimSupport = ({
       claimText,
       citations: scopedCitations,
       documentLabelCitations: citations,
-      headingContext,
       inflection,
     });
     const contrastSupport = evaluateContrastClaimSupport({
@@ -250,7 +245,6 @@ const computeClaimSupport = ({
         claimText,
         citations: [citation],
         documentLabelCitations: citations,
-        headingContext,
         inflection,
       }).supported;
     });

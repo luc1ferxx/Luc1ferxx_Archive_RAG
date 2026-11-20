@@ -1172,14 +1172,6 @@ export const isQaGateInflectionEnabled = () =>
 export const isClaimInflectionEnabled = () =>
   toBoolean(process.env.RAG_CLAIM_INFLECTION, false);
 
-// RAG_CLAIM_HEADING_CONTEXT: the lexical claim check also reads each evidence
-// sentence under a section heading of the cited chunk with the heading's title
-// in front ("Limitation of Liability: The total liability ..."), so a claim
-// that names the section it answers from can be supported. Heading numbers are
-// dropped; see buildHeadingScopedSupportSentences in self-check/attribution.js.
-export const isClaimHeadingContextEnabled = () =>
-  toBoolean(process.env.RAG_CLAIM_HEADING_CONTEXT, false);
-
 // RAG_CLAIM_SOURCE_INHERITANCE: an answer sentence with no [Source N] label
 // takes the labels of the nearest labelled sentence in the same line (the
 // next one, else the previous one) before it is checked. The check itself is
@@ -1299,7 +1291,6 @@ export const assertAnswerGenerationSettings = () => {
 
 /** The answer-rate flags as an evaluation report records them. */
 export const describeAnswerRateFlags = () => ({
-  claimHeadingContext: isClaimHeadingContextEnabled(),
   claimInflection: isClaimInflectionEnabled(),
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),

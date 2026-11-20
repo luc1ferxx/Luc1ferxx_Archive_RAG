@@ -1,7 +1,7 @@
 // Exact memo for one claim-support evaluation, or for one /chat.
 //
 // The claim check is pure: it reads the answer text, the citations, the
-// comparison summary and three flags (evaluate.js), and nothing else. Every
+// comparison summary and two flags (evaluate.js), and nothing else. Every
 // claim re-reads the same citations, though, so the same sentence splitting,
 // alias derivation and numeric normalisation run once per claim and per
 // segment, and a /chat runs the whole check again for the selection between
@@ -235,7 +235,7 @@ let nextClaimSupportInputId = 1;
  * An id for what every claim of one claim check reads: every citation field
  * (the attached evidence included), which citations are the same object (the
  * check tells repeated references apart by index), the comparison summary, and
- * the three flags evaluateClaimSupport reads. The active context gives the
+ * the two flags evaluateClaimSupport reads. The active context gives the
  * same exact input the same id, so the keys below carry a small id instead of
  * the citations' text. Null without an enabled context or when the input
  * cannot be serialised exactly.

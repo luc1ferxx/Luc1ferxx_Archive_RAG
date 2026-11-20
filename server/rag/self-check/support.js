@@ -56,7 +56,6 @@ import {
 import {
   buildCitationSupportSegments,
   buildCitationSupportSentences,
-  buildHeadingScopedSupportSentences,
   getCitationDocIds,
   getCitationDocumentAliases,
   getCitationIdentity,
@@ -474,8 +473,6 @@ const isClaimAnchorSupported = ({
   );
 };
 
-// `headingContext` (RAG_CLAIM_HEADING_CONTEXT, likewise): sentences under a
-// section heading are also checked with the heading's title in front.
 // `inflection` (RAG_CLAIM_INFLECTION, passed by evaluateClaimSupport for
 // non-comparison answers): a claim word also counts as present when the
 // evidence segment has an inflected form of it (rag/inflection.js). It only
@@ -486,7 +483,6 @@ export const evaluateClaimAgainstCitations = ({
   citations = [],
   documentLabelCitations = citations,
   forceComparisonClaim = false,
-  headingContext = false,
   inflection = false,
 } = {}) => {
   const documentAliases = documentLabelCitations.flatMap((citation) =>
@@ -572,11 +568,6 @@ export const evaluateClaimAgainstCitations = ({
     ...parentSupportSegments,
     ...exactEvidenceSupportSegments,
     ...compoundSupportSegments,
-    // RAG_CLAIM_HEADING_CONTEXT (attribution.js): each sentence also read
-    // under its section heading's title.
-    ...(headingContext
-      ? buildHeadingScopedSupportSentences(citations, { claimText: factualInputClaim, inflection })
-      : []),
   ]);
   const exactEvidenceSupportKeys = new Set(
     exactEvidenceSupportSegments.map((segment) =>
