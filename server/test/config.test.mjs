@@ -4,11 +4,9 @@ import {
   getAdminAuditRetentionDays,
   getAdminAuditStoreConfigStatus,
   getApiAuthConfigStatus,
-  getAgentExecutionPlanner,
   getAgentRunRecoveryMode,
   getAgentRunRecoveryModeConfigStatus,
   getAgentRunStoreConfigStatus,
-  getAgentIntentPlanner,
   getAgentPlannerRollout,
   getAgentExperienceMemoryConfigStatus,
   getLlmOpsPolicy,
@@ -46,19 +44,61 @@ const withEnv = async (overrides, callback) => {
   }
 };
 
-test("agent planner defaults target pure LLM runtime", async () => {
-  await withEnv(
-    {
-      AGENT_EXECUTION_PLANNER: undefined,
-      AGENT_INTENT_PLANNER: undefined,
-      AGENT_PLANNER_ROLLOUT: undefined,
-    },
-    async () => {
-      assert.equal(getAgentPlannerRollout(), "llm");
-      assert.equal(getAgentIntentPlanner(), "llm");
-      assert.equal(getAgentExecutionPlanner(), "llm");
-    }
-  );
+// One variable picks every planner: unset, empty, whitespace, llm and
+// deterministic (trimmed, any case) pass; a removed value or a typo refuses
+// instead of planning with the model, as any unknown value did until
+// 2026-11-19. AGENT_INTENT_PLANNER and AGENT_EXECUTION_PLANNER are no longer
+// read: set beside any accepted value, they change nothing.
+test("the planner rollout is llm by default or deterministic, and refuses anything else", async () => {
+  const config = await import("../rag/config.js");
+
+  assert.equal(config.AGENT_PLANNER_ROLLOUT_REMOVED_CODE, "AGENT_PLANNER_ROLLOUT_REMOVED");
+  assert.equal(Object.hasOwn(config, "getAgentIntentPlanner"), false);
+  assert.equal(Object.hasOwn(config, "getAgentExecutionPlanner"), false);
+
+  for (const [value, expected] of [
+    [undefined, "llm"],
+    ["", "llm"],
+    [" \t ", "llm"],
+    ["llm", "llm"],
+    ["deterministic", "deterministic"],
+    [" Deterministic ", "deterministic"],
+  ]) {
+    await withEnv(
+      {
+        AGENT_EXECUTION_PLANNER: "deterministic",
+        AGENT_INTENT_PLANNER: "deterministic",
+        AGENT_PLANNER_ROLLOUT: value,
+      },
+      () => assert.equal(getAgentPlannerRollout(), expected, JSON.stringify(value))
+    );
+  }
+
+  for (const value of ["configured", "guarded_llm", "shadow", " Shadow "]) {
+    await withEnv({ AGENT_PLANNER_ROLLOUT: value }, () => {
+      assert.throws(
+        () => getAgentPlannerRollout(),
+        {
+          code: "AGENT_PLANNER_ROLLOUT_REMOVED",
+          message: new RegExp(
+            `^AGENT_PLANNER_ROLLOUT=${value.trim().toLowerCase()} was removed \\(2026-11-19\\): .+\\. ` +
+              "Unset AGENT_PLANNER_ROLLOUT or set it to llm or deterministic\\.$",
+            "u"
+          ),
+        },
+        value
+      );
+    });
+  }
+
+  await withEnv({ AGENT_PLANNER_ROLLOUT: "determinstic" }, () => {
+    assert.throws(() => getAgentPlannerRollout(), {
+      code: "AGENT_PLANNER_ROLLOUT_REMOVED",
+      message:
+        'AGENT_PLANNER_ROLLOUT="determinstic" is not a planner rollout. ' +
+        "Unset AGENT_PLANNER_ROLLOUT or set it to llm or deterministic.",
+    });
+  });
 });
 
 // The custom-Skill graph has no rollout dial any more: nothing in config.js

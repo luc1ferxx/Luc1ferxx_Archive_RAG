@@ -98,8 +98,6 @@ before(async () => {
   modelServer = await startFakeModel();
 
   Object.assign(process.env, {
-    AGENT_EXECUTION_PLANNER: "deterministic",
-    AGENT_INTENT_PLANNER: "deterministic",
     AGENT_PLANNER_ROLLOUT: "deterministic",
     API_AUTH_ENABLED: "true",
     API_AUTH_TOKENS: JSON.stringify(TOKENS),

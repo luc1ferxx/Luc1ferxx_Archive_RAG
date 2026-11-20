@@ -7,11 +7,7 @@ import {
 } from "./planner-provider-gate.js";
 import { buildRecoveryGate } from "./quality-recovery-gate.js";
 import { buildTrajectoryGate } from "./quality-trajectory-gate.js";
-import {
-  getAgentExecutionPlanner,
-  getAgentIntentPlanner,
-  getAgentPlannerRollout,
-} from "../rag/config.js";
+import { getAgentPlannerRollout } from "../rag/config.js";
 import {
   attachEvaluationEvidence,
   buildSourceReportReference,
@@ -207,23 +203,17 @@ const DEFAULT_REQUIRED_PLANNER_RUNTIME = Object.freeze({
 const normalizeRuntimeValue = (value) =>
   String(value ?? "").trim().toLowerCase();
 
+// AGENT_PLANNER_ROLLOUT picks every planner, so all five fields the release
+// contract keeps (release-report-contract-validation.js) are the rollout.
 export const getCurrentPlannerRuntime = () => {
   const plannerRollout = getAgentPlannerRollout();
-  const intentPlanner = getAgentIntentPlanner();
-  const executionPlanner = getAgentExecutionPlanner();
 
   return {
-    executionPlanner,
-    intentPlanner,
+    executionPlanner: plannerRollout,
+    intentPlanner: plannerRollout,
     plannerRollout,
-    effectiveExecutionPlanner:
-      plannerRollout === "llm" || plannerRollout === "deterministic"
-        ? plannerRollout
-        : executionPlanner,
-    effectiveIntentPlanner:
-      plannerRollout === "llm" || plannerRollout === "deterministic"
-        ? plannerRollout
-        : intentPlanner,
+    effectiveExecutionPlanner: plannerRollout,
+    effectiveIntentPlanner: plannerRollout,
   };
 };
 

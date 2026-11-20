@@ -323,7 +323,7 @@ test("rollout readiness report blocks on planner, trajectory, and recovery signa
     plannerRuntime: {
       executionPlanner: "deterministic",
       intentPlanner: "deterministic",
-      plannerRollout: "configured",
+      plannerRollout: "deterministic",
       effectiveExecutionPlanner: "deterministic",
       effectiveIntentPlanner: "deterministic",
     },
@@ -490,7 +490,7 @@ test("planner runtime gate requires pure LLM rollout target", () => {
     current: {
       executionPlanner: "llm",
       intentPlanner: "llm",
-      plannerRollout: "configured",
+      plannerRollout: "deterministic",
       effectiveExecutionPlanner: "llm",
       effectiveIntentPlanner: "llm",
     },

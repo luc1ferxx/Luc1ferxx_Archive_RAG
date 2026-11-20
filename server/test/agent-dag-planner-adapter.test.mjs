@@ -903,10 +903,11 @@ test("an adapter that only shares the deterministic id is planned as a primary p
   );
 });
 
-// llm and guarded_llm wrap the model's planner, and configured hands it over
-// unwrapped. Either way it is a primary planner: its own graph is selected,
-// and its failure is still recorded as a fallback to the deterministic graph.
-test("the model planner's record is unchanged under the llm, guarded_llm and configured rollouts", async () => {
+// The llm rollout wraps the model's planner, and a caller that injects one
+// (the planner eval) hands it over unwrapped. Either way it is a primary
+// planner: its own graph is selected, and its failure is still recorded as a
+// fallback to the deterministic graph.
+test("the model planner's record is unchanged under the llm rollout and when injected", async () => {
   const modelPlanner = stubAdapter(DAG_PLANNER_IDS.llm, () => ({
     nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
   }));
@@ -915,8 +916,7 @@ test("the model planner's record is unchanged under the llm, guarded_llm and con
   });
   const rollouts = [
     ["llm", (adapter) => withPlannerRollout(adapter, "llm")],
-    ["guarded_llm", (adapter) => withPlannerRollout(adapter, "guarded_llm")],
-    ["configured", (adapter) => adapter],
+    ["injected", (adapter) => adapter],
   ];
 
   for (const [rolloutMode, wrap] of rollouts) {

@@ -59,34 +59,28 @@ test("the DAG planner follows the rollout dial the V1 planner already reads", as
   });
 });
 
-// Shadow means the model plans beside the run, not for it. The deterministic
-// graph stays primary and the model's graph is only compared against it.
-test("the shadow rollout keeps the deterministic graph primary", async () => {
-  await withEnv({ AGENT_PLANNER_ROLLOUT: "shadow" }, () => {
-    const adapter = createDagPlannerAdapter();
-
-    assert.equal(adapter.id, DAG_PLANNER_IDS.deterministic);
-    assert.equal(adapter.shadowPlannerAdapter.id, DAG_PLANNER_IDS.llm);
-  });
-});
-
-test("the configured rollout defers to the execution planner setting", async () => {
-  await withEnv(
-    { AGENT_EXECUTION_PLANNER: "llm", AGENT_PLANNER_ROLLOUT: "configured" },
-    () => {
-      assert.equal(createDagPlannerAdapter().id, DAG_PLANNER_IDS.llm);
-    }
-  );
-
-  await withEnv(
-    {
-      AGENT_EXECUTION_PLANNER: "deterministic",
-      AGENT_PLANNER_ROLLOUT: "configured",
-    },
-    () => {
-      assert.equal(createDagPlannerAdapter().id, DAG_PLANNER_IDS.deterministic);
-    }
-  );
+// A removed value (configured, guarded_llm, shadow) or a typo used to plan
+// with the model, as an unknown value did; now no app is built, even one
+// whose caller injects every planner.
+test("a removed or mistyped rollout refuses the app services and the planners", async () => {
+  for (const rollout of ["configured", "guarded_llm", "shadow", "determinstic"]) {
+    await withEnv({ AGENT_PLANNER_ROLLOUT: rollout }, () => {
+      assert.throws(
+        () =>
+          createAppServices(
+            {
+              dagPlannerAdapter: { id: "injected" },
+              executionPlannerAdapter: { id: "injected" },
+              intentPlannerAdapter: { id: "injected" },
+            },
+            { uploadsDirectory: os.tmpdir() }
+          ),
+        { code: "AGENT_PLANNER_ROLLOUT_REMOVED" },
+        rollout
+      );
+      assert.throws(() => createDagPlannerAdapter(), { code: "AGENT_PLANNER_ROLLOUT_REMOVED" }, rollout);
+    });
+  }
 });
 
 /**
@@ -96,29 +90,15 @@ test("the configured rollout defers to the execution planner setting", async () 
  * injected instruction has the most to work with.
  */
 test("the replanner is withheld wherever a model is not already planning for real", async () => {
-  for (const rollout of ["deterministic", "shadow"]) {
-    await withEnv({ AGENT_PLANNER_ROLLOUT: rollout }, () => {
-      assert.equal(createReplanAdapter(), null);
-    });
-  }
-
-  await withEnv(
-    {
-      AGENT_EXECUTION_PLANNER: "deterministic",
-      AGENT_PLANNER_ROLLOUT: "configured",
-    },
-    () => {
-      assert.equal(createReplanAdapter(), null);
-    }
-  );
+  await withEnv({ AGENT_PLANNER_ROLLOUT: "deterministic" }, () => {
+    assert.equal(createReplanAdapter(), null);
+  });
 });
 
 test("the replanner is available once the model plans the executed graph", async () => {
-  for (const rollout of ["guarded_llm", "llm"]) {
-    await withEnv({ AGENT_PLANNER_ROLLOUT: rollout }, () => {
-      assert.equal(createReplanAdapter().id, REPLAN_ADAPTER_IDS.llm);
-    });
-  }
+  await withEnv({ AGENT_PLANNER_ROLLOUT: "llm" }, () => {
+    assert.equal(createReplanAdapter().id, REPLAN_ADAPTER_IDS.llm);
+  });
 });
 
 // The replanner reads the planner it was actually given rather than resolving

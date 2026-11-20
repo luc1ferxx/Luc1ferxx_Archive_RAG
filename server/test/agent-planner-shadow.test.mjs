@@ -15,7 +15,6 @@ import {
   withPlannerRollout,
   withShadowPlanner,
 } from "../rag/agent-planner-shadow.js";
-import { getAgentPlannerRollout } from "../rag/config.js";
 import {
   AGENT_SKILL_IDS,
   CUSTOM_SKILL_IDS,
@@ -142,7 +141,7 @@ test("execution planner shadow records alternate steps without changing executio
   assert.equal(result.planner.shadow.error, null);
 });
 
-test("guarded LLM intent planner selects through the validator", async () => {
+test("LLM intent planner under the llm rollout selects through the validator and records the rollout", async () => {
   const result = await createAgentIntentPlanResult({
     docIds: ["contract-1"],
     plannerAdapter: withPlannerRollout({
@@ -151,7 +150,7 @@ test("guarded LLM intent planner selects through the validator", async () => {
         selectedIntentId: CUSTOM_SKILL_IDS.summarizeContract,
         reason: "The user asked for key terms.",
       }),
-    }, "guarded_llm"),
+    }, "llm"),
     question: "Summarize the key terms in this contract.",
   });
 
@@ -159,11 +158,11 @@ test("guarded LLM intent planner selects through the validator", async () => {
   assert.equal(result.planner.requestedPlannerId, "llm");
   assert.equal(result.planner.selectedPlannerId, "llm");
   assert.equal(result.planner.selectedIntentId, CUSTOM_SKILL_IDS.summarizeContract);
-  assert.equal(result.planner.rolloutMode, "guarded_llm");
+  assert.equal(result.planner.rolloutMode, "llm");
   assert.equal(result.planner.fallback, false);
 });
 
-test("guarded LLM intent planner falls back when the selected intent is invalid", async () => {
+test("LLM intent planner under the llm rollout falls back when the selected intent is invalid", async () => {
   const result = await createAgentIntentPlanResult({
     docIds: ["contract-1"],
     plannerAdapter: withPlannerRollout({
@@ -171,12 +170,12 @@ test("guarded LLM intent planner falls back when the selected intent is invalid"
       selectIntentPlan: async () => ({
         selectedIntentId: "unregistered_tool",
       }),
-    }, "guarded_llm"),
+    }, "llm"),
     question: "Review this contract for risks and key terms.",
   });
 
   assert.equal(result.plan.mode, SKILL_CHAIN_MODE);
-  assert.equal(result.planner.rolloutMode, "guarded_llm");
+  assert.equal(result.planner.rolloutMode, "llm");
   assert.equal(result.planner.requestedPlannerId, "llm");
   assert.equal(result.planner.selectedPlannerId, "deterministic");
   assert.equal(result.planner.status, "fallback");
@@ -184,7 +183,7 @@ test("guarded LLM intent planner falls back when the selected intent is invalid"
   assert.match(result.planner.fallbackReason, /unregistered_tool/);
 });
 
-test("guarded LLM execution planner selects validated steps", async () => {
+test("LLM execution planner under the llm rollout selects validated steps and records the rollout", async () => {
   const result = await createAgentExecutionPlanResult({
     accessScope: ACCESS_SCOPE,
     plannerAdapter: withPlannerRollout({
@@ -197,7 +196,7 @@ test("guarded LLM execution planner selects validated steps", async () => {
           skillId: AGENT_SKILL_IDS.documentRag,
         },
       ],
-    }, "guarded_llm"),
+    }, "llm"),
     plannerContext: {
       docIds: ["policy-1"],
       plan: {
@@ -228,14 +227,14 @@ test("guarded LLM execution planner selects validated steps", async () => {
   assert.deepEqual(result.executionPlan.map((step) => step.id), [
     AGENT_EXECUTION_STEP_IDS.documentRag,
   ]);
-  assert.equal(result.planner.rolloutMode, "guarded_llm");
+  assert.equal(result.planner.rolloutMode, "llm");
   assert.equal(result.planner.requestedPlannerId, "llm");
   assert.equal(result.planner.selectedPlannerId, "llm");
   assert.equal(result.planner.status, "selected");
   assert.equal(result.planner.fallback, false);
 });
 
-test("guarded LLM execution planner falls back when validation rejects a step", async () => {
+test("LLM execution planner under the llm rollout falls back when validation rejects a step", async () => {
   const result = await createAgentExecutionPlanResult({
     accessScope: ACCESS_SCOPE,
     plannerAdapter: withPlannerRollout({
@@ -246,7 +245,7 @@ test("guarded LLM execution planner falls back when validation rejects a step", 
           reason: "Invalid external tool.",
         },
       ],
-    }, "guarded_llm"),
+    }, "llm"),
     selectedSkills: [
       {
         budgetKey: "documentRagCalls",
@@ -258,7 +257,7 @@ test("guarded LLM execution planner falls back when validation rejects a step", 
     ],
   });
 
-  assert.equal(result.planner.rolloutMode, "guarded_llm");
+  assert.equal(result.planner.rolloutMode, "llm");
   assert.equal(result.planner.selectedPlannerId, "deterministic");
   assert.equal(result.planner.status, "fallback");
   assert.equal(result.planner.fallback, true);
@@ -276,19 +275,4 @@ test("guarded LLM execution planner falls back when validation rejects a step", 
       AGENT_EXECUTION_STEP_IDS.webSearch,
     ]
   );
-});
-
-test("planner rollout config accepts guarded_llm", () => {
-  const originalValue = process.env.AGENT_PLANNER_ROLLOUT;
-  process.env.AGENT_PLANNER_ROLLOUT = "guarded_llm";
-
-  try {
-    assert.equal(getAgentPlannerRollout(), "guarded_llm");
-  } finally {
-    if (originalValue === undefined) {
-      delete process.env.AGENT_PLANNER_ROLLOUT;
-    } else {
-      process.env.AGENT_PLANNER_ROLLOUT = originalValue;
-    }
-  }
 });
