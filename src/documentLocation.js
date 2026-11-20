@@ -81,15 +81,10 @@ export const hasInlineDocumentPreview = (sourceOrDocument) => {
 /**
  * The citation's location for display: "Page 4" for a PDF (empty without a
  * page, as before), "Slide 3 · Revenue", "Sheet Revenue" (a sheet without a
- * name: "Sheet 2") or "Section 2 · Scope". `withLabel: false` leaves a slide
- * title or section heading out (a sheet's name is its identity and stays).
+ * name: "Sheet 2") or "Section 2 · Scope".
  * Never invents a number: a slide or section without one shows its label alone.
  */
-export const formatDocumentLocation = (
-  location,
-  t = englishT,
-  { withLabel = true } = {}
-) => {
+export const formatDocumentLocation = (location, t = englishT) => {
   const unit = getLocationUnit(location);
   const number = location?.pageNumber;
 
@@ -109,7 +104,7 @@ export const formatDocumentLocation = (
 
   const position = number ? t(`location.${unit}`, { number }) : "";
 
-  if (!withLabel || !label) {
+  if (!label) {
     return position;
   }
 

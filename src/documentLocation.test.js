@@ -37,7 +37,6 @@ describe("formatDocumentLocation", () => {
     expect(formatDocumentLocation({ locationUnit: "slide", pageNumber: 7 }, zh)).toBe(
       "第 7 张幻灯片"
     );
-    expect(formatDocumentLocation(slide, en, { withLabel: false })).toBe("Slide 3");
   });
 
   test("labels a sheet by its name, else its position", () => {
@@ -45,8 +44,6 @@ describe("formatDocumentLocation", () => {
 
     expect(formatDocumentLocation(sheet, en)).toBe("Sheet Revenue");
     expect(formatDocumentLocation(sheet, zh)).toBe("工作表 Revenue");
-    // The name is the sheet's identity, so it stays without the suffix too.
-    expect(formatDocumentLocation(sheet, en, { withLabel: false })).toBe("Sheet Revenue");
     expect(formatDocumentLocation({ locationUnit: "sheet", pageNumber: 2 }, en)).toBe(
       "Sheet 2"
     );
