@@ -2940,7 +2940,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 配对差（agent 减 rag，10000 次）：答题率 −0.558 [−0.674, −0.454]，不可答被回答 −0.429 [−0.714, −0.143]。
 
-**agent 的 98 道没答停在哪**（`--surface agent` 的每行现在带 `checks`：每次 self_check 的结果、被拒 claim 的失败字段和它引用的原文；报告末尾按失败字段和原因汇总）：
+**agent 的 98 道没答停在哪**（`--surface agent` 的每行现在带 `checks`：每次 self_check 的结果、被拒 claim 的失败字段和它引用的原文，以及评审摘要 `judge`；报告末尾按失败字段和原因汇总，并按评审状态计数 `judgeStatuses`）：
 - 46 道：主检索的 QA 门控就拒了（rag 同样拒了其中 43 道）。
 - 47 道：主答案被 claim 检查拒掉，补检索一次后仍不过，转成澄清。47 次补检索全部报"证据不足"：默认的补检索问题是 "Re-check the uploaded documents…" 元文本，门控和回答都把它当成问题本身（回答例如 "I found material related to Re-check, but I still cannot confirm Re-check and page-level reliably."），所以补检索在这个样本上一次也没成功。
 - 6 道：没走到文档检索，3 道在规划阶段就反问，3 道被转去 research brief 或自定义 Skill（rag 答了其中 5 道）。
@@ -3047,6 +3047,24 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 - 四条都过：两处改动都合并。任一条不过：只合并评审失败的记录，路由改动不合并。
 
 只记录、不判定：评审状态分布（新记录）、路由变了但 TB1 原本答了的题、每题延迟。
+
+**结果**（ad46e155 上的干净 detached worktree，11.8 分钟；报告 `latest-qasper-answers-tc-TC1`）：路由没变的 195 题与 TB1 逐题相同，基线有效；有差别的 5 题都是路由改了的题。
+
+| | TB1 | TC1 |
+| --- | --- | --- |
+| 回答的可答题 | 47/176 | 52/176 |
+| 不可答被回答 | 3/24 | 3/24 |
+| 补检索次数 / 成功 | 50 / 8 | 57 / 9 |
+
+判定：
+- g1 那 13 道全部走到文档检索：通过。
+- g2 净多答 5（新答 5、丢 0）≥ 3：通过。
+- g3 不可答被回答 3 ≤ 10：通过。
+- g4 独立评审（1 个，按引用页原文和参考答案）判新答的 5 题：答对 2、部分对 2、错 1：通过。
+
+只记录：样本上改了路由的 26 题（对比 18、研究简报 8）都改走文档问答，其余 13 题是不可答题或 rag 面也没答，没有新答。评审状态（新记录）：judged 120、failed 32、not_needed 103；32 次失败全是"回复里解析不出结论"，记下的回复开头都是合法的 JSON 开头，是截断还是 claim 编号对不上没有再查；另有 10 条 claim 被只答了一部分的回复漏掉。
+
+**结论**：四条都过，两处改动都合并：单文档收窄成为唯一行为（`AGENT_SINGLE_DOCUMENT_ROUTING` 删除，单文档的问句不再当研究简报请求），评审回复解析不出结论时记为失败、eval 记评审摘要。评审在 7B 上失败 32 次是下一条线索。
 
 ### API 压测（`npm run eval:load-test:pgvector`）
 

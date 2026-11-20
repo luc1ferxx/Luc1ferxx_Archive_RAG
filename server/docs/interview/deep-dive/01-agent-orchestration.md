@@ -71,7 +71,7 @@
 **代价**
 
 - 规则没生成的意图模型选不了（经验记忆只能补白名单内的意图）
-- 正则会误路由：compare/between 被判成对比，RAG-Sequence 被判成时间线；修复开关 AGENT_SINGLE_DOCUMENT_ROUTING 默认关
+- 正则会误路由：compare/between 被判成对比，RAG-Sequence 被判成时间线；2026-11-19 起单文档收窄成为唯一行为（开关删除），单文档的问句也不再被当成研究简报请求
 - 只有一个候选时也调一次模型，代码里没有短路
 
 **证据**
@@ -479,7 +479,7 @@
 
 代码：`server/rag/agent-intent-rules.js buildIntentPlanCandidates, AGENT_INTENT_IDS`；`server/rag/agent-intent-llm-adapter.js buildIntentPlannerResponseFormat`；`server/rag/agent-execution-plan.js AGENT_EXECUTION_STEP_SCHEMA`
 
-> ⚠ 规则没生成的意图 LLM 选不了。只有一个候选时也会调一次模型（代码里没有短路）。正则会误路由（§3.21：compare/between、RAG-Sequence），修复开关 AGENT_SINGLE_DOCUMENT_ROUTING 默认关。安全说法：「路由是规则 + 模型在白名单里选，灵活性换可审计。」
+> ⚠ 规则没生成的意图 LLM 选不了。只有一个候选时也会调一次模型（代码里没有短路）。正则会误路由（§3.21：compare/between、RAG-Sequence），2026-11-19 起单文档收窄成为唯一行为（开关删除）。安全说法：「路由是规则 + 模型在白名单里选，灵活性换可审计。」
 
 ### Q3. 为什么坚持「模型只提议、运行时决定」？规划器能看到什么、看不到什么？
 
@@ -734,7 +734,7 @@
 ## 要主动说出口的边界
 
 - 只在本地 qwen2.5:7b 上验证过规划。动态组合 2/5；已删除的 v3 统一图当时规划采纳 3/15。没有 GPT 级模型和生产流量的数据
-- 意图候选来自正则规则，模型选不了规则没生成的意图；路由会误判，修复开关 AGENT_SINGLE_DOCUMENT_ROUTING 默认关
+- 意图候选来自正则规则，模型选不了规则没生成的意图；路由会误判，2026-11-19 起单文档收窄成为唯一行为（开关删除）
 - 只有一个意图候选时也会调一次 LLM（代码没有短路）；默认 LLM 规划每请求多 2 次模型调用，容量影响是推算的
 - typed DAG 只覆盖自定义 Skill 阶段，外层文档、Web、内置阶段仍是固定阶段集合；执行规划器能省略阶段，校验器不要求全选
 - 默认 custom 预算为 2，DAG 实际最多 2 个 custom 节点，12 节点、并发 3 在默认配置下用不满
