@@ -104,8 +104,7 @@ export const createAnswerDraftReleaser = ({ allowedText = null, citations = [] }
   let evidenceContext = createSelfCheckEvidenceContext();
 
   const release = (answerText) => {
-    // A reply opening with the not-in-evidence marker becomes an abstention;
-    // none of it is a draft.
+    // A reply opening with the not-in-evidence marker is never a draft.
     if (startsWithNotInEvidenceVerdict(answerText)) {
       return;
     }

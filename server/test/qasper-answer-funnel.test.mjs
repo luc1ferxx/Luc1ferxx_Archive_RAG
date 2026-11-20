@@ -122,9 +122,11 @@ test("a refusal after the gate is a refusal, and no disagreement with the retrie
   const { answers, retrieval } = buildReports();
 
   answers.rows[4] = answerRow("q5", { abstained: true, abstainSource: "output_limit" });
+  // A report from before 2026-11-20 can hold the answer model's own refusal.
+  answers.rows[5] = answerRow("q6", { abstained: true, abstainSource: "answer_model" });
   const funnel = buildQasperAnswerFunnel(answers, retrieval);
 
-  assert.deepEqual(stageOf(funnel, "refused").refusedBySource, { gate: 1, output_limit: 1 });
+  assert.deepEqual(stageOf(funnel, "refused").refusedBySource, { answer_model: 1, gate: 1, output_limit: 1 });
   assert.deepEqual(funnel.answerable.inconsistent, { context: 0, gate: 0 });
 });
 
