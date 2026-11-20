@@ -15,12 +15,10 @@
 // the run's own top-K (config.retrieval.topK) chunks. It never reads
 // server/.env.
 //
-// The two runs must differ in nothing but the query expansion
-// (retrieval.qaQueryExpansion*): same checkout (git sha, a clean tree),
-// chunking, retrieval settings, embedding model, query adapter, corpus and
+// The two runs must not differ in the checkout (git sha, a clean tree),
+// chunking, retrieval settings, embedding model, query adapter, corpus or
 // sample. Otherwise it refuses and names the differences; --allow-differences
-// compares anyway and prints them. The output names each run's commit and
-// expansion mode.
+// compares anyway and prints them. The output names each run's commit.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -60,14 +58,11 @@ const assertGateDump = (dump, label) => {
 const RUN_FIELDS = Object.freeze(["answerable", "corpus", "embeddingModel", "queryAdapter", "seed"]);
 
 /**
- * Where the two runs differ apart from the query expansion: the fields
- * describeRunConfigDifferences lists (chunking, retrieval settings, the
- * checkout) without retrieval.qaQueryExpansion*, plus RUN_FIELDS.
+ * Where the two runs differ: the fields describeRunConfigDifferences lists
+ * (chunking, retrieval settings, the checkout), plus RUN_FIELDS.
  */
 export const describeGateDumpConfigDifferences = (baseConfig = {}, armConfig = {}) => [
-  ...describeRunConfigDifferences(baseConfig, armConfig).filter(
-    ({ field }) => !field.startsWith("retrieval.qaQueryExpansion")
-  ),
+  ...describeRunConfigDifferences(baseConfig, armConfig),
   ...RUN_FIELDS.filter((field) => !Object.is(baseConfig?.[field] ?? null, armConfig?.[field] ?? null)).map((field) => ({
     current: baseConfig?.[field] ?? null,
     field,
@@ -75,19 +70,18 @@ export const describeGateDumpConfigDifferences = (baseConfig = {}, armConfig = {
   })),
 ];
 
-/** A run's commit, whether its tree was clean, and its expansion mode, for the output. */
+/** A run's commit and whether its tree was clean, for the output. */
 export const describeGateDumpProvenance = (dump) => ({
   dirty: dump.config?.git?.dirty ?? null,
   generatedAt: dump.generatedAt ?? null,
-  queryExpansion: dump.config?.retrieval?.qaQueryExpansion ?? "off",
   sha: dump.config?.git?.sha ?? null,
 });
 
 /**
  * Throws unless both dumps hold the same questions in the same order,
  * recorded the gate settings `currentRetrieval` (describeRetrievalConfig) has,
- * and differ in nothing but the query expansion (describeGateDumpConfigDifferences;
- * `allowDifferences` lets them through). Returns those differences.
+ * and do not differ (describeGateDumpConfigDifferences; `allowDifferences`
+ * lets them through). Returns those differences.
  */
 export const assertComparableGateDumps = (base, arm, currentRetrieval, { allowDifferences = false } = {}) => {
   assertGateDump(base, "the base");
@@ -123,7 +117,7 @@ export const assertComparableGateDumps = (base, arm, currentRetrieval, { allowDi
 
   if (differences.length > 0 && !allowDifferences) {
     throw new Error(
-      `The two runs differ in more than the query expansion: ${differences
+      `The two runs differ: ${differences
         .map(({ current, field, other }) => `${field} ${JSON.stringify(current)} / ${JSON.stringify(other)}`)
         .join("; ")}. Run both arms on one clean commit with one environment, or pass --allow-differences.`
     );
@@ -280,7 +274,7 @@ const formatMetric = (name, metric) =>
 
 const describeRun = (provenance) =>
   provenance
-    ? `commit ${provenance.sha ?? "unknown"}${provenance.dirty ? " (uncommitted changes)" : ""}, expansion ${provenance.queryExpansion}`
+    ? `commit ${provenance.sha ?? "unknown"}${provenance.dirty ? " (uncommitted changes)" : ""}`
     : "unknown";
 
 export const formatGateDumpComparison = (comparison, { armLabel, baseLabel }) =>

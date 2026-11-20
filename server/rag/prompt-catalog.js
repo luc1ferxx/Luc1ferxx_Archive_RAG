@@ -9,10 +9,6 @@ import {
 } from "./answer-writer.js";
 import { getActiveRewritePromptDescriptor, listRewritePromptDescriptors } from "./memory.js";
 import { hashPromptSet } from "./prompt-registry.js";
-import {
-  getActiveQueryExpansionPromptDescriptors,
-  listQueryExpansionPromptDescriptors,
-} from "./query-expansion.js";
 import { getClaimJudgePromptDescriptor } from "./self-check/claim-judge.js";
 
 // Every prompt template a production code path can send to a chat model. The
@@ -37,7 +33,6 @@ export const listPromptTemplates = () =>
     ...listAnswerPromptDescriptors(),
     ...listRewritePromptDescriptors(),
     ...listWebAnswerPromptDescriptors(),
-    ...listQueryExpansionPromptDescriptors(),
     ...getSingleTemplatePrompts(),
   ].sort(byKey);
 
@@ -47,9 +42,6 @@ export const getActivePromptTemplates = () =>
     ...getActiveAnswerPromptDescriptors(),
     getActiveRewritePromptDescriptor(),
     getActiveWebAnswerPromptDescriptor(),
-    // RAG_QA_QUERY_EXPANSION's template only while it is on, so a default
-    // report's prompt set (and its hash) is what it was.
-    ...getActiveQueryExpansionPromptDescriptors(),
     ...getSingleTemplatePrompts(),
   ].sort(byKey);
 

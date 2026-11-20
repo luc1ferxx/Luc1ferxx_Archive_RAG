@@ -69,25 +69,9 @@ const describeEmbeddingEndpointHost = (env = process.env) => {
  * embedded.
  */
 export const describeRetrievalConfig = async () => {
-  const [config, topology, queryExpansionModule] = await Promise.all([
-    import("../rag/config.js"),
-    import("../rag/service-topology.js"),
-    import("../rag/query-expansion.js"),
-  ]);
-  const queryExpansion = config.getQaQueryExpansion();
+  const [config, topology] = await Promise.all([import("../rag/config.js"), import("../rag/service-topology.js")]);
 
   return {
-    // Only with RAG_QA_QUERY_EXPANSION on, so a default report keeps its shape
-    // and compares equal with reports from before the setting; the prompt as
-    // id@version#fingerprint, since the expansion's text comes from it.
-    ...(queryExpansion
-      ? {
-          qaQueryExpansion: queryExpansion.mode,
-          qaQueryExpansionCount: queryExpansion.count,
-          qaQueryExpansionPrompt: queryExpansionModule.describeQueryExpansionPrompt(queryExpansion.mode),
-          qaQueryExpansionTemperature: queryExpansion.temperature,
-        }
-      : {}),
     // Only with reranking on (RAG_CROSS_ENCODER_SCORES): how the rerank gate
     // reads a stored crossEncoderScore, so a replay can be held to it.
     ...(config.isRerankEnabled() ? { crossEncoderScores: config.getCrossEncoderScoreScale() } : {}),
@@ -156,10 +140,6 @@ const RETRIEVAL_FIELDS = Object.freeze([
   "qaGateInflection",
   "qaAnswerVerdict",
   "qaMinRerankProbability",
-  "qaQueryExpansion",
-  "qaQueryExpansionCount",
-  "qaQueryExpansionPrompt",
-  "qaQueryExpansionTemperature",
   "remoteRetrieval",
   "modelGateway",
   "embeddingEndpointHost",

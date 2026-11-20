@@ -246,9 +246,7 @@ export const computeQueryTermCoverage = ({ queryText = "", resultText = "", infl
 /**
  * A candidate's query-term coverage of `queryText`, read from the text the
  * stores score (file name, section heading, chunk): what a store's
- * keywordScore would be had it searched with `queryText`. Query expansion
- * (query-expansion.js) measures a chunk only a rewrite returned against the
- * question with it.
+ * keywordScore would be had it searched with `queryText`.
  */
 export const computeResultQueryTermCoverage = (result, queryText) =>
   computeQueryTermCoverage({ queryText, resultText: buildSearchableResultText(result) });
