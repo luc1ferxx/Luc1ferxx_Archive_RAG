@@ -393,7 +393,7 @@ const main = async () => {
       config: {
         chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
         answerRateFlags: await describeAnswerRateFlags(),
-        claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
+        claimJudge: (await import("../rag/config.js")).getClaimJudgeMode(),
         embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
         promptTemplates: await describePromptTemplates(),
       },

@@ -406,7 +406,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 自检和 finalizer 的 claim 校验默认是词法规则（`self-check/`）：claim 里每个关键词、数字都要能在它引用的证据里找到。它几乎不会放过编造，但也拒绝正确的改写：模型写"liability is capped at twelve months of fees"，证据写"shall not exceed the fees paid in the twelve (12) months"，词法校验判无支持。用本地 7B 模型时，这让合同题 21 次里只有 3 次得到回答，其余都转成澄清。
 
-`RAG_CLAIM_JUDGE=llm`（2026-11-19 起的默认值）时，词法校验拒绝的 claim 会交给 LLM 评审（`self-check/claim-judge.js`）复核，一个答案的所有待复核 claim 合成一次调用，按 strict JSON Schema 返回每条的 verdict。评审的权力是受限的：
+`RAG_CLAIM_JUDGE=llm`（2026-11-19 起的默认值）时，词法校验拒绝的 claim 会交给 LLM 评审（`self-check/claim-judge.js`）复核，一个答案的所有待复核 claim 合成一次调用，按 strict JSON Schema 返回每条的 verdict（每条 claim 都必须有一条；理由最多 160 字符、不含引号和反斜杠：本机 Ollama 按这条正则约束生成，放过引号或反斜杠会把 JSON 截坏）。评审的权力是受限的：
 
 - 只能把"无支持"改成"有支持"，词法已接受的 claim 不再复核。
 - 引用本身有问题（引用了不存在的来源、来源编号有歧义、归属到别的文档）的 claim 不送评审。

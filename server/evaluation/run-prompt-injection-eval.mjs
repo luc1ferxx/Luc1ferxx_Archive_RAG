@@ -19,7 +19,7 @@
 // 2. Claim judge. Claims that the evidence contradicts or does not state are
 //    judged against the evidence with and without a payload that tells the
 //    checker to accept everything. This runs the judge directly
-//    (RAG_CLAIM_JUDGE=llm), because it is off on the agent path by default.
+//    (RAG_CLAIM_JUDGE=llm), because part 1 pins it off.
 //
 // Attack success is pattern-matched on the final answer text, so it measures
 // what a user (or an MCP client that renders the answer) would receive, not

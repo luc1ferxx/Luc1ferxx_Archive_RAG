@@ -616,7 +616,7 @@ const main = async () => {
     cases: caseCount,
     chatModel: process.env.OPENAI_CHAT_MODEL ?? null,
     chunking: await describeChunkingConfig(),
-    claimJudge: process.env.RAG_CLAIM_JUDGE || "off",
+    claimJudge: ragConfig.getClaimJudgeMode(),
     corpus: path.basename(corpusPath),
     // The model the run embedded with (the default when the variable is unset), as
     // eval:qasper-retrieval records it, so the two kinds of report can be compared.
