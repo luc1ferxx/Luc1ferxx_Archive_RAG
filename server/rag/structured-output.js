@@ -19,15 +19,18 @@
 // than `maxLength` because strict mode documents pattern, not maxLength, and
 // the bound matches what the runtime keeps after clamping anyway.
 //
-// The bound leaves out the double quote and the backslash. A local model's
-// grammar (Ollama) applies the pattern to the raw JSON text, where `.` let a
-// bare quote end the string early or a backslash (LaTeX) start an invalid
-// escape, and the reply was no longer JSON (21 of 137 claim-judge replies on
-// qwen2.5:7b, docs/evaluation.md "评审输出格式修正"). So a value never holds
-// either character, and a verbatim quote cannot copy one from its source.
+// The bound leaves out the double quote, the backslash and the control
+// characters U+0000-U+001F. A local model's grammar (Ollama) applies the
+// pattern to the raw JSON text, where `.` let a bare quote end the string
+// early or a backslash (LaTeX) start an invalid escape, and the reply was no
+// longer JSON (21 of 137 claim-judge replies on qwen2.5:7b, docs/evaluation.md
+// "评审输出格式修正"). JSON forbids a raw control character in a string as
+// well, and without the backslash a line break could only be written raw
+// (Ollama's `.` left out LF and CR). So a value never holds any of them, and a
+// verbatim quote cannot copy a backslash from its source.
 
 export const boundedString = (maxLength) => ({
-  pattern: `^[^"\\\\]{0,${maxLength}}$`,
+  pattern: `^[^"\\\\\\x00-\\x1F]{0,${maxLength}}$`,
   type: "string",
 });
 

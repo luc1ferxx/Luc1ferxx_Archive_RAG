@@ -13,7 +13,7 @@
               "additionalProperties": false,
               "properties": {
                 "reason": {
-                  "pattern": "^[^\"\\\\]{0,220}$",
+                  "pattern": "^[^\"\\\\\\x00-\\x1F]{0,220}$",
                   "type": "string"
                 },
                 "selectedIntentId": {

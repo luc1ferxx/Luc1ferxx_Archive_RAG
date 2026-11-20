@@ -15,12 +15,17 @@ import {
   buildPlannerResponseFormat,
   llmPlannerAdapter,
 } from "../rag/agent-llm-planner-adapter.js";
+import {
+  buildComparisonStructuredResponseFormat,
+  buildQaExtractiveResponseFormat,
+} from "../rag/answer-writer.js";
 import { createChatClient } from "../rag/openai-client.js";
 import {
   completeTextWithMetadata,
   configureOpenAIProvider,
   resetOpenAIProvider,
 } from "../rag/openai.js";
+import { buildClaimJudgeResponseFormat } from "../rag/self-check/claim-judge.js";
 import { createSkillRegistry } from "../rag/skills/registry.js";
 import { extractFirstJsonValue } from "../rag/structured-output.js";
 
@@ -92,15 +97,16 @@ const assertStrictAndBounded = (schema, path = "$") => {
   if (schema.type === "string" && !schema.enum) {
     assert.match(schema.pattern ?? "", /\{\d+,\d+\}\$$/, `${path} is an unbounded string`);
     // A local model's grammar applies the pattern to the raw JSON text, where a
-    // bare quote or backslash breaks the reply.
+    // bare quote, backslash or control character breaks the reply.
     const value = new RegExp(schema.pattern);
     assert.equal(value.test("plain"), true, `${path} refuses a plain word`);
-    assert.equal(value.test('the "quoted" term'), false, `${path} allows a quote`);
-    assert.equal(value.test("$\\langle s \\rangle$"), false, `${path} allows a backslash`);
+    for (const breaking of ['pl"ain', "pl\\ain", "pl\nain", "pl\tain"]) {
+      assert.equal(value.test(breaking), false, `${path} allows ${JSON.stringify(breaking)}`);
+    }
   }
 };
 
-test("every planner response format stays inside the bounded strict subset", () => {
+test("every structured response format stays inside the bounded strict subset", () => {
   const formats = [
     buildPlannerResponseFormat({
       selectedSkills: [{ id: "document_rag" }, { id: "inventory" }],
@@ -108,6 +114,9 @@ test("every planner response format stays inside the bounded strict subset", () 
     }),
     buildDagPlannerResponseFormat(dagContext()),
     buildIntentPlannerResponseFormat({ candidates: [{ id: "qa" }, { id: "compare_documents" }] }),
+    buildComparisonStructuredResponseFormat([1, 2]),
+    buildQaExtractiveResponseFormat([1, 2]),
+    buildClaimJudgeResponseFormat([0, 2]),
   ];
 
   for (const format of formats) {

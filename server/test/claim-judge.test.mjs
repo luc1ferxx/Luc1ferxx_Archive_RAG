@@ -382,11 +382,12 @@ test("the judge output is constrained to the claims it was asked about", () => {
   assert.match(verdict.items.properties.reason.pattern, /\{0,160\}/);
 
   // A local model's grammar applies the pattern to the raw JSON text, so the
-  // reason may hold neither a quote nor a backslash (LaTeX) that would break it.
+  // reason may hold no quote, backslash (LaTeX) or raw line break that would break it.
   const reason = new RegExp(verdict.items.properties.reason.pattern);
   assert.equal(reason.test("Source 2 states it in other words."), true);
   assert.equal(reason.test('Source 2 says "soft version".'), false);
   assert.equal(reason.test("the form $\\langle s, r \\rangle$"), false);
+  assert.equal(reason.test("Source 2 states\nit."), false);
   assert.equal(reason.test("x".repeat(161)), false);
 });
 
