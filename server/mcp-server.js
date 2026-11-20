@@ -54,21 +54,18 @@ server.registerTool(
         .describe("Number of results to return (default: 5)"),
     },
   },
+  // An isError result's text is the reason the web search step fails with
+  // (chat-mcp.js); the model never answers it.
   async ({ query, num = 5 }) => {
     if (!SERPAPI_KEY) {
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                error: "SERPAPI_KEY is not configured.",
-              },
-              null,
-              2
-            ),
+            text: "Web search is not configured: SERPAPI_KEY is not set.",
           },
         ],
+        isError: true,
       };
     }
 
@@ -95,15 +92,15 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                error: `Error performing web search: ${error.message}`,
-              },
-              null,
-              2
-            ),
+            // serpapi rejects an answer other than 200 (a bad key, no searches
+            // left) with its body, {"error": "..."}, not an Error. A body that
+            // is not JSON throws here, which McpServer also answers isError.
+            text: `Error performing web search: ${
+              error instanceof Error ? error.message : JSON.parse(error).error
+            }`,
           },
         ],
+        isError: true,
       };
     }
   }

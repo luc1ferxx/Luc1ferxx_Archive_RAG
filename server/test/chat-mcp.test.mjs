@@ -123,6 +123,30 @@ test("a search in flight when its connection closes is sent again on a new one",
   assert.equal(connections.length, 2);
 });
 
+test("a failed search fails once with its reason and the model never answers it", async (t) => {
+  let modelCalls = 0;
+  let searches = 0;
+
+  useEnvironment(t, { OPENAI_API_KEY: "test-key" });
+  // A thrown error reaches the client as an isError result (McpServer), the
+  // result mcp-server.js returns for a missing SERPAPI_KEY or a SerpAPI error.
+  useSearchServer(t, async () => {
+    searches += 1;
+    throw new Error("Web search is not configured: SERPAPI_KEY is not set.");
+  });
+  useModel(t, async () => {
+    modelCalls += 1;
+    return "web answer";
+  });
+
+  await assert.rejects(chatMCP("anything"), {
+    message: "Web search is not configured: SERPAPI_KEY is not set.",
+    status: 409,
+  });
+  assert.equal(searches, 1);
+  assert.equal(modelCalls, 0);
+});
+
 test("the search server's child gets SERPAPI_KEY and no other secret of this process", async (t) => {
   useEnvironment(t, { OPENAI_API_KEY: "sk-unrelated-secret", SERPAPI_KEY: "serp-test-key" });
   const connections = useSearchServer(t, async (query) => `results for ${query}`);

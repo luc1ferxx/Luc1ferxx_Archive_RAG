@@ -62,7 +62,7 @@ STARTUP_HEALTH_STRICT=false
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | 无 | 生成 embeddings 和回答所需。 |
-| `SERPAPI_KEY` | 无 | Web answer 搜索所需；只跑文档 RAG 可先不配。 |
+| `SERPAPI_KEY` | 无 | Web answer 搜索所需；只跑文档 RAG 可先不配。没配时，批准的 Web 搜索以 409 失败，原因是 `Web search is not configured: SERPAPI_KEY is not set.`，不会让模型作答。 |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 文档 chunk 与 query 的 embedding 模型。 |
 | `OPENAI_CHAT_MODEL` | `gpt-5` | 文档答案、对比答案、网页摘要使用的模型。 |
 | `RAG_INJECTION_SCREEN` | `on` | 检索切块、上传文件名和网页结果进入 prompt 前，是否筛掉对 AI 说话的句子（`on` / `off`，无法识别的值按 `on` 处理）。`off` 只作为生产环境出现误判时的紧急开关；答案 prompt 里的不可信证据规则和输出链接守卫不受影响。见 `docs/agent-rag.md` 的“Prompt 注入防护”。 |
