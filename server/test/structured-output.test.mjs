@@ -91,6 +91,12 @@ const assertStrictAndBounded = (schema, path = "$") => {
 
   if (schema.type === "string" && !schema.enum) {
     assert.match(schema.pattern ?? "", /\{\d+,\d+\}\$$/, `${path} is an unbounded string`);
+    // A local model's grammar applies the pattern to the raw JSON text, where a
+    // bare quote or backslash breaks the reply.
+    const value = new RegExp(schema.pattern);
+    assert.equal(value.test("plain"), true, `${path} refuses a plain word`);
+    assert.equal(value.test('the "quoted" term'), false, `${path} allows a quote`);
+    assert.equal(value.test("$\\langle s \\rangle$"), false, `${path} allows a backslash`);
   }
 };
 

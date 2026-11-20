@@ -18,9 +18,16 @@
 // 12-second planner eval into minutes. Length is bounded with `pattern` rather
 // than `maxLength` because strict mode documents pattern, not maxLength, and
 // the bound matches what the runtime keeps after clamping anyway.
+//
+// The bound leaves out the double quote and the backslash. A local model's
+// grammar (Ollama) applies the pattern to the raw JSON text, where `.` let a
+// bare quote end the string early or a backslash (LaTeX) start an invalid
+// escape, and the reply was no longer JSON (21 of 137 claim-judge replies on
+// qwen2.5:7b, docs/evaluation.md "评审输出格式修正"). So a value never holds
+// either character, and a verbatim quote cannot copy one from its source.
 
 export const boundedString = (maxLength) => ({
-  pattern: `^.{0,${maxLength}}$`,
+  pattern: `^[^"\\\\]{0,${maxLength}}$`,
   type: "string",
 });
 

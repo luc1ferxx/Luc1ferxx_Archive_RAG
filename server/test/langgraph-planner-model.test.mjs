@@ -32,6 +32,16 @@ import {
 // So every scenario now runs once and is compared with what the direct call
 // produced.
 //
+// The goldens were rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1) when
+// boundedString (structured-output.js) stopped allowing a quote or backslash:
+// the intent, execution and DAG schemas' reason/rationale pattern is
+// ^[^"\\]{0,220}$ instead of ^.{0,220}$. Only those pattern lines of the three
+// decide-<planner>.json files and the 65 digests whose value holds one of the
+// schemas changed; no replan digest did. The rewrite ran as one full pass with
+// the mid-test failure switched off locally: a rewrite stops its test part-way,
+// which changes what later scenarios see, so key-by-key reruns did not settle.
+// The same pass on the code before the change left every golden as it was.
+//
 // The suite also shows which path ran. hooks.mjs sends planner-model.js's
 // import of model.js to a counting stand-in (model-tap.mjs) and reports every
 // @langchain module loaded from outside node_modules, so a call that never
