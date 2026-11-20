@@ -26,7 +26,7 @@
 | LLM 调用容错 | 带抖动的指数退避、遵守 `retry-after-ms` / `Retry-After`、可重试的超时、空响应重试一次、经模型注册表切换备用模型；每个模型端点有并发上限（默认 8）和熔断器（连续 5 次不可用错误熔断 30 秒，429 不计）；多实例部署时二者和评审缓存可放进 Redis 共享（Lua 脚本原子更新，名额和探测都是租约，Redis 挂了退回进程内） | `rag/openai.js`、`rag/openai-client.js`、`rag/model-call-guard.js`、`rag/model-providers/` |
 | 可观测性 | OpenTelemetry trace，遵循 GenAI 语义约定：一次运行一个 `invoke_agent` span，规划器、每个 Skill（`execute_tool`）、每次模型调用（`chat` / `embeddings`，带 token 和估算成本）逐层嵌套；步骤是 span 事件；不记录问题、prompt、输出和文档内容。默认关闭；OTLP 导出默认 protobuf（Phoenix 只收 protobuf），也能接 Langfuse。响应里的 `traceId` 和 span 上的 `agent.run.id` 互相可查 | `rag/tracing.js`、`otel.js` |
 | Claim 校验 | 默认词法规则；可选 LLM 评审只复核被词法拒绝的 claim，只能升级不能降级，引用错误、证据中没有的数字、对比答案不送评审，失败时保留词法结论；结论缓存 | `rag/self-check/`、`rag/self-check/claim-judge.js` |
-| Prompt 版本 | 14 个 prompt、24 个钉住的模板版本（`id@version`；2026-11-14 按代码数的，阶段 10 删掉 `unified_graph_planner@v1` 之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
+| Prompt 版本 | 12 个 prompt、20 个钉住的模板版本（`id@version`；2026-11-19 按代码数的，删掉抽取式问答和结构化对比的 4 个模板之后），每个模板有 `id@version#fingerprint`（模板原文的哈希）。每次模型调用带上它，进入 LLMOps 事件、模型 span、每次运行的 prompt 清单、LLM 规划器的决策和每份评测报告；测试把每个版本钉到 fingerprint，改模板不改版本号会失败；发布门要求所有发布报告用同一组 prompt | `rag/prompt-registry.js`、`rag/prompt-catalog.js`、`test/prompt-registry.test.mjs` |
 | 提示注入防护 | 文档、文件名、网页结果进 prompt 前做确定性筛查（对 AI 说话的句子替换成标记，中英文都覆盖）；答案、网页回答、claim 评审的 prompt 写明证据是不可信数据；输出链接守卫删掉图片和模型没见过的链接。规划器本来就看不到文档正文 | `rag/prompt-injection-screen.js`、`evaluation/prompt-injection-cases.js` |
 | 租户隔离 | 应用层每个 store 按 user/workspace 过滤；PostgreSQL 行级安全再兜一层：鉴权后的中间件把访问范围放进 `AsyncLocalStorage`，带范围的语句在短事务里 `SET LOCAL ROLE` 到租户角色并设置租户变量，17 张表（再加每个 live 索引版本的分块表和 BM25 统计表）的策略拒绝其他租户的行。后台任务和恢复以记录自己的范围执行；迁移用 owner 登录；进程级缓存加载、跨租户恢复扫描显式标成 system 工作，默认仍以 owner 登录执行，开角色拆分时切到 NOLOGIN 的 system 角色（迁移 035）。strict 上下文和角色拆分都是可选项，默认关（见 3.32） | `db/migrations/013_enable_tenant_row_level_security.sql`、`rag/postgres.js`、`rag/postgres-tenant.js`、`health.js`（`getRowLevelSecurityTables`） |
 | 流式进度与草稿 | `POST /chat/stream` 以 SSE 推送每一步 trace 摘要；主文档答案按 token 生成，但只推送通过 finalizer 同一套 claim 校验的整句（草稿），原始 token 不出服务器；最终答案整体发送并替换草稿。聊天界面已接上 | `routes/chat.js`、`rag/langgraph/agent-stream.js`、`rag/agent-event-stream.js`、`rag/answer-drafts.js`、`src/components/ChatComponent.jsx` |
@@ -933,7 +933,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 - **为什么做**：3.39 里温度 0 下有一道题生成停不下来，客户端只能等超时、重试，最坏约 8 分钟后失败。原因是答案调用没有输出上限。
 - **怎么做**：
-  - 新增可选设置 `RAG_ANSWER_MAX_TOKENS`，只加在文档答案的三种调用上。默认不发送，请求逐字节不变。
+  - 新增可选设置 `RAG_ANSWER_MAX_TOKENS`，只加在文档答案的三种调用上（2026-11-19 删除抽取式后是两种：单文档问答和对比）。默认不发送，请求逐字节不变。
   - 上限默认放在 `max_tokens` 字段里，可改成 `max_completion_tokens`（OpenAI 推理模型只认它）。
   - 直连、流式、模型网关三条路都带上。网关收到不合法的上限直接返回 400，不会悄悄丢掉；设置值不对时应用和网关拒绝启动。
   - 回复因上限停下（`finish_reason: "length"`）时，答案标 `answerTruncated: true`，MCP 结果里也有。语义缓存不存这种答案，评测报告逐题记录。一个字都没写出来就被截断的回复算拒答，不再冒充答案。v3 统一图路径的步骤输出还不带这个标记。（v3 统一图 2026-11-14 已删除，这一条限制随它没有了，见 3.51。）
@@ -949,7 +949,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 ### 3.39 答案温度设为 0：先写规则，结果是一道题卡死，口径不改（2026-11-10）
 
 - **为什么做**：应用不传 temperature，Ollama 按 1.0 采样。同一设置、同一批题重复跑，作答的题完全相同，官方 F1 却在 0.205–0.215 之间来回（3.38）。想用温度 0 去掉这份噪声。
-- **怎么做**：新增可选设置 `RAG_ANSWER_TEMPERATURE`，只加在文档答案的三种调用上。默认不设、不发送，因为有的模型只接受默认温度（例如 OpenAI 的推理模型）。规则先写好并提交：温度 0 跑两次看是否逐字可复现，F1 不能检出下降，`verify:quality` 18/18。样本是没用过的 dev 200 题，每次运行各起一个新的 Ollama 进程。
+- **怎么做**：新增可选设置 `RAG_ANSWER_TEMPERATURE`，只加在文档答案的三种调用上（2026-11-19 删除抽取式后是两种：单文档问答和对比）。默认不设、不发送，因为有的模型只接受默认温度（例如 OpenAI 的推理模型）。规则先写好并提交：温度 0 跑两次看是否逐字可复现，F1 不能检出下降，`verify:quality` 18/18。样本是没用过的 dev 200 题，每次运行各起一个新的 Ollama 进程。
 - **结果**：温度 0 的第一次运行在第 24 题（是非题）卡死。同一个请求四次都写到 5,600–5,800 个 token，被 120 秒超时取消；重试 3 次后评测中止。同一道题在 1.0 下 91 个 token、1.7 秒就答完。温度 1.0 的五次运行共 599 次作答，最长 554 token，从没出现过这种情况。
 - **结论**：一臂跑不完，按规则算不过，评测口径不改。设置保留为可选，文档写明“没有输出上限时不要设 0”。下一步应先给答案调用加输出上限，让这类请求的最坏情况从 8 分钟变成几十秒，再重测温度 0。
 - **面试里的说法**：本想做的是降低评测噪声，结果先撞上一个生产风险：小模型贪心解码会进入停不下来的生成，而答案调用没有输出上限。规则先写好，所以“跑不完”没被当成小问题绕过去。改动默认不发送温度，是因为有的托管模型不接受这个参数。
@@ -992,7 +992,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 
 - **结论**：词法 claim 检查对逐字原句的拒绝率从 29.9% 降到 2.5%（QASPER train 前 120 篇论文、2,521 句，离线复放不调模型，`classify-refusals.mjs`），剩下的 64 句里 44 句只是 `;` 前半段没有 `[Source N]`（`RAG_CLAIM_SOURCE_INHERITANCE` 的范围，默认关，没有改）。六处修改都是让 claim 侧按证据侧的规则读词，或一字不差时直接通过，不放宽对释义的判定；五个新用例各带一个改了事实的对照仍被拒。全套 4,018 过、0 败；确定性评测改前改后逐行相同，trajectory 19/19。
 - **六处不对称**：词内数字被 `stripNumericValueSurfaces` 删掉（`BIBREF20`→`bibref`、`seq2seq`→`seq`，755 条拒绝里 531 条缺 `term:bibref`）；子句切分吃掉的 however / but / while 仍被当 claim 词项和主语绑定词；additive 词组没过别名表（`references` 对 `reference`）；数字事实的歧义规则连一字不差的子句也拒（`13,215 ... six domains`）；证据句只在和 claim 完全相等时整句参与，跨子句的逐字引文没有任何一段装得下；整句参与后反转启发式对重复词误判。
-- **面试里的说法**：这是对"按构造通过校验"前提的修正——此前逐字引文只有七成能过，不是模型的问题，是校验器两侧读法不一致；修完后抽取模式的 `unsupported` 回退、agent 面的引用召回、finalizer 对散文的保留率都需要重测（未做，要先写规则）。要主动说：数字事实的"同文通过"第一版用去掉符号的比较，7 个既有用例（`+2`/`-2`、`$500`/`€500`、`~2`/`2`）立刻失败，改成保留符号、运算符、币种、约数标记的比较才过。
+- **面试里的说法**：这是对"按构造通过校验"前提的修正——此前逐字引文只有七成能过，不是模型的问题，是校验器两侧读法不一致；修完后抽取模式的 `unsupported` 回退（第三轮已测：rag 0、agent 1，见 3.34；这个模式 2026-11-19 已删除）、agent 面的引用召回、finalizer 对散文的保留率都需要重测（未做，要先写规则）。要主动说：数字事实的"同文通过"第一版用去掉符号的比较，7 个既有用例（`+2`/`-2`、`$500`/`€500`、`~2`/`2`）立刻失败，改成保留符号、运算符、币种、约数标记的比较才过。
 - **提交**：fb737f28（代码和用例），细节见 docs/evaluation.md "Claim 检查两侧对称"。
 
 ### 3.34 抽取式作答模式：同一思路搬到单文档问答，阶段 1 没过（2026-10-22）
@@ -1005,6 +1005,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **第三轮（2026-10-28，提交 624a02b1，规则先写再跑，train seed 9，100 题，86 可答 / 14 不可答）**：加"直接答案所在的引文句必须按门控的锚点、共词、近邻替换三条检查回答问题"（trace 码 `answer_unanchored`，同样回退散文），两侧对称修复和逐行检查也一起进入测量。rag 面作答集合仍与基线相同，短答案 +0.006 [−0.035, +0.049]，r1 不过（54 次尝试回退 37 次：新规则 15、未定位 13、无引文 5、定位失败 4，`unsupported` 从第二轮的 7 降到 0）；agent 面 2 → 22/86（+0.233 [0.151, 0.326]）、短答案 +0.055 [0.023, 0.093]、不可答被答 1/14（"Which languages do they focus on?" 答 "African languages"，标注边界题）、引用证据召回 0.32，a3、a4 不过。停在阶段 1，开关默认关，不再做第四轮词法规则：定位、回退、锚点三种手段用尽，a4 的 0.4 对这个模型始终过不了。
 - **面试里的说法（三轮合并）**：三轮都按事先写好的规则判定为不通过、没有改默认，这本身是方法论证据；能稳定复现的收益是 Agent 路径从几乎不作答到作答 22–35/86 且短答案显著更好，稳定复现的代价是不可答题多答 1–3 道、作答行引用证据召回 0.3 上下。
 - **面试里的说法**：这是"按构造通过校验"思路的第二次应用，证明了它能让 Agent 路径作答，也暴露了代价：模型总能挑出一句引文，不可答题会被多答；"直接答案必须定位"把错答从 3/12 压到 2/14 但压不到 0，因为模型会从相关句子里挑片段。要主动说：只在 7B 上测过，两轮都停在阶段 1，默认关；离线复放发现词法校验对逐字原句也有一到三成拒绝率，这是下一步的优化点。
+- **已删除（2026-11-19，用户："按推荐全做"）**：三轮都没过事先规则，开关和抽取式代码一起删除，响应不再有 `directAnswer`，单文档问答只剩散文一条路；`f1Direct` 保留，改为一律按第一句计分。
 
 ### 3.33 对比答案结构化输出：模型选证据、服务端写答案（2026-10-21）
 
@@ -1014,6 +1015,7 @@ invoke_agent archive_rag  5840ms  mode=skill_chain usage.tokens=740 usage.model_
 - **没变好的**：语料外用例模型返回空列表，和以前一样拒答；另有一轮里一个两文档用例的两条引文都改了措辞、定位不到证据，回退模板，答案和基线相同。
 - **一个坑**：第一版把每份文档各写一行，三文档用例 6 行全被判不受支持：差异段的校验要求能两两配成"不同文档、实质对立"的对子，奇数行整段作废，所以改成按组两两配对（同一行可重复），和模板同一写法。
 - **面试里的说法**：7B 写不出能过词法校验的对比散文，但能选对证据；把"写"交给服务端，校验就按构造通过，闸门一行没改。要主动说：只在 7B 上测过；近重复的漏引是服务端用"同一句话"的硬条件补的，不是模型学会了。
+- **已删除（2026-11-19，用户："按推荐全做"）**：更强的模型一直没测，用户可见的检查两边相同（`verify:quality` 18/18、compare-hard 6/8），变的只有 7B 的闸门采纳率；开关、模板、渲染器和引文定位一起删除，对比只剩散文 prompt 加有依据模板。讲的时候是"做过、测过、删了"。
 
 ### 3.32 多租户加固阶段 1–5（2026-10-18）
 

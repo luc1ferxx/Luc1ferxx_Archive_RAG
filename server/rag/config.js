@@ -1217,11 +1217,11 @@ export const getClaimJudgeTemperature = () => {
 const invalidAnswerGenerationSetting = (code, message) => Object.assign(new Error(message), { code });
 
 // RAG_ANSWER_TEMPERATURE: sampling temperature of the document answer calls
-// (single-document QA, its extractive mode and comparison). Unset (default)
-// sends none, so the endpoint's default applies (1.0 on Ollama's and OpenAI's
-// chat endpoints), because some models accept only their default (OpenAI's
-// reasoning models, for example). A value outside 0..2 refuses the call instead
-// of being dropped, so a run that meant 0 cannot quietly sample at 1.
+// (single-document QA and comparison). Unset (default) sends none, so the
+// endpoint's default applies (1.0 on Ollama's and OpenAI's chat endpoints),
+// because some models accept only their default (OpenAI's reasoning models,
+// for example). A value outside 0..2 refuses the call instead of being
+// dropped, so a run that meant 0 cannot quietly sample at 1.
 export const getAnswerTemperature = () => {
   const rawValue = process.env.RAG_ANSWER_TEMPERATURE;
 
@@ -1242,10 +1242,10 @@ export const getAnswerTemperature = () => {
 };
 
 // RAG_ANSWER_MAX_TOKENS: the most tokens a document answer call (single-document
-// QA, its extractive mode and comparison) may write. Unset, empty or 0 (default)
-// sends no limit, so the request is what it always was; the answer calls had
-// none, and qwen2.5:7b at temperature 0 once wrote on one QASPER question until
-// the client timeout, on every retry (2026-11-10). The field it travels in is
+// QA or comparison) may write. Unset, empty or 0 (default) sends no limit, so
+// the request is what it always was; the answer calls had none, and qwen2.5:7b
+// at temperature 0 once wrote on one QASPER question until the client timeout,
+// on every retry (2026-11-10). The field it travels in is
 // RAG_LLM_MAX_TOKENS_FIELD's. Anything but a whole number refuses the call
 // instead of being dropped, so a run that meant a limit never runs without one.
 export const getAnswerMaxTokens = () => {
@@ -1313,7 +1313,6 @@ export const describeAnswerRateFlags = () => ({
   claimInflection: isClaimInflectionEnabled(),
   claimJudgeTemperature: getClaimJudgeTemperature(),
   claimSourceInheritance: isClaimSourceInheritanceEnabled(),
-  qaExtractiveOutput: isQaExtractiveOutputEnabled(),
   qaGateInflection: isQaGateInflectionEnabled(),
   qaVerdictOverride: getQaVerdictOverrideMode(),
 });
@@ -1556,25 +1555,6 @@ export const getMaxQueryRequirements = () =>
 
 export const isNearDuplicateGuardEnabled = () =>
   toBoolean(process.env.RAG_NEAR_DUPLICATE_GUARD_ENABLED, true);
-
-// RAG_COMPARISON_STRUCTURED_OUTPUT (default off): the comparison answer model
-// returns, per aspect on which the documents differ, one verbatim quote per
-// document with the Source number it came from, and the server renders the
-// answer from the evidence sentences those quotes resolve to (answer-writer.js).
-// The comparison gate then checks the rendered answer exactly as it checks a
-// prose answer. Off, the comparison call is byte-identical to before.
-export const isComparisonStructuredOutputEnabled = () =>
-  toBoolean(process.env.RAG_COMPARISON_STRUCTURED_OUTPUT, false);
-
-// RAG_QA_EXTRACTIVE_OUTPUT (default off): single-document QA asks the model
-// for the shortest exact answer copied from the evidence plus the sentences it
-// came from, each with its Source number, and the server renders the answer
-// from the evidence sentences those quotes resolve to (answer-writer.js). The
-// response carries the short answer as `directAnswer`. It replaces the QA
-// prompt whatever RAG_QA_ANSWER_VERDICT says (an empty reply is the model's
-// abstention) and RAG_QA_VERDICT_OVERRIDE does not apply to it.
-export const isQaExtractiveOutputEnabled = () =>
-  toBoolean(process.env.RAG_QA_EXTRACTIVE_OUTPUT, false);
 
 export const isRagObservabilityEnabled = () =>
   toBoolean(process.env.RAG_OBSERVABILITY_ENABLED, false);

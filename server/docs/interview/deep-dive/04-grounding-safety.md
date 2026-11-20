@@ -554,7 +554,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 
 代码：`server/rag/prompt-registry.js definePrompt`；`server/rag/prompt-registry.js hashPromptSet`；`server/rag/prompt-catalog.js describeActivePromptTemplates`；`server/test/prompt-registry.test.mjs PINNED_PROMPT_TEMPLATES`；`server/evaluation/release-evidence-gate.js buildPromptLineageCheck`
 
-> ⚠ 现在代码里是 11 个 prompt id、19 个钉住的 id@version，CURRENT-TRUTH 写的 10/16 已经过时。这套只做归因，没有线上 A/B 或灰度。
+> ⚠ 这套只做归因，没有线上 A/B 或灰度。
 
 ### Q15. QPS 放大 100 倍，这条自检链路哪里先扛不住？如果评审模型挂了、超时或者输出乱码，会发生什么？
 
@@ -581,7 +581,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 补检索不再用元文本当问题（2026-11-19 已做）
 - 区分'能不能答'和'怎么答'：单独训练或校准一个可答性判别信号，而不是靠词面覆盖率
 - 更早接真实模型和外部标注集（QASPER），少做一些不改默认的开关
-- 对比路径改为先让模型输出逐文档的值绑定（结构化），再由引擎渲染文本
+- 对比路径改为先让模型输出逐文档的值绑定（结构化），再由引擎渲染文本（2026-10-21 做过默认关的版本：7B 的闸门采纳率 0/16 → 12/16，但用户可见的检查两边相同、更强的模型没测，2026-11-19 删除，见 CURRENT-TRUTH 3.33）
 
 代码：`server/rag/self-check/claims.js splitAnswerStructure`；`server/rag/self-check/gaps.js buildFollowUpQuestion`
 

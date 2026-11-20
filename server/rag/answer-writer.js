@@ -8,17 +8,9 @@ import {
   getMaxComparisonSources,
   getPromptVersion,
   getQaVerdictOverrideMode,
-  isComparisonStructuredOutputEnabled,
   isNearDuplicateGuardEnabled,
   isQaAnswerVerdictEnabled,
-  isQaExtractiveOutputEnabled,
-  isQaGateInflectionEnabled,
 } from "./config.js";
-import {
-  computeQueryTermCoverage,
-  findQueryTermSubstitution,
-  findUncoveredQueryAnchors,
-} from "./confidence.js";
 import {
   attachRetrievedEvidence,
   buildCitation,
@@ -30,20 +22,11 @@ import {
   pickDocumentLocation,
 } from "./citations.js";
 import { evaluateClaimSupport } from "./agent-self-check.js";
-import { ensureTerminalPunctuation } from "./grounded-answer-finalizer.js";
-import { normalizeGroupedSourceLabels, normalizeSemanticText } from "./self-check/text.js";
+import { normalizeGroupedSourceLabels } from "./self-check/text.js";
 import { isStructuralSectionHeading, joinWrappedLines } from "./self-check/attribution.js";
-import { MAX_MULTIPARTITE_DIFFERENCE_ENTRIES } from "./self-check/support.js";
 import { hasClaimPredicate, splitAnswerStructure } from "./self-check/claims.js";
 import { completeText } from "./openai.js";
 import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
-import {
-  boundedArray,
-  boundedString,
-  buildJsonSchemaResponseFormat,
-  parseFirstJsonValue,
-  strictObject,
-} from "./structured-output.js";
 import {
   addToInjectionScreenSummary,
   createInjectionScreenSummary,
@@ -56,7 +39,7 @@ import {
   describeVerdictOverride,
   overrideNotInEvidenceVerdict,
 } from "./answer-verdict-override.js";
-import { foldDashVariants, NAIVE_SENTENCE_BOUNDARY, normalizeWhitespace } from "./text-utils.js";
+import { NAIVE_SENTENCE_BOUNDARY, normalizeWhitespace } from "./text-utils.js";
 import { evaluateBidirectionalEvidenceEntailment } from "./comparison-equivalence.js";
 
 // Spotlighting: evidence is data from uploaded documents, never instructions.
@@ -207,58 +190,6 @@ const qaPromptV2 = buildQaPromptV2(
 );
 const qaVerdictPromptV2 = buildQaPromptV2(QA_NOT_IN_EVIDENCE_RULE);
 
-// RAG_QA_EXTRACTIVE_OUTPUT: for single-document QA the model selects evidence
-// instead of writing prose. It returns the shortest exact answer copied from
-// the evidence and the sentences it was copied from, each with its Source
-// number; the server resolves the quotes to evidence sentences and renders
-// them as the lines the finalizer writes ("<sentence> [Source N]"), so the
-// lexical claim check passes by construction. The JSON shape is described in
-// words because braces are template variables; buildQaExtractiveResponseFormat
-// enforces it where the endpoint honours response_format.
-const EXTRACTIVE_QA_RULES = `- Use only the provided evidence. Each evidence block is labelled Source N.
-- Reply with one JSON object and nothing else. It has two keys: "answer" (text) and "quotes" (a list). Each quote is an object with "source" (the Source number as an integer) and "quote" (one complete sentence copied verbatim from that Source block, with its numbers, qualifiers and named actors unchanged).
-- "answer" is the shortest exact answer the question allows, copied from the quoted sentences: a name, a number with its unit, a short phrase, or a comma-separated list of the items the quotes name. For a yes/no question write Yes or No. Never paraphrase, and never add a word the quotes do not contain.
-- Quote at most 4 sentences, each from the block that contains it and each only once; prefer the sentence that states the answer most directly.
-- If the evidence answers only part of the question, answer that part. If it does not answer the question at all, reply with an empty answer and an empty quotes list; never guess.
-${UNTRUSTED_EVIDENCE_RULES}`;
-
-const extractiveQaPromptV1 = createPromptTemplate(
-  `You answer questions about uploaded documents by selecting the evidence that answers them; the server writes the answer from your selection.
-${EXTRACTIVE_QA_RULES}
-Use long-term memory only for user preferences or stable notes, never as document evidence.
-
-{questionBlock}
-
-{preferenceBlock}
-
-Retrieved Evidence:
-{context}
-
-JSON:`
-);
-
-const extractiveQaPromptV2 = createChatPromptTemplate([
-  [
-    "system",
-    `You are a document-grounded assistant for uploaded PDFs. You do not write the answer: you select the evidence that answers the question, and the server writes the answer from your selection.
-Follow these rules strictly:
-${EXTRACTIVE_QA_RULES}
-- Answer the original user question, not the retrieval paraphrase.
-- Use long-term memory only for user preferences or stable notes, never as document evidence.`,
-  ],
-  [
-    "human",
-    `{questionBlock}
-
-{preferenceBlock}
-
-Retrieved evidence:
-{context}
-
-JSON:`,
-  ],
-]);
-
 const comparisonPromptV2 = createChatPromptTemplate([
   [
     "system",
@@ -355,66 +286,6 @@ Use short bullets inside sections when helpful.`,
   ],
 ]);
 
-// RAG_COMPARISON_STRUCTURED_OUTPUT: the model selects evidence instead of
-// writing prose. It returns, per aspect on which the documents differ, one
-// verbatim quote per document with the Source number it was copied from; the
-// server resolves each quote to the evidence sentences it lies in and renders
-// the "<document> states <sentence> [Source N]" lines the grounded template
-// uses, so the comparison gate checks the rendered answer unchanged. The JSON
-// shape is described in words because the template engine reads braces as
-// variables; the strict response format (buildComparisonStructuredResponseFormat)
-// enforces it where the endpoint honours response_format.
-const STRUCTURED_COMPARISON_RULES = `- Use only the provided evidence. Each evidence block is labelled Source N and belongs to one document.
-- Reply with one JSON object and nothing else. It has one key, "differences": a list of aspects. Each aspect is an object with "aspect" (a short name for the topic) and "entries" (a list). Each entry is an object with "source" (the Source number as an integer) and "quote" (text).
-- An aspect is one topic the user question asks about on which the documents differ: a value, a condition, a party, or a scope. For each aspect add one entry for every document whose evidence addresses it, including a document whose evidence says the same as another document's (the reader needs every document's position), each citing its own document's Source number.
-- "quote" must be copied verbatim from the cited Source block: a complete sentence or clause with its numbers, qualifiers, and named actors unchanged. Never paraphrase, never merge text from two sources, and never add a qualifier the evidence does not have.
-- Include only aspects where the quoted evidence of at least two documents differs. Do not invent a difference for near-duplicate evidence, and do not treat an omission as a difference.
-- Do not treat a related but different policy as evidence for the asked policy.
-- If the evidence shows no difference, reply with an empty differences list.
-${UNTRUSTED_EVIDENCE_RULES}`;
-
-const structuredComparisonPromptV1 = createPromptTemplate(
-  `You compare uploaded documents by selecting the evidence that shows how they differ; the server writes the answer from your selection.
-${STRUCTURED_COMPARISON_RULES}
-Use long-term memory only for user preferences or stable notes, never as document evidence.
-
-{questionBlock}
-
-{preferenceBlock}
-
-Comparison diagnostics:
-{diagnostics}
-
-Evidence by document:
-{context}
-
-JSON:`
-);
-
-const structuredComparisonPromptV2 = createChatPromptTemplate([
-  [
-    "system",
-    `You are a document-grounded comparison assistant for uploaded PDFs. You do not write the answer: you select the evidence that shows how the documents differ, and the server writes the answer from your selection.
-Follow these rules strictly:
-${STRUCTURED_COMPARISON_RULES}
-- Use long-term memory only for user preferences or stable notes, never as document evidence.`,
-  ],
-  [
-    "human",
-    `{questionBlock}
-
-{preferenceBlock}
-
-Comparison diagnostics:
-{diagnostics}
-
-Evidence by document:
-{context}
-
-JSON:`,
-  ],
-]);
-
 const buildQuestionBlock = ({ query, resolvedQuery }) =>
   resolvedQuery && resolvedQuery !== query
     ? [
@@ -467,19 +338,7 @@ const QA_VERDICT_PROMPTS = defineAnswerPrompts({
   versions: { v1: "v1.3", v2: "v2.3" },
 });
 
-// v1 / v2 (2026-10-22): the extractive QA templates (RAG_QA_EXTRACTIVE_OUTPUT).
-// The extractive reply carries its own abstention (an empty answer and no
-// quotes), so it replaces the verdict templates rather than stacking on them.
-const QA_EXTRACTIVE_PROMPTS = defineAnswerPrompts({
-  id: PROMPT_IDS.qaAnswerExtractive,
-  v1Template: extractiveQaPromptV1,
-  v2Template: extractiveQaPromptV2,
-});
-
-// The prose QA templates: what the QA call sends with RAG_QA_EXTRACTIVE_OUTPUT
-// off, and what the extractive mode falls back to when its attempt fails.
-const selectProseQaPrompts = () =>
-  isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS;
+const selectQaPrompts = () => (isQaAnswerVerdictEnabled() ? QA_VERDICT_PROMPTS : QA_PROMPTS);
 const COMPARISON_PROMPTS = defineAnswerPrompts({
   id: PROMPT_IDS.comparisonAnswer,
   v1Template: comparisonPromptV1,
@@ -493,43 +352,26 @@ const GUARDED_COMPARISON_PROMPTS = defineAnswerPrompts({
   versions: ANSWER_PROMPT_VERSIONS,
 });
 
-// v1 / v2 (2026-10-21): the first structured comparison templates
-// (RAG_COMPARISON_STRUCTURED_OUTPUT). One pair whatever the near-duplicate
-// guard says: the rule against inventing differences is always in.
-const STRUCTURED_COMPARISON_PROMPTS = defineAnswerPrompts({
-  id: PROMPT_IDS.comparisonAnswerStructured,
-  v1Template: structuredComparisonPromptV1,
-  v2Template: structuredComparisonPromptV2,
-});
-
 const selectPrompt = (variants) =>
   getPromptVersion() === "v1" ? variants.v1 : variants.v2;
 
 const selectComparisonPrompt = () =>
-  isComparisonStructuredOutputEnabled()
-    ? selectPrompt(STRUCTURED_COMPARISON_PROMPTS)
-    : selectPrompt(
-        isNearDuplicateGuardEnabled() ? GUARDED_COMPARISON_PROMPTS : COMPARISON_PROMPTS
-      );
+  selectPrompt(
+    isNearDuplicateGuardEnabled() ? GUARDED_COMPARISON_PROMPTS : COMPARISON_PROMPTS
+  );
 
 /** Every template this module can send, for the pinned fingerprint test. */
 export const listAnswerPromptDescriptors = () =>
   [
     QA_PROMPTS,
     QA_VERDICT_PROMPTS,
-    QA_EXTRACTIVE_PROMPTS,
     COMPARISON_PROMPTS,
     GUARDED_COMPARISON_PROMPTS,
-    STRUCTURED_COMPARISON_PROMPTS,
   ].flatMap((variants) => Object.values(variants).map(({ descriptor }) => descriptor));
 
-/**
- * The templates the current configuration would send. The extractive mode
- * sends its own template first and the prose one when that attempt fails.
- */
+/** The templates the current configuration would send. */
 export const getActiveAnswerPromptDescriptors = () => [
-  ...(isQaExtractiveOutputEnabled() ? [selectPrompt(QA_EXTRACTIVE_PROMPTS).descriptor] : []),
-  selectPrompt(selectProseQaPrompts()).descriptor,
+  selectPrompt(selectQaPrompts()).descriptor,
   selectComparisonPrompt().descriptor,
 ];
 
@@ -742,9 +584,8 @@ const describeResultDocument = (result) => ({
 // PDF text keeps the page layout, so a sentence wrapped across lines arrives
 // in pieces. The soft wraps are rejoined first (joinEvidenceSoftWraps keeps
 // headings, list items and "Label:" lines on their own lines), and only then
-// are bare headings dropped, so every reader quotes whole sentences: the
-// fallback templates (buildDocEvidenceEntries) and the structured renderers
-// (buildStructuredEvidenceSources) share this one definition.
+// are bare headings dropped, so the fallback templates
+// (buildDocEvidenceEntries) quote whole sentences.
 const listEvidenceSentences = (text) =>
   splitEvidenceSentences(joinEvidenceSoftWraps(text)).filter(
     (sentence) => !isBareHeadingSentence(sentence)
@@ -953,8 +794,7 @@ const buildGroundedDifferenceAnswer = ({ analysis, bundle }) => {
 };
 
 // The section skeleton of a grounded comparison answer, the one the gate's
-// claim parser finds the Differences section in; the structured renderer
-// writes the same one.
+// claim parser finds the Differences section in.
 const renderGroundedDifferenceSections = ({ differenceLines, perDocumentLines }) =>
   [
     "Summary:",
@@ -1337,26 +1177,7 @@ export const writeQaAnswer = async ({
       retrievedContexts: bundle.retrievedContexts ?? [],
     }),
   });
-
-  const call = { allowedText, blocks, bundle, drafts, evidenceRequirementCount, query, resolvedQuery };
-
-  return isQaExtractiveOutputEnabled() ? writeExtractiveQaAnswer(call) : writeProseQaAnswer(call);
-};
-
-// The QA call as it always was: the prose template (verdict or plain), its
-// reply guarded, the verdict read, the drafts released. With
-// RAG_QA_EXTRACTIVE_OUTPUT on it is also the fallback of a failed extractive
-// attempt, over the same blocks.
-const writeProseQaAnswer = async ({
-  allowedText,
-  blocks,
-  bundle,
-  drafts,
-  evidenceRequirementCount,
-  query,
-  resolvedQuery,
-}) => {
-  const qaPrompt = selectPrompt(selectProseQaPrompts());
+  const qaPrompt = selectPrompt(selectQaPrompts());
   const prompt = qaPrompt.render(blocks);
   const completion = await completeAnswerText(prompt, {
     ...drafts?.completionOptions,
@@ -1450,30 +1271,7 @@ const writeProseQaAnswer = async ({
   );
 };
 
-// --- Structured comparison output (RAG_COMPARISON_STRUCTURED_OUTPUT) ---------
-
-const MAX_STRUCTURED_ASPECTS = 6;
-const MAX_STRUCTURED_ASPECT_CHARS = 80;
-const MAX_STRUCTURED_QUOTE_CHARS = 400;
-
-/**
- * The strict response format of one structured comparison call: `source` may
- * only name a rank the model was shown, and every string and list is bounded.
- */
-// The ranks a structured reply may cite: the distinct integers among `ranks`.
-const toSourceRanks = (ranks = []) => [
-  ...new Set(ranks.map((rank) => Number(rank)).filter(Number.isInteger)),
-];
-
-// One quoted evidence entry of a structured reply, the same in both modes: a
-// bounded verbatim quote and the rank it was copied from.
-const evidenceQuoteSchema = (sourceRanks) =>
-  strictObject({
-    quote: boundedString(MAX_STRUCTURED_QUOTE_CHARS),
-    source: { enum: sourceRanks, type: "integer" },
-  });
-
-// The three document answer calls (QA prose, QA extractive, comparison):
+// The two document answer calls (single-document QA and comparison):
 // RAG_ANSWER_TEMPERATURE and RAG_ANSWER_MAX_TOKENS go with each, each only when
 // set, so by default the request is what it always was and the endpoint's
 // defaults apply. `truncated` says the reply stopped at an output limit (that
@@ -1497,294 +1295,10 @@ const completeAnswerText = async (prompt, options) => {
 // An answer whose answer call was cut off at an output limit carries
 // answerTruncated: true, on the answer and in its trace. The text is what the
 // writer made of the cut reply: the reply as written, or what replaced it (the
-// comparison template or an abstention, the extractive mode's prose call).
-// Nothing is added otherwise, so an answer keeps its shape.
+// comparison template or an abstention). Nothing is added otherwise, so an
+// answer keeps its shape.
 const markTruncated = (answer, truncated) =>
   truncated ? { ...answer, answerTruncated: true, trace: { ...answer.trace, answerTruncated: true } } : answer;
-
-// The completion options of a structured call: its response format, or
-// nothing when no block was shown (an empty `source` enum is no schema).
-const structuredResponseFormatOptions = (bundle, buildResponseFormat) => {
-  const ranks = (bundle.rankedResults ?? []).map((result) => result.rank);
-
-  return ranks.length > 0 ? { responseFormat: buildResponseFormat(ranks) } : {};
-};
-
-export const buildComparisonStructuredResponseFormat = (ranks = []) => {
-  const sourceRanks = toSourceRanks(ranks);
-
-  return buildJsonSchemaResponseFormat({
-    name: "comparison_differences",
-    schema: strictObject({
-      differences: boundedArray(
-        strictObject({
-          aspect: boundedString(MAX_STRUCTURED_ASPECT_CHARS),
-          entries: boundedArray(evidenceQuoteSchema(sourceRanks), Math.max(1, sourceRanks.length)),
-        }),
-        MAX_STRUCTURED_ASPECTS
-      ),
-    }),
-  });
-};
-
-// Quotes are matched against the evidence after folding whitespace and case,
-// dropping double quotation marks (a model may wrap a phrase in them) and
-// folding the typographic variants of apostrophes (normalizeSemanticText, the
-// claim check's own folding, plus the single low and reversed quotation marks)
-// and dashes; numbers stay as they are, because a quote with a changed value
-// must not resolve.
-const normalizeQuoteText = (value = "") =>
-  foldDashVariants(
-    normalizeSemanticText(normalizeWhitespace(String(value ?? "")))
-      .replace(/[‚‛]/gu, "'")
-      .replace(/[“”„‟"]/gu, "")
-  )
-    .replace(/\s+/gu, " ")
-    .toLowerCase();
-
-const trimQuoteEdges = (value = "") =>
-  value.replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "");
-
-// The sentences of each shown block a quote may resolve to. The text is the
-// screened one the model was shown (prompt-injection-screen.js), so a sentence
-// the screen removed cannot come back as a quote.
-const buildStructuredEvidenceSources = (bundle) =>
-  new Map(
-    (bundle.rankedResults ?? []).map((result) => [
-      result.rank,
-      {
-        ...describeResultDocument(result),
-        rank: result.rank,
-        sentences: listEvidenceSentences(
-          screenUntrustedText(result.document.pageContent).text
-        ).map((sentence) => ({
-            normalized: normalizeQuoteText(sentence),
-            text: sentence,
-          })),
-      },
-    ])
-  );
-
-// The evidence sentence a quote lies in: the sentence that contains it, or,
-// when it runs across a sentence boundary, the sentence holding most of it
-// (one entry is one claim, and the gate pairs difference claims one to one).
-// A quote the cited block does not contain resolves to nothing.
-const resolveQuoteSentence = (quote, source) => {
-  const needle = trimQuoteEdges(normalizeQuoteText(quote));
-
-  if (!needle || !source) {
-    return null;
-  }
-
-  const containing = source.sentences.find((sentence) =>
-    sentence.normalized.includes(needle)
-  );
-
-  if (containing) {
-    return containing;
-  }
-
-  const joined = source.sentences.map((sentence) => sentence.normalized).join(" ");
-  const start = joined.indexOf(needle);
-
-  if (start === -1) {
-    return null;
-  }
-
-  const end = start + needle.length;
-  let best = null;
-  let bestOverlap = 0;
-  let offset = 0;
-
-  for (const sentence of source.sentences) {
-    const sentenceEnd = offset + sentence.normalized.length;
-    const overlap = Math.min(end, sentenceEnd) - Math.max(start, offset);
-
-    if (overlap > bestOverlap) {
-      best = sentence;
-      bestOverlap = overlap;
-    }
-
-    offset = sentenceEnd + 1;
-  }
-
-  return best;
-};
-
-const toStructuredDifferences = (parsed) =>
-  Array.isArray(parsed?.differences)
-    ? parsed.differences
-        .filter((aspect) => aspect && typeof aspect === "object")
-        .slice(0, MAX_STRUCTURED_ASPECTS)
-        .map((aspect) => ({
-          entries: (Array.isArray(aspect.entries) ? aspect.entries : [])
-            .filter((entry) => entry && typeof entry === "object")
-            .map((entry) => ({
-              quote: String(entry.quote ?? ""),
-              source: Number(entry.source),
-            })),
-        }))
-    : null;
-
-// Each document's near-duplicate partners (analysis.nearDuplicatePairs), by id.
-const buildNearDuplicatePartners = (analysis) =>
-  new Map(
-    [
-      ...Map.groupBy(
-        (analysis?.nearDuplicatePairs ?? [])
-          .filter((pair) => pair?.leftDocId && pair?.rightDocId)
-          .flatMap((pair) => [
-            [pair.leftDocId, pair.rightDocId],
-            [pair.rightDocId, pair.leftDocId],
-          ]),
-        ([docId]) => docId
-      ),
-    ].map(([docId, pairs]) => [docId, pairs.map(([, partnerDocId]) => partnerDocId)])
-  );
-
-/**
- * The answer text rendered from a structured comparison reply, in the grounded
- * template's shape, plus counts of what the reply held and what was dropped.
- * `text` is null when nothing parsed or no aspect kept entries of two documents.
- * The counts are integers only: they go to the RAG trace.
- */
-export const renderStructuredComparisonAnswer = ({ analysis = null, bundle, parsed }) => {
-  const differences = toStructuredDifferences(parsed);
-  const counts = {
-    parsed: differences ? 1 : 0,
-    aspectCount: 0,
-    entryCount: 0,
-    resolvedEntryCount: 0,
-    droppedEntryCount: 0,
-    droppedAspectCount: 0,
-    filledEntryCount: 0,
-    renderedLineCount: 0,
-  };
-
-  if (!differences) {
-    return { counts, reason: "structured_output_unparsable", text: null };
-  }
-
-  const sources = buildStructuredEvidenceSources(bundle);
-  const sourcesByDocId = Map.groupBy(sources.values(), (source) => source.docId);
-  const nearDuplicatePartners = buildNearDuplicatePartners(analysis);
-  const differenceLines = [];
-  const firstLineByDocId = new Map();
-  counts.aspectCount = differences.length;
-
-  for (const aspect of differences) {
-    // One claim per document per aspect: the first entry of a document that
-    // resolves; a later one for the same document counts as dropped.
-    const resolvedByDocId = new Map();
-
-    for (const entry of aspect.entries) {
-      counts.entryCount += 1;
-      const source = sources.get(entry.source);
-      const sentence = resolveQuoteSentence(entry.quote, source);
-
-      if (!sentence || resolvedByDocId.has(source.docId)) {
-        counts.droppedEntryCount += 1;
-        continue;
-      }
-
-      counts.resolvedEntryCount += 1;
-      resolvedByDocId.set(source.docId, {
-        line: buildDocumentBoundFactLine(source, { rank: source.rank, text: sentence.text }),
-        normalized: sentence.normalized,
-      });
-    }
-
-    // A document the model left out of an aspect is filled in from its
-    // near-duplicate partner (analysis.nearDuplicatePairs) when its own
-    // evidence holds the very sentence the partner quoted: qwen2.5:7b quotes
-    // one of two near-identical files, and the gate binds every document.
-    // The filled entry joins the partner's group, so it is paired with the
-    // documents that differ, never with the partner.
-    for (const [docId, docSources] of sourcesByDocId) {
-      if (resolvedByDocId.has(docId)) {
-        continue;
-      }
-
-      for (const partnerDocId of nearDuplicatePartners.get(docId) ?? []) {
-        const partner = resolvedByDocId.get(partnerDocId);
-        const match = partner
-          ? docSources
-              .flatMap((source) =>
-                source.sentences.map((sentence) => ({ sentence, source }))
-              )
-              .find(({ sentence }) => sentence.normalized === partner.normalized)
-          : null;
-
-        if (match) {
-          counts.filledEntryCount += 1;
-          resolvedByDocId.set(docId, {
-            line: buildDocumentBoundFactLine(match.source, {
-              rank: match.source.rank,
-              text: match.sentence.text,
-            }),
-            normalized: match.sentence.normalized,
-          });
-          break;
-        }
-      }
-    }
-
-    // Documents quoting the same sentence agree on this aspect (near-duplicate
-    // files do); a difference needs at least two groups that say different
-    // things. Each entry of one group is paired with each entry of every other
-    // group, written as the pair's two lines, which is the shape the claim
-    // check pairs up; a line therefore repeats when it contrasts with several.
-    const groups = [...Map.groupBy(resolvedByDocId.values(), (entry) => entry.normalized).values()];
-
-    if (groups.length < 2) {
-      counts.droppedAspectCount += 1;
-      continue;
-    }
-
-    const aspectLines = [];
-
-    for (let left = 0; left < groups.length; left += 1) {
-      for (let right = left + 1; right < groups.length; right += 1) {
-        for (const leftEntry of groups[left]) {
-          for (const rightEntry of groups[right]) {
-            aspectLines.push(leftEntry.line, rightEntry.line);
-          }
-        }
-      }
-    }
-
-    // The gate pairs at most MAX_MULTIPARTITE_DIFFERENCE_ENTRIES claims of a
-    // three-or-more-document answer; the renderer keeps every answer under it.
-    if (differenceLines.length + aspectLines.length > MAX_MULTIPARTITE_DIFFERENCE_ENTRIES) {
-      counts.droppedAspectCount += 1;
-      continue;
-    }
-
-    differenceLines.push(...aspectLines);
-
-    for (const [docId, entry] of resolvedByDocId) {
-      if (!firstLineByDocId.has(docId)) {
-        firstLineByDocId.set(docId, entry.line);
-      }
-    }
-  }
-
-  counts.renderedLineCount = differenceLines.length;
-
-  if (differenceLines.length === 0) {
-    return { counts, reason: "structured_no_differences", text: null };
-  }
-
-  const perDocumentLines = [...sources.values()]
-    .map((source) => firstLineByDocId.get(source.docId))
-    .filter((line, index, lines) => line && lines.indexOf(line) === index);
-
-  return {
-    counts,
-    reason: null,
-    text: renderGroundedDifferenceSections({ differenceLines, perDocumentLines }),
-  };
-};
 
 export const writeComparisonAnswer = async ({
   query,
@@ -1823,33 +1337,18 @@ export const writeComparisonAnswer = async ({
     diagnostics,
     context: bundle.context,
   });
-  const structuredOutputEnabled = isComparisonStructuredOutputEnabled();
   const completion = await completeAnswerText(selectedPrompt, {
     promptTemplate: comparisonPrompt.descriptor,
-    ...(structuredOutputEnabled
-      ? structuredResponseFormatOptions(bundle, buildComparisonStructuredResponseFormat)
-      : {}),
   });
-  // With structured output on, the model's reply is a selection of evidence
-  // and the text the gate sees is rendered from it; the counts of what the
-  // reply held (integers only) go to the trace.
-  const rendered = structuredOutputEnabled
-    ? renderStructuredComparisonAnswer({ analysis, bundle, parsed: parseFirstJsonValue(completion.text) })
-    : null;
-  // This answer's trace-only diagnostics (codes and counts); the caller moves
-  // them to the RAG trace and keeps them out of the response.
-  const trace = rendered ? { comparisonStructuredOutput: rendered.counts } : {};
   const guarded = guardAnswerLinks(
-    normalizeGroupedSourceLabels(rendered ? rendered.text ?? "" : completion.text),
+    normalizeGroupedSourceLabels(completion.text),
     { allowedText: buildAllowedLinkText({ bundle, query, resolvedQuery }) }
   );
   const text = guarded.text;
-  const modelGate = rendered?.reason
-    ? { safe: false, reason: { code: rendered.reason } }
-    : assessStructuredDifferenceAnswer({ analysis, bundle, text });
+  const modelGate = assessStructuredDifferenceAnswer({ analysis, bundle, text });
 
   if (modelGate.safe) {
-    return markTruncated({ text, citations: bundle.citations, ...withTrace(trace) }, completion.truncated);
+    return markTruncated({ text, citations: bundle.citations }, completion.truncated);
   }
 
   const groundedDifferenceAnswer = buildGroundedDifferenceAnswer({
@@ -1863,10 +1362,14 @@ export const writeComparisonAnswer = async ({
       bundle,
       text: groundedDifferenceAnswer,
     }).safe;
-  // Why the model's answer was not used (codes and counts only).
-  trace.modelRejectReason = {
-    ...modelGate.reason,
-    fallback: groundedSafe ? "grounded_template" : "abstained",
+  // This answer's trace-only diagnostics: why the model's answer was not used
+  // (codes and counts only). The caller moves them to the RAG trace and keeps
+  // them out of the response.
+  const trace = {
+    modelRejectReason: {
+      ...modelGate.reason,
+      fallback: groundedSafe ? "grounded_template" : "abstained",
+    },
   };
 
   if (!groundedSafe) {
@@ -1880,312 +1383,4 @@ export const writeComparisonAnswer = async ({
   }
 
   return markTruncated({ text: groundedDifferenceAnswer, citations: bundle.citations, trace }, completion.truncated);
-};
-
-// An answer's `trace` field only when it holds something, so an answer that
-// records nothing keeps its shape.
-const withTrace = (trace) => (Object.keys(trace).length > 0 ? { trace } : {});
-
-// --- Extractive QA output (RAG_QA_EXTRACTIVE_OUTPUT) --------------------------
-
-const MAX_EXTRACTIVE_ANSWER_CHARS = 200;
-const MAX_EXTRACTIVE_QUOTES = 4;
-
-/**
- * The strict response format of one extractive QA call: a bounded answer and
- * at most four quotes, each naming a rank the model was shown.
- */
-export const buildQaExtractiveResponseFormat = (ranks = []) =>
-  buildJsonSchemaResponseFormat({
-    name: "extractive_answer",
-    schema: strictObject({
-      answer: boundedString(MAX_EXTRACTIVE_ANSWER_CHARS),
-      quotes: boundedArray(evidenceQuoteSchema(toSourceRanks(ranks)), MAX_EXTRACTIVE_QUOTES),
-    }),
-  });
-
-// The line shape the finalizer writes for a supported claim (its own
-// punctuation rule), so the text is the same whether or not it rebuilds it.
-const renderEvidenceLine = (text, ranks) =>
-  `${ensureTerminalPunctuation(text)} ${formatSourceLabels(ranks)}`;
-
-const BOOLEAN_ANSWER_PATTERN = /^(yes|no)\b/iu;
-const ANSWER_ITEM_SEPARATOR = /\s*(?:,|;|\band\b)\s*/iu;
-
-/**
- * Where the model's short answer sits in the resolved evidence lines: a
- * verbatim span of one line, a list whose every item is in some line, or a
- * yes/no answer (which is never a claim and never rendered as a line). An
- * answer that is none of these is not grounded and is dropped.
- */
-const groundDirectAnswer = (answer, lines) => {
-  const trimmed = normalizeWhitespace(String(answer ?? ""));
-
-  if (!trimmed) {
-    return { directAnswer: null, kind: "empty", ranks: [] };
-  }
-
-  const booleanMatch = trimmed.match(BOOLEAN_ANSWER_PATTERN);
-
-  if (booleanMatch) {
-    const word = booleanMatch[1].toLowerCase();
-
-    return { directAnswer: word === "yes" ? "Yes" : "No", kind: "boolean", ranks: [] };
-  }
-
-  const needle = trimQuoteEdges(normalizeQuoteText(trimmed));
-  const holder = lines.find((line) => line.normalized.includes(needle));
-
-  if (holder) {
-    return { directAnswer: trimmed, holders: [holder], kind: "span", ranks: [holder.rank] };
-  }
-
-  const items = trimmed
-    .split(ANSWER_ITEM_SEPARATOR)
-    .map((item) => trimQuoteEdges(normalizeQuoteText(item)))
-    .filter(Boolean);
-  const ranks = [];
-  const holders = [];
-
-  for (const item of items) {
-    const line = lines.find((candidate) => candidate.normalized.includes(item));
-
-    if (!line) {
-      return { directAnswer: null, kind: "ungrounded", ranks: [] };
-    }
-
-    if (!ranks.includes(line.rank)) {
-      ranks.push(line.rank);
-    }
-
-    if (!holders.includes(line)) {
-      holders.push(line);
-    }
-  }
-
-  return items.length > 1
-    ? { directAnswer: trimmed, holders, kind: "list", ranks }
-    : { directAnswer: null, kind: "ungrounded", ranks: [] };
-};
-
-/**
- * Round 3 (2026-10-28): whether the evidence the direct answer was taken
- * from answers the question, by the QA gate's own three lexical checks: it
- * names every anchor of the question (findUncoveredQueryAnchors), shares at
- * least one of its meaningful words (computeQueryTermCoverage, inflected
- * forms counting under RAG_QA_GATE_INFLECTION), and swaps no question word
- * for a rival on the same head word (findQueryTermSubstitution). A fragment
- * copied from a related sentence ("converge faster" for a question the paper
- * never answers) is a grounded span, so grounding alone let it through.
- */
-const quoteAnswersQuestion = ({ queryText = "", text = "" }) => {
-  if (!queryText) {
-    return true;
-  }
-
-  if (findUncoveredQueryAnchors({ queryText, text }).length > 0) {
-    return false;
-  }
-
-  const coverage = computeQueryTermCoverage({
-    queryText,
-    resultText: text,
-    inflection: isQaGateInflectionEnabled(),
-  });
-
-  if (coverage !== null && coverage <= 0) {
-    return false;
-  }
-
-  return findQueryTermSubstitution(queryText, text) === null;
-};
-
-const toExtractiveReply = (parsed) =>
-  parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.quotes)
-    ? {
-        answer: typeof parsed.answer === "string" ? parsed.answer : "",
-        quotes: parsed.quotes
-          .filter((quote) => quote && typeof quote === "object")
-          .slice(0, MAX_EXTRACTIVE_QUOTES)
-          .map((quote) => ({ quote: String(quote.quote ?? ""), source: Number(quote.source) })),
-      }
-    : null;
-
-/**
- * The answer rendered from an extractive reply: the direct answer as its own
- * line when it is a span or list of the evidence (yes/no is kept only in
- * `directAnswer`), then one line per resolved quote, every line "<sentence>
- * [Source N]". The lines are claim-checked before they are returned and any
- * line the lexical check refuses is dropped, so the agent's self-check and
- * finalizer meet an answer that passes. `abstained` when nothing resolved,
- * the direct answer is empty or in none of the resolved sentences, the
- * sentence it sits in does not answer the question (`queryText` given), or
- * nothing passed. The counts are integers only: they go to the RAG trace.
- */
-export const renderExtractiveQaAnswer = ({ bundle, parsed, queryText = "" }) => {
-  const reply = toExtractiveReply(parsed);
-  const counts = {
-    parsed: reply ? 1 : 0,
-    quoteCount: 0,
-    resolvedQuoteCount: 0,
-    droppedQuoteCount: 0,
-    directAnswerLine: 0,
-    unsupportedLineCount: 0,
-    renderedLineCount: 0,
-  };
-
-  if (!reply) {
-    return { abstained: true, counts, directAnswer: null, reason: "unparsable", text: null };
-  }
-
-  const sources = buildStructuredEvidenceSources(bundle);
-  const lines = [];
-
-  for (const quote of reply.quotes) {
-    counts.quoteCount += 1;
-    const sentence = resolveQuoteSentence(quote.quote, sources.get(quote.source));
-
-    if (!sentence || lines.some((line) => line.normalized === sentence.normalized)) {
-      counts.droppedQuoteCount += 1;
-      continue;
-    }
-
-    counts.resolvedQuoteCount += 1;
-    lines.push({ normalized: sentence.normalized, rank: quote.source, text: sentence.text });
-  }
-
-  if (lines.length === 0) {
-    return {
-      abstained: true,
-      counts,
-      directAnswer: null,
-      reason: counts.quoteCount === 0 ? "no_quotes" : "quotes_unresolved",
-      text: null,
-    };
-  }
-
-  const direct = groundDirectAnswer(reply.answer, lines);
-
-  // Round 2 (2026-10-22): an answer the quotes do not hold is no answer.
-  // Quoting a sentence is easy; in the first round the unanswerable questions
-  // were mostly answered with quotes and an answer found in none of them.
-  if (direct.directAnswer === null) {
-    return {
-      abstained: true,
-      counts,
-      directAnswer: null,
-      reason: direct.kind === "empty" ? "answer_empty" : "answer_ungrounded",
-      text: null,
-    };
-  }
-
-  // Round 3 (2026-10-28): the sentence the answer sits in (every sentence a
-  // list item sits in; every resolved sentence for yes/no) must answer the
-  // question by the gate's own checks, else the span was only copied from a
-  // related sentence.
-  const holderText = (direct.holders?.length > 0 ? direct.holders : lines)
-    .map((line) => line.text)
-    .join(" ");
-
-  if (!quoteAnswersQuestion({ queryText, text: holderText })) {
-    return { abstained: true, counts, directAnswer: null, reason: "answer_unanchored", text: null };
-  }
-
-  const directNormalized = trimQuoteEdges(normalizeQuoteText(direct.directAnswer));
-  // An answer that is a whole quoted sentence is not written twice, and
-  // yes/no (the one grounded kind without ranks) is never a line.
-  const directLine =
-    direct.ranks.length > 0 &&
-    !lines.some((line) => trimQuoteEdges(line.normalized) === directNormalized)
-      ? renderEvidenceLine(direct.directAnswer, direct.ranks)
-      : null;
-  const candidateLines = [
-    ...(directLine ? [directLine] : []),
-    ...lines.map((line) => renderEvidenceLine(line.text, [line.rank])),
-  ];
-  const citations = attachRetrievedEvidence({
-    citations: bundle.citations ?? [],
-    retrievedContexts: bundle.retrievedContexts ?? [],
-  });
-  // The same check the self-check and finalizer run, one line at a time, so
-  // the unit dropped is the unit judged (a refused direct-answer fragment
-  // never takes the quote line that contains it down with it); a line it
-  // refuses would cost a follow-up retrieval on the agent path and then be
-  // cut anyway.
-  const rendered = candidateLines.filter((line) => {
-    const claimSupport = evaluateClaimSupport({ answerText: line, citations });
-
-    return claimSupport.checked !== true || (claimSupport.unsupportedClaimCount ?? 0) === 0;
-  });
-
-  counts.unsupportedLineCount = candidateLines.length - rendered.length;
-  counts.directAnswerLine = directLine && rendered.includes(directLine) ? 1 : 0;
-  counts.renderedLineCount = rendered.length;
-
-  if (rendered.length === 0) {
-    return { abstained: true, counts, directAnswer: null, reason: "unsupported", text: null };
-  }
-
-  return {
-    abstained: false,
-    counts,
-    directAnswer: direct.directAnswer,
-    reason: null,
-    text: rendered.join("\n"),
-  };
-};
-
-// writeQaAnswer under RAG_QA_EXTRACTIVE_OUTPUT: one structured call, the
-// rendered answer, and the drafts released once from the rendered text (a JSON
-// reply is not prose, so nothing streams while it is being written). A failed
-// attempt is handed to the prose call (round 2, 2026-10-22).
-const writeExtractiveQaAnswer = async (call) => {
-  const { allowedText, blocks, bundle, drafts } = call;
-  const qaPrompt = selectPrompt(QA_EXTRACTIVE_PROMPTS);
-  const completion = await completeAnswerText(qaPrompt.render(blocks), {
-    promptTemplate: qaPrompt.descriptor,
-    ...structuredResponseFormatOptions(bundle, buildQaExtractiveResponseFormat),
-  });
-  const rendered = renderExtractiveQaAnswer({
-    bundle,
-    parsed: parseFirstJsonValue(completion.text),
-    queryText: call.query || call.resolvedQuery || "",
-  });
-  // Counts plus one code (unparsable, no_quotes, quotes_unresolved,
-  // unsupported, answer_empty, answer_ungrounded, answer_unanchored; null
-  // when answered) and
-  // `fallback` ("prose" when the prose call answered instead of the attempt;
-  // null otherwise), for the trace.
-  const qaStructuredOutput = { ...rendered.counts, code: rendered.reason, fallback: null };
-
-  if (rendered.abstained) {
-    // The prose call over the same blocks, handled exactly as with the flag
-    // off (verdict, override, drafts, and the deeper retrieval retry after a
-    // verdict abstention); its answer carries no directAnswer. Before round 2
-    // the attempt's failure was the model's abstention.
-    const fallback = await writeProseQaAnswer(call);
-
-    return markTruncated(
-      {
-        ...fallback,
-        trace: { ...fallback.trace, qaStructuredOutput: { ...qaStructuredOutput, fallback: "prose" } },
-      },
-      completion.truncated
-    );
-  }
-
-  const guarded = guardAnswerLinks(rendered.text, { allowedText });
-
-  drafts?.finish(guarded.text);
-
-  return markTruncated(
-    {
-      text: guarded.text,
-      citations: bundle.citations,
-      directAnswer: rendered.directAnswer,
-      injectionScreen: buildInjectionScreenResult(bundle, guarded.removed),
-      trace: { qaStructuredOutput },
-    },
-    completion.truncated
-  );
 };
