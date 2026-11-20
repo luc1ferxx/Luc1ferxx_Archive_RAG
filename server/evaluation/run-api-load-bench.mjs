@@ -2220,8 +2220,6 @@ export const buildAppEnvironment = ({
     API_AUTH_ENABLED: options.auth ? "true" : "false",
     RATE_LIMIT_ENABLED: options.rateLimit ? "true" : "false",
     AGENT_PLANNER_ROLLOUT: options.planner === "llm" ? "llm" : "deterministic",
-    AGENT_INTENT_PLANNER: options.planner,
-    AGENT_EXECUTION_PLANNER: options.planner,
     // No AGENT_RUNTIME and no AGENT_OUTER_PLAN_RUNTIME: their inherited
     // values were dropped above, and unset is the only scheduler (LangGraph)
     // of the graphs since phase 6 and of the outer plan since phase 7.

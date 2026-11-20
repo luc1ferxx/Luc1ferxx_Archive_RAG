@@ -1,11 +1,6 @@
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
-import {
-  getPlannerRolloutMode,
-  getShadowPlannerAdapter,
-  runShadowPlanner,
-  sameStringList,
-} from "./agent-planner-shadow.js";
+import { getPlannerRolloutMode } from "./agent-planner-rollout.js";
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 export const AGENT_EXECUTION_STEP_IDS = {
@@ -431,7 +426,6 @@ export const createAgentExecutionPlanResult = async ({
   plannerContext = {},
   registry,
   selectedSkills = [],
-  shadowPlannerAdapter = getShadowPlannerAdapter(plannerAdapter),
 } = {}) => {
   const fallbackPlannerId = normalizePlannerId(fallbackPlannerAdapter);
   const requestedPlannerId = normalizePlannerId(plannerAdapter);
@@ -477,53 +471,16 @@ export const createAgentExecutionPlanResult = async ({
     };
   };
 
-  const attachShadowPlanner = async (result) => {
-    const shadow = await runShadowPlanner({
-      compare: ({ primary, shadow }) =>
-        !sameStringList(
-          primary?.executionPlan?.map((step) => step.id),
-          shadow?.map((step) => step.id)
-        ),
-      describe: (shadowExecutionPlan) => ({
-        stepIds: shadowExecutionPlan.map((step) => step.id),
-      }),
-      execute: async (adapter) => {
-        const result = await createValidatedPlanWithMetadata({
-          accessScope,
-          authorizedCustomSkills,
-          plannerAdapter: adapter,
-          plannerContext,
-          registry,
-          selectedSkills,
-        });
-
-        return result.executionPlan;
-      },
-      primary: result,
-      shadowPlannerAdapter,
-    });
-
-    if (!shadow) {
-      return {
-        ...result,
-        planner: withRolloutMetadata(result.planner),
-      };
-    }
-
-    return {
-      ...result,
-      planner: {
-        ...withRolloutMetadata(result.planner),
-        shadow,
-      },
-    };
-  };
+  const attachRolloutMode = (result) => ({
+    ...result,
+    planner: withRolloutMetadata(result.planner),
+  });
 
   if (!plannerAdapter || plannerAdapter === fallbackPlannerAdapter) {
     const fallbackPlan = await createFallbackPlan();
     const { executionPlan } = fallbackPlan;
 
-    return attachShadowPlanner({
+    return attachRolloutMode({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
@@ -546,7 +503,7 @@ export const createAgentExecutionPlanResult = async ({
     });
     const { executionPlan } = selectedPlan;
 
-    return attachShadowPlanner({
+    return attachRolloutMode({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,
@@ -560,7 +517,7 @@ export const createAgentExecutionPlanResult = async ({
     const fallbackPlan = await createFallbackPlan();
     const { executionPlan } = fallbackPlan;
 
-    return attachShadowPlanner({
+    return attachRolloutMode({
       executionPlan,
       planner: buildPlannerSelection({
         executionPlan,

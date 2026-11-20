@@ -153,8 +153,6 @@ if (!adminDatabaseUrl) {
     await adminQuery(withDatabase(adminDatabaseUrl, databaseName), "CREATE EXTENSION IF NOT EXISTS vector");
 
     Object.assign(process.env, {
-      AGENT_EXECUTION_PLANNER: "deterministic",
-      AGENT_INTENT_PLANNER: "deterministic",
       AGENT_PLANNER_ROLLOUT: "deterministic",
       AGENT_RUN_STORE_PROVIDER: "postgres",
       API_AUTH_ENABLED: "true",

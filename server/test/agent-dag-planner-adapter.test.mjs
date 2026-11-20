@@ -15,7 +15,7 @@ import {
   normalizeExecutionGraphPayload,
 } from "../rag/agent-dag-planner-adapter.js";
 import { createSkillRegistry } from "../rag/skills/registry.js";
-import { withPlannerRollout, withShadowPlanner } from "../rag/agent-planner-shadow.js";
+import { withPlannerRollout } from "../rag/agent-planner-rollout.js";
 
 // The V2 planner is the least trusted component in the runtime: it is the only
 // place a language model writes something the scheduler will act on. These
@@ -709,91 +709,20 @@ test("createAgentExecutionGraphResult passes only whitelisted capabilities to th
 });
 
 // ---------------------------------------------------------------------------
-// Shadow rollout
+// Planner rollout
 // ---------------------------------------------------------------------------
-
-test("createAgentExecutionGraphResult records a shadow planner comparison", async () => {
-  const plannerAdapter = withShadowPlanner(
-    stubAdapter("deterministic_dag_primary", () => ({
-      nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
-    })),
-    stubAdapter("llm_dag", () => ({
-      nodes: [
-        ragNode({ nodeId: "compare", skillId: "compare_documents" }),
-        ragNode({ nodeId: "risk", skillId: "risk_review" }),
-      ],
-    }))
-  );
-
-  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
-
-  assert.equal(result.planner.fallback, false);
-  assert.deepEqual(result.planner.nodeIds, ["compare"]);
-  assert.equal(result.planner.shadow.requestedPlannerId, "llm_dag");
-  assert.deepEqual(result.planner.shadow.nodeIds, ["compare", "risk"]);
-  assert.equal(result.planner.shadow.diverged, true);
-});
-
-test("createAgentExecutionGraphResult marks an agreeing shadow planner as not diverged", async () => {
-  const buildNodes = () => ({
-    nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
-  });
-  const plannerAdapter = withShadowPlanner(
-    stubAdapter("deterministic_dag_primary", buildNodes),
-    stubAdapter("llm_dag", buildNodes)
-  );
-
-  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
-
-  assert.equal(result.planner.shadow.diverged, false);
-});
-
-test("createAgentExecutionGraphResult keeps the primary graph when the shadow planner fails", async () => {
-  const plannerAdapter = withShadowPlanner(
-    stubAdapter("deterministic_dag_primary", () => ({
-      nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
-    })),
-    stubAdapter("llm_dag", () => {
-      throw new Error("shadow exploded");
-    })
-  );
-
-  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
-
-  assert.equal(result.planner.fallback, false);
-  assert.deepEqual(result.planner.nodeIds, ["compare"]);
-  assert.equal(result.planner.shadow.status, "error");
-  assert.match(result.planner.shadow.error, /shadow exploded/);
-});
-
-test("createAgentExecutionGraphResult keeps the primary graph when the shadow planner is illegal", async () => {
-  const plannerAdapter = withShadowPlanner(
-    stubAdapter("deterministic_dag_primary", () => ({
-      nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
-    })),
-    stubAdapter("llm_dag", () => ({
-      nodes: [ragNode({ nodeId: "exfiltrate", skillId: "shell_exec" })],
-    }))
-  );
-
-  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
-
-  assert.equal(result.planner.fallback, false);
-  assert.deepEqual(result.planner.nodeIds, ["compare"]);
-  assert.equal(result.planner.shadow.status, "error");
-});
 
 test("createAgentExecutionGraphResult carries the rollout mode through", async () => {
   const plannerAdapter = withPlannerRollout(
     stubAdapter("llm_dag", () => ({
       nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
     })),
-    "guarded"
+    "llm"
   );
 
   const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
 
-  assert.equal(result.planner.rolloutMode, "guarded");
+  assert.equal(result.planner.rolloutMode, "llm");
 });
 
 // A rollout wrapper is a copy of the adapter it wraps. Under
@@ -819,40 +748,6 @@ test("the deterministic planner under a rollout wrapper is selected, not a fallb
     ["compare_documents", "risk_review"]
   );
   assert.deepEqual(result.graph, unwrapped.graph);
-});
-
-// Shadow keeps the deterministic graph primary and lets the model plan beside
-// it. The primary is the deterministic planner, so it is selected; the model's
-// graph is recorded, compared, and never run.
-test("the shadow rollout records the deterministic graph as selected and the model's beside it", async () => {
-  let shadowCalls = 0;
-  const plannerAdapter = withPlannerRollout(
-    withShadowPlanner(
-      deterministicDagPlannerAdapter,
-      stubAdapter(DAG_PLANNER_IDS.llm, () => {
-        shadowCalls += 1;
-        return { nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })] };
-      })
-    ),
-    "shadow"
-  );
-
-  const result = await createAgentExecutionGraphResult(baseOptions({ plannerAdapter }));
-
-  assert.equal(result.planner.fallback, false);
-  assert.equal(result.planner.status, "selected");
-  assert.equal(result.planner.fallbackReason, null);
-  assert.equal(result.planner.selectedPlannerId, DAG_PLANNER_IDS.deterministic);
-  assert.equal(result.planner.rolloutMode, "shadow");
-  assert.deepEqual(
-    result.graph.nodes.map((node) => node.nodeId),
-    ["compare_documents", "risk_review"]
-  );
-  assert.equal(shadowCalls, 1);
-  assert.equal(result.planner.shadow.status, "selected");
-  assert.equal(result.planner.shadow.requestedPlannerId, DAG_PLANNER_IDS.llm);
-  assert.deepEqual(result.planner.shadow.nodeIds, ["compare"]);
-  assert.equal(result.planner.shadow.diverged, true);
 });
 
 test("a rollout-wrapped deterministic planner with no selected Skill is rejected on its own empty graph", async () => {
@@ -903,10 +798,11 @@ test("an adapter that only shares the deterministic id is planned as a primary p
   );
 });
 
-// llm and guarded_llm wrap the model's planner, and configured hands it over
-// unwrapped. Either way it is a primary planner: its own graph is selected,
-// and its failure is still recorded as a fallback to the deterministic graph.
-test("the model planner's record is unchanged under the llm, guarded_llm and configured rollouts", async () => {
+// The llm rollout wraps the model's planner, and a caller that injects one
+// (the planner eval) hands it over unwrapped. Either way it is a primary
+// planner: its own graph is selected, and its failure is still recorded as a
+// fallback to the deterministic graph.
+test("the model planner's record is unchanged under the llm rollout and when injected", async () => {
   const modelPlanner = stubAdapter(DAG_PLANNER_IDS.llm, () => ({
     nodes: [ragNode({ nodeId: "compare", skillId: "compare_documents" })],
   }));
@@ -915,8 +811,7 @@ test("the model planner's record is unchanged under the llm, guarded_llm and con
   });
   const rollouts = [
     ["llm", (adapter) => withPlannerRollout(adapter, "llm")],
-    ["guarded_llm", (adapter) => withPlannerRollout(adapter, "guarded_llm")],
-    ["configured", (adapter) => adapter],
+    ["injected", (adapter) => adapter],
   ];
 
   for (const [rolloutMode, wrap] of rollouts) {

@@ -1313,7 +1313,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - **第一个 custom Skill 失败时要不要照样跑第二个**（阶段 8 起的默认行为）。决定点在 `decideExecutionGraphNode`：只要有一个依赖失败就跳过（`dependency_failed`），不看这个依赖喂的输入是不是可选的。确定性图在相邻的选中 Skill 之间都连边（4 个上线的 Skill 都声明了可选的 `priorFindings`），LLM 图的边由模型决定。用户看到的是 HTTP 200 的弃答（失败归为依赖故障时整个 run 以 outage 结束）。删掉的顺序链会用原问题照样跑第二个。选项：A 保持现状；B 失败的依赖只喂可选输入时不阻塞，下游不带这些输入运行（约 25 行，恢复链的语义，不加第二条执行路径）；C 图里加显式的可选边标记（约 80–120 行）。调查推荐 B。**用户选了 B，已做**，见本节最后的“用户决定”。
 - **需审批的 Capability 在外层计划里直接执行成功之后的分支，生产里走不到了。** Web 搜索、arXiv 导入、文档发现等都是 `user_confirmation`（只有 citation 是 `direct`），请求又不再带批准，所以它们在生产里只能停在门上，批准之后由 step executor 作为排好的 `capability_call` 步骤执行。外层计划里这些 Capability 执行成功之后的分支（例如文档弃答之后用 Web 结果合成 `document_web` 答案）现在只有测试走得到。要不要删，或者让批准之后回到外层计划合成，要先数清楚再决定。（`web_search` Skill 只经过需确认的 Capability 是读代码得出的；那些分支没有逐个数。）**2026-11-17 数过之后用户选了删除（方案 A），见阶段 13。**
-- **规划器的灰度开关**（`AGENT_PLANNER_ROLLOUT`：默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。
+- **规划器的灰度开关**（`AGENT_PLANNER_ROLLOUT`：默认 `llm`，以及 `guarded_llm`、`deterministic`、`shadow`、`configured`）还在。`shadow` 让 LLM 规划器在确定性规划之后再跑一次，只记录、不改变执行的图。它不是第二种运行时，也不是第二种回答请求的方式，这一步没有动。**2026-11-19 用户回复“按推荐全做”，按调查推荐的方案 B 删除了 `guarded_llm`、`shadow`、`configured`，只剩 `llm`（默认）和 `deterministic`。** 调查测得 `guarded_llm` 建出的适配器和 `llm` 完全一样，只差记录里的标签；`shadow` 每个请求另外最多调 3 次模型，结果（`planner.shadow`）没有任何报告、指标或前端读取；`configured` 是唯一读 `AGENT_INTENT_PLANNER`、`AGENT_EXECUTION_PLANNER` 的取值，这两个变量随之不再读取；拼错的值以前静默当作 `llm`。现在这三个值和其他任何取值都让 `createAppServices` 在建任何服务之前拒绝（`AGENT_PLANNER_ROLLOUT_REMOVED`）。默认部署和 `deterministic` 部署的规划和记录不变，graph golden 没有重录。
 
 ### 证据
 
@@ -1465,14 +1465,14 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 阶段 8 起：custom Skill 阶段没有回到顺序链的开关。
   - V1 顺序链和 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow` 已删除，变量只接受未设置、空值、空白或 `guarded`，其他值拒绝启动（`AGENT_SKILL_GRAPH_ROLLOUT_REMOVED`）。
   - 恢复顺序链的唯一办法是 `git revert` 阶段 8 的删除提交，见“阶段 8 结果”。图 checkpoint 的格式没有变，没有数据要处理。
-  - 剩下的运维开关只有 `AGENT_UNIFIED_GRAPH_ROLLOUT`（默认 `off`，v3 图不执行；阶段 10 已删除）和三个 planner 开关。
+  - 剩下的运维开关只有 `AGENT_UNIFIED_GRAPH_ROLLOUT`（默认 `off`，v3 图不执行；阶段 10 已删除）和三个 planner 开关（2026-11-19 起只剩 `AGENT_PLANNER_ROLLOUT=llm|deterministic` 一个）。
 - 阶段 9 起：没有不经图执行 custom Skill 的恢复路径。
   - `custom_skill` 步骤的独立处理器、单步 resume、启动时的单步重放和 `resume_from_step` 动作已删除。没有对应的环境变量，所以没有启动拒绝要加。
   - 恢复它们的唯一办法是 `git revert` 阶段 9 的删除提交，见“阶段 9 结果”。run 和 checkpoint 的格式没有变，没有数据要处理。
 - 阶段 10 起：没有第二种回答请求的方式。
   - v3 统一图和 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow` 已删除，变量只接受未设置、空值、空白或 `off`，其他值拒绝启动（`AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED`）。`AGENT_UNIFIED_GRAPH_CAPABILITIES` 不再读取。
   - 恢复 v3 的唯一办法是 `git revert` 阶段 10 的删除提交，见“阶段 10 结果”。已存的 v3 run 被新版本标成人工恢复之后，revert 也不会让它们重新可以批准。
-  - 剩下的运维开关只有三个 planner 开关。
+  - 剩下的运维开关只有三个 planner 开关（2026-11-19 起只剩 `AGENT_PLANNER_ROLLOUT=llm|deterministic` 一个）。
 - 阶段 11 起：共用图模块里也没有 v3 的支持了。恢复要 `git revert` 阶段 11 和阶段 10 的提交，见两节各自的“怎样恢复”。
 - 阶段 12 起：请求不能带批准，也没有能在图节点之外调用 custom Skill 的适配器。恢复要 `git revert` 阶段 12 的提交；run 和 checkpoint 的格式没有变，没有数据要处理。
 - 数据（阶段 4、5 的规则，revert 阶段 6 之后同样适用）：LangGraph 的线程记录写在 run 行 `result` 下的独立私有键，原生路径不读它。回退到 `native` 后，正在 LangGraph 上执行、尚未结束的 run 由原生路径接管：启动恢复和审批续跑都从 agent run 的图 checkpoint（权威）继续，不看线程；结算保存或 `failRun` 用 null 墓碑覆盖旧线程记录。已批准、尚未写入的 Capability 在原生路径上以 run+node 幂等键执行一次；写入后崩溃（step 为 running）仍转人工，不重放。反方向（native 停靠、langgraph 续跑）走一次新的 invocation。阶段 4、5 时两个方向都有测试钉住（`langgraph-unified-graph`、`langgraph-execution-graph-runtime` 的启动恢复交叉用例、`agent-unified-graph-postgres.integration` 的 7 个跨进程用例在两种 runtime 下各跑一遍）。阶段 6 删掉了“交给 native 接管”这一方向的用例，revert 会把它们一起恢复；“native 留下的 run 由 LangGraph 接管”这一方向仍由删掉线程后续跑、恢复的用例钉住（见“阶段 6 结果”的“升级时在途的 run”）。

@@ -535,26 +535,40 @@ export const isStructuredOutputEnabled = () =>
 export const getPromptVersion = () =>
   toChoice(process.env.RAG_PROMPT_VERSION, "v3", ["v1", "v2", "v3"]);
 
-export const getAgentPlannerRollout = () =>
-  toChoice(process.env.AGENT_PLANNER_ROLLOUT, "llm", [
-    "configured",
-    "deterministic",
-    "guarded_llm",
-    "llm",
-    "shadow",
-  ]);
+// Who plans every agent request (intent, execution steps, custom-Skill graph):
+// the model (`llm`, the default; a plan the validator refuses falls back to
+// the rules) or the rules alone (`deterministic`, no replanner). The values
+// below were removed on 2026-11-19. Like the removed dials further down, a
+// removed value or a typo refuses, here and when the app services are built,
+// instead of planning as if unset: until then an unknown value meant `llm`,
+// so a mistyped `deterministic` let the model plan.
+export const AGENT_PLANNER_ROLLOUT_REMOVED_CODE = "AGENT_PLANNER_ROLLOUT_REMOVED";
 
-export const getAgentExecutionPlanner = () =>
-  toChoice(process.env.AGENT_EXECUTION_PLANNER, "llm", [
-    "deterministic",
-    "llm",
-  ]);
+const AGENT_PLANNER_ROLLOUTS = Object.freeze(["llm", "deterministic"]);
+const REMOVED_AGENT_PLANNER_ROLLOUTS = new Map([
+  ["configured", "it read AGENT_INTENT_PLANNER and AGENT_EXECUTION_PLANNER, which are no longer read"],
+  ["guarded_llm", "it planned exactly as llm does"],
+  ["shadow", "it ran the deterministic plan and asked the model for one that nothing read"],
+]);
 
-export const getAgentIntentPlanner = () =>
-  toChoice(process.env.AGENT_INTENT_PLANNER, "llm", [
-    "deterministic",
-    "llm",
-  ]);
+export const getAgentPlannerRollout = () => {
+  const rawValue = process.env.AGENT_PLANNER_ROLLOUT;
+  const value = String(rawValue ?? "").trim().toLowerCase() || "llm";
+
+  if (AGENT_PLANNER_ROLLOUTS.includes(value)) {
+    return value;
+  }
+
+  const removed = REMOVED_AGENT_PLANNER_ROLLOUTS.get(value);
+  const error = new Error(
+    (removed
+      ? `AGENT_PLANNER_ROLLOUT=${value} was removed (2026-11-19): ${removed}.`
+      : `AGENT_PLANNER_ROLLOUT=${JSON.stringify(rawValue)} is not a planner rollout.`) +
+      " Unset AGENT_PLANNER_ROLLOUT or set it to llm or deterministic."
+  );
+  error.code = AGENT_PLANNER_ROLLOUT_REMOVED_CODE;
+  throw error;
+};
 
 // The agent has one runtime, LangGraph, and one way to answer a request, the
 // outer execution plan; no dial selects another. Four variables used to:

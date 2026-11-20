@@ -213,7 +213,7 @@
 
 **代码**：server/rag/agent-replanner.js DEFAULT_MAX_REPLANS, createReplanResult, fingerprintExecutionGraph, buildReplanContext; server/app-services.js createReplanAdapter
 
-### D7. 执行器开关和规划器开关拆开（2026-09-25 的转正决定）：当时 AGENT_SKILL_GRAPH_ROLLOUT 决定执行器（默认改成 guarded），AGENT_EXECUTION_PLANNER 决定谁来规划；执行器按执行语义的证据转正。2026-11-13 阶段 8 之后执行器只剩 DAG 一个，前一个开关不再选择任何东西
+### D7. 执行器开关和规划器开关拆开（2026-09-25 的转正决定）：当时 AGENT_SKILL_GRAPH_ROLLOUT 决定执行器（默认改成 guarded），AGENT_EXECUTION_PLANNER 决定谁来规划；执行器按执行语义的证据转正。2026-11-13 阶段 8 之后执行器只剩 DAG 一个，前一个开关不再选择任何东西；2026-11-19 起谁来规划只看 AGENT_PLANNER_ROLLOUT（llm 或 deterministic），AGENT_EXECUTION_PLANNER 不再读取
 
 **为什么**
 
@@ -235,7 +235,7 @@
 - 文档问答 5/5 都没被多加阶段
 - 全量测试 + PostgreSQL 集成测试 15/15（其中 5 个是图恢复跨进程与 CAS 竞争）
 
-**代码**：server/rag/config.js assertAgentRuntimeSupported, AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE, getAgentExecutionPlanner（getAgentSkillGraphRollout 已在阶段 8 删除）; server/app-services.js createDagPlannerAdapter
+**代码**：server/rag/config.js assertAgentRuntimeSupported, AGENT_SKILL_GRAPH_ROLLOUT_REMOVED_CODE, getAgentPlannerRollout（getAgentSkillGraphRollout 已在阶段 8 删除，getAgentExecutionPlanner 2026-11-19 删除）; server/app-services.js createDagPlannerAdapter
 
 ### D8. 整个 Agent 只有 LangGraph.js 一种运行时：先迁需要持久状态和中断的两张图（custom-Skill DAG、v3 统一图）；外层计划因压测不过门留在原生循环，2026-11-13 按用户决定也迁过去（阶段 7）；custom Skill 阶段的 V1 顺序链同一天删除（阶段 8）；阶段 8 留下的 custom_skill 步骤单独重试和单独重放也在同一天删除（阶段 9）；v3 统一图 2026-11-14 删除，回答请求只剩外层执行计划一种方式（阶段 10）；它在共用图模块里留下的代码 2026-11-15 删除（阶段 11）
 
@@ -613,7 +613,7 @@
 
 - rollout:readiness 要求真实 LLM 规划零降级、零 mock/real 分歧，它测的是规划质量
 - LLM 规划失败退回的是确定性 DAG，不是 V1，所以执行器安不安全只取决于执行语义
-- 拆成两个开关：AGENT_SKILL_GRAPH_ROLLOUT 管执行器，AGENT_EXECUTION_PLANNER 管谁规划
+- 拆成两个开关：AGENT_SKILL_GRAPH_ROLLOUT 管执行器，AGENT_EXECUTION_PLANNER 管谁规划（2026-11-19 起谁规划只看 AGENT_PLANNER_ROLLOUT，AGENT_EXECUTION_PLANNER 不再读取）
 - 转正证据：全量测试、trajectory、recovery、PostgreSQL 跨进程恢复和 CAS 竞争
 - 复测 24/30 → 27/30、2/25 → 0/25，在噪声内；专门查了最可能出问题的行为变化：普通问答被多加 custom_skills，5/5 都没加
 - 后续：转正七周后（2026-11-13，阶段 8）V1 顺序链整个删除，DAG 从默认执行器变成唯一的执行器；AGENT_SKILL_GRAPH_ROLLOUT 不再选择任何东西，off、shadow 和拼错的值让进程拒绝启动
