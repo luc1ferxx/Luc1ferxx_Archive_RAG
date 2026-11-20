@@ -261,7 +261,6 @@ const WorkspaceSidebar = ({
   isActionPending,
   isArxivImporting,
   isArxivSuggestionLoading,
-  isDemoWorkbench,
   isQualityLoading,
   isRecoveryLoading,
   onClearDocuments,
@@ -286,7 +285,6 @@ const WorkspaceSidebar = ({
   t = defaultT,
   totalPages,
   uploadRef,
-  workspaceDocumentTotal,
 }) => (
   <aside className="archive-sidebar" aria-label={t("sidebar.workspaceControls")}>
     <div className="archive-sidebar-top">
@@ -364,7 +362,7 @@ const WorkspaceSidebar = ({
     </SidebarSection>
 
     <SidebarSection
-      caption={formatDocumentCount(workspaceDocumentTotal ?? activeDocuments.length)}
+      caption={formatDocumentCount(activeDocuments.length)}
       className="archive-doc-section"
       sectionRef={documentListRef}
       title={t("sidebar.scope")}
@@ -412,7 +410,7 @@ const WorkspaceSidebar = ({
                       </>
                     )}
                     {document.version ? ` · ${document.version}` : ""}
-                    {document.age ? ` · ${document.age}` : ` · ID ${document.docId.slice(0, 8)}`}
+                    {` · ID ${document.docId.slice(0, 8)}`}
                   </div>
                   <div className="document-source-row">
                     <span
@@ -446,68 +444,55 @@ const WorkspaceSidebar = ({
                   </button>
                 ) : null}
 
-                {isDemoWorkbench ? (
-                  <span className={`document-status-dot is-${document.status ?? "ready"}`} />
-                ) : (
-                  <div className="document-item-actions">
+                <div className="document-item-actions">
+                  <button
+                    type="button"
+                    className={`document-scope-toggle ${
+                      isInSelectedChatScope ? "is-active" : ""
+                    }`}
+                    aria-label={t(
+                      isInSelectedChatScope
+                        ? "sidebar.excludeFromScope"
+                        : "sidebar.includeInScope",
+                      {
+                        fileName: document.fileName,
+                      }
+                    )}
+                    aria-pressed={isInSelectedChatScope}
+                    onClick={() => void onToggleChatScopeDocument?.(document.docId)}
+                  >
+                    {isInSelectedChatScope ? <CheckSquareOutlined /> : <PlusCircleOutlined />}
+                  </button>
+                  {/* The server deletes at once (no trash by default) and
+                      the workbench then resets the conversation, so a
+                      click only asks. */}
+                  <Popconfirm
+                    title={t("sidebar.removeDocumentConfirm", {
+                      fileName: document.fileName,
+                    })}
+                    description={t("sidebar.deleteCannotBeUndone")}
+                    okText={t("sidebar.confirmDelete")}
+                    cancelText={t("common.cancel")}
+                    okButtonProps={{ danger: true }}
+                    disabled={!canDelete}
+                    onConfirm={() => onRemoveDocument(document.docId)}
+                  >
                     <button
                       type="button"
-                      className={`document-scope-toggle ${
-                        isInSelectedChatScope ? "is-active" : ""
-                      }`}
-                      aria-label={t(
-                        isInSelectedChatScope
-                          ? "sidebar.excludeFromScope"
-                          : "sidebar.includeInScope",
-                        {
-                          fileName: document.fileName,
-                        }
-                      )}
-                      aria-pressed={isInSelectedChatScope}
-                      onClick={() => void onToggleChatScopeDocument?.(document.docId)}
-                    >
-                      {isInSelectedChatScope ? <CheckSquareOutlined /> : <PlusCircleOutlined />}
-                    </button>
-                    {/* The server deletes at once (no trash by default) and
-                        the workbench then resets the conversation, so a
-                        click only asks. */}
-                    <Popconfirm
-                      title={t("sidebar.removeDocumentConfirm", {
+                      className="document-item-remove"
+                      aria-label={t("sidebar.removeDocument", {
                         fileName: document.fileName,
                       })}
-                      description={t("sidebar.deleteCannotBeUndone")}
-                      okText={t("sidebar.confirmDelete")}
-                      cancelText={t("common.cancel")}
-                      okButtonProps={{ danger: true }}
                       disabled={!canDelete}
-                      onConfirm={() => onRemoveDocument(document.docId)}
+                      title={canDelete ? undefined : t("auth.deleteNotAllowed")}
                     >
-                      <button
-                        type="button"
-                        className="document-item-remove"
-                        aria-label={t("sidebar.removeDocument", {
-                          fileName: document.fileName,
-                        })}
-                        disabled={!canDelete}
-                        title={canDelete ? undefined : t("auth.deleteNotAllowed")}
-                      >
-                        ×
-                      </button>
-                    </Popconfirm>
-                  </div>
-                )}
+                      ×
+                    </button>
+                  </Popconfirm>
+                </div>
               </article>
             );
           })}
-          {isDemoWorkbench ? (
-            <button
-              type="button"
-              className="archive-show-more-button"
-              onClick={() => void onNavigate?.("datasets")}
-            >
-              {t("sidebar.showMore", { count: 19 })}
-            </button>
-          ) : null}
         </div>
       ) : (
         <div className="archive-empty-state">

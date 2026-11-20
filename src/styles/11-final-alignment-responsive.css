@@ -522,8 +522,7 @@
   overflow-wrap: anywhere;
 }
 
-.archive-preview-wrap,
-.archive-preview-wrap-demo {
+.archive-preview-wrap {
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
 }
 

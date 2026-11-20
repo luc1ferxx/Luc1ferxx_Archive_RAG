@@ -36,13 +36,6 @@ import { hasActiveTasks, useTaskLog } from "./hooks/useTaskLog";
 import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 import { withDocumentMimeType } from "./archiveWorkspace";
 import {
-  DEMO_CONVERSATION,
-  DEMO_DOCUMENTS,
-  DEMO_PREVIEW_SOURCE,
-  DEMO_QUALITY_HISTORY,
-  DEMO_QUALITY_REPORT,
-} from "./demoWorkbench";
-import {
   createTranslator,
   getInitialLocale,
   LOCALE_STORAGE_KEY,
@@ -66,7 +59,6 @@ const HOME_NAV_SECTIONS = new Set([
 ]);
 
 const EMPTY_ARRAY = [];
-const EMPTY_OBJECT = {};
 
 const getBackendErrorMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
@@ -193,11 +185,6 @@ const App = () => {
     setActiveTurnIndex,
     t,
   });
-  const hasOnlyDemoConversation =
-    conversation.length === 0 ||
-    conversation.every((turn) => turn.answer?.demoWorkbench);
-  const isDemoWorkbench =
-    activeDocuments.length === 0 && hasOnlyDemoConversation && !isLoading;
 
   const {
     chatDocIds,
@@ -217,12 +204,7 @@ const App = () => {
     qualityHistory,
     qualityReport,
     runSyntheticQualityReport,
-  } = useQualityReports({
-    demoQualityHistory: DEMO_QUALITY_HISTORY,
-    demoQualityReport: DEMO_QUALITY_REPORT,
-    isDemoWorkbench,
-    t,
-  });
+  } = useQualityReports({ t });
 
   const {
     handleAgentApprovalAction,
@@ -552,13 +534,6 @@ const App = () => {
 
       if (target === "new-chat") {
         setActiveHomeSection("home");
-        if (isDemoWorkbench) {
-          message.success(t("app.chatReady"));
-          setIsWorkbenchOpen(false);
-          focusComposer("archive-home-agent-search");
-          return;
-        }
-
         await resetWorkspaceSession();
         message.success(t("app.startedNewChat"));
         setIsWorkbenchOpen(false);
@@ -593,8 +568,8 @@ const App = () => {
         return;
       }
 
-      if (target === "workspaces" || target === "datasets") {
-        scrollSidebarSection(target === "datasets" ? uploadRef : documentListRef);
+      if (target === "workspaces") {
+        scrollSidebarSection(documentListRef);
         return;
       }
 
@@ -614,7 +589,6 @@ const App = () => {
     },
     [
       focusComposer,
-      isDemoWorkbench,
       resetPageScroll,
       resetWorkspaceSession,
       scrollSidebarSection,
@@ -637,41 +611,16 @@ const App = () => {
     };
   }, [handleSidebarNavigate]);
 
-  const visibleDocuments = isDemoWorkbench ? DEMO_DOCUMENTS : activeDocuments;
-  const visibleConversation = isDemoWorkbench
-    ? conversation.length > 0
-      ? conversation
-      : DEMO_CONVERSATION
-    : conversation;
-  const visibleActiveTurnIndex = isDemoWorkbench ? 0 : activeTurnIndex;
-  const visibleCurrentTurn =
-    visibleConversation[visibleActiveTurnIndex] ??
-    (isDemoWorkbench ? DEMO_CONVERSATION[0] : currentTurn);
-  const visibleQualityReport =
-    isDemoWorkbench && !qualityReport ? DEMO_QUALITY_REPORT : qualityReport;
-  const visibleQualityHistory =
-    isDemoWorkbench && !qualityHistory ? DEMO_QUALITY_HISTORY : qualityHistory;
-  const visibleSelectedSource =
-    selectedSource ?? (isDemoWorkbench ? DEMO_PREVIEW_SOURCE : null);
   // Citations carry no MIME type; the preview takes the document's, so a
   // Word, PowerPoint or Excel source offers its download instead of the PDF
   // viewer (a PDF source is passed on unchanged).
   const previewSource = useMemo(
-    () => withDocumentMimeType(visibleSelectedSource, visibleDocuments),
-    [visibleDocuments, visibleSelectedSource]
+    () => withDocumentMimeType(selectedSource, activeDocuments),
+    [activeDocuments, selectedSource]
   );
-  const visibleTotalPages = isDemoWorkbench ? 182 : totalPages;
-  const visiblePreviewStatus = isDemoWorkbench
-    ? `Finance Policy Manual.pdf · ${t("common.page")} 42`
-    : previewStatus;
-  const visibleDocLabel = isDemoWorkbench
-    ? t("workbench.financePolicyQa")
-    : chatDocLabel;
-  const visibleTrace = visibleCurrentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
-  const visibleSources = visibleCurrentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
-  const visibleTaskLog = isDemoWorkbench ? EMPTY_ARRAY : taskLog;
-  const visibleRecoveryRuns = isDemoWorkbench ? EMPTY_ARRAY : recoveryRuns;
-  const hasActiveTaskLog = hasActiveTasks(visibleTaskLog);
+  const currentTrace = currentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
+  const currentSources = currentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
+  const hasActiveTaskLog = hasActiveTasks(taskLog);
   const idleTasks = useMemo(
     () => [
       {
@@ -685,16 +634,16 @@ const App = () => {
   );
   let visibleTasks = idleTasks;
 
-  if (visibleTrace.length > 0) {
-    visibleTasks = visibleTrace;
+  if (currentTrace.length > 0) {
+    visibleTasks = currentTrace;
   }
 
-  if (visibleTaskLog.length > 0) {
-    visibleTasks = visibleTaskLog;
+  if (taskLog.length > 0) {
+    visibleTasks = taskLog;
   }
 
   useEffect(() => {
-    if (isDemoWorkbench || !hasActiveTaskLog) {
+    if (!hasActiveTaskLog) {
       return undefined;
     }
 
@@ -705,65 +654,20 @@ const App = () => {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [hasActiveTaskLog, isDemoWorkbench, refreshTaskLog]);
+  }, [hasActiveTaskLog, refreshTaskLog]);
 
   useEffect(() => {
-    if (isDemoWorkbench) {
-      return;
-    }
-
     if (hadActiveTasksRef.current && !hasActiveTaskLog) {
       void refreshDocuments();
       void loadSavedArxivSuggestions();
     }
 
     hadActiveTasksRef.current = hasActiveTaskLog;
-  }, [
-    hasActiveTaskLog,
-    isDemoWorkbench,
-    loadSavedArxivSuggestions,
-    refreshDocuments,
-  ]);
+  }, [hasActiveTaskLog, loadSavedArxivSuggestions, refreshDocuments]);
 
-  const renderQASelectTurn = useMemo(
-    () => (isDemoWorkbench ? undefined : selectTurn),
-    [isDemoWorkbench, selectTurn]
-  );
-  const renderQAApprovalAction = useMemo(
-    () =>
-      isDemoWorkbench
-        ? undefined
-        : (payload) => void handleAgentApprovalAction(payload),
-    [isDemoWorkbench, handleAgentApprovalAction]
-  );
-  const renderQAContinueRun = useMemo(
-    () =>
-      isDemoWorkbench
-        ? undefined
-        : (payload) => handleAgentRunContinue(payload),
-    [isDemoWorkbench, handleAgentRunContinue]
-  );
   const renderQAFeedback = useCallback(
     (feedback) => void submitAnswerFeedback(feedback),
     [submitAnswerFeedback]
-  );
-  const renderQAStepRetry = useMemo(
-    () =>
-      isDemoWorkbench
-        ? undefined
-        : (payload) => void handleAgentStepRetry(payload),
-    [isDemoWorkbench, handleAgentStepRetry]
-  );
-  const sidebarRecoveryAction = useMemo(
-    () =>
-      isDemoWorkbench
-        ? undefined
-        : (payload) => void handleAgentRecoveryAction(payload),
-    [isDemoWorkbench, handleAgentRecoveryAction]
-  );
-  const taskAction = useMemo(
-    () => (isDemoWorkbench ? undefined : handleTaskAction),
-    [isDemoWorkbench, handleTaskAction]
   );
   const artifactSlot = useMemo(
     () => <WorkspaceArtifactsPanel locale={locale} t={t} />,
@@ -800,10 +704,10 @@ const App = () => {
         <div className="archive-view-panel archive-trace-view">
           <div className="archive-view-panel-head">
             <span>{t("workbench.agentTrace")}</span>
-            <strong>{t("workbench.steps", { count: visibleTrace.length })}</strong>
+            <strong>{t("workbench.steps", { count: currentTrace.length })}</strong>
           </div>
           <div className="archive-view-grid">
-            {visibleTrace.map((step, index) => (
+            {currentTrace.map((step, index) => (
               <button
                 key={step.id ?? `${step.label}-${index}`}
                 type="button"
@@ -828,15 +732,15 @@ const App = () => {
         <div className="archive-view-panel archive-sources-view">
           <div className="archive-view-panel-head">
             <span>{t("workbench.sources")}</span>
-            <strong>{t("common.cited", { count: visibleSources.length })}</strong>
+            <strong>{t("common.cited", { count: currentSources.length })}</strong>
           </div>
           <div className="archive-view-grid">
-            {visibleSources.map((source, index) => (
+            {currentSources.map((source, index) => (
               <button
                 key={`${source.docId}-${source.chunkIndex}-${source.rank}`}
                 type="button"
                 className={`archive-view-item ${
-                  visibleSelectedSource?.docId === source.docId ? "is-selected" : ""
+                  selectedSource?.docId === source.docId ? "is-selected" : ""
                 }`}
                 onClick={() => {
                   setSelectedSource(source);
@@ -860,8 +764,8 @@ const App = () => {
     if (activeConversationView === "tasks") {
       return (
         <AgentRunCenter
-          isLoading={(isTaskLogLoading || isRecoveryLoading) && !isDemoWorkbench}
-          onTaskAction={taskAction}
+          isLoading={isTaskLogLoading || isRecoveryLoading}
+          onTaskAction={handleTaskAction}
           tasks={visibleTasks}
         />
       );
@@ -869,16 +773,16 @@ const App = () => {
 
     return (
       <RenderQA
-        conversation={visibleConversation}
-        activeTurnIndex={visibleActiveTurnIndex}
+        conversation={conversation}
+        activeTurnIndex={activeTurnIndex}
         isLoading={isLoading}
-        selectedSource={visibleSelectedSource}
+        selectedSource={selectedSource}
         onSelectSource={setSelectedSource}
-        onSelectTurn={renderQASelectTurn}
-        onApprovalAction={renderQAApprovalAction}
-        onContinueRun={renderQAContinueRun}
+        onSelectTurn={selectTurn}
+        onApprovalAction={handleAgentApprovalAction}
+        onContinueRun={handleAgentRunContinue}
         onFeedback={renderQAFeedback}
-        onStepRetry={renderQAStepRetry}
+        onStepRetry={handleAgentStepRetry}
         t={t}
       />
     );
@@ -890,14 +794,13 @@ const App = () => {
         chatScopeMode={chatScopeMode}
         chatScopeOptions={chatScopeOptions}
         draftQuestion={inputId === "archive-home-agent-search" ? homeDraftQuestion : ""}
-        docIds={isWorkbenchOpen && isDemoWorkbench ? EMPTY_ARRAY : chatDocIds}
-        docLabel={isWorkbenchOpen && isDemoWorkbench ? visibleDocLabel : chatDocLabel}
+        docIds={chatDocIds}
+        docLabel={chatDocLabel}
         sessionId={sessionId}
         userId={userId}
         handleResp={handleResp}
         inputId={inputId}
         isLoading={isLoading}
-        isDemoWorkbench={isWorkbenchOpen && isDemoWorkbench}
         onChatScopeModeChange={setChatScopeMode}
         onDraftQuestionConsumed={handleHomeDraftQuestionConsumed}
         onAttach={isWorkbenchOpen ? handleComposerAttach : handleHomeUploadClick}
@@ -972,7 +875,7 @@ const App = () => {
                 onClick={() => void handleSidebarNavigate("workspaces")}
               >
                 <FileSearchOutlined />
-                {t("app.docsSummary", { count: visibleDocuments.length })}
+                {t("app.docsSummary", { count: activeDocuments.length })}
               </button>
               <button
                 type="button"
@@ -981,7 +884,7 @@ const App = () => {
                 onClick={() => selectConversationView("chat")}
               >
                 <BranchesOutlined />
-                {t("app.turnShort", { count: visibleConversation.length })}
+                {t("app.turnShort", { count: conversation.length })}
               </button>
               <button
                 type="button"
@@ -1029,27 +932,24 @@ const App = () => {
 
           <WorkspaceSidebar
             activeNavItem={activeWorkspaceNav}
-            activeDocuments={visibleDocuments}
+            activeDocuments={activeDocuments}
             authStatus={authStatus}
             canAdmin={canAdmin}
             canDelete={canDelete}
             canUpload={canUpload}
-            arxivSuggestion={isDemoWorkbench ? null : arxivSuggestion}
-            conversationCount={visibleConversation.length}
+            arxivSuggestion={arxivSuggestion}
+            conversationCount={conversation.length}
             documentListRef={documentListRef}
             isArxivImporting={isArxivImporting}
             isActionPending={isLoading}
-            isRecoveryLoading={isDemoWorkbench ? false : isRecoveryLoading}
-            isArxivSuggestionLoading={
-              isDemoWorkbench ? false : isArxivSuggestionLoading
-            }
-            isDemoWorkbench={isDemoWorkbench}
+            isRecoveryLoading={isRecoveryLoading}
+            isArxivSuggestionLoading={isArxivSuggestionLoading}
             isQualityLoading={isQualityLoading}
             onClearDocuments={clearDocuments}
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}
             onOpenSavedArxivSuggestion={openSavedArxivSuggestion}
-            onRecoveryAction={sidebarRecoveryAction}
+            onRecoveryAction={handleAgentRecoveryAction}
             onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
@@ -1057,26 +957,23 @@ const App = () => {
             onRunSyntheticQuality={runSyntheticQualityReport}
             onNavigate={handleSidebarNavigate}
             onUploadSuccess={handleWorkspaceUploadSuccess}
-            qualityHistory={visibleQualityHistory}
-            qualityReport={visibleQualityReport}
+            qualityHistory={qualityHistory}
+            qualityReport={qualityReport}
             qualityRef={qualityRef}
-            recoveryRuns={visibleRecoveryRuns}
-            savedArxivSuggestionsByDocId={
-              isDemoWorkbench ? EMPTY_OBJECT : savedArxivSuggestionsByDocId
-            }
-            selectedChatDocIds={isDemoWorkbench ? EMPTY_ARRAY : selectedChatDocIds}
+            recoveryRuns={recoveryRuns}
+            savedArxivSuggestionsByDocId={savedArxivSuggestionsByDocId}
+            selectedChatDocIds={selectedChatDocIds}
             locale={locale}
             t={t}
-            totalPages={visibleTotalPages}
+            totalPages={totalPages}
             uploadRef={uploadRef}
-            workspaceDocumentTotal={isDemoWorkbench ? 24 : visibleDocuments.length}
           />
 
           <section className="archive-preview-column">
             <div className="archive-main-header archive-preview-header">
               <div className="section-label">
                 <span className="section-label-title">{t("app.preview")}</span>
-                <span className="section-label-caption">{visiblePreviewStatus}</span>
+                <span className="section-label-caption">{previewStatus}</span>
               </div>
             </div>
 
@@ -1088,20 +985,16 @@ const App = () => {
           <section className="archive-main" ref={mainRef}>
             <div className="archive-main-header">
               <div className="section-label">
-                <span className="section-label-title">
-                  {isDemoWorkbench
-                    ? t("workbench.financePolicyQa")
-                    : t("app.conversation")}
-                </span>
+                <span className="section-label-title">{t("app.conversation")}</span>
                 <span className="section-label-caption">
-                  {visibleDocuments.length > 0
-                    ? t("app.workingWith", { label: visibleDocLabel })
+                  {activeDocuments.length > 0
+                    ? t("app.workingWith", { label: chatDocLabel })
                     : t("app.agentWorkspaceEmpty")}
                 </span>
               </div>
               <Text className="archive-meta-text">
                 {t("app.recordedTurn", {
-                  count: visibleConversation.length,
+                  count: conversation.length,
                 })}
               </Text>
             </div>

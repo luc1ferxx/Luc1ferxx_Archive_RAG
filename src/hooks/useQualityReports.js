@@ -6,19 +6,12 @@ import {
   requestSyntheticQualityRun,
 } from "../archiveApi";
 
-export const useQualityReports = ({ demoQualityHistory, demoQualityReport, isDemoWorkbench, t }) => {
+export const useQualityReports = ({ t }) => {
   const [isQualityLoading, setIsQualityLoading] = useState(false);
   const [qualityHistory, setQualityHistory] = useState(null);
   const [qualityReport, setQualityReport] = useState(null);
 
   const loadLatestQualityReport = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityReport(demoQualityReport);
-      setQualityHistory(demoQualityHistory);
-      message.success(t("app.demoQualityLoaded"));
-      return;
-    }
-
     setIsQualityLoading(true);
 
     try {
@@ -31,15 +24,9 @@ export const useQualityReports = ({ demoQualityHistory, demoQualityReport, isDem
     } finally {
       setIsQualityLoading(false);
     }
-  }, [demoQualityHistory, demoQualityReport, isDemoWorkbench, t]);
+  }, [t]);
 
   const loadQualityHistory = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityHistory(demoQualityHistory);
-      message.success(t("app.demoQualityHistoryLoaded"));
-      return;
-    }
-
     setIsQualityLoading(true);
 
     try {
@@ -51,16 +38,9 @@ export const useQualityReports = ({ demoQualityHistory, demoQualityReport, isDem
     } finally {
       setIsQualityLoading(false);
     }
-  }, [demoQualityHistory, isDemoWorkbench, t]);
+  }, [t]);
 
   const runSyntheticQualityReport = useCallback(async () => {
-    if (isDemoWorkbench) {
-      setQualityReport(demoQualityReport);
-      setQualityHistory(demoQualityHistory);
-      message.success(t("app.demoSyntheticComplete"));
-      return;
-    }
-
     setIsQualityLoading(true);
 
     try {
@@ -74,7 +54,7 @@ export const useQualityReports = ({ demoQualityHistory, demoQualityReport, isDem
     } finally {
       setIsQualityLoading(false);
     }
-  }, [demoQualityHistory, demoQualityReport, isDemoWorkbench, t]);
+  }, [t]);
 
   return {
     isQualityLoading,

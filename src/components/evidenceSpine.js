@@ -324,10 +324,8 @@ const getOfficeFileType = (source) => {
  * keeps whatever number the citation gave it, or none.
  */
 export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
-  const previewMeta = isPlainObject(source.demoPreview) ? source.demoPreview : {};
   const fileName = source.fileName ?? "Untitled source";
   const fileType =
-    previewMeta.type ??
     getOfficeFileType(source) ??
     fileName.split(".").pop()?.toUpperCase() ??
     "DOC";
@@ -337,8 +335,7 @@ export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
   const pageNumber = hasInlinePreview ? sourcePageNumber ?? 1 : sourcePageNumber ?? null;
   const locationText = formatDocumentLocation({ ...source, pageNumber }, t);
   const chunkIndex = source.chunkIndex ?? source.metadata?.chunkIndex ?? null;
-  const excerpt =
-    source.excerpt ?? source.text ?? source.pageContent ?? previewMeta.description ?? "";
+  const excerpt = source.excerpt ?? source.text ?? source.pageContent ?? "";
   const sourceScore = formatSourceScore(source.score ?? source.metadata?.score);
   const citations = normalizeArray(source.citations);
   const chunks = normalizeArray(source.chunks);
@@ -382,17 +379,12 @@ export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
     filePath: source.filePath ?? "",
     fileType,
     hasInlinePreview,
-    isDemoPreview: Boolean(source.demoPreview || !source.filePath),
     locationText,
     locationUnit,
     metadataRows,
     pageNumber,
-    pageRange:
-      previewMeta.pageRange ??
-      (pageNumber ? String(pageNumber) : hasInlinePreview ? "1" : null),
-    previewDescription:
-      previewMeta.description || excerpt || "Selected evidence from the answer source.",
-    previewTags: normalizeArray(previewMeta.tags),
+    pageRange: pageNumber ? String(pageNumber) : hasInlinePreview ? "1" : null,
+    previewDescription: excerpt || "Selected evidence from the answer source.",
     rank: source.rank,
     score: sourceScore,
     source,
