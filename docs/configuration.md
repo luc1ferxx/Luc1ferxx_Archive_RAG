@@ -525,7 +525,7 @@ API_AUTH_JWT_AUDIENCE=archive-rag
 API_AUTH_TOKENS={"shared-token":{"workspaceId":"workspace-a","allowClientUserId":true}}
 ```
 
-网页界面不发送 `userId`，它代表的用户只由凭证决定。凭证不带 `userId` 时（不开鉴权、单个 `API_AUTH_TOKEN`、不带 `userId` 的 token 条目）它不代表任何用户，浏览器里的对话和反馈也就不读写长期记忆和 Agent experience memory（两者都按用户存）。
+网页界面不发送 `userId`，它代表的用户只由凭证决定。凭证不带 `userId` 时（不开鉴权、单个 `API_AUTH_TOKEN`、不带 `userId` 的 token 条目）它不代表任何用户，浏览器里的对话和反馈也就不读写长期记忆和 Agent experience memory（两者都按用户存）。以前只为网页界面加的 `"allowClientUserId": true` 可以去掉：网页界面用不到它，它却仍允许持有者冒充任何用户。
 
 Admin 端点还会读取 token principal 或 JWT claims 上的 `roles` / `roleIds` 和 `permissions` / `permissionIds`。内置角色包括 `admin.viewer`、`admin.quality_operator`、`admin.recovery_operator`、`admin.operator`、`admin.owner`；也可以直接授予 `admin.status.read`、`admin.audit.read`、`admin.actions.recovery_scan`、`admin.actions.quality_refresh`、`admin.actions.recover_tasks` 等权限：
 

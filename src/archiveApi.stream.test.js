@@ -52,13 +52,14 @@ describe("streamChat", () => {
     const fetchMock = stubFetch(streamingResponse([payload.slice(0, 37), payload.slice(37, 90), payload.slice(90)]));
     const onEvent = vi.fn();
 
-    const result = await streamChat({ ...request, onEvent });
+    const result = await streamChat({ ...request, userId: "u", onEvent });
 
     expect(result).toEqual({ body: { agentAnswer: "Final" }, status: 200 });
     expect(onEvent.mock.calls.map(([event]) => event.event)).toEqual(["trace_step", "answer_draft"]);
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/chat\/stream$/);
-    // No userId: the browser acts for its credential's user (none with auth
-    // off); a random one of its own hid every unowned upload from chat.
+    // No userId, even one a caller passes: the browser acts for its
+    // credential's user (none with auth off); a random one of its own hid
+    // every unowned upload from chat.
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       docIds: "doc-1",
       question: "Q?",

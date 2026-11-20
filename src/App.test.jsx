@@ -854,6 +854,10 @@ describe("App", () => {
         expect.objectContaining({ timeout: 30000 })
       )
     );
+    // No userId: a random browser id hid every ownerless upload from chat.
+    expect(
+      axios.post.mock.calls.findLast(([url]) => url.endsWith("/feedback"))[1]
+    ).not.toHaveProperty("userId");
   });
 
   test("suggests arxiv papers after upload and imports after confirmation", async () => {
