@@ -158,9 +158,31 @@ test("the judge can only confirm a rejection, and a failure keeps the lexical ve
   const unparseable = await judgeClaimSupport({
     citations: [CITATION],
     claimSupport: lexical([PARAPHRASE]),
-    complete: async () => ({ text: "Sure, looks supported to me!" }),
+    complete: async () => ({ text: "Sure, looks supported to me! ".repeat(20) }),
   });
   assert.equal(unparseable.claims[0].supported, false, "no verdict is not a yes");
+  assert.equal(unparseable.judge.status, "failed", "a reply without a verdict is a failed call");
+  assert.match(unparseable.judge.error, /^no verdict could be parsed from the reply: Sure, looks supported to me!/);
+  assert.ok(unparseable.judge.error.length <= 200);
+});
+
+test("claims a reply leaves without a verdict keep the lexical verdict and are counted", async (t) => {
+  withJudge(t);
+  const claimSupport = lexical([PARAPHRASE, "Vendor A's liability is limited to twelve months of fees."]);
+  assert.deepEqual(claimSupport.claims.map((claim) => claim.supported), [false, false], "precondition");
+
+  const judged = await judgeClaimSupport({
+    citations: [CITATION],
+    claimSupport,
+    complete: async () => ({
+      text: JSON.stringify({ verdicts: [{ claim: 0, reason: "stated in source 1", supported: true }] }),
+    }),
+  });
+
+  assert.deepEqual(judged.claims.map((claim) => claim.supported), [true, false]);
+  assert.equal(judged.claims[1].judge, undefined);
+  assert.equal(judged.judge.status, "judged");
+  assert.equal(judged.judge.missingVerdictCount, 1);
 });
 
 test("a claim the lexical check already supports is never re-judged", async (t) => {

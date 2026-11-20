@@ -387,7 +387,9 @@ const upgradeClaim = ({ claim, citationByRank, verdict }) => {
 /**
  * Returns claimSupport with lexically rejected claims re-judged, or the input
  * unchanged when the judge is off, has nothing eligible, or fails. Adds a
- * `judge` summary so traces show what the judge did. `accessScope` names the
+ * `judge` summary so traces show what the judge did: status "failed" (with
+ * `error`) when the call threw or its reply held no verdict, and
+ * `missingVerdictCount` for the claims a reply left out. `accessScope` names the
  * tenant whose cache partition is used (default: the active database tenant);
  * `sharedRedis` is a test seam for the RAG_SHARED_STATE=redis client.
  */
@@ -412,6 +414,7 @@ export const judgeClaimSupport = async ({
   const summary = {
     cachedClaimCount: 0,
     judgedClaimCount: 0,
+    missingVerdictCount: 0,
     modelId: null,
     numberGuardRejectedCount: 0,
     status: "not_needed",
@@ -500,6 +503,12 @@ export const judgeClaimSupport = async ({
       const parsed = parseVerdicts(completion?.text, claimIndexes);
       summary.modelId = completion?.modelRoute?.modelId ?? null;
 
+      // A reply with no usable verdict is a failed call, not a judged one.
+      if (parsed.size === 0) {
+        throw new Error(`no verdict could be parsed from the reply: ${completion?.text ?? ""}`);
+      }
+
+      summary.missingVerdictCount = uncached.length - parsed.size;
       const judged = [];
 
       for (const item of uncached) {
