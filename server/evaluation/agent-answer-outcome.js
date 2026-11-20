@@ -96,6 +96,9 @@ const describeCheck = (check, phase, reply) => {
     passed: check?.passed === true,
     reasons: check?.reasons ?? [],
     answer: typeof reply?.text === "string" ? reply.text : null,
+    // The claim judge's summary (self-check/claim-judge.js); null when the
+    // check ran without the judge.
+    judge: check?.claimSupport?.judge ?? null,
     supportedClaimCount: check?.claimSupport?.supportedClaimCount ?? null,
     unsupportedClaimCount: check?.claimSupport?.unsupportedClaimCount ?? null,
     // Each claim with the check's own fields, plus the sources it cites.
@@ -201,17 +204,22 @@ const tally = (pairs) => {
 
 /**
  * Over every self-check of every row carrying describeAgentChecks: checks per
- * phase, failed checks and unsupported claims, then unsupported claims by
- * failure (describeClaimFailures) and failed checks by reason, each with the
- * rows it occurs in, most frequent first.
+ * phase and per claim judge status ("none" without a judge summary), failed
+ * checks and unsupported claims, then unsupported claims by failure
+ * (describeClaimFailures) and failed checks by reason, each with the rows it
+ * occurs in, most frequent first.
  */
 export const summarizeAgentChecks = (rows = []) => {
   const checks = rows.flatMap((row) => (row.checks ?? []).map((check) => ({ check, rowId: row.id })));
   const failed = checks.filter(({ check }) => !check.passed);
   const phases = {};
+  const judgeStatuses = {};
 
   for (const { check } of checks) {
+    const judgeStatus = check.judge?.status ?? "none";
+
     phases[check.phase] = (phases[check.phase] ?? 0) + 1;
+    judgeStatuses[judgeStatus] = (judgeStatuses[judgeStatus] ?? 0) + 1;
   }
 
   return {
@@ -225,6 +233,7 @@ export const summarizeAgentChecks = (rows = []) => {
       ({ count, key, rows: rowCount }) => ({ checks: count, reason: key, rows: rowCount })
     ),
     failedChecks: failed.length,
+    judgeStatuses,
     phases,
     unsupportedClaims: checks.reduce((sum, { check }) => sum + check.unsupportedClaims.length, 0),
   };

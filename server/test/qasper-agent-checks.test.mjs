@@ -93,6 +93,8 @@ test("an agent row records each self-check, its rejected claims and the cited te
   assert.deepEqual(answer.agent.checks, [
     {
       answer: primary.text,
+      // These checks ran without the claim judge.
+      judge: null,
       passed: false,
       phase: "primary",
       reasons: primaryCheck.reasons,
@@ -103,6 +105,7 @@ test("an agent row records each self-check, its rejected claims and the cited te
     },
     {
       answer: followUp.text,
+      judge: null,
       passed: true,
       phase: "follow_up",
       reasons: [],
@@ -190,7 +193,33 @@ test("the summary counts rejected claims by failure and failed checks by reason,
       { checks: 1, reason: "2 answer claims lacks citation support.", rows: 1 },
     ],
     failedChecks: 3,
+    judgeStatuses: { none: 4 },
     phases: { follow_up: 1, primary: 3 },
     unsupportedClaims: 4,
   });
+});
+
+test("each check records the claim judge's summary, and the summary counts checks by judge status", () => {
+  const judge = (status, fields = {}) => ({
+    cachedClaimCount: 0,
+    judgedClaimCount: 2,
+    missingVerdictCount: 0,
+    modelId: "judge-model",
+    numberGuardRejectedCount: 0,
+    status,
+    upgradedClaimCount: 0,
+    ...fields,
+  });
+  const failed = judge("failed", { error: "no verdict could be parsed from the reply: Sure!" });
+  const partial = judge("judged", { missingVerdictCount: 1, upgradedClaimCount: 1 });
+  const selfCheck = (claimSupport) => ({
+    detail: { claimSupport: { claims: [], ...claimSupport }, passed: false, reasons: [] },
+    type: "self_check",
+  });
+  const checks = describeAgentChecks({
+    agentTrace: [selfCheck({ judge: failed }), selfCheck({ judge: partial }), selfCheck({})],
+  });
+
+  assert.deepEqual(checks.map((check) => check.judge), [failed, partial, null]);
+  assert.deepEqual(summarizeAgentChecks([{ checks, id: "q1" }]).judgeStatuses, { failed: 1, judged: 1, none: 1 });
 });
