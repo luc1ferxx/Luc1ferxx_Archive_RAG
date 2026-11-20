@@ -171,15 +171,6 @@
               "skillVersion": "1.0.0"
             },
             {
-              "label": "Original request",
-              "phase": "follow_up",
-              "primary": true,
-              "query": "Re-check the uploaded documents for cited support before answering. Original question: What does remote work require? Evidence issue: Citations cover 0 of 1 required documents. 2 answer claims lacks citation support. Unsupported claims: Remote work requires manager approval | The satellite stipend is 500 dollars Return the best answer only if it is backed by page-level citations.",
-              "queryId": "primary",
-              "skillId": "document_rag",
-              "skillVersion": "1.0.0"
-            },
-            {
               "label": "Follow-up evidence repair",
               "phase": "follow_up",
               "primary": false,
@@ -426,7 +417,7 @@
         "answer_finalizer"
       ],
       "workingMemory": {
-        "checkedQueryCount": 5,
+        "checkedQueryCount": 4,
         "resolvedGapCount": 2,
         "unresolvedGapCount": 0,
         "unsupportedClaimCount": 2

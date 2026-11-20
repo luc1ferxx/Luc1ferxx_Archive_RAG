@@ -19,7 +19,6 @@ import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 // any ambient value of the override, the verdict, the judge, or the
 // answer-rate flags.
 const FLAG_KEYS = [
-  "AGENT_FOLLOW_UP_ORIGINAL_QUESTION",
   "AGENT_SINGLE_DOCUMENT_ROUTING",
   "RAG_CLAIM_HEADING_CONTEXT",
   "RAG_CLAIM_INFLECTION",

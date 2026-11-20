@@ -572,9 +572,9 @@ routes/chat.js handleChatRequest
 
 坦白用了（FAQ #22）；说清自己负责的是边界、指标和「何时不信一个数字」；举出自己发现并改正过的过时文档（如 AGENTS.md 曾写着不存在的 <t>_bm25_rank、RAG_BM25_PRUNE_DF_FRACTION），证明读过真实代码
 
-**7.16 如果要让补检索用原问题而不是元文本，你改哪里？效果会怎样？**
+**7.16 补检索为什么从元文本改成问原问题？改了哪里？效果怎样？**
 
-指出 server/rag/self-check/gaps.js buildFollowUpQuestion / buildEvidenceRetryQuestion 和已有开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION；给结论：单开时可答仍 0/41（3.21），说明瓶颈在词法校验，不在补检索
+指出 server/rag/self-check/gaps.js buildFollowUpQuestion；给结论：评审关时问原问题单开可答仍 0/41（3.21），瓶颈在词法校验；2026-11-19 评审默认打开后，元文本 187 次 0 次成功，问原问题 50 次成功 8 次、可答 +8、不可答不变，于是问原问题成为唯一做法，开关 AGENT_FOLLOW_UP_ORIGINAL_QUESTION 删除
 
 **7.17 这个仓库这么大，你真的都读过吗？**
 

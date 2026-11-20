@@ -8,7 +8,6 @@ import {
   getRetrievalTopK,
   getRrfK,
   getVectorStoreProvider,
-  isAgentFollowUpOriginalQuestionEnabled,
   isHybridRetrievalEnabled,
   isQueryDecompositionEnabled,
   isRerankEnabled,
@@ -1073,11 +1072,10 @@ const executeQaRag = async ({
   route,
 }) => {
   const queryAdapterScope = agentRetrievalPlan ? null : QUERY_ADAPTER_SCOPE_QA;
-  // The agent's follow-up (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) asks the original
-  // question but retrieves with gap-repair queries built from the unsupported
-  // claims; its gate judges every candidate against the question.
-  const coverageFromQueryText =
-    agentRetrievalPlan?.phase === "follow_up" && isAgentFollowUpOriginalQuestionEnabled();
+  // The agent's follow-up asks the original question but retrieves with
+  // gap-repair queries built from the unsupported claims; its gate judges every
+  // candidate against the question.
+  const coverageFromQueryText = agentRetrievalPlan?.phase === "follow_up";
   const expansion = await prepareQaQueryExpansion({ agentRetrievalPlan, plannedRetrievalQueries });
   const {
     expansionFailures,

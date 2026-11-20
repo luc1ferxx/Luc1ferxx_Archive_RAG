@@ -9,22 +9,6 @@ import { getCitationDocumentAliases } from "../rag/self-check/attribution.js";
 import { evaluateClaimSupport } from "../rag/self-check/evaluate.js";
 import { collapseParenthesizedNumberRestatements } from "../rag/self-check/text.js";
 
-// This test asserts the default follow-up question; the flag that changes it
-// (AGENT_FOLLOW_UP_ORIGINAL_QUESTION) is pinned off so an ambient value does
-// not change what is asserted.
-const pinDefaultFollowUpQuestion = (t) => {
-  const previous = process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-
-  process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = "false";
-  t.after(() => {
-    if (previous === undefined) {
-      delete process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION;
-    } else {
-      process.env.AGENT_FOLLOW_UP_ORIGINAL_QUESTION = previous;
-    }
-  });
-};
-
 test("document evidence check fails when an answer claim is unsupported by citations", () => {
   const check = evaluateDocumentEvidence({
     docIds: ["doc-1"],
@@ -3179,8 +3163,7 @@ test("analysis-backed no-difference claims provide minimal document coverage", (
   assert.deepEqual(check.claimSupport.claims[0].supportedSourceRanks, [1, 2]);
 });
 
-test("agent rag runs follow-up retrieval when claim support check finds unsupported answer claims", async (t) => {
-  pinDefaultFollowUpQuestion(t);
+test("agent rag runs follow-up retrieval when claim support check finds unsupported answer claims", async () => {
   const askedQuestions = [];
   const ragService = {
     chat: async (_docIds, query) => {
@@ -3243,7 +3226,7 @@ test("agent rag runs follow-up retrieval when claim support check finds unsuppor
 
   assert.equal(response.status, 200);
   assert.equal(askedQuestions.length, 2);
-  assert.match(askedQuestions[1], /claim lacks citation support/i);
+  assert.equal(askedQuestions[1], "What does remote work require?");
   assert.equal(
     response.body.ragAnswer,
     "Remote work requires manager approval before the first remote day. [Source 1]"
@@ -3292,9 +3275,10 @@ test("agent rag runs follow-up retrieval when claim support check finds unsuppor
     "unsupported_claim"
   );
   assert.equal(response.body.agentWorkingMemory.goal, "What does remote work require?");
+  // The follow-up's primary query is the question, already checked once.
   assert.deepEqual(
     response.body.agentWorkingMemory.checkedQueries.map((query) => query.phase),
-    ["primary", "primary", "follow_up", "follow_up", "follow_up"]
+    ["primary", "primary", "follow_up", "follow_up"]
   );
   assert.ok(
     response.body.agentWorkingMemory.supportedClaims.some((claim) =>

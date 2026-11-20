@@ -85,7 +85,6 @@ const CREATED_AT = "2026-10-14T00:00:00.000Z";
 // (test/trajectory-eval.test.mjs pins them off for the same reason), so every
 // pass runs with every one of them off whatever the ambient environment says.
 const ANSWER_RATE_FLAGS_OFF = Object.freeze({
-  AGENT_FOLLOW_UP_ORIGINAL_QUESTION: undefined,
   AGENT_SINGLE_DOCUMENT_ROUTING: undefined,
   RAG_CLAIM_HEADING_CONTEXT: undefined,
   RAG_CLAIM_INFLECTION: undefined,

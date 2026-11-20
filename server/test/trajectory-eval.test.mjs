@@ -17,7 +17,6 @@ import {
 // unlabelled correct sentence supported), so this default-trajectory contract
 // runs with every one of them off whatever the ambient environment says.
 const ANSWER_RATE_FLAG_KEYS = [
-  "AGENT_FOLLOW_UP_ORIGINAL_QUESTION",
   "AGENT_SINGLE_DOCUMENT_ROUTING",
   "RAG_CLAIM_HEADING_CONTEXT",
   "RAG_CLAIM_INFLECTION",
