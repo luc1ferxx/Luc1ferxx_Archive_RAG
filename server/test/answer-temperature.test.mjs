@@ -19,8 +19,6 @@ useIsolatedAnswerWriterEnvironment({
   keys: [
     "RAG_ANSWER_TEMPERATURE",
     "RAG_QA_ANSWER_VERDICT",
-    "RAG_COMPARISON_STRUCTURED_OUTPUT",
-    "RAG_STRUCTURED_OUTPUT_ENABLED",
     "RAG_INJECTION_SCREEN",
   ],
   prefix: "answer-temperature-",
@@ -106,25 +104,18 @@ test("the QA answer call carries the temperature only when it is set", async () 
   await assert.rejects(writeQa([`${POLICY_SENTENCE} [Source 1]`]), /RAG_ANSWER_TEMPERATURE must be a number from 0 to 2/);
 });
 
-test("the comparison answer call carries it, with or without structured output", async () => {
-  for (const structured of [false, true]) {
-    if (structured) {
-      process.env.RAG_COMPARISON_STRUCTURED_OUTPUT = "true";
-    }
+test("the comparison answer call carries it too", async () => {
+  const { analysis, bundle } = comparison();
+  const unsetCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
 
-    const { analysis, bundle } = comparison();
-    const unsetCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
+  await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });
+  assert.equal("temperature" in unsetCalls[0].options, false);
 
-    delete process.env.RAG_ANSWER_TEMPERATURE;
-    await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });
-    assert.equal("temperature" in unsetCalls[0].options, false, `structured ${structured}`);
+  const zeroCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
 
-    const zeroCalls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
-
-    process.env.RAG_ANSWER_TEMPERATURE = "0";
-    await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });
-    assert.equal(zeroCalls[0].options.temperature, 0, `structured ${structured}`);
-  }
+  process.env.RAG_ANSWER_TEMPERATURE = "0";
+  await writeComparisonAnswer({ analysis, bundle, query: "Compare the remote work policy.", resolvedQuery: "Compare the remote work policy." });
+  assert.equal(zeroCalls[0].options.temperature, 0);
 });
 
 test("two answer reports are compared on it, and a report from before the field ran without one", () => {

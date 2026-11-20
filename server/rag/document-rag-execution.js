@@ -1000,8 +1000,8 @@ const executeComparisonRag = async ({
   });
 
   // The writer's trace-only diagnostics (why the model's comparison answer
-  // was replaced, what a structured reply held; codes and counts only) go to
-  // the trace, never into the response.
+  // was replaced; codes and counts only) go to the trace, never into the
+  // response.
   Object.assign(traceFields, answerTrace);
 
   return {

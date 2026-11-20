@@ -54,7 +54,6 @@ useIsolatedAnswerWriterEnvironment({
     "OPENAI_CHAT_MODEL",
     "RAG_ANSWER_MAX_TOKENS",
     "RAG_ANSWER_TEMPERATURE",
-    "RAG_COMPARISON_STRUCTURED_OUTPUT",
     "RAG_INJECTION_SCREEN",
     "RAG_LLM_MAX_TOKENS_FIELD",
     "RAG_LLM_REQUEST_TIMEOUT_MS",
@@ -62,7 +61,6 @@ useIsolatedAnswerWriterEnvironment({
     "RAG_QA_ANSWER_VERDICT",
     "RAG_SEMANTIC_CACHE",
     "RAG_SHARED_STATE",
-    "RAG_STRUCTURED_OUTPUT_ENABLED",
   ],
   prefix: "answer-max-tokens-",
   set: { RAG_OBSERVABILITY_ENABLED: "false", RAG_SHARED_STATE: "memory" },
@@ -338,15 +336,11 @@ test("the two answer calls carry the limit only when it is set, and an invalid o
   assert.equal(cappedAnswer.text, unsetAnswer.text);
   assert.equal("answerTruncated" in cappedAnswer, false);
 
-  // The comparison call, with and without structured output.
-  for (const structured of [false, true]) {
-    if (structured) process.env.RAG_COMPARISON_STRUCTURED_OUTPUT = "true";
+  // The comparison call.
+  const comparisonCapped = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
 
-    const calls = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);
-
-    await writeComparison();
-    assert.equal(calls[0].options.maxTokens, 1024, `structured ${structured}`);
-  }
+  await writeComparison();
+  assert.equal(comparisonCapped[0].options.maxTokens, 1024);
 
   delete process.env.RAG_ANSWER_MAX_TOKENS;
   const comparisonUnset = stubModelReplies(["Differences:\n- alpha says 2 days [Source 1]"]);

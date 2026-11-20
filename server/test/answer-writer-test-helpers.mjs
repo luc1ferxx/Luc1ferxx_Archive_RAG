@@ -1,7 +1,7 @@
-// Shared by the answer-writer suites (answer-max-tokens, answer-temperature,
-// comparison-structured-output): each test runs in its own RAG data directory
-// with the suite's environment variables cleared, and the model is a stand-in
-// that answers scripted replies. Not a test suite.
+// Shared by the answer-writer suites (answer-max-tokens, answer-temperature):
+// each test runs in its own RAG data directory with the suite's environment
+// variables cleared, and the model is a stand-in that answers scripted
+// replies. Not a test suite.
 import { afterEach, beforeEach } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -47,8 +47,8 @@ export const useIsolatedAnswerWriterEnvironment = ({ keys, prefix, set = {} }) =
 };
 
 /**
- * A stand-in model answering one reply per call, the last one repeated; an
- * object is sent as JSON. Returns the calls it received ({ options, prompt }).
+ * A stand-in model answering one reply per call, the last one repeated.
+ * Returns the calls it received ({ options, prompt }).
  */
 export const stubModelReplies = (replies) => {
   const queue = [...replies];
@@ -59,9 +59,8 @@ export const stubModelReplies = (replies) => {
     embedQuery: async () => [1],
     completeText: async (prompt, options) => {
       calls.push({ options, prompt });
-      const reply = queue.length > 1 ? queue.shift() : queue[0];
 
-      return typeof reply === "string" ? reply : JSON.stringify(reply);
+      return queue.length > 1 ? queue.shift() : queue[0];
     },
   });
 
