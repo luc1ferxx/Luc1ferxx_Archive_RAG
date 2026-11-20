@@ -2999,6 +2999,24 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 
 **结论**：判定全部通过，默认值在本轮没有改，交给用户决定；用户随后选择默认打开（"默认打开"），`RAG_CLAIM_JUDGE` 默认 `llm`、`RAG_CLAIM_SOURCE_INHERITANCE` 默认 `true`，评审温度仍不设（用服务端默认）。打开以后，176 道可答题多答 37 道，评审看新答的 40 题六成对或部分对、四成错或答了不可答题；200 题多花约 3.4 分钟（平均每题约 1 秒，多出来的是评审调用）。补检索仍是 0 次成功（元文本问题，见上一节），是另一件事。
 
+### 补检索问原问题还是删掉（2026-11-19，规则先于运行）
+
+**为什么测**：补检索默认拿 "Re-check the uploaded documents…" 元文本当问题，三次测量共跑 187 次、0 次成功（门控和回答都把元文本当成问题本身）。`AGENT_FOLLOW_UP_ORIGINAL_QUESTION=true` 让补检索问主调用改写后的原问题、缺口只进检索查询；10-03 那轮在评审关闭时单开它没有多答，评审默认打开后（617b3463）没测过。用户选择"先测一轮"再决定改还是删。
+
+**臂**（main 617b3463 的干净 detached worktree，依次跑；两臂都是新的默认值：评审 + 来源继承）：
+- TB0：agent 面，默认配置（补检索问元文本）。
+- TB1：agent 面，默认配置 + `AGENT_FOLLOW_UP_ORIGINAL_QUESTION=true`。
+
+**环境**：同上两节，另外两臂都设 `RAG_CLAIM_JUDGE_TEMPERATURE=0`（评审也按温度 0 的评测规程，应用默认仍不设），所以 TB0 的配置与上一节的 TA1 相同，可以拿来核对同机复现。
+
+**样本**：与上一节相同（train `--cases 200 --seed 12`，排除同样的 20 份报告：176 可答 / 24 不可答，182 篇），便于和 TA1、R0 逐题对照。两臂的主答案相同，差别只来自补检索。
+
+**事先定好的规则**（TB1 对 TB0）：
+- f1 有用：TB1 补检索成功（`follow-ups resolved`）≥ 5 次，且 TB1 比 TB0 多答 ≥ 5 道可答题（按题配对计数）。
+- f2 安全：TB1 回答的不可答题数 ≤ 上一节 R0（rag 面）的 10/24。
+- f3 答得对：TB1 比 TB0 多答的题由独立评审按引用原文和参考答案逐题判，答对或部分对的 ≥ 一半。
+- 三条都过：补检索只保留"问原问题"这一条路（`AGENT_FOLLOW_UP_ORIGINAL_QUESTION` 的行为成为唯一行为，删掉元文本那条路和这个开关）。f1 不过：整个删掉补检索。f1 过但 f2 或 f3 不过：也删掉补检索（元文本那条路本身没用）。
+
 ### API 压测（`npm run eval:load-test:pgvector`）
 
 `server/evaluation/run-api-load-bench.mjs` 用 `createApp()` 和真实 services 在子进程里启动应用，做闭环压测。
