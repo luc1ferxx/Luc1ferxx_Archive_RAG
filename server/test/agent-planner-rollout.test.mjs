@@ -4,8 +4,12 @@ import {
   AGENT_EXECUTION_CONDITIONS,
   AGENT_EXECUTION_STEP_IDS,
   createAgentExecutionPlanResult,
+  deterministicPlannerAdapter,
 } from "../rag/agent-execution-plan.js";
-import { createAgentIntentPlanResult } from "../rag/agent-intent-planner.js";
+import {
+  createAgentIntentPlanResult,
+  deterministicIntentPlannerAdapter,
+} from "../rag/agent-intent-planner.js";
 import { SKILL_CHAIN_MODE } from "../rag/agent-planner.js";
 import { withPlannerRollout } from "../rag/agent-planner-rollout.js";
 import {
@@ -152,4 +156,51 @@ test("LLM execution planner under the llm rollout falls back when validation rej
       AGENT_EXECUTION_STEP_IDS.webSearch,
     ]
   );
+});
+
+// A rollout wrapper is a copy of the adapter it wraps, so under
+// AGENT_PLANNER_ROLLOUT=deterministic the rules plan as the requested planner,
+// not through the fallback branch, and must record what the unwrapped rules do.
+test("the deterministic intent planner under the deterministic rollout is selected, not a fallback", async () => {
+  const options = {
+    docIds: ["contract-1"],
+    question: "Review this contract for risks and key terms.",
+  };
+  const unwrapped = await createAgentIntentPlanResult(options);
+  const result = await createAgentIntentPlanResult({
+    ...options,
+    plannerAdapter: withPlannerRollout(deterministicIntentPlannerAdapter, "deterministic"),
+  });
+
+  assert.equal(result.plan.mode, SKILL_CHAIN_MODE);
+  assert.deepEqual(result.plan, unwrapped.plan);
+  assert.deepEqual(result.planner, { ...unwrapped.planner, rolloutMode: "deterministic" });
+  assert.equal(result.planner.status, "selected");
+  assert.equal(result.planner.fallback, false);
+});
+
+test("the deterministic execution planner under the deterministic rollout is selected, not a fallback", async () => {
+  const options = {
+    accessScope: ACCESS_SCOPE,
+    selectedSkills: [
+      {
+        budgetKey: "documentRagCalls",
+        id: AGENT_SKILL_IDS.documentRag,
+        kind: "built_in",
+        label: "Document RAG",
+        requiresAccessScope: true,
+      },
+    ],
+  };
+  const unwrapped = await createAgentExecutionPlanResult(options);
+  const result = await createAgentExecutionPlanResult({
+    ...options,
+    plannerAdapter: withPlannerRollout(deterministicPlannerAdapter, "deterministic"),
+  });
+
+  assert.ok(result.planner.stepIds.includes(AGENT_EXECUTION_STEP_IDS.documentRag));
+  assert.deepEqual(result.executionPlan, unwrapped.executionPlan);
+  assert.deepEqual(result.planner, { ...unwrapped.planner, rolloutMode: "deterministic" });
+  assert.equal(result.planner.status, "selected");
+  assert.equal(result.planner.fallback, false);
 });
