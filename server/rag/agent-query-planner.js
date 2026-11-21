@@ -1,8 +1,11 @@
 import { buildAgentRetrievalQueries } from "./agent-retrieval-queries.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
 
+// The compar-, differ-, similar-, contrast- and conflict- words in their
+// inflections ("differs", "compared", "similarities"), but not "compartment"
+// or the technical terms "differential" and "contrastive".
 const COMPARISON_SIGNAL_PATTERN =
-  /\b(compare|comparison|difference|differences|different|versus|vs|same|similar|conflict|conflicts|contrast|between|across)\b|区别|差异|不同|对比|比较|冲突|一致|相同/i;
+  /\b(compar(?:e[ds]?|ing|isons?|ative|able)|differ(?:s|ed|ing|ences?|ent(?:ly)?)?|similar(?:ly|ity|ities)?|contrast(?:s|ed|ing)?|conflict(?:s|ed|ing)?|versus|vs|same|between|across)\b|区别|差别|差异|不同|异同|对比|比较|相比|相较|冲突|一致|相同|相似|类似|共同点/i;
 
 const ANALYSIS_SIGNAL_PATTERN =
   /\b(analy[sz]e|analysis|risk|risks|gaps?|exceptions?|uncertaint(?:y|ies)|obligations?|findings?)\b|分析|风险|缺口|例外|不确定|义务|发现/i;
