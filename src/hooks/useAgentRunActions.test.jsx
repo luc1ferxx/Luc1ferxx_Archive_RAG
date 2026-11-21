@@ -468,7 +468,8 @@ describe("useAgentRunActions after a retry fails", () => {
 
       expect(messageError).toHaveBeenCalledWith(reason);
       expect(fetchAgentRunMock).toHaveBeenCalledWith("run-1");
-      expect(result.current.session.conversation[0].answer).toEqual(FAILED_ANSWER);
+      // The same object: nothing replaced the turn.
+      expect(result.current.session.conversation[0].answer).toBe(FAILED_ANSWER);
       expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(1);
     }
   );
