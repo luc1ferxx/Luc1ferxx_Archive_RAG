@@ -283,6 +283,7 @@ export const createArxivEnrichmentService = ({
     assertClaimActive,
     docId,
     document,
+    offerSelectionToken,
     onPaperProgress,
     queryPolicy,
     relevantSelectedPapers = [],
@@ -372,6 +373,7 @@ export const createArxivEnrichmentService = ({
       accessScope,
       docId,
       importResult,
+      offerSelectionToken,
       selectedPapers: relevantSelectedPapers,
       topic,
     });
@@ -414,18 +416,20 @@ export const createArxivEnrichmentService = ({
   // recommendation.import_selected Capability) confirms the saved suggestion,
   // which this process holds.
   const importForDocument = async (options = {}) => {
+    const issuedSelectionToken = recommendationSnapshotService.getSelectionToken({
+      accessScope: options.accessScope,
+      docId: options.docId,
+    });
     const preparedImport = await prepareImportForDocument({
       ...options,
-      issuedSelectionToken: recommendationSnapshotService.getSelectionToken({
-        accessScope: options.accessScope,
-        docId: options.docId,
-      }),
+      issuedSelectionToken,
     });
 
     const { task, ...result } = await executePreparedImport({
       ...preparedImport,
       accessScope: options.accessScope,
       assertClaimActive: options.assertClaimActive,
+      offerSelectionToken: issuedSelectionToken,
       signal: options.signal,
     });
 
@@ -491,6 +495,8 @@ export const createArxivEnrichmentService = ({
             }
           );
         },
+        // The offer this job's confirmation was checked against.
+        offerSelectionToken: payload.selectionToken,
         queryPolicy,
         relevantSelectedPapers: selectedPapers,
         signal,
@@ -544,7 +550,11 @@ export const createArxivEnrichmentService = ({
 
     // `task` is the stored task (the job orchestrator reads it with its
     // internal payload), which holds the offer this confirms: the token is
-    // checked against it on whichever tier runs this.
+    // checked against it on whichever tier runs this. The orchestrator's
+    // transition to queued then checks the status only, so a search that
+    // publishes in between (the registry read below) is replaced by this
+    // import of the older offer, which the server issued too; that search's
+    // token then gets the 409.
     const issuedSelectionToken = task.payload?.selectionToken;
     const preparedImport = await prepareImportForDocument({
       accessScope,

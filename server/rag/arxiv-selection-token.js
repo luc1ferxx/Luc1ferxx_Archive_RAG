@@ -31,6 +31,32 @@ export const normalizeArxivSelectionPaper = (paper = {}) => ({
   categories: toArray(paper.categories).map(normalizeText).filter(Boolean),
 });
 
+// The offer a token holds, or null when it is not a selection token.
+const decodeSelectionToken = (token) => {
+  const [versionPart, payloadPart, ...extraParts] = normalizeText(token).split(".");
+
+  if (versionPart !== TOKEN_VERSION || !payloadPart || extraParts.length > 0) {
+    return null;
+  }
+
+  try {
+    const payload = decodeJson(payloadPart);
+
+    return payload?.version === TOKEN_VERSION && payload?.purpose === TOKEN_PURPOSE
+      ? payload
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const toSelection = (payload) => ({
+  docId: normalizeText(payload.docId),
+  topic: normalizeText(payload.topic),
+  requestedMaxResults: payload.requestedMaxResults,
+  papers: toArray(payload.papers).map(normalizeArxivSelectionPaper),
+});
+
 // A selection token is the offer one search made for one document: the
 // papers as arXiv returned them, and when the offer expires. It is not
 // signed. The server stores the token with the offer (on the document's
@@ -67,44 +93,37 @@ export const createArxivSelectionTokenService = ({
 
   // `issuedToken`: the token stored with the offer being confirmed.
   const verifySelectionToken = (token, issuedToken) => {
-    const normalizedToken = normalizeText(token);
-    const [versionPart, payloadPart, ...extraParts] = normalizedToken.split(".");
+    const payload = decodeSelectionToken(token);
 
-    if (
-      normalizedToken !== normalizeText(issuedToken) ||
-      versionPart !== TOKEN_VERSION ||
-      !payloadPart ||
-      extraParts.length > 0
-    ) {
+    if (!payload) {
       assertTokenError("Invalid arXiv selection token.");
     }
 
-    let payload;
-
-    try {
-      payload = decodeJson(payloadPart);
-    } catch {
-      assertTokenError("Invalid arXiv selection token.");
-    }
-
-    if (payload?.version !== TOKEN_VERSION || payload?.purpose !== TOKEN_PURPOSE) {
-      assertTokenError("Invalid arXiv selection token.");
+    // A token, but not the stored offer: a newer search, or an import's offer
+    // of the papers it left, replaced it (or the client altered it). Without a
+    // signature these look the same, and none of them is downloaded.
+    if (normalizeText(token) !== normalizeText(issuedToken)) {
+      assertTokenError("These arXiv recommendations are no longer current; search again.", 409);
     }
 
     if (Number(payload.expiresAt) < Number(now())) {
       assertTokenError("Expired arXiv selection token.", 410);
     }
 
-    return {
-      docId: normalizeText(payload.docId),
-      topic: normalizeText(payload.topic),
-      requestedMaxResults: payload.requestedMaxResults,
-      papers: toArray(payload.papers).map(normalizeArxivSelectionPaper),
-    };
+    return toSelection(payload);
+  };
+
+  // The offer in a token the server stored itself (a task's or a saved
+  // suggestion's), so without the checks a client's token gets.
+  const readSelectionToken = (token) => {
+    const payload = decodeSelectionToken(token);
+
+    return payload ? toSelection(payload) : null;
   };
 
   return {
     createSelectionToken,
+    readSelectionToken,
     verifySelectionToken,
   };
 };

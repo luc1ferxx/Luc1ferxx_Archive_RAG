@@ -260,7 +260,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/llmops-metrics.js` | 定义 LLMOps metric event contract，统一记录 completion、embedding 和 cross-encoder rerank 的 operation、stage、status、latency、公开 `modelRoute`、输入/输出规模、token usage、估算成本、latency SLO 和 policy signals，不记录 prompt 原文或 secret。 |
 | `server/rag/llmops-policy.js` | 集中处理 LLMOps annotation、alert 和 per-event budget verdict；`enforcementMode: "block"` 可在模型调用前按已知 usage/cost estimate 拦截，避免把预算判断散进各个 provider 调用点。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
-| `server/rag/arxiv-selection-token.js` | 把文档级 arXiv 推荐结果编码成 token（不签名），确认时要求它和服务端存下的那份（task 的内部 payload，或本进程的 snapshot）一致，确保确认导入的是服务端从 arXiv 拿到、用户看到的候选；任何读得到 task store 的进程都能校验，split 部署的 api 层检索、agent 层确认也成立。 |
+| `server/rag/arxiv-selection-token.js` | 把文档级 arXiv 推荐结果编码成 token（不签名），确认时要求它和服务端存下的那份（task 的内部 payload，或本进程的 snapshot）一致（不一致返回 409，提示重新查询），确保确认导入的是服务端从 arXiv 拿到、用户看到的候选；任何读得到 task store 的进程都能校验，split 部署的 api 层检索、agent 层确认也成立。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
 | `server/rag/agent-retrieval-queries.js` | 检索查询模板（按意图和阶段）。会话记忆改写了问题时，`chat()` 用同一套模板按改写后的问题重建主计划的查询，意图和 topK 不变；follow-up 计划不重建。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |

@@ -6,6 +6,7 @@ import {
   evaluateArxivPaperRelevance,
   rankArxivTopicCandidatesFromDocumentProfile,
 } from "../rag/arxiv-enrichment.js";
+import { createArxivSelectionTokenService } from "../rag/arxiv-selection-token.js";
 import {
   createJobOrchestrator,
   TASK_ACTIONS,
@@ -1011,7 +1012,7 @@ test("arxiv background task writes remain fenced after cancellation", async () =
   assert.equal(importCompleted, false);
 });
 
-test("arxiv enrichment rejects selected papers outside the signed recommendation set", async () => {
+test("arxiv enrichment rejects selected papers outside the offered recommendation set", async () => {
   const service = createArxivEnrichmentService({
     arxivImportService: {
       importPapers: async () => {
@@ -1055,7 +1056,7 @@ test("arxiv enrichment rejects selected papers outside the signed recommendation
   );
 });
 
-test("arxiv enrichment rejects signed import candidates that fail relevance checks", async () => {
+test("arxiv enrichment rejects offered import candidates that fail relevance checks", async () => {
   const service = createArxivEnrichmentService({
     arxivImportService: {
       importPapers: async () => {
@@ -1149,6 +1150,22 @@ const RACE_PAPERS = [
     title: "Retrieval Augmented Generation with Archive Memory",
   },
 ];
+
+// A token that is not the offer the server stored.
+const NOT_THE_STORED_OFFER = {
+  message: "These arXiv recommendations are no longer current; search again.",
+  status: 409,
+};
+
+// The same offer naming a paper URL the server never got from arXiv.
+const alterOfferedPdfUrl = (selectionToken) => {
+  const [version, payloadPart] = selectionToken.split(".");
+  const offer = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
+
+  offer.papers[0].pdfUrl = "http://169.254.169.254/latest/meta-data";
+
+  return `${version}.${Buffer.from(JSON.stringify(offer)).toString("base64url")}`;
+};
 
 const createDeferred = () => {
   let resolve;
@@ -1502,7 +1519,7 @@ for (const [storeName, createTaskStore] of RACE_TASK_STORES) {
 // its own services and saved suggestions, sharing only the task store (the
 // PostgreSQL both use). The search runs on one, the task's confirmation on
 // the other.
-test("a suggestion searched on one tier is confirmed and imported on another that shares only the task store", async () => {
+test("a suggestion searched on one tier is confirmed and imported on another that shares only the task store, ending as in one process", async () => {
   const taskStore = createInMemoryTaskStore();
   const downloads = [];
   const createTier = () => {
@@ -1548,25 +1565,16 @@ test("a suggestion searched on one tier is confirmed and imported on another tha
   const api = createTier();
   const agent = createTier();
   const suggestion = await api.service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
-  const confirm = (selectionToken) =>
+  const confirm = (selectionToken, selectedArxivIds = ["2401.00001v1"]) =>
     agent.orchestrator.resumeTask({
       action: TASK_ACTIONS.confirm,
-      payload: { docId: "doc-1", selectedArxivIds: ["2401.00001v1"], selectionToken },
+      payload: { docId: "doc-1", selectedArxivIds, selectionToken },
       runImmediately: false,
       taskId: RACE_TASK_ID,
     });
 
   assert.equal(suggestion.task.payload, undefined, "the stored offer stays internal");
-
-  // The same offer naming a paper URL the server never got from arXiv.
-  const [version, payloadPart] = suggestion.selectionToken.split(".");
-  const offer = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
-
-  offer.papers[0].pdfUrl = "http://169.254.169.254/latest/meta-data";
-  await assert.rejects(
-    confirm(`${version}.${Buffer.from(JSON.stringify(offer)).toString("base64url")}`),
-    { message: "Invalid arXiv selection token.", status: 400 }
-  );
+  await assert.rejects(confirm(alterOfferedPdfUrl(suggestion.selectionToken)), NOT_THE_STORED_OFFER);
 
   const queued = await confirm(suggestion.selectionToken);
 
@@ -1574,6 +1582,88 @@ test("a suggestion searched on one tier is confirmed and imported on another tha
 
   const finished = await agent.orchestrator.runTask({ taskId: RACE_TASK_ID });
 
-  assert.equal(finished.status, TASK_STATUSES.completed);
+  // As in one process: the paper not selected is left, as a new offer the
+  // task stores (the agent tier holds no saved suggestion to take it from).
+  assert.equal(finished.status, TASK_STATUSES.waitingForUser);
+  assert.equal(finished.action, "review_remaining_recommendations");
+  assert.deepEqual(finished.result.remainingPaperIds, ["2401.00002v1"]);
   assert.deepEqual(downloads, ["https://arxiv.org/pdf/2401.00001v1"]);
+
+  const { payload } = await agent.taskService.getInternalTask({ taskId: RACE_TASK_ID });
+
+  assert.equal((await confirm(payload.selectionToken, ["2401.00002v1"])).status, TASK_STATUSES.queued);
+});
+
+test("a token a newer search replaced is refused with 409 on both confirmation paths", async () => {
+  let clock = 0;
+  const taskService = createTaskService({ taskStore: createInMemoryTaskStore() });
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async () => {
+        throw new Error("a replaced offer is never imported");
+      },
+    },
+    arxivService: { search: async () => RACE_PAPERS },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: { tags: ["retrieval", "augmented", "generation"] },
+      }),
+    },
+    recommendationTaskService: createRecommendationTaskService({ taskService }),
+    // The two searches' offers differ only in when they expire.
+    selectionTokenService: createArxivSelectionTokenService({ now: () => (clock += 1) }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: { [service.importJobRunner.id]: service.importJobRunner },
+    taskService,
+  });
+  const replaced = await service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
+
+  await service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
+  await assert.rejects(
+    orchestrator.resumeTask({
+      action: TASK_ACTIONS.confirm,
+      payload: { selectedArxivIds: ["2401.00001v1"], selectionToken: replaced.selectionToken },
+      runImmediately: false,
+      taskId: RACE_TASK_ID,
+    }),
+    NOT_THE_STORED_OFFER
+  );
+  await assert.rejects(
+    service.importForDocument({ docId: "doc-1", selectionToken: replaced.selectionToken }),
+    NOT_THE_STORED_OFFER
+  );
+});
+
+test("a direct import refuses an offer altered to name a paper URL arXiv never returned", async () => {
+  const imports = [];
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async ({ papers }) => {
+        imports.push(papers.map((paper) => paper.pdfUrl));
+
+        return { failedPapers: [], importedCount: papers.length, importedPapers: [], skippedPapers: [] };
+      },
+    },
+    arxivService: { search: async () => RACE_PAPERS },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: { tags: ["retrieval", "augmented", "generation"] },
+      }),
+    },
+  });
+  const suggestion = await service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
+
+  await assert.rejects(
+    service.importForDocument({
+      docId: "doc-1",
+      selectionToken: alterOfferedPdfUrl(suggestion.selectionToken),
+    }),
+    NOT_THE_STORED_OFFER
+  );
+  assert.deepEqual(imports, []);
 });

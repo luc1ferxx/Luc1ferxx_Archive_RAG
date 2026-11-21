@@ -134,62 +134,77 @@ export const createArxivRecommendationSnapshotService = ({
     };
   };
 
+  // The papers of the confirmed offer this import did not take (or failed),
+  // as a new offer. The offer is the token the confirmation was checked
+  // against (`offerSelectionToken`: the task's or the saved suggestion's), so
+  // the papers left are the same on whichever tier runs the import; the saved
+  // suggestion follows when this process holds that offer.
   const updateAfterImport = ({
     accessScope = {},
     docId,
     importResult,
+    offerSelectionToken,
     selectedPapers,
     topic,
   } = {}) => {
+    const offer = selectionTokenService.readSelectionToken(offerSelectionToken);
     const existingSnapshot = recommendationSnapshotStore.get({
       accessScope,
       docId,
       provider: ARXIV_RECOMMENDATION_PROVIDER,
     });
-
-    if (!existingSnapshot) {
-      return null;
-    }
-
+    const savedOffer =
+      existingSnapshot?.selectionToken === normalizeText(offerSelectionToken)
+        ? existingSnapshot
+        : null;
     const selectedPaperIds = buildPaperIdSet(selectedPapers);
     const failedPaperIds = buildPaperIdSet(importResult.failedPapers);
-    const remainingPapers = toArray(existingSnapshot.papers).filter((paper) => {
+    const remainingPapers = toArray(offer?.papers).filter((paper) => {
       const paperId = getPaperId(paper);
 
       return !selectedPaperIds.has(paperId) || failedPaperIds.has(paperId);
     });
 
     if (remainingPapers.length === 0) {
-      recommendationSnapshotStore.delete({
-        accessScope,
-        docId,
-        provider: ARXIV_RECOMMENDATION_PROVIDER,
-      });
+      if (savedOffer) {
+        recommendationSnapshotStore.delete({
+          accessScope,
+          docId,
+          provider: ARXIV_RECOMMENDATION_PROVIDER,
+        });
+      }
+
       return null;
     }
 
-    const requestedMaxResults =
-      existingSnapshot.requestedMaxResults || remainingPapers.length;
-    const updatedSnapshot = recommendationSnapshotStore.upsert({
-      accessScope,
-      snapshot: buildSavedSuggestionSnapshot({
-        existingSnapshot,
-        now,
-        suggestion: {
-          ...existingSnapshot,
-          papers: remainingPapers,
-          requestedMaxResults,
-          selectionToken: selectionTokenService.createSelectionToken({
-            docId,
-            papers: remainingPapers,
-            requestedMaxResults,
-            topic,
-          }),
-        },
-      }),
+    const requestedMaxResults = offer.requestedMaxResults || remainingPapers.length;
+    const selectionToken = selectionTokenService.createSelectionToken({
+      docId,
+      papers: remainingPapers,
+      requestedMaxResults,
+      topic,
     });
 
-    return stripInternalSnapshotFields(updatedSnapshot);
+    if (savedOffer) {
+      recommendationSnapshotStore.upsert({
+        accessScope,
+        snapshot: buildSavedSuggestionSnapshot({
+          existingSnapshot: savedOffer,
+          now,
+          suggestion: {
+            ...savedOffer,
+            papers: remainingPapers,
+            requestedMaxResults,
+            selectionToken,
+          },
+        }),
+      });
+    }
+
+    return {
+      papers: remainingPapers,
+      selectionToken,
+    };
   };
 
   // The token of the saved offer, which a direct import must present.
