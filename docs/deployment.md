@@ -244,7 +244,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 
 - **检索层**：在另一个端口（或另一台机器）再起一个 `retrieval` 进程，然后把它加进调用方的地址列表，例如 `RETRIEVAL_SERVICE_URL=http://127.0.0.1:5002,http://127.0.0.1:5012`，再重启调用方。没有服务发现，副本列表只从环境变量读。
 - **agent 层**：只跑一个。每个 agent 进程启动时都做启动恢复，它分不出存储里"运行中"的 run 是中断了还是另一个 agent 正在跑，会把别的 agent 正在跑的 run 转人工。重叠的滚动重启（新 agent 起来时旧的还在跑）也一样：先停旧的，再起新的。`AGENT_SERVICE_URL` 列了多个地址时启动会打警告。要支持多副本，得先给 run 加归属、租约和心跳，写入时拒绝旧执行者。
-- **api 层**：只跑一个。arXiv 选择 token 的签名密钥只在本进程里，换一个实例（或重启）就验不过；上传认领按进程 PID 判断，多个 api 共享上传目录时会误判；按 IP 限流每个进程各算。
+- **api 层**：只跑一个。保存的 arXiv 推荐（recommendation snapshot）只在本进程内存里，换一个实例（或重启）就没有了，从它直接导入（`POST /documents/:docId/arxiv/import`）也随之被拒（检索后在 task 上确认的导入对照 task 里存的 token，由 agent 层执行，不受影响）；上传认领按进程 PID 判断，多个 api 共享上传目录时会误判；按 IP 限流每个进程各算。
 - **向量库**：拆分部署只用 pgvector。Qdrant 的稀疏词表存在进程内，入库和检索不在同一进程时可能对不上。
 - **模型网关**：同样起多个网关进程，列进 `MODEL_GATEWAY_URL`。多个网关副本要共享并发上限、熔断和配额计数，设 `RAG_SHARED_STATE=redis`；不设时每个网关进程各算各的。
 - **推理后端（embedding、重排）**：在网关上列多个上游，例如 `MODEL_GATEWAY_EMBEDDING_UPSTREAMS=http://gpu-a:11434/v1,http://gpu-b:11434/v1`、`MODEL_GATEWAY_RERANK_UPSTREAMS=http://r1:8081/rerank,http://r2:8081/rerank`。网关选进行中请求最少的健康副本，每个副本有自己的并发上限和熔断；连接被拒或熔断打开时立即换下一个副本。

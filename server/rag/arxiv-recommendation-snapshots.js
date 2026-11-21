@@ -192,6 +192,14 @@ export const createArxivRecommendationSnapshotService = ({
     return stripInternalSnapshotFields(updatedSnapshot);
   };
 
+  // The token of the saved offer, which a direct import must present.
+  const getSelectionToken = ({ accessScope = {}, docId } = {}) =>
+    recommendationSnapshotStore.get({
+      accessScope,
+      docId,
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+    })?.selectionToken ?? null;
+
   const list = ({ accessScope = {} } = {}) => ({
     suggestions: recommendationSnapshotStore
       .list({
@@ -240,6 +248,7 @@ export const createArxivRecommendationSnapshotService = ({
 
   return {
     getForDocument,
+    getSelectionToken,
     list,
     save,
     updateAfterImport,

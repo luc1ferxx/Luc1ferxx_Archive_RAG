@@ -256,12 +256,14 @@ export const createArxivEnrichmentService = ({
   const prepareImportForDocument = ({
     accessScope = {},
     docId,
+    issuedSelectionToken,
     selectedArxivIds,
     selectionToken,
   } = {}) => {
     return prepareArxivImportForDocument({
       accessScope,
       docId,
+      issuedSelectionToken,
       resolveTopicForDocument,
       selectedArxivIds,
       selectionToken,
@@ -401,8 +403,17 @@ export const createArxivEnrichmentService = ({
     };
   };
 
+  // A direct import (POST /documents/:docId/arxiv/import, the
+  // recommendation.import_selected Capability) confirms the saved suggestion,
+  // which this process holds.
   const importForDocument = async (options = {}) => {
-    const preparedImport = prepareImportForDocument(options);
+    const preparedImport = prepareImportForDocument({
+      ...options,
+      issuedSelectionToken: recommendationSnapshotService.getSelectionToken({
+        accessScope: options.accessScope,
+        docId: options.docId,
+      }),
+    });
 
     const { task, ...result } = await executePreparedImport({
       ...preparedImport,
@@ -481,9 +492,11 @@ export const createArxivEnrichmentService = ({
         topic,
       });
 
+      // The task's end state carries the offer of the papers left, if any
+      // (recordImportCompleted), in place of this job's payload.
       return {
-        ...(result.task ?? {}),
         payload: null,
+        ...(result.task ?? {}),
       };
     } catch (error) {
       if (isCooperativeAbortError(error, signal)) {
@@ -494,13 +507,16 @@ export const createArxivEnrichmentService = ({
         throw error;
       }
 
+      // A failed import can be confirmed again from the offer it came from.
+      const offer = payload.selectionToken ? { selectionToken: payload.selectionToken } : null;
+
       await patchTask?.({
-        payload: null,
+        payload: offer,
       });
 
       return error.task ?? {
         error: error instanceof Error ? error.message : String(error),
-        payload: null,
+        payload: offer,
         status: "failed",
       };
     }
@@ -519,9 +535,14 @@ export const createArxivEnrichmentService = ({
       throw error;
     }
 
+    // `task` is the stored task (the job orchestrator reads it with its
+    // internal payload), which holds the offer this confirms: the token is
+    // checked against it on whichever tier runs this.
+    const issuedSelectionToken = task.payload?.selectionToken;
     const preparedImport = prepareImportForDocument({
       accessScope,
       docId: payload.docId ?? task.subject?.id,
+      issuedSelectionToken,
       selectedArxivIds: payload.selectedArxivIds,
       selectionToken: payload.selectionToken,
     });
@@ -535,6 +556,7 @@ export const createArxivEnrichmentService = ({
           docId: preparedImport.docId,
           queryPolicy: preparedImport.queryPolicy,
           selectedPapers: preparedImport.relevantSelectedPapers,
+          selectionToken: issuedSelectionToken,
           topic: preparedImport.topic,
         },
         provider: ARXIV_RECOMMENDATION_PROVIDER,

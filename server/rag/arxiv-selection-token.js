@@ -1,4 +1,3 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_SELECTION_TTL_MS = 15 * 60 * 1000;
@@ -12,9 +11,6 @@ const encodeJson = (value) =>
 
 const decodeJson = (value) =>
   JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-
-const signPayload = ({ payloadPart, secret }) =>
-  createHmac("sha256", secret).update(payloadPart).digest("base64url");
 
 const assertTokenError = (message, status = 400) => {
   const error = new Error(message);
@@ -35,9 +31,16 @@ export const normalizeArxivSelectionPaper = (paper = {}) => ({
   categories: toArray(paper.categories).map(normalizeText).filter(Boolean),
 });
 
+// A selection token is the offer one search made for one document: the
+// papers as arXiv returned them, and when the offer expires. It is not
+// signed. The server stores the token with the offer (on the document's
+// recommendation task and in its saved suggestion), and a confirmation is
+// checked against that stored token, never against what the client sends
+// alone: a client cannot name a paper URL the server did not get from arXiv,
+// and any process that reads the stored task can check a confirmation (a
+// split deployment searches on the api tier and confirms on the agent tier).
 export const createArxivSelectionTokenService = ({
   now = () => Date.now(),
-  secret = randomUUID(),
   ttlMs = DEFAULT_SELECTION_TTL_MS,
 } = {}) => {
   const createSelectionToken = ({
@@ -58,39 +61,20 @@ export const createArxivSelectionTokenService = ({
       papers: normalizedPapers,
       expiresAt: Number(now()) + ttlMs,
     };
-    const payloadPart = encodeJson(payload);
-    const signaturePart = signPayload({
-      payloadPart,
-      secret,
-    });
 
-    return `${TOKEN_VERSION}.${payloadPart}.${signaturePart}`;
+    return `${TOKEN_VERSION}.${encodeJson(payload)}`;
   };
 
-  const verifySelectionToken = (token) => {
+  // `issuedToken`: the token stored with the offer being confirmed.
+  const verifySelectionToken = (token, issuedToken) => {
     const normalizedToken = normalizeText(token);
-    const [versionPart, payloadPart, signaturePart, ...extraParts] =
-      normalizedToken.split(".");
+    const [versionPart, payloadPart, ...extraParts] = normalizedToken.split(".");
 
     if (
+      normalizedToken !== normalizeText(issuedToken) ||
       versionPart !== TOKEN_VERSION ||
       !payloadPart ||
-      !signaturePart ||
       extraParts.length > 0
-    ) {
-      assertTokenError("Invalid arXiv selection token.");
-    }
-
-    const expectedSignature = signPayload({
-      payloadPart,
-      secret,
-    });
-    const receivedSignatureBuffer = Buffer.from(signaturePart, "base64url");
-    const expectedSignatureBuffer = Buffer.from(expectedSignature, "base64url");
-
-    if (
-      receivedSignatureBuffer.length !== expectedSignatureBuffer.length ||
-      !timingSafeEqual(receivedSignatureBuffer, expectedSignatureBuffer)
     ) {
       assertTokenError("Invalid arXiv selection token.");
     }

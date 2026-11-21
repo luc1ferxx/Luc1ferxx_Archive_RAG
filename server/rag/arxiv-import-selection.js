@@ -49,9 +49,13 @@ export const getSelectedArxivPapers = ({ papers = [], selectedArxivIds }) => {
   return normalizedIds.map((arxivId) => papersById.get(arxivId));
 };
 
+// `issuedSelectionToken` is the token stored with the offer being confirmed
+// (arxiv-selection-token.js): the task's on a task confirmation, the saved
+// suggestion's on a direct import.
 export const prepareArxivImportForDocument = ({
   accessScope = {},
   docId,
+  issuedSelectionToken,
   resolveTopicForDocument,
   selectedArxivIds,
   selectionToken,
@@ -76,7 +80,10 @@ export const prepareArxivImportForDocument = ({
     throw error;
   }
 
-  const selection = selectionTokenService.verifySelectionToken(selectionToken);
+  const selection = selectionTokenService.verifySelectionToken(
+    selectionToken,
+    issuedSelectionToken
+  );
 
   if (selection.docId !== docId) {
     const error = new Error("arXiv selection token does not match this document.");

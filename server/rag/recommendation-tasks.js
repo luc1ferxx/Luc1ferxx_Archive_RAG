@@ -135,6 +135,11 @@ export const createRecommendationTaskService = ({
             : TASK_STATUSES.completed,
         }),
         label: `${providerLabel} recommendations`,
+        // The offer a confirmation of this task is checked against
+        // (arxiv-selection-token.js); internal, never in a public task.
+        payload: hasImportableRecommendations
+          ? { selectionToken: suggestion.selectionToken }
+          : null,
         requiredUserAction: hasImportableRecommendations ? "confirm_import" : "",
         result: {
           paperIds: papers.map((paper) => normalizeRecommendationTaskText(paper.arxivId ?? paper.id)),
@@ -379,6 +384,11 @@ export const createRecommendationTaskService = ({
           status === TASK_STATUSES.waitingForUser
             ? `${providerLabel} recommendations`
             : `${providerLabel} import`,
+        // The papers left (not selected, or failed) are a new offer to confirm.
+        payload:
+          remainingCount > 0 && remainingSuggestion?.selectionToken
+            ? { selectionToken: remainingSuggestion.selectionToken }
+            : null,
         requiredUserAction:
           status === TASK_STATUSES.waitingForUser ? "confirm_import" : "",
         result: {

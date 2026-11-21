@@ -211,7 +211,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
 | 普通问答 | `src/components/ChatComponent.jsx` 经 `streamChatAnswer` 调 `/chat/stream`（进度和校验过的草稿实时推送，最终结果与 `/chat` 相同） | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
-| arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
+| arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和候选 token，task service 记录等待确认并存下这份候选 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
 | Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 判断能否自动续跑：只续跑图，guarded graph 需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills`；其余中断的 run 转人工。replay safety matrix 决定哪类失败 step 能由人重试，并给出原因码 | 符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时转人工；`agent-run-step-executor.js` 只执行审批后的 capability step 和人工重试的失败 step，不恢复中断的 step |
 | 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
@@ -230,7 +230,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
 | `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |
 | `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
-| `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile keyphrases 生成 arXiv topic、过滤私密实体和内部术语、对候选做 relevance check、返回签名候选 token，保存 recommendation snapshot，并提供 arXiv recommendation import runner。 |
+| `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile keyphrases 生成 arXiv topic、过滤私密实体和内部术语、对候选做 relevance check、返回候选 token，保存 recommendation snapshot，并提供 arXiv recommendation import runner。 |
 | `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，导入前按 arXiv ID / PDF URL / title hash 去重，写入 `profile.source` provenance，通过现有文档 ingestion 写入索引，并通过可选 progress callback 汇报 per-paper 状态。 |
 | `server/rag/arxiv-identity.js` | 规范化 arXiv ID、PDF URL 和 title hash，集中提供导入去重所需的身份匹配规则。 |
 | `server/rag/external-query-policy.js` | 外部工具调用前的 query policy，统一清理 candidate query 中的私密实体、内部项目码和泛化敏感词；返回可记录的 sanitized query、redacted removed terms、risk flags 和 allow/deny 状态。 |
@@ -260,7 +260,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/llmops-metrics.js` | 定义 LLMOps metric event contract，统一记录 completion、embedding 和 cross-encoder rerank 的 operation、stage、status、latency、公开 `modelRoute`、输入/输出规模、token usage、估算成本、latency SLO 和 policy signals，不记录 prompt 原文或 secret。 |
 | `server/rag/llmops-policy.js` | 集中处理 LLMOps annotation、alert 和 per-event budget verdict；`enforcementMode: "block"` 可在模型调用前按已知 usage/cost estimate 拦截，避免把预算判断散进各个 provider 调用点。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
-| `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
+| `server/rag/arxiv-selection-token.js` | 把文档级 arXiv 推荐结果编码成 token（不签名），确认时要求它和服务端存下的那份（task 的内部 payload，或本进程的 snapshot）一致，确保确认导入的是服务端从 arXiv 拿到、用户看到的候选；任何读得到 task store 的进程都能校验，split 部署的 api 层检索、agent 层确认也成立。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
 | `server/rag/agent-retrieval-queries.js` | 检索查询模板（按意图和阶段）。会话记忆改写了问题时，`chat()` 用同一套模板按改写后的问题重建主计划的查询，意图和 topK 不变；follow-up 计划不重建。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |

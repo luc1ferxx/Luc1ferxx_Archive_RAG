@@ -29,10 +29,10 @@
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 流式返回文档原件，支持 range request：PDF 内联显示，Word、PowerPoint、Excel 按附件下载，Content-Type 是文档自己的类型。 |
-| `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的签名 token，并保存可稍后查看的 recommendation snapshot，同时记录 `external_recommendation` task。清理后的主题还剩词时，把它（最多 4 个词）发给 `https://export.arxiv.org/api/query`；Web 界面只在用户点击文档旁的“查找相关 arXiv 论文”（“Find related arXiv papers”）时调用它，上传不会调用，返回的候选默认都不勾选。该文档的 arXiv 导入还在排队或运行时返回 409，不查询 arXiv，也不改 task。查询返回时再查一次：这条 task 在查询期间变了（别处确认了导入，不论导入是否已经结束，或另一次查询先写了结果）返回 409，文档在查询期间被删除或移出调用方范围返回 404，两种情况都不写 task、不保存 snapshot；task 是否变了和写入在 task store 里是同一步（按查询开始时读到的 status 和 updatedAt 条件写入）。 |
+| `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的 token，并保存可稍后查看的 recommendation snapshot，同时记录 `external_recommendation` task。token 不签名：服务端把它存进 snapshot 和这条 task（task 里是内部 payload，不对外返回），确认时客户端必须交回同一个 token，服务端只下载存下的候选里的论文。清理后的主题还剩词时，把它（最多 4 个词）发给 `https://export.arxiv.org/api/query`；Web 界面只在用户点击文档旁的“查找相关 arXiv 论文”（“Find related arXiv papers”）时调用它，上传不会调用，返回的候选默认都不勾选。该文档的 arXiv 导入还在排队或运行时返回 409，不查询 arXiv，也不改 task。查询返回时再查一次：这条 task 在查询期间变了（别处确认了导入，不论导入是否已经结束，或另一次查询先写了结果）返回 409，文档在查询期间被删除或移出调用方范围返回 404，两种情况都不写 task、不保存 snapshot；task 是否变了和写入在 task store 里是同一步（按查询开始时读到的 status 和 updatedAt 条件写入）。 |
 | `GET` | `/documents/arxiv/suggestions` | 列出当前访问范围内保存的 arXiv recommendation snapshots。 |
 | `GET` | `/documents/:docId/arxiv/suggestions/saved` | 读取单份文档当前保存的 arXiv recommendation snapshot；没有保存项时返回空候选和原因。 |
-| `POST` | `/documents/:docId/arxiv/import` | 兼容旧同步确认导入；新前端流程优先通过 `/tasks/:taskId/actions/confirm` 触发异步 runner。两条路径都会复检所选候选相关性，并按 arXiv ID / PDF URL / title hash 跳过已索引论文。 |
+| `POST` | `/documents/:docId/arxiv/import` | 兼容旧同步确认导入；新前端流程优先通过 `/tasks/:taskId/actions/confirm` 触发异步 runner。两条路径都会复检所选候选相关性，并按 arXiv ID / PDF URL / title hash 跳过已索引论文。这条路由把 token 和本进程保存的 snapshot 对照，task 确认和 task 里存的 token 对照（split 部署里由 agent 层执行，它读同一个 task store）；更新的查询换掉了存下的候选后，旧 token 两条路径都不再接受。 |
 | `POST` | `/upload/init` | 初始化分片上传会话。 |
 | `GET` | `/upload/status` | 查询分片上传进度。 |
 | `POST` | `/upload/chunk` | 上传单个文件分片。 |

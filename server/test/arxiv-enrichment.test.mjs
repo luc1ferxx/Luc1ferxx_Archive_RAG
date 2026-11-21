@@ -655,6 +655,60 @@ test("arxiv enrichment imports only selected recommended papers", async () => {
   assert.equal(tasks[0].counts.imported, 2);
   assert.equal(tasks[0].counts.remaining, 1);
   assert.deepEqual(tasks[0].result.remainingPaperIds, ["2401.00002v1"]);
+  // The paper left is a new offer, on the task as in the saved suggestion.
+  assert.equal(
+    (await taskService.getInternalTask({ taskId: tasks[0].id })).payload.selectionToken,
+    savedResult.suggestions[0].selectionToken
+  );
+});
+
+test("an import that failed can be confirmed again from the offer it came from", async () => {
+  const taskService = createTaskService({ taskStore: createInMemoryTaskStore() });
+  let failImport = true;
+  const service = createArxivEnrichmentService({
+    arxivImportService: {
+      importPapers: async ({ papers }) => {
+        if (failImport) {
+          throw new Error("disk full");
+        }
+
+        return { failedPapers: [], importedCount: papers.length, importedPapers: [], skippedPapers: [] };
+      },
+    },
+    arxivService: { search: async () => RACE_PAPERS },
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: { tags: ["retrieval", "augmented", "generation"] },
+      }),
+    },
+    recommendationTaskService: createRecommendationTaskService({ taskService }),
+  });
+  const orchestrator = createJobOrchestrator({
+    runners: { [service.importJobRunner.id]: service.importJobRunner },
+    taskService,
+  });
+  const suggestion = await service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
+  const confirm = () =>
+    orchestrator.resumeTask({
+      action: TASK_ACTIONS.confirm,
+      payload: { selectedArxivIds: ["2401.00001v1"], selectionToken: suggestion.selectionToken },
+      runImmediately: false,
+      taskId: RACE_TASK_ID,
+    });
+
+  await confirm();
+  assert.equal((await orchestrator.runTask({ taskId: RACE_TASK_ID })).status, TASK_STATUSES.failed);
+
+  failImport = false;
+  assert.equal((await confirm()).status, TASK_STATUSES.queued);
+
+  // Imported; the other paper of the offer is left to confirm.
+  const retried = await orchestrator.runTask({ taskId: RACE_TASK_ID });
+
+  assert.equal(retried.counts.imported, 1);
+  assert.equal(retried.status, TASK_STATUSES.waitingForUser);
 });
 
 test("arxiv enrichment runner queues confirmed imports and records per-paper progress", async () => {
@@ -735,13 +789,14 @@ test("arxiv enrichment runner queues confirmed imports and records per-paper pro
   assert.equal(suggestion.task.status, TASK_STATUSES.waitingForUser);
   assert.equal(suggestion.task.payload, undefined);
 
+  // The job orchestrator hands the runner the stored task, offer included.
   const queuedTask = await service.importJobRunner.resume({
     action: "confirm",
     payload: {
       selectedArxivIds: ["2401.00001v1"],
       selectionToken: suggestion.selectionToken,
     },
-    task: suggestion.task,
+    task: await taskService.getInternalTask({ taskId: suggestion.task.id }),
   });
 
   assert.equal(queuedTask.status, TASK_STATUSES.queued);
@@ -814,7 +869,7 @@ test("arxiv enrichment refuses a new search while the document's import is queue
       selectedArxivIds: ["2401.00001v1"],
       selectionToken: suggestion.selectionToken,
     },
-    task: suggestion.task,
+    task: await taskService.getInternalTask({ taskId: suggestion.task.id }),
   });
 
   for (const status of [TASK_STATUSES.queued, TASK_STATUSES.running]) {
@@ -1442,3 +1497,83 @@ for (const [storeName, createTaskStore] of RACE_TASK_STORES) {
     assert.equal(race.getSnapshotToken(), null);
   });
 }
+
+// The api and agent tiers of a split deployment: two processes, each with
+// its own services and saved suggestions, sharing only the task store (the
+// PostgreSQL both use). The search runs on one, the task's confirmation on
+// the other.
+test("a suggestion searched on one tier is confirmed and imported on another that shares only the task store", async () => {
+  const taskStore = createInMemoryTaskStore();
+  const downloads = [];
+  const createTier = () => {
+    const taskService = createTaskService({ taskStore });
+    const service = createArxivEnrichmentService({
+      arxivImportService: {
+        importPapers: async ({ papers }) => {
+          downloads.push(...papers.map((paper) => paper.pdfUrl));
+
+          return {
+            failedCount: 0,
+            failedPapers: [],
+            foundCount: papers.length,
+            importedCount: papers.length,
+            importedPapers: papers.map((paper) => ({ arxivId: paper.arxivId, docId: "doc-arxiv", title: paper.title })),
+            requestedMaxResults: papers.length,
+            skippedCount: 0,
+            skippedPapers: [],
+            topic: "retrieval augmented generation",
+          };
+        },
+      },
+      arxivService: { search: async () => RACE_PAPERS },
+      ragService: {
+        getDocument: () => ({
+          docId: "doc-1",
+          fileName: "private-notes.pdf",
+          profile: { tags: ["retrieval", "augmented", "generation"] },
+        }),
+      },
+      recommendationTaskService: createRecommendationTaskService({ taskService }),
+    });
+
+    return {
+      orchestrator: createJobOrchestrator({
+        runners: { [service.importJobRunner.id]: service.importJobRunner },
+        taskService,
+      }),
+      service,
+      taskService,
+    };
+  };
+  const api = createTier();
+  const agent = createTier();
+  const suggestion = await api.service.suggestForDocument({ docId: "doc-1", maxResults: 3 });
+  const confirm = (selectionToken) =>
+    agent.orchestrator.resumeTask({
+      action: TASK_ACTIONS.confirm,
+      payload: { docId: "doc-1", selectedArxivIds: ["2401.00001v1"], selectionToken },
+      runImmediately: false,
+      taskId: RACE_TASK_ID,
+    });
+
+  assert.equal(suggestion.task.payload, undefined, "the stored offer stays internal");
+
+  // The same offer naming a paper URL the server never got from arXiv.
+  const [version, payloadPart] = suggestion.selectionToken.split(".");
+  const offer = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
+
+  offer.papers[0].pdfUrl = "http://169.254.169.254/latest/meta-data";
+  await assert.rejects(
+    confirm(`${version}.${Buffer.from(JSON.stringify(offer)).toString("base64url")}`),
+    { message: "Invalid arXiv selection token.", status: 400 }
+  );
+
+  const queued = await confirm(suggestion.selectionToken);
+
+  assert.equal(queued.status, TASK_STATUSES.queued);
+
+  const finished = await agent.orchestrator.runTask({ taskId: RACE_TASK_ID });
+
+  assert.equal(finished.status, TASK_STATUSES.completed);
+  assert.deepEqual(downloads, ["https://arxiv.org/pdf/2401.00001v1"]);
+});
