@@ -230,6 +230,78 @@ export const summarizeAgentChecks = (rows = []) => {
   };
 };
 
+// What a row keeps of one planner's decision (the planner objects of
+// agent-intent-validator.js, agent-execution-plan.js and
+// agent-dag-planner-adapter.js); null when the planner did not run.
+const describePlannerDecision = (planner) =>
+  planner && planner.status !== "not_run"
+    ? { fallback: planner.fallback === true, fallbackReason: planner.fallbackReason ?? null, status: planner.status ?? null }
+    : null;
+
+/**
+ * Whether each planner of an agent run fell back to the rules, and why: the
+ * intent and execution planners as the body's agentObservability records
+ * them, the custom-Skill graph planner (dag) and its replans as the run's last
+ * skill_graph_planned event does (`graphEvents`, the events' payloads; the
+ * body keeps neither). A planner that did not run is null: no execution plan
+ * after a clarification during preparation, no graph when the plan ran no
+ * custom Skill. `replans` is each replan's decision and reason code, empty
+ * without a replanner.
+ */
+export const describeAgentPlanners = (body = {}, graphEvents = []) => {
+  const graph = graphEvents.at(-1) ?? null;
+
+  return {
+    dag: describePlannerDecision(graph?.planner),
+    execution: describePlannerDecision(body?.agentObservability?.executionPlanner),
+    intent: describePlannerDecision(body?.agentObservability?.intentPlanner),
+    replans: graph ? (graph.replans ?? []).map(({ decision, reasonCode }) => ({ decision, reasonCode: reasonCode ?? null })) : null,
+  };
+};
+
+// Reasons with the rows they occur in, most frequent first.
+const countReasons = (pairs) =>
+  tally(pairs.map(([reason, rowId]) => [reason ?? "none recorded", rowId])).map(({ key, rows }) => ({ reason: key, rows }));
+
+/**
+ * Over the rows carrying describeAgentPlanners, per planner: the rows it ran
+ * in, how many used its own plan (selected) and how many fell back to the
+ * rules (a graph rejected whole counts as fallen back: nothing ran in its
+ * place), the fallback rate (null when it never ran) and the fallback reasons;
+ * then the rows that considered a replan, the rows that applied one and the
+ * reason codes of the replans not applied.
+ */
+export const summarizeAgentPlanners = (rows = []) => {
+  const planned = rows.filter((row) => row.planners);
+  const summarize = (name) => {
+    const decisions = planned.flatMap((row) => (row.planners[name] ? [[row.planners[name], row.id]] : []));
+    const fallbacks = decisions.filter(([decision]) => decision.fallback);
+
+    return {
+      fallback: fallbacks.length,
+      fallbackRate: decisions.length === 0 ? null : Number((fallbacks.length / decisions.length).toFixed(4)),
+      fallbackReasons: countReasons(fallbacks.map(([decision, rowId]) => [decision.fallbackReason, rowId])),
+      ran: decisions.length,
+      selected: decisions.length - fallbacks.length,
+    };
+  };
+  const replans = planned.flatMap((row) => (row.planners.replans ?? []).map((replan) => [replan, row.id]));
+  const applied = replans.filter(([replan]) => replan.decision === "applied");
+
+  return {
+    dag: summarize("dag"),
+    execution: summarize("execution"),
+    intent: summarize("intent"),
+    replans: {
+      applied: new Set(applied.map(([, rowId]) => rowId)).size,
+      considered: new Set(replans.map(([, rowId]) => rowId)).size,
+      notApplied: countReasons(
+        replans.filter(([replan]) => replan.decision !== "applied").map(([replan, rowId]) => [replan.reasonCode, rowId])
+      ),
+    },
+  };
+};
+
 /** Counts over rows that carry classifyAgentAnswer and describeAgentFollowUp fields. */
 export const summarizeAgentOutcomes = (rows = []) => {
   const agentRows = rows.filter((row) => typeof row.answered === "boolean");

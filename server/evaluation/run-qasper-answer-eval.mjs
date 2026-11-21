@@ -17,7 +17,11 @@
 // with the real embedding model, and each question is asked about its own
 // paper through one of two surfaces:
 //   rag    chat() from chat.js, the document RAG answer MCP archive_ask returns;
-//   agent  runAgentRag with the deterministic planners, as /chat runs it.
+//   agent  runAgentRag with the four planners /chat builds (app-services.js):
+//          AGENT_PLANNER_ROLLOUT unset or llm plans with the model, falling
+//          back to the rules, and deterministic with the rules alone. Reports
+//          without config.plannerRollout ran the deterministic planners
+//          whatever AGENT_PLANNER_ROLLOUT said.
 //
 // Token F1 rewards short answers: an answer that restates the question and
 // cites its source scores lower than the bare span. Compare runs of this
@@ -35,6 +39,12 @@
 // compared it (describeAgentChecks in agent-answer-outcome.js). The .md report
 // counts the checks by judge status, those claims by failure field and the
 // failed checks by reason.
+//
+// The agent surface also records its planners: config.plannerRollout (null on
+// the rag surface, which plans nothing) and, per row, planners: whether the
+// intent, execution and custom-Skill graph (dag) planners fell back to the
+// rules and why, and the graph's replans (describeAgentPlanners). The .md
+// report gives each planner's fallback rate and the fallback reasons.
 //
 // Two runs over the same sample can be compared question by question:
 // --compare <other report.json> adds a paired bootstrap block (this run minus
@@ -75,9 +85,11 @@ import {
   classifyAgentAnswer,
   describeAgentChecks,
   describeAgentFollowUp,
+  describeAgentPlanners,
   isAgentAnswerTruncated,
   summarizeAgentChecks,
   summarizeAgentOutcomes,
+  summarizeAgentPlanners,
 } from "./agent-answer-outcome.js";
 import {
   compareQasperAnswerReports,
@@ -223,8 +235,9 @@ export const describeRagSurfaceAnswer = (result) => {
 // The agent surface's answer as this eval scores it, from runAgentRag's body.
 // ragReplies are the run's document RAG replies in call order, each
 // { question, value }; the row's checks pair them with the trace's
-// self-checks (describeAgentChecks).
-export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
+// self-checks (describeAgentChecks). graphEvents are the payloads of the run's
+// skill_graph_planned events, read for its planners (describeAgentPlanners).
+export const describeAgentSurfaceAnswer = (body = {}, ragReplies = [], graphEvents = []) => {
   // A clarification and the grounded abstention sentence are both
   // abstentions (agent-answer-outcome.js).
   const outcome = classifyAgentAnswer(body);
@@ -235,7 +248,12 @@ export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
   return {
     abstained: !outcome.answered,
     abstainSource: outcome.abstainSource,
-    agent: { ...outcome, ...describeAgentFollowUp(body), checks: describeAgentChecks(body, ragReplies) },
+    agent: {
+      ...outcome,
+      ...describeAgentFollowUp(body),
+      checks: describeAgentChecks(body, ragReplies),
+      planners: describeAgentPlanners(body, graphEvents),
+    },
     answerTruncated: isAgentAnswerTruncated(body),
     // The agent body carries its cited sources as ragSources; it has no
     // citations field, so reading that gave every agent row no pages.
@@ -246,6 +264,66 @@ export const describeAgentSurfaceAnswer = (body = {}, ragReplies = []) => {
     contextPages: outcome.answered ? sources.map((citation) => Number(citation.pageNumber)) : [],
     text: body.agentAnswer,
   };
+};
+
+/**
+ * The four planners /chat runs with, built as createAppServices builds them
+ * for buildChatResponse (app-services.js): AGENT_PLANNER_ROLLOUT picks the
+ * model (llm, the default) or the rules (deterministic, which has no
+ * replanner); a removed value or a typo throws. Imported here, not at the top:
+ * app-services.js loads chat.js, whose storage reads RAG_DATA_DIRECTORY at
+ * first import.
+ */
+export const createAgentSurfacePlanners = async () => {
+  const appServices = await import("../app-services.js");
+  const dagPlannerAdapter = appServices.createDagPlannerAdapter();
+
+  return {
+    dagPlannerAdapter,
+    executionPlannerAdapter: appServices.createExecutionPlannerAdapter(),
+    intentPlannerAdapter: appServices.createIntentPlannerAdapter(),
+    replanAdapter: appServices.createReplanAdapter(dagPlannerAdapter),
+  };
+};
+
+/** One question on the agent surface: runAgentRag with `planners`, scored by describeAgentSurfaceAnswer. */
+export const askAgentSurface = async ({ accessScope, docId, planners, question, ragService, runAgentRag, sessionId }) => {
+  // Every reply the document RAG gave this run, in call order: the
+  // self-check read its text, citations and retrieved chunks, which
+  // neither the trace nor the body keeps.
+  const ragReplies = [];
+  // The graph planner's decision and the replans travel only in the run's
+  // skill_graph_planned event. The run service records events alone: with no
+  // createRun the run has no id, so nothing else is written.
+  const graphEvents = [];
+  const response = await runAgentRag({
+    ...planners,
+    accessScope,
+    agentRunService: {
+      appendRunEvent: ({ payload, type }) => {
+        if (type === "skill_graph_planned") {
+          graphEvents.push(payload);
+        }
+      },
+    },
+    docIds: [docId],
+    question,
+    ragService: {
+      ...ragService,
+      chat: async (...args) => {
+        const reply = { question: args[1], value: null };
+
+        ragReplies.push(reply);
+        reply.value = await ragService.chat(...args);
+        return reply.value;
+      },
+    },
+    sessionId,
+    userId: "",
+    webChatService: async () => ({ text: "" }),
+  });
+
+  return describeAgentSurfaceAnswer(response.body ?? {}, ragReplies, graphEvents);
 };
 
 /**
@@ -296,6 +374,31 @@ const formatAgentChecks = (agentChecks) => [
   "",
 ];
 
+const PLANNER_NAMES = ["intent", "execution", "dag"];
+
+// The agent's planners (summarizeAgentPlanners): how often each fell back to
+// the rules, and why. A reason is planner text, so a pipe in it is escaped.
+export const formatAgentPlanners = (planners, plannerRollout) => [
+  `Agent planners (AGENT_PLANNER_ROLLOUT ${plannerRollout}; a planner that fell back planned with the rules, and a custom-Skill graph rejected whole counts as fallen back; dag counts only the rows that planned a graph). Replans considered in ${planners.replans.considered} rows, applied in ${planners.replans.applied}; not applied by reason: ${
+    planners.replans.notApplied.map(({ reason, rows }) => `${reason} ${rows}`).join(", ") || "none"
+  }.`,
+  "",
+  "| Planner | Ran | Selected | Fell back | Fallback rate |",
+  "|---|---|---|---|---|",
+  ...PLANNER_NAMES.map((name) => {
+    const { fallback, fallbackRate, ran, selected } = planners[name];
+
+    return `| ${name} | ${ran} | ${selected} | ${fallback} | ${fallbackRate ?? "–"} |`;
+  }),
+  "",
+  "| Planner | Fallback reason | Rows |",
+  "|---|---|---|",
+  ...PLANNER_NAMES.flatMap((name) =>
+    planners[name].fallbackReasons.map(({ reason, rows }) => `| ${name} | ${reason.replaceAll("|", "\\|")} | ${rows} |`)
+  ),
+  "",
+];
+
 const formatMarkdown = (report) => {
   const summary = report.summary;
 
@@ -333,6 +436,7 @@ const formatMarkdown = (report) => {
     "|---|---|---|",
     ...Object.entries(summary.answerF1ByType).map(([type, entry]) => `| ${type} | ${entry.cases} | ${entry.f1} |`),
     "",
+    ...(summary.agentPlanners ? formatAgentPlanners(summary.agentPlanners, report.config.plannerRollout) : []),
     ...(summary.agentChecks ? formatAgentChecks(summary.agentChecks) : []),
     ...(report.comparison ? formatComparisonMarkdown(report.comparison) : []),
   ].join("\n");
@@ -442,7 +546,6 @@ const main = async () => {
   useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, {
-    AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
     RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
     RAG_LONG_MEMORY_ENABLED: "false",
   });
@@ -460,6 +563,10 @@ const main = async () => {
     ...describeAnswerOutputLimit(ragConfig, { routedToGateway: isModelCallRoutedToGateway() }),
     answerTemperature: ragConfig.getAnswerTemperature(),
   };
+  // The planners /chat runs with, read before anything is ingested too: a
+  // removed or mistyped AGENT_PLANNER_ROLLOUT stops the run here.
+  const plannerRollout = surface === "agent" ? ragConfig.getAgentPlannerRollout() : null;
+  const planners = plannerRollout ? await createAgentSurfacePlanners() : null;
   const rows = [];
 
   try {
@@ -512,30 +619,15 @@ const main = async () => {
 
         answer = describeRagSurfaceAnswer(result);
       } else {
-        // Every reply the document RAG gave this run, in call order: the
-        // self-check read its text, citations and retrieved chunks, which
-        // neither the trace nor the body keeps.
-        const ragReplies = [];
-        const response = await runAgentRag({
+        answer = await askAgentSurface({
           accessScope,
-          docIds: [docId],
+          docId,
+          planners,
           question: testCase.question,
-          ragService: {
-            ...ragService,
-            chat: async (...args) => {
-              const reply = { question: args[1], value: null };
-
-              ragReplies.push(reply);
-              reply.value = await ragService.chat(...args);
-              return reply.value;
-            },
-          },
+          ragService,
+          runAgentRag,
           sessionId: `qasper-agent-${testCase.id}`,
-          userId: "",
-          webChatService: async () => ({ text: "" }),
         });
-
-        answer = describeAgentSurfaceAnswer(response.body ?? {}, ragReplies);
       }
 
       const prediction = toQasperPrediction(answer);
@@ -601,6 +693,9 @@ const main = async () => {
     embeddingModel: getEmbeddingModel(),
     ...(excluded ? { excluded } : {}),
     git,
+    // AGENT_PLANNER_ROLLOUT as the agent surface's planners were built for it
+    // (llm or deterministic); null on the rag surface, which plans nothing.
+    plannerRollout,
     promptTemplates: await describePromptTemplates(),
     // RAG_EMBEDDING_QUERY_ADAPTER reorders the QA route's dense candidates.
     queryAdapter: getQueryAdapterReportFingerprint(),
@@ -624,7 +719,13 @@ const main = async () => {
     rows,
     summary: {
       ...summarizeQasperRuns(rows),
-      ...(surface === "agent" ? { agentChecks: summarizeAgentChecks(rows), agentOutcomes: summarizeAgentOutcomes(rows) } : {}),
+      ...(surface === "agent"
+        ? {
+            agentChecks: summarizeAgentChecks(rows),
+            agentOutcomes: summarizeAgentOutcomes(rows),
+            agentPlanners: summarizeAgentPlanners(rows),
+          }
+        : {}),
       answerTruncations: summarizeAnswerTruncations(rows),
     },
   };
