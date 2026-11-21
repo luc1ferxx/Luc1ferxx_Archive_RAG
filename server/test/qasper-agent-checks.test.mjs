@@ -224,7 +224,7 @@ test("each check records the claim judge's summary, and the summary counts check
     upgradedClaimCount: 0,
     ...fields,
   });
-  const failed = judge("failed", { error: "no verdict could be parsed from the reply: Sure!" });
+  const failed = judge("failed", { error: "no_verdict" });
   const partial = judge("judged", { missingVerdictCount: 1, upgradedClaimCount: 1 });
   const selfCheck = (claimSupport) => ({
     detail: { claimSupport: { claims: [], ...claimSupport }, passed: false, reasons: [] },

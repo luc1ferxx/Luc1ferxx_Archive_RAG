@@ -133,8 +133,9 @@ test("a claim with an unsound citation stays rejected whatever the judge would s
   assert.equal(judged.claims[0].supported, false);
 });
 
-test("the judge can only confirm a rejection, and a failure keeps the lexical verdict", async (t) => {
+test("the judge can only confirm a rejection, and a failure keeps the lexical verdict under a code", async (t) => {
   withJudge(t);
+  const warn = t.mock.method(console, "warn", () => {});
   const rejected = await judgeClaimSupport({
     citations: [CITATION],
     claimSupport: lexical([PARAPHRASE]),
@@ -148,22 +149,33 @@ test("the judge can only confirm a rejection, and a failure keeps the lexical ve
     citations: [CITATION],
     claimSupport: lexical([PARAPHRASE]),
     complete: async () => {
-      throw new Error("model down");
+      throw Object.assign(new Error("model down: the upstream quoted Vendor A's twelve months"), {
+        code: "UPSTREAM_DOWN",
+      });
     },
   });
   assert.equal(failed.claims[0].supported, false);
   assert.equal(failed.judge.status, "failed");
+  assert.equal(failed.judge.error, "call_failed");
 
   resetClaimJudgeCache();
   const unparseable = await judgeClaimSupport({
     citations: [CITATION],
     claimSupport: lexical([PARAPHRASE]),
-    complete: async () => ({ text: "Sure, looks supported to me! ".repeat(20) }),
+    complete: async () => ({ text: "Sure, Vendor A's twelve months look supported to me! ".repeat(20) }),
   });
   assert.equal(unparseable.claims[0].supported, false, "no verdict is not a yes");
   assert.equal(unparseable.judge.status, "failed", "a reply without a verdict is a failed call");
-  assert.match(unparseable.judge.error, /^no verdict could be parsed from the reply: Sure, looks supported to me!/);
-  assert.ok(unparseable.judge.error.length <= 200);
+  assert.equal(unparseable.judge.error, "no_verdict");
+
+  // /chat returns the summary in its trace and the log is the operator's, so
+  // neither may hold the reply (which can quote the documents) or the upstream message.
+  const logged = warn.mock.calls.map((call) => call.arguments.join(" ")).join("\n");
+  assert.match(logged, /\[claim-judge\] The judge failed \(Error UPSTREAM_DOWN\)/);
+  assert.match(logged, /\[claim-judge\] The judge failed \(Error no_verdict\)/);
+  for (const text of [JSON.stringify([failed.judge, unparseable.judge]), logged]) {
+    assert.doesNotMatch(text, /Vendor A|twelve|model down|Sure/);
+  }
 });
 
 test("claims a reply leaves without a verdict keep the lexical verdict and are counted", async (t) => {

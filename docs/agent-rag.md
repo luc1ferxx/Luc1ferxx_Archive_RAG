@@ -415,7 +415,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 - 调用失败、输出无法解析、缺某条 verdict，一律保留词法结论。
 - 结论按 claim 文本 + 证据全文缓存，自检和 finalizer 对同一条 claim 只调一次。
 
-生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、research 的最终校验和流式草稿仍只用词法规则；批准后执行的 Web 搜索直接用 Capability 返回的文本作答，不做 claim 校验。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条；评审回复里解析不出任何结论时记 `status: "failed"` 并带 `error`（回复开头最多 200 字符），只漏了部分 claim 时 `missingVerdictCount` 记漏掉的条数，两种情况词法结论都保持不变；升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
+生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、research 的最终校验和流式草稿仍只用词法规则；批准后执行的 Web 搜索直接用 Capability 返回的文本作答，不做 claim 校验。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条；评审调用抛错或回复里解析不出任何结论时记 `status: "failed"`，`error` 只是固定代码（调用抛错为 `call_failed`，回复里没有结论为 `no_verdict`），不带回复原文（可能引用文档内容）也不带上游错误信息，因为这份摘要随 `/chat` 的 trace 返回给客户端；服务端日志对每种失败只记一次警告，只写错误名和错误代码。只漏了部分 claim 时 `missingVerdictCount` 记漏掉的条数，两种情况词法结论都保持不变；升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
 
 ## 流式进度与校验过的答案草稿
 
