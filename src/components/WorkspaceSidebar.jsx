@@ -229,6 +229,7 @@ const WorkspaceSidebar = ({
   isArxivSuggestionLoading,
   isQualityLoading,
   isRecoveryLoading,
+  locale = "en",
   onClearDocuments,
   onDismissArxivSuggestion,
   onImportArxivSuggestion,
@@ -266,11 +267,11 @@ const WorkspaceSidebar = ({
 
       <div className="archive-sidebar-action-row">
         <button type="button" onClick={() => void onNavigate?.("new-chat")}>
-          <PlusCircleOutlined />
+          <PlusCircleOutlined aria-hidden="true" />
           {t("sidebar.newChat")}
         </button>
         <button type="button" onClick={() => void onNavigate?.("search")}>
-          <SearchOutlined />
+          <SearchOutlined aria-hidden="true" />
           {t("sidebar.search")}
         </button>
       </div>
@@ -286,7 +287,7 @@ const WorkspaceSidebar = ({
               className={activeNavItem === item.id ? "is-active" : ""}
               onClick={() => void onNavigate?.(item.target)}
             >
-              <NavIcon />
+              <NavIcon aria-hidden="true" />
               <span>{t(item.labelKey)}</span>
             </button>
           );
@@ -345,6 +346,7 @@ const WorkspaceSidebar = ({
                 : null;
             const savedArxivPaperCount =
               savedArxivSuggestion?.papers?.length ?? 0;
+            const pageCount = formatPageCount(document.pageCount);
 
             return (
               <article
@@ -367,15 +369,8 @@ const WorkspaceSidebar = ({
                   <div className="document-item-meta">
                     {/* A deck counts slides, a workbook sheets, a Word file
                         sections; a PDF (or an unknown type) keeps its pages. */}
-                    {formatDocumentUnitCount(
-                      document,
-                      formatPageCount(document.pageCount),
-                      t
-                    ) ?? (
-                      <>
-                        {formatPageCount(document.pageCount)} {t("common.pages")}
-                      </>
-                    )}
+                    {formatDocumentUnitCount(document, pageCount, t) ??
+                      `${pageCount} ${t(pageCount === 1 ? "common.page" : "common.pages")}`}
                     {document.version ? ` · ${document.version}` : ""}
                     {` · ID ${document.docId.slice(0, 8)}`}
                   </div>
@@ -499,6 +494,7 @@ const WorkspaceSidebar = ({
         onLoadLatest={onLoadQualityLatest}
         onRunSynthetic={onRunSyntheticQuality}
         canRunSynthetic={canAdmin}
+        locale={locale}
         qualityHistory={qualityHistory}
         qualityReport={qualityReport}
         t={t}

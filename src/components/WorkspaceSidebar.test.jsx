@@ -207,3 +207,22 @@ describe("WorkspaceSidebar recovery card", () => {
     expect(card.getByText("非幂等")).toBeInTheDocument();
   });
 });
+
+describe("WorkspaceSidebar labels", () => {
+  test("a one-page PDF reads 1 page", () => {
+    renderSidebar();
+
+    expect(screen.getByText(/^1 page · ID doc-2/)).toBeInTheDocument();
+    expect(screen.getByText(/^2 pages · ID doc-1/)).toBeInTheDocument();
+  });
+
+  // antd names each icon in English (aria-label "plus-circle"); a button
+  // named by its text keeps it out of the name.
+  test("names its buttons by their text alone, in Chinese too", () => {
+    renderSidebar({ activeNavItem: "drive", t: createTranslator("zh") });
+
+    for (const name of ["新对话", "搜索", "文件库", "添加文档"]) {
+      expect(screen.getByRole("button", { name: new RegExp(`^${name}`) })).toBeInTheDocument();
+    }
+  });
+});

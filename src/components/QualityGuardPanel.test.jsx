@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { createTranslator } from "../archiveI18n";
 import QualityGuardPanel from "./QualityGuardPanel";
 
 const noop = () => {};
@@ -251,5 +252,43 @@ describe("QualityGuardPanel", () => {
         "This evaluation is not verified against the current commit."
       )
     ).toBeInTheDocument();
+  });
+
+  // Not the browser's locale: an English browser in 中文 mode reads 中文 dates.
+  test("dates a recent run in the app's language", () => {
+    const createdAt = "2026-11-20T02:00:00.000Z";
+    const history = {
+      runs: [{ createdAt, fileName: "f", metrics: { overallPassPercent: 90 }, runId: "q-1" }],
+    };
+    const format = (locale) =>
+      new Intl.DateTimeFormat(locale, {
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        month: "short",
+      }).format(new Date(createdAt));
+    const { rerender } = render(
+      <QualityGuardPanel
+        locale="zh"
+        onLoadHistory={noop}
+        onLoadLatest={noop}
+        onRunSynthetic={noop}
+        qualityHistory={history}
+        t={createTranslator("zh")}
+      />
+    );
+
+    expect(screen.getByText(format("zh-CN"))).toBeInTheDocument();
+
+    rerender(
+      <QualityGuardPanel
+        locale="en"
+        onLoadHistory={noop}
+        onLoadLatest={noop}
+        onRunSynthetic={noop}
+        qualityHistory={history}
+      />
+    );
+    expect(screen.getByText(format("en-US"))).toBeInTheDocument();
   });
 });

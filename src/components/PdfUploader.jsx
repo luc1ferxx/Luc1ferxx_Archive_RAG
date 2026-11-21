@@ -334,7 +334,7 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
     <Dragger {...attributes}>
       <div className="archive-uploader-row">
         <div className="archive-uploader-icon">
-          <InboxOutlined />
+          <InboxOutlined aria-hidden="true" />
         </div>
 
         <div className="archive-uploader-copy-wrap">

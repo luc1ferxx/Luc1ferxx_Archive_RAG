@@ -34,13 +34,13 @@ const KEPT_WORDS = new Set([
   "ms",
 ]);
 
-const dataWords = (value) => {
+const dataStrings = (value) => {
   if (typeof value === "string") {
-    return wordsIn(value).map((word) => word.toLowerCase());
+    return value ? [value] : [];
   }
 
   if (value && typeof value === "object") {
-    return Object.values(value).flatMap(dataWords);
+    return Object.values(value).flatMap(dataStrings);
   }
 
   return [];
@@ -49,11 +49,15 @@ const dataWords = (value) => {
 /**
  * The English words a Chinese reader would still see in the container: its
  * text and its aria-label, title and placeholder attributes, less the terms
- * above and the words of the data the panel shows (what the server sends,
- * file names, codes it prints as words).
+ * above and the data the panel shows as it is (what the server sends, file
+ * names, ids). The data is cut out whole, so a code the panel turns into
+ * English words ("document_rag" as "Document Rag") still counts.
  */
 const findEnglish = (container, data) => {
-  const shownData = new Set(dataWords(data));
+  // Longest first, so a value is not cut short by one it contains.
+  const shownData = dataStrings(data).sort((a, b) => b.length - a.length);
+  const cutData = (text) =>
+    shownData.reduce((rest, value) => rest.split(value).join(" "), String(text ?? ""));
   const texts = [];
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
 
@@ -70,13 +74,7 @@ const findEnglish = (container, data) => {
       );
     });
 
-  return [
-    ...new Set(
-      texts
-        .flatMap(wordsIn)
-        .filter((word) => !KEPT_WORDS.has(word) && !shownData.has(word.toLowerCase()))
-    ),
-  ].sort();
+  return [...new Set(texts.map(cutData).flatMap(wordsIn).filter((word) => !KEPT_WORDS.has(word)))].sort();
 };
 
 const GAP = {
@@ -85,13 +83,14 @@ const GAP = {
   phase: "gap_analysis",
   skillId: "document_rag",
   skillVersion: "1.0.0",
-  type: "uncited_figure",
+  type: "unsupported_claim",
 };
 
 const AGENT_TURN = {
   question: "续约条款是什么？",
   answer: {
     agentAnswer: "续约需要提前通知。",
+    agentMode: "research_brief",
     agentRunId: "r-12345678901234",
     agentRunStatus: "waiting_for_user",
     approvalGates: [
@@ -109,7 +108,7 @@ const AGENT_TURN = {
         attempt: 2,
         id: "s-1",
         input: { 问题: "续约" },
-        kind: "document_rag",
+        kind: "tool_call",
         label: "检索文档",
         output: { 引用: 2 },
         status: "completed",
@@ -123,7 +122,7 @@ const AGENT_TURN = {
         status: "failed",
         type: "capability_call",
       },
-      { id: "s-3", kind: "document_rag", label: "复核", status: "pending" },
+      { id: "s-3", kind: "observation", label: "复核", status: "pending" },
     ],
     agentObservability: {
       executionLoop: { followUpsRun: 1 },
@@ -134,7 +133,10 @@ const AGENT_TURN = {
         selectedPlannerId: "deterministic",
         status: "completed",
       },
-      selectedSkills: [{ label: "文档检索", skillId: "document_rag", skillVersion: "1.0.0" }],
+      selectedSkills: [
+        { label: "文档检索", skillId: "document_rag", skillVersion: "1.0.0" },
+        { label: "风险审查", skillId: "risk_review", status: "not_run" },
+      ],
       skillChain: [{ label: "风险审查", skillId: "risk_review" }],
       skills: [
         {
@@ -155,7 +157,7 @@ const AGENT_TURN = {
       checkedQueries: [
         { phase: "follow_up", primary: true, query: "查找通知期", skillId: "document_rag" },
       ],
-      resolvedGaps: [{ message: "已找到引用。", type: "weak_support" }],
+      resolvedGaps: [{ message: "已找到引用。", type: "missing_citations" }],
       unresolvedGaps: [GAP],
       unsupportedClaims: [{ missingAnchors: ["90"], text: "通知期为九十天。" }],
     },
@@ -253,7 +255,7 @@ const AGENT_TURN = {
         type: "self_check",
       },
       {
-        detail: { followUpRecommended: true, gaps: [{ type: "uncited_figure" }] },
+        detail: { followUpRecommended: true, gaps: [{ type: "insufficient_evidence" }] },
         id: "t-8",
         label: "缺口分析",
         status: "completed",
@@ -283,6 +285,38 @@ const AGENT_TURN = {
         status: "skipped",
         summary: "跳过重试。",
         type: "budget_limit",
+      },
+      // The approval flow's steps, with the fields the server records.
+      {
+        detail: {
+          approvalGate: { id: "gate-1" },
+          clarificationQuestion: "批准网页搜索吗？",
+          reason: "capability_approval_required",
+        },
+        id: "t-12",
+        label: "能力审批",
+        status: "needs_input",
+        summary: "等待审批。",
+        type: "capability_approval_gate",
+      },
+      {
+        detail: {
+          approvalDelegated: true,
+          approvalGateId: "approval:web.search:1.0.0:h",
+          approvalObjectHash: "sha256:h",
+          attempt: 1,
+          capabilityId: "web.search",
+          delegatedStepId: "capability:web.search:approval:web.search:1.0.0:h",
+          interruptType: "capability_approval_required",
+          kind: "tool_call",
+          retryOfStepId: null,
+          traceStatus: "skipped",
+        },
+        id: "t-13",
+        label: "网页搜索",
+        status: "skipped",
+        summary: "已交给批准后的调用。",
+        type: "web_search",
       },
     ],
     errors: { mcp: "超时。" },
@@ -362,6 +396,10 @@ describe("the workbench in Chinese", () => {
     expect(screen.getAllByRole("button", { name: "引用有误" })).toHaveLength(2);
     expect(screen.getAllByPlaceholderText("反馈备注（可选）")).toHaveLength(2);
     expect(screen.getByText("正在生成回答…")).toBeInTheDocument();
+    expect(container.querySelector(".archive-answer-chip-agent")).toHaveTextContent("研究简报");
+    expect(screen.getAllByText("需要审批").length).toBeGreaterThan(0);
+    // An approval step shows no internal id or hash.
+    expect(container.textContent).not.toMatch(/sha256|approval:web\.search/);
   });
 
   test("the preview reads in Chinese, empty, loading, failed and on every tab", async () => {
@@ -433,11 +471,35 @@ describe("the workbench in Chinese", () => {
         type: "agent_goal",
       },
       { id: "task-2", requiredUserAction: "continue_task", status: "paused", type: "agent_goal" },
+      {
+        id: "external_recommendation:arxiv:d-1",
+        items: [
+          { id: "p-2", label: "检索增强生成", result: { status: "" }, status: "waiting_for_user", summary: "waiting_for_user" },
+          { id: "p-3", label: "文档问答", result: { status: "already_indexed" }, status: "completed", summary: "already_indexed" },
+        ],
+        label: "arXiv 推荐",
+        status: "waiting_for_user",
+        type: "external_recommendation",
+      },
+      {
+        id: "task-3",
+        result: {
+          goalPlan: {
+            deliverables: { items: [{ id: "dl-2", label: "报告", status: "waiting_for_approval" }] },
+            goalCompletion: { checks: [{ id: "c-2", label: "无待办", passed: false }], status: "blocked" },
+          },
+        },
+        status: "waiting_for_user",
+        type: "agent_goal",
+      },
     ];
     const { container } = render(<AgentRunCenter t={zh} tasks={tasks} />);
 
     expect(findEnglish(container, tasks)).toEqual([]);
     expect(screen.getByText("Agent 运行中心")).toBeInTheDocument();
+    expect(screen.getByText("已在索引中")).toBeInTheDocument();
+    expect(screen.getByText("等待审批")).toBeInTheDocument();
+    expect(screen.getByText("受阻")).toBeInTheDocument();
     expect(screen.getByText("已运行 2/4 轮 · 审批后 1 轮")).toBeInTheDocument();
     expect(screen.getByText("2 个文档")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "批准交付物" })).toBeInTheDocument();
@@ -502,6 +564,12 @@ describe("the workbench in Chinese", () => {
           runId: "r-1",
           status: "failed",
         },
+        {
+          goal: "整理合同",
+          recovery: { actions: [{ type: "cancel" }], reason: "graph_checkpoint_missing" },
+          runId: "r-2",
+          status: "running",
+        },
       ],
       savedArxivSuggestionsByDocId: { "d-12345678": { papers: [{}, {}] } },
     };
@@ -523,6 +591,7 @@ describe("the workbench in Chinese", () => {
     expect(screen.getByText("为“检索”找到 2 篇论文，请选择要导入的论文。")).toBeInTheDocument();
     expect(screen.getByText("已选 0/2 篇")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试失败的步骤" })).toBeInTheDocument();
+    expect(screen.getByText("没有保存的检查点")).toBeInTheDocument();
     expect(screen.getByText("-5 个百分点")).toBeInTheDocument();
     expect(screen.getByText("无日期")).toBeInTheDocument();
 

@@ -2,7 +2,7 @@ import React from "react";
 import { Button } from "antd";
 import { createTranslator } from "../archiveI18n";
 import ApprovalGatePreviewList from "./ApprovalGatePreviewList";
-import { formatStatusLabel } from "./workbenchFormatters";
+import { formatStatusLabel, formatStepLabel } from "./workbenchFormatters";
 
 // English unless the app hands in its translator.
 const defaultT = createTranslator("en");
@@ -136,6 +136,23 @@ const renderPlanMeta = (task = {}, t) => {
   );
 };
 
+// An arXiv recommendation paper's summary is its status code
+// (server/rag/recommendation-task-builders.js): read as a label, and left out
+// where it only repeats the item's own status.
+const getPlanItemSummary = (item, t) => {
+  if (!item.summary) {
+    return t("tasks.noStepSummary");
+  }
+
+  if (item.summary === item.status) {
+    return null;
+  }
+
+  return /^[a-z]+(?:_[a-z]+)*$/.test(item.summary)
+    ? formatStatusLabel(item.summary, t)
+    : item.summary;
+};
+
 const AgentTaskPlan = ({ t, task }) => {
   const planItems = getPlanItems(task);
 
@@ -147,19 +164,23 @@ const AgentTaskPlan = ({ t, task }) => {
 
   return (
     <div className="archive-agent-plan-list">
-      {planItems.map((item, index) => (
-        <div
-          className={`archive-agent-plan-step is-${item.status ?? "pending"}`}
-          key={item.id ?? `${task.id}-step-${index}`}
-        >
-          <span>{index + 1}</span>
-          <div>
-            <strong>{item.label || t("tasks.step", { number: index + 1 })}</strong>
-            <p>{item.summary || t("tasks.noStepSummary")}</p>
+      {planItems.map((item, index) => {
+        const summary = getPlanItemSummary(item, t);
+
+        return (
+          <div
+            className={`archive-agent-plan-step is-${item.status ?? "pending"}`}
+            key={item.id ?? `${task.id}-step-${index}`}
+          >
+            <span>{index + 1}</span>
+            <div>
+              <strong>{item.label || t("tasks.step", { number: index + 1 })}</strong>
+              {summary ? <p>{summary}</p> : null}
+            </div>
+            <em>{formatStatusLabel(item.status, t)}</em>
           </div>
-          <em>{formatStatusLabel(item.status, t)}</em>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };
@@ -293,7 +314,9 @@ const AgentTaskCard = ({ onTaskAction, t, task }) => {
       <header>
         <div>
           <span>{formatStatusLabel(task.status, t)}</span>
-          <strong>{task.label || t("tasks.agentTask")}</strong>
+          <strong>
+            {formatStepLabel({ label: task.label || t("tasks.agentTask"), type: task.type }, t)}
+          </strong>
           <p>{goalPlan?.goal || task.summary || t("tasks.noTaskSummary")}</p>
         </div>
         {renderPlanMeta(task, t)}
@@ -346,29 +369,45 @@ const AgentRunCenter = ({
   onTaskAction,
   t = defaultT,
   tasks = [],
-}) => (
-  <div className="archive-view-panel archive-tasks-view">
-    <div className="archive-view-panel-head">
-      <span>{t("tasks.runCenter")}</span>
-      <strong>
-        {isLoading
-          ? t("tasks.loading")
-          : t("tasks.active", {
-              count: tasks.filter((task) => !FINISHED_STATUSES.has(task.status)).length,
-            })}
-      </strong>
+}) => {
+  // With no task yet, a placeholder card says how to start one; the header
+  // counts real tasks only.
+  const shownTasks =
+    tasks.length > 0
+      ? tasks
+      : [
+          {
+            id: "idle-task",
+            label: t("tasks.idle.label"),
+            status: "pending",
+            summary: t("tasks.idle.summary"),
+          },
+        ];
+
+  return (
+    <div className="archive-view-panel archive-tasks-view">
+      <div className="archive-view-panel-head">
+        <span>{t("tasks.runCenter")}</span>
+        <strong>
+          {isLoading
+            ? t("tasks.loading")
+            : t("tasks.active", {
+                count: tasks.filter((task) => !FINISHED_STATUSES.has(task.status)).length,
+              })}
+        </strong>
+      </div>
+      <div className="archive-agent-task-list">
+        {shownTasks.map((task, index) => (
+          <AgentTaskCard
+            key={task.id ?? `${task.label}-${index}`}
+            onTaskAction={onTaskAction}
+            t={t}
+            task={task}
+          />
+        ))}
+      </div>
     </div>
-    <div className="archive-agent-task-list">
-      {tasks.map((task, index) => (
-        <AgentTaskCard
-          key={task.id ?? `${task.label}-${index}`}
-          onTaskAction={onTaskAction}
-          t={t}
-          task={task}
-        />
-      ))}
-    </div>
-  </div>
-);
+  );
+};
 
 export default React.memo(AgentRunCenter);

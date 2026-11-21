@@ -703,6 +703,10 @@ describe("RenderQA", () => {
 
     expect(getStepRows().getByText("Web Search")).toBeInTheDocument();
     expect(getStepRows().getByText("Web Search (capability call)")).toBeInTheDocument();
+    // The step rail clips a long label; its title keeps the whole of it.
+    expect(
+      document.querySelector('.archive-run-stage-label[title="Web Search (capability call)"]')
+    ).not.toBeNull();
     expect(getStepRows().getByText("Skipped")).toBeInTheDocument();
     expect(getStepRows().getByText("Failed")).toBeInTheDocument();
     const runStatus = within(

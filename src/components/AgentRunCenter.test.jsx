@@ -390,7 +390,64 @@ describe("AgentRunCenter", () => {
     expect(screen.getByText("Done task")).toBeInTheDocument();
 
     rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
-    expect(screen.getByText("2 个进行中")).toBeInTheDocument();
+    expect(screen.getByText("2 个未完成")).toBeInTheDocument();
+  });
+
+  test("with no task, says how to start one and counts nothing", () => {
+    render(<AgentRunCenter tasks={[]} />);
+
+    expect(screen.getByText("0 active")).toBeInTheDocument();
+    expect(screen.getByText("Awaiting question")).toBeInTheDocument();
+  });
+
+  // The paper items as server/rag/recommendation-task-builders.js builds them:
+  // the summary is the paper's status code.
+  test("reads a recommendation paper's status code as a label", () => {
+    const paper = (id, status, resultStatus = "") => ({
+      error: null,
+      id,
+      label: `Paper ${id}`,
+      result: { docId: "", fileName: "", status: resultStatus },
+      status,
+      summary: resultStatus || status,
+    });
+    const tasks = [
+      {
+        id: "external_recommendation:arxiv:doc-1",
+        items: [
+          paper("p-1", "waiting_for_user"),
+          paper("p-2", "completed", "already_indexed"),
+          paper("p-3", "completed", "imported"),
+        ],
+        label: "arXiv recommendations",
+        status: "waiting_for_user",
+        type: "external_recommendation",
+      },
+    ];
+    const { container, rerender } = render(<AgentRunCenter tasks={tasks} />);
+    const summaries = () =>
+      [...container.querySelectorAll(".archive-agent-plan-step p")].map((node) => node.textContent);
+
+    // A summary that only repeats the paper's status is left out.
+    expect(summaries()).toEqual(["Already indexed", "Imported"]);
+    expect(container.textContent).not.toMatch(/waiting_for_user|already_indexed|imported/);
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+    expect(summaries()).toEqual(["已在索引中", "已导入"]);
+  });
+
+  test("tells a capability call trace step apart from the step that asked for it", () => {
+    render(
+      <AgentRunCenter
+        tasks={[
+          { id: "web_search:primary", label: "Web Search", status: "skipped", type: "web_search" },
+          { id: "capability:web.search", label: "Web Search", status: "failed", type: "capability_call" },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Web Search")).toBeInTheDocument();
+    expect(screen.getByText("Web Search (capability call)")).toBeInTheDocument();
   });
 });
 

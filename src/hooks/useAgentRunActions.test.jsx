@@ -312,6 +312,45 @@ describe("useAgentRunActions after a decision fails", () => {
     expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
     expect(screen.getByText(reason)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // The answer no longer asks for the approval it cannot take.
+    expect(screen.queryByText("Approve Web Search?")).toBeNull();
+    expect(result.current.session.conversation[0].answer.agentAnswer).toBe(
+      "app.approvalNotCompletedAnswer"
+    );
+  });
+
+  it("offers no decision on a gate a canceled run left pending", async () => {
+    requestAgentRunActionMock.mockRejectedValue({
+      response: { data: { error: "Agent run is not waiting for user input." }, status: 409 },
+    });
+    // cancelRun (server/rag/agent-runs.js) sets the run's status and result
+    // only: its gate stays pending.
+    fetchAgentRunMock.mockResolvedValue({
+      approvalGates: [PENDING_GATE],
+      runId: "run-1",
+      status: "canceled",
+      steps: [],
+    });
+    const { result } = renderWithSession();
+
+    await act(async () => {
+      await result.current.actions.handleAgentApprovalAction({
+        action: "approve",
+        gate: PENDING_GATE,
+        turnIndex: 0,
+      });
+    });
+
+    render(
+      <RenderQA
+        conversation={result.current.session.conversation}
+        onApprovalAction={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("Canceled")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
   });
 
   it("keeps the gate usable while the run still waits, or cannot be read", async () => {
@@ -338,6 +377,7 @@ describe("useAgentRunActions after a decision fails", () => {
 
       expect(answer.agentRunStatus).toBe("waiting_for_user");
       expect(answer.approvalGates).toEqual([PENDING_GATE]);
+      expect(answer.agentAnswer).toBe("Approve Web Search?");
     }
 
     expect(messageError).toHaveBeenCalledWith("app.approvalMissing");

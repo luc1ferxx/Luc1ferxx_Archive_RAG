@@ -15,6 +15,7 @@ import PdfUploader from "./components/PdfUploader";
 import WorkspaceSidebar from "./components/WorkspaceSidebar";
 import WorkspaceEntryPanel from "./components/WorkspaceEntryPanel";
 import WorkspaceArtifactsPanel from "./components/WorkspaceArtifactsPanel";
+import { formatStepLabel } from "./components/workbenchFormatters";
 import LocaleSwitch from "./components/LocaleSwitch";
 import AuthStatus from "./auth/AuthStatus";
 import WorkspaceSwitcher from "./auth/WorkspaceSwitcher";
@@ -630,18 +631,7 @@ const App = () => {
   const currentTrace = currentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
   const currentSources = currentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
   const hasActiveTaskLog = hasActiveTasks(taskLog);
-  const idleTasks = useMemo(
-    () => [
-      {
-        id: "idle-task",
-        label: t("tasks.idle.label"),
-        status: "pending",
-        summary: t("tasks.idle.summary"),
-      },
-    ],
-    [t]
-  );
-  let visibleTasks = idleTasks;
+  let visibleTasks = EMPTY_ARRAY;
 
   if (currentTrace.length > 0) {
     visibleTasks = currentTrace;
@@ -723,11 +713,11 @@ const App = () => {
                 className={`archive-view-item is-${step.status ?? "completed"}`}
                 onClick={() => {
                   setActiveConversationView("chat");
-                  message.info(`${step.label}: ${step.summary}`);
+                  message.info(`${formatStepLabel(step, t)}: ${step.summary}`);
                 }}
               >
                 <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{step.label}</strong>
+                <strong>{formatStepLabel(step, t)}</strong>
                 <p>{step.summary}</p>
               </button>
             ))}
@@ -937,6 +927,7 @@ const App = () => {
             isRecoveryLoading={isRecoveryLoading}
             isArxivSuggestionLoading={isArxivSuggestionLoading}
             isQualityLoading={isQualityLoading}
+            locale={locale}
             onClearDocuments={clearDocuments}
             onDismissArxivSuggestion={clearArxivSuggestion}
             onImportArxivSuggestion={importArxivSuggestion}

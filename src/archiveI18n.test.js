@@ -25,7 +25,7 @@ describe("createTranslator counts", () => {
     expect(en("common.docs", { count: 1 })).toBe("1 doc");
     expect(en("sidebar.arxivRecommendations", { count: 1 })).toBe("1 arXiv recommendation");
     // A label without a _plural entry reads the same for every count.
-    expect(en("sidebar.recoveryWaiting", { count: 2 })).toBe("2 waiting");
+    expect(en("sidebar.recoveryWaiting", { count: 2 })).toBe("2 to recover");
   });
 
   test("Chinese has one form, unless a _plural entry words it differently", () => {

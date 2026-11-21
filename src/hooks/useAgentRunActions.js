@@ -103,14 +103,28 @@ export const useAgentRunActions = ({
 
         // A failed decision can still have moved the run (the approved
         // capability failed, or the gate was decided elsewhere): show the run
-        // as the server holds it. Unread, the turn keeps its usable gate.
+        // as the server holds it. Unread, the turn keeps its usable gate; a
+        // run no longer waiting no longer asks for the approval.
         const run = await fetchAgentRun(runId).catch(() => null);
 
         if (run) {
-          updateTurnByRunId(runId, (currentTurn) => ({
-            ...currentTurn,
-            answer: buildAgentRunActionAnswer(currentTurn.answer, { run }),
-          }));
+          updateTurnByRunId(runId, (currentTurn) => {
+            const answer = buildAgentRunActionAnswer(currentTurn.answer, { run });
+
+            return {
+              ...currentTurn,
+              answer:
+                run.status === "waiting_for_user"
+                  ? answer
+                  : {
+                      ...answer,
+                      agentAnswer: t("app.approvalNotCompletedAnswer", {
+                        reason: backendMessage,
+                      }),
+                      clarification: { ...(answer.clarification ?? {}), needed: false },
+                    },
+            };
+          });
         }
       } finally {
         // Whether the decision went through or not, the run may have joined

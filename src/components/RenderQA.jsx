@@ -10,6 +10,8 @@ import {
   formatStatusLabel,
   formatStepLabel,
   isStepRetrySupported,
+  toTitleWords,
+  translateCode,
 } from "./workbenchFormatters";
 
 // English unless the app hands in its translator.
@@ -46,21 +48,12 @@ const getAgentRunSteps = (answer = {}) => {
     return answer.agentRunSteps;
   }
 
-  return Array.isArray(answer.agentTrace)
-    ? answer.agentTrace.map((step) => ({
-        ...step,
-        kind: step.type,
-      }))
-    : [];
+  return Array.isArray(answer.agentTrace) ? answer.agentTrace : [];
 };
 
-// The step's kind as the server names it, in words.
-const formatStepKind = (kind, t) =>
-  kind
-    ? String(kind)
-        .replace(/_/g, " ")
-        .replace(/\b\w/g, (letter) => letter.toUpperCase())
-    : t("sidebar.step");
+// A run step's kind by its stepKind.* label, or as the server names it. A
+// trace step has none: its label already names it.
+const formatStepKind = (kind, t) => translateCode("stepKind", kind, t) ?? toTitleWords(kind);
 
 const formatShortId = (value, t) => {
   const text = String(value ?? "").trim();
@@ -238,7 +231,10 @@ const AgentRunControlPanel = ({
 }) => {
   const runId = answer.agentRunId;
   const runStatus = answer.agentRunStatus ?? "unknown";
-  const pendingGates = gates.filter(isPendingGate);
+  // A gate is decided only while its run waits for the user: canceling a
+  // waiting run leaves its gate pending (server/rag/agent-runs.js cancelRun).
+  const canDecide = !answer.agentRunStatus || answer.agentRunStatus === "waiting_for_user";
+  const pendingGates = canDecide ? gates.filter(isPendingGate) : [];
   const failedSteps = steps.filter(isFailedStep).filter((step) => step.id);
 
   if (!runId && steps.length === 0 && gates.length === 0) {
@@ -356,6 +352,8 @@ const AgentRunRail = ({ steps, t }) => {
     <div className="archive-run-rail" aria-label={t("run.railLabel")}>
       {visibleSteps.map((step, stepIndex) => {
         const stepStatus = step.status ?? "completed";
+        // The rail clips a long label; its title keeps the whole of it.
+        const label = formatStepLabel(step, t);
 
         return (
           <div
@@ -363,7 +361,9 @@ const AgentRunRail = ({ steps, t }) => {
             className={`archive-run-stage is-${stepStatus}`}
           >
             <span className="archive-run-stage-index">{stepIndex + 1}</span>
-            <span className="archive-run-stage-label">{formatStepLabel(step, t)}</span>
+            <span className="archive-run-stage-label" title={label}>
+              {label}
+            </span>
           </div>
         );
       })}
@@ -395,7 +395,7 @@ const AgentRunTimeline = ({ steps, t }) => {
                   <span>{formatStatusLabel(stepStatus, t)}</span>
                 </div>
                 <div className="archive-run-timeline-meta">
-                  <span>{formatStepKind(step.kind ?? step.type, t)}</span>
+                  {step.kind ? <span>{formatStepKind(step.kind, t)}</span> : null}
                   {step.attempt > 1 ? (
                     <span>{t("run.attempt", { number: step.attempt })}</span>
                   ) : null}

@@ -49,13 +49,14 @@ const formatQualityGateDelta = (check, t = defaultT) => {
   return t("quality.points", { value: formatQualityDelta(check.delta, t, 100) });
 };
 
-const formatQualityDate = (value, t) => {
+// In the app's language, as the artifacts panel formats its dates.
+const formatQualityDate = (value, t, locale) => {
   if (!value) {
     return t("common.noDate");
   }
 
   try {
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
       month: "short",
       day: "2-digit",
       hour: "2-digit",
@@ -177,6 +178,7 @@ const RecoveryGateCard = ({ gate, t }) => {
 const QualityGuardPanel = ({
   canRunSynthetic = true,
   isQualityLoading,
+  locale = "en",
   onLoadHistory,
   onLoadLatest,
   onRunSynthetic,
@@ -363,7 +365,7 @@ const QualityGuardPanel = ({
                 <strong>{formatQualityPercent(run.metrics?.overallPassPercent, t)}</strong>
                 {run.status ? formatQualityGateStatus(run.status, t) : null}
               </span>
-              <span>{formatQualityDate(run.createdAt, t)}</span>
+              <span>{formatQualityDate(run.createdAt, t, locale)}</span>
             </div>
           ))}
         </div>

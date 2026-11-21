@@ -88,7 +88,7 @@ const ArxivSuggestionPanel = ({
     <div className="arxiv-suggestion-panel" aria-live="polite">
       <div className="arxiv-suggestion-head">
         <div className="arxiv-suggestion-title">
-          <FileSearchOutlined />
+          <FileSearchOutlined aria-hidden="true" />
           <span>{t("arxiv.title")}</span>
         </div>
         <Button
@@ -155,7 +155,7 @@ const ArxivSuggestionPanel = ({
             <Button
               className="archive-secondary-button"
               disabled={selectedCount === 0}
-              icon={<DownloadOutlined />}
+              icon={<DownloadOutlined aria-hidden="true" />}
               loading={isImporting}
               onClick={() => void onImport?.(selectedPaperIds)}
               size="small"

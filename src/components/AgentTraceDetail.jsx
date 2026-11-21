@@ -1,24 +1,12 @@
-import { formatStatusLabel } from "./workbenchFormatters";
+import { formatStatusLabel, toTitleWords, translateCode } from "./workbenchFormatters";
 
-export const formatAgentMode = (mode, t) => {
-  if (!mode) {
-    return t("trace.agent");
-  }
+// The answer's agent mode by its mode.* label, or as the server names it.
+export const formatAgentMode = (mode, t) =>
+  mode ? translateCode("mode", mode, t) ?? toTitleWords(mode) : t("trace.agent");
 
-  return mode
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" + ");
-};
-
-// A phase or gap type as the server names it, in words.
-export const formatTraceStatus = (status, t) => {
-  if (!status) {
-    return t("trace.completed");
-  }
-
-  return status.replace(/_/g, " ");
-};
+// A retrieval phase by its phase.* label, or in words; null without one.
+export const formatTracePhase = (phase, t) =>
+  phase ? translateCode("phase", phase, t) ?? String(phase).replace(/_/g, " ") : null;
 
 export const formatDuration = (value) => {
   const parsed = Number(value);
@@ -122,10 +110,11 @@ export const formatSkillMetricCopy = (skill = {}, t) => {
   return parts.join(" · ");
 };
 
-export const formatGapType = (gap = {}, t) =>
-  formatTraceStatus(String(gap.type ?? "evidence_gap"), t).replace(/\b\w/g, (letter) =>
-    letter.toUpperCase()
-  );
+export const formatGapType = (gap = {}, t) => {
+  const type = String(gap.type ?? "evidence_gap");
+
+  return translateCode("gapType", type, t) ?? toTitleWords(type);
+};
 
 export const getGapTitle = (gap = {}, index, t) =>
   gap.claim ?? gap.message ?? gap.reason ?? `${formatGapType(gap, t)} ${index + 1}`;
@@ -141,7 +130,7 @@ export const getGapCopy = (gap = {}, t) => {
     gap.skillId
       ? `${gap.skillId}${formatMaybeVersion(gap.skillVersion)}`
       : null,
-    gap.phase ? t("trace.phase", { phase: formatTraceStatus(gap.phase, t) }) : null,
+    gap.phase ? t("trace.phase", { phase: formatTracePhase(gap.phase, t) }) : null,
     formatMissingAnchors(gap.missingAnchors, t),
   ].filter(Boolean);
 
@@ -155,9 +144,7 @@ export const formatQueryCopy = (query = {}, t) =>
     query.skillId
       ? `${query.skillId}${formatMaybeVersion(query.skillVersion)}`
       : null,
-    query.phase
-      ? t("trace.phase", { phase: formatTraceStatus(String(query.phase), t) })
-      : null,
+    query.phase ? t("trace.phase", { phase: formatTracePhase(query.phase, t) }) : null,
     query.primary ? t("trace.primary") : null,
   ]
     .filter(Boolean)
@@ -396,14 +383,21 @@ const TraceClaimSupport = ({ claimSupport, t }) => {
   );
 };
 
-// The step's own fields, named as the server names them.
+// Fields the step's row already shows (its kind, attempt and status) and the
+// ids and hashes only the server reads.
+const HIDDEN_DETAIL_KEY = /^(kind|attempt|traceStatus)$|(Id|Hash)$/;
+
+const isCode = (value) => typeof value === "string" && /^[a-z]+(?:_[a-z]+)+$/.test(value);
+
+// The step's own fields: a known one by its trace.field.* label, any other
+// named as the server names it; a code reads as its status label.
 const GenericTraceDetail = ({ detail, exclude = [], t }) => {
   const excludedKeys = new Set(exclude);
   const rows = Object.entries(detail)
-    .filter(([key]) => !excludedKeys.has(key))
+    .filter(([key]) => !excludedKeys.has(key) && !HIDDEN_DETAIL_KEY.test(key))
     .map(([key, value]) => ({
-      label: formatDetailLabel(key),
-      value: formatDetailValue(value, t),
+      label: translateCode("trace.field", key, t) ?? formatDetailLabel(key),
+      value: isCode(value) ? formatStatusLabel(value, t) : formatDetailValue(value, t),
     }))
     .filter(({ value }) => value !== null);
 
@@ -450,7 +444,7 @@ const AgentTraceDetail = ({ step, t }) => {
         <TraceDetailRows
           rows={[
             { label: t("trace.intent"), value: formatDetailValue(detail.intent, t) },
-            { label: t("trace.phaseLabel"), value: formatTraceStatus(detail.phase, t) },
+            { label: t("trace.phaseLabel"), value: formatTracePhase(detail.phase, t) },
             {
               label: t("trace.topK"),
               value: formatDetailValue(detail.retrievalOptions?.topK, t),
@@ -607,12 +601,15 @@ const AgentTraceDetail = ({ step, t }) => {
     );
   }
 
-  if (step.type === "clarification_gate") {
+  if (step.type === "clarification_gate" || step.type === "capability_approval_gate") {
     return (
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: t("trace.reason"), value: formatDetailValue(detail.reason, t) },
+            {
+              label: t("trace.reason"),
+              value: detail.reason ? formatStatusLabel(detail.reason, t) : null,
+            },
           ]}
         />
         <TraceGapList gaps={detail.gaps} t={t} />

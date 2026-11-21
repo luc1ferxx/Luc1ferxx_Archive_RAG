@@ -1,18 +1,27 @@
-// A run, task, step or approval status, a recovery reason or a replay risk as
-// the server sends it, translated (the status.* keys; a recovery reason can be
-// a replay risk, so they share them). A value without a key reads as words.
-export const formatStatusLabel = (status, t) => {
-  const value = String(status ?? "pending");
-  const key = `status.${value}`;
+// A code the server sends (a status, an agent mode, a step kind, a phase, a
+// gap type) by its `${group}.${code}` key, or null when it has none.
+export const translateCode = (group, code, t) => {
+  const key = `${group}.${code}`;
   const label = t(key);
 
-  if (label !== key) {
-    return label;
-  }
+  return label === key ? null : label;
+};
 
+// A code without a key, in words: "document_rag" as "Document Rag".
+export const toTitleWords = (code) =>
+  String(code)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+// A run, task, step or approval status, a recovery or clarification reason or
+// a replay risk as the server sends it, translated (the status.* keys; a
+// recovery reason can be a replay risk, so they share them). A value without
+// a key reads as words.
+export const formatStatusLabel = (status, t) => {
+  const value = String(status ?? "pending");
   const words = value.replace(/_/g, " ");
 
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  return translateCode("status", value, t) ?? words.charAt(0).toUpperCase() + words.slice(1);
 };
 
 // A capability_call step is labelled with its Capability, like the step whose

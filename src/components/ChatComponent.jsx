@@ -610,15 +610,15 @@ const ChatComponent = (props) => {
           {isToolsOpen ? (
             <div className="archive-composer-menu">
               <button type="button" onClick={() => onAttach?.()}>
-                <PaperClipOutlined />
+                <PaperClipOutlined aria-hidden="true" />
                 {t("chat.attachDocuments")}
               </button>
               <button type="button" onClick={cycleRetrievalMode}>
-                <AppstoreOutlined />
+                <AppstoreOutlined aria-hidden="true" />
                 {t("chat.retrievalPrefix")}: {retrievalLabelByMode[retrievalMode]}
               </button>
               <button type="button" onClick={chatModeClickHandler}>
-                <SoundOutlined />
+                <SoundOutlined aria-hidden="true" />
                 {isChatModeOn ? t("chat.voiceOn") : t("chat.voiceMode")}
               </button>
               {isChatModeOn ? (
@@ -627,7 +627,7 @@ const ChatComponent = (props) => {
                   className={isRecording ? "is-recording" : ""}
                   onClick={recordingClickHandler}
                 >
-                  <AudioOutlined />
+                  <AudioOutlined aria-hidden="true" />
                   {isRecording ? t("chat.listening") : t("chat.record")}
                 </button>
               ) : null}

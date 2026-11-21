@@ -112,6 +112,22 @@ vi.mock("./components/ChatComponent", () => ({ default: (props) => (
     >
       Submit mock chat
     </button>
+    <button
+      type="button"
+      onClick={() =>
+        props.handleResp?.("Search the web.", {
+          agentAnswer: "Mock web answer",
+          ragAnswer: "",
+          ragSources: [],
+          agentTrace: [
+            { id: "web_search:primary", label: "Web Search", status: "skipped", type: "web_search" },
+            { id: "capability:web.search", label: "Web Search", status: "failed", type: "capability_call" },
+          ],
+        })
+      }
+    >
+      Submit web chat
+    </button>
     {[
       ["Submit deck chat", MOCK_DECK_CITATION],
       ["Submit pdf chat", MOCK_PDF_CITATION],
@@ -619,6 +635,19 @@ describe("App", () => {
       screen.getByRole("button", { name: "Conversation turns summary" })
     ).toHaveTextContent(/^2 turns$/);
     expect(screen.getByText("2 recorded turns")).toBeInTheDocument();
+  });
+
+  test("the Trace view tells the approved capability call apart from the step that asked for it", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Submit web chat" }));
+    expect(await screen.findByText("Corpus")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+    const trace = within(document.querySelector(".archive-trace-view"));
+
+    expect(trace.getByText("Web Search")).toBeInTheDocument();
+    expect(trace.getByText("Web Search (capability call)")).toBeInTheDocument();
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {

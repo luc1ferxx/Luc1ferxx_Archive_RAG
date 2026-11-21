@@ -14,6 +14,7 @@ import {
   formatQueryCopy,
   formatSkillMetricCopy,
   formatSkillRef,
+  formatTracePhase,
   getGapCopy,
   getGapTitle,
   isPlainObject,
@@ -113,7 +114,7 @@ const buildQueryItems = (queries = [], t) =>
     title:
       query.label ?? query.queryId ?? query.id ?? t("trace.query", { number: index + 1 }),
     copy: formatQueryCopy(query, t),
-    meta: query.phase ? String(query.phase).replace(/_/g, " ") : null,
+    meta: formatTracePhase(query.phase, t),
   }));
 
 const buildGapItems = (gaps = [], t) =>

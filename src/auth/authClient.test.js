@@ -280,4 +280,19 @@ describe("403", () => {
       error: { code: "x", message: "You do not have permission to do this." },
     });
   });
+
+  test("words the client's own message in the app's language", async () => {
+    const { LOCALE_STORAGE_KEY } = await import("../archiveI18n");
+    const { apiClient } = await loadModules();
+
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, "zh");
+
+    expect(
+      apiClient.describeForbiddenResponse({ error: "Forbidden.", permission: "documents.delete" })
+    ).toBe("你没有执行此操作的权限。缺少权限：documents.delete。");
+    // The server's own message stays as it was sent.
+    expect(apiClient.describeForbiddenResponse({ error: "Workspace w2 is read-only." })).toBe(
+      "Workspace w2 is read-only."
+    );
+  });
 });

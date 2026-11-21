@@ -201,7 +201,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
         {canDownloadFile ? (
           <Button
             className="archive-secondary-button archive-preview-download-button"
-            icon={<DownloadOutlined />}
+            icon={<DownloadOutlined aria-hidden="true" />}
             loading={isDownloading}
             onClick={() => void documentDownload.download()}
           >
@@ -438,7 +438,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
             href={previewUrl}
             target="_blank"
             rel="noopener noreferrer"
-            icon={<DownloadOutlined />}
+            icon={<DownloadOutlined aria-hidden="true" />}
           >
             {t("preview.open")}
           </Button>

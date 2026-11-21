@@ -80,8 +80,47 @@ describe("workbench formatters", () => {
     expect(formatStatusLabel("waiting_for_user", zh)).toBe("等待用户处理");
     expect(formatStatusLabel("non_idempotent", zh)).toBe("非幂等");
     // A value without a label still reads as words; a missing one is pending.
-    expect(formatStatusLabel("graph_resume_failed", en)).toBe("Graph resume failed");
+    expect(formatStatusLabel("some_new_reason", en)).toBe("Some new reason");
     expect(formatStatusLabel(undefined, en)).toBe("Pending");
+  });
+
+  // Values the server sends that a Chinese reader saw in English: a skill not
+  // run, a reused graph node, goal checks and deliverables, an arXiv paper's
+  // own state, a clarification reason and every manual-recovery reason
+  // (server/rag/agent-run-recovery.js and the checkpoint reconciliation).
+  test("the server's other statuses and reasons have Chinese labels", () => {
+    const zh = createTranslator("zh");
+
+    for (const status of [
+      "not_run",
+      "reused",
+      "blocked",
+      "waiting_for_approval",
+      "not_requested",
+      "imported",
+      "already_indexed",
+      "downloading",
+      "ingesting",
+      "capability_approval_required",
+      "document_follow_up_limit_reached",
+      "graph_resume_failed",
+      "checkpoint_digest_mismatch",
+      "graph_finalization_requires_recovery",
+      "graph_checkpoint_missing",
+      "graph_checkpoint_version_not_resumable",
+      "graph_outer_plan_not_resumable",
+      "graph_resume_executor_unavailable",
+      "invalid_checkpoint_shape",
+      "duplicate_checkpoint_node_run",
+      "unknown_in_flight_node",
+      "checkpoint_step_mismatch",
+      "completed_step_without_checkpoint",
+      "failed_node_requires_recovery",
+      "failed_step_checkpoint_mismatch",
+      "checkpoint_missing_completed_step",
+    ]) {
+      expect(formatStatusLabel(status, zh), status).not.toMatch(/[A-Za-z]/);
+    }
   });
 
   test("a capability call step is told apart from the step whose approval queued it", () => {
