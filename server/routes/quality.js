@@ -79,7 +79,6 @@ export const createQualityRouter = (services) => {
         });
         agentExperienceMemory = writeResult?.observability ?? null;
       } catch (error) {
-        console.error("Failed to record agent experience from feedback.", error);
         agentExperienceMemory = {
           error: serializeError(error, "write_failed"),
           status: "error",

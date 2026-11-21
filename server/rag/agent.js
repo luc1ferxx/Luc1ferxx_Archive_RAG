@@ -280,8 +280,6 @@ const loadAgentExperienceMemorySafely = async ({
       userId,
     });
   } catch (error) {
-    console.error("Failed to load agent experience memory.", error);
-
     return createAgentExperienceMemoryUnavailableContext({
       error: serializeError(error, "load_failed"),
       reason: "load_failed",
@@ -304,7 +302,6 @@ const recordAgentExperienceSafely = async ({
       userId,
     });
   } catch (error) {
-    console.error("Failed to record agent experience memory.", error);
     return createAgentExperienceMemoryWriteErrorResult(error);
   }
 };

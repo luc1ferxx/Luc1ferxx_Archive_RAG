@@ -121,6 +121,8 @@ const reportSkillsNotRun = ({
   const results = customSkills.map((skill) => {
     const error = new Error(`${skill.label} was not run: ${reason}.`);
     error.code = AGENT_SKILL_GRAPH_REJECTED_CODE;
+    // Written for the user: the Skill runs and the run keep it (lib/error-text.js).
+    error.expose = true;
 
     const result = buildFailedSkillResult(skill, error);
 

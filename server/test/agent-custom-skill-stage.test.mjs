@@ -759,7 +759,9 @@ test("selected Skills the runtime did not authorize: nothing runs, each is repor
   ]);
 });
 
-test("more selected Skills than a graph may hold: nothing runs, each is reported as not run", async () => {
+test("more selected Skills than a graph may hold: nothing runs, each is reported as not run", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
   const compare = createRecordingSkill({ id: "compare_documents", label: "Compare" });
   const risk = createRecordingSkill({ id: "risk_review", label: "Risk" });
   const harness = createHarness({ skills: [compare, risk] });
@@ -778,6 +780,16 @@ test("more selected Skills than a graph may hold: nothing runs, each is reported
       ["risk_review", false, "Risk was not run: no legal execution graph (max_nodes_exceeded)."],
     ]
   );
+  // The reason is written for the user: the Skill runs the response lists keep
+  // it, and a skip is not an error for the server log (lib/error-text.js).
+  assert.deepEqual(
+    harness.tracker.getSkillRuns().map((run) => [run.skillId, run.status, run.error]),
+    [
+      ["compare_documents", "skipped", "Compare was not run: no legal execution graph (max_nodes_exceeded)."],
+      ["risk_review", "skipped", "Risk was not run: no legal execution graph (max_nodes_exceeded)."],
+    ]
+  );
+  assert.deepEqual(logged, []);
   assert.deepEqual(
     harness.trace.map((step) => [step.type, step.status]),
     [["skill_graph_rejected", "skipped"]]

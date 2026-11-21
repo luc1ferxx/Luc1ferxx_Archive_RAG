@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { isUpstreamError } from "../lib/error-text.js";
 import {
   getDocumentsPostgresTable,
   getIngestJobOutputsPostgresTable,
@@ -175,14 +176,16 @@ const toPositiveInteger = (value, fallbackValue) => {
  * The message a user may see, bounded to its first line. A string is already a
  * public message (a stored last_error). An Error keeps its message only when
  * the ingest path raised it about the upload (a PUBLIC_ERROR_STATUSES status,
- * or `expose: true`); anything else becomes SERVER_ERROR_MESSAGE.
+ * or `expose: true`), never a model backend's own answer (a provider's 413 or
+ * 422 carries its text); anything else becomes SERVER_ERROR_MESSAGE.
  */
 export const toIngestJobErrorMessage = (error) => {
   let rawMessage = String(error ?? "");
 
   if (error instanceof Error) {
     rawMessage =
-      error.expose === true || PUBLIC_ERROR_STATUSES.has(Number(error.status))
+      !isUpstreamError(error) &&
+      (error.expose === true || PUBLIC_ERROR_STATUSES.has(Number(error.status)))
         ? error.message
         : SERVER_ERROR_MESSAGE;
   }

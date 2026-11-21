@@ -751,14 +751,16 @@ describe("the /feedback routes", () => {
   // The answer's experience-memory error follows lib/error-text.js: the store's
   // error stays in the server log.
   test("an experience-memory write that fails answers write_failed, never the store's error", async (t) => {
-    t.mock.method(console, "error", () => {});
+    const logged = [];
+    t.mock.method(console, "error", (...args) => logged.push(args));
+    const storeError = new Error('duplicate key value violates unique constraint "long_memories_pkey" on db.internal.example');
     const directory = await mkdtemp(path.join(os.tmpdir(), "feedback-routes-"));
 
     try {
       await withEnv({ API_AUTH_ENABLED: undefined, RBAC_MODE: undefined }, async () => {
         const server = await startServer(
           await createApp(createFileFeedbackStore({ directory }), async () => {
-            throw new Error('duplicate key value violates unique constraint "long_memories_pkey" on db.internal.example');
+            throw storeError;
           })
         );
 
@@ -771,6 +773,11 @@ describe("the /feedback routes", () => {
             status: "error",
             writeAttempted: true,
           });
+          // Logged once, by the rule; no second line at the route.
+          assert.deepEqual(
+            logged.filter((args) => args.includes(storeError)),
+            [["write_failed", storeError]]
+          );
         } finally {
           await server.close();
         }

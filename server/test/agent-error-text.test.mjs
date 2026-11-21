@@ -109,12 +109,17 @@ test("an experience memory that cannot be read answers load_failed, never the st
   await withAgentExperienceMemoryEnabled(async () => {
     configureAgentExperienceMemoryStore({ delete: failStore, list: failStore, remember: failStore });
 
-    const { result } = await streamDocumentQuestion(
+    const { logged, result } = await streamDocumentQuestion(
       t,
       Object.assign(new Error("Document not found for docId doc-1."), { status: 404 })
     );
 
     assert.equal(result.body.agentObservability.experienceMemory.error, "load_failed");
     assert.doesNotMatch(JSON.stringify(result.body), /db\.internal\.example/);
+    // Each store error is logged once, by the rule; no second line at the call.
+    assert.deepEqual(
+      logged.map(([text, error]) => [text, error.message]),
+      [["load_failed", "connect ECONNREFUSED db.internal.example:5432"]]
+    );
   });
 });
