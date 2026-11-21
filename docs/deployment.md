@@ -134,6 +134,8 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 RAG_SHARED_STATE=redis docker compose --profile app --profile shared-state up -d
 ```
 
+- 多个单体实例之间，下面"给某一层加副本"里 agent 层和 api 层的限制同样成立：每个实例启动时都做启动恢复，会把别的实例正在跑的 run 转人工；api 层那一条列出的进程内状态每个实例各一份。向量库只用 pgvector（见下面的"异步入库"）。
+
 ### 异步入库（可选）
 
 ```bash
@@ -273,7 +275,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
   - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。api 只跑一个容器（见上面的"给某一层加副本"），`ARCHIVE_RAG_API_PORTS` 只用来换宿主机端口。
   - api 的端口和基础文件里的端口一样绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`），各层的数据库地址用同一个 `POSTGRES_PASSWORD`，见上面的"端口与网络暴露"。
   - `--scale` 起的副本共用一个 DNS 名（例如 `--scale retrieval=2` 的 `http://retrieval:5002`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。只有检索层和模型网关能这样扩，api 和 agent 各跑一个。
-  - `--scale agent=2` 时 `AGENT_SERVICE_URL=http://agent:5001` 仍只有一个地址，启动时的拓扑检查看不出来。api 的 `/health` 每次都解析这个主机名：同一协议族解析出多个地址时，`checks.agentService` 报 `warning`（`warnings: ["several_agents_behind_one_name"]`，启动时的健康摘要里是 `agentService=warning`）。一个 IPv4 加一个 IPv6 地址算一台主机。前面放了负载均衡（或 Kubernetes 的 ClusterIP Service）、只解析出一个地址时查不出来。
+  - `--scale agent=2` 时 `AGENT_SERVICE_URL=http://agent:5001` 仍只有一个地址，启动时的拓扑检查看不出来。api 的 `/health` 每次都解析这个主机名（最多等 250 毫秒，同一个名字同时只解析一次；解析器更慢时这次不报）：同一协议族解析出多个地址时，`checks.agentService` 报 `warning`（`warnings: ["several_agents_behind_one_name"]`，启动时的健康摘要里是 `agentService=warning`）。一个 IPv4 加一个 IPv6 地址算一台主机。前面放了负载均衡（或 Kubernetes 的 ClusterIP Service）、只解析出一个地址时查不出来；反过来，负载均衡本身解析出多个地址时（例如跨多个可用区的云负载均衡、DNS 轮询），后面即使只有一个 agent 也会报，这时以负载均衡的目标数为准。
   - 这个文件还没有真正构建和启动过，只用 `docker compose config` 校验过解析，由 `test/deployment-contract.test.mjs` 固定。
 - 仓库里没有 Kubernetes 清单。
 

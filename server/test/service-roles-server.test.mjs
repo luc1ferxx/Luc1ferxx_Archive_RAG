@@ -871,6 +871,35 @@ test("the edge's health warns when one AGENT_SERVICE_URL name resolves to severa
     looked.length = 0;
     assert.equal((await agentServiceEntry(resolver(() => []), `http://127.0.0.1:${port}`)).status, "ok");
     assert.deepEqual(looked, []);
+
+    // A resolver that hangs: each report gives up on it after a short wait,
+    // not the probe timeout, and starts no second lookup of the name while
+    // the first one still holds its thread.
+    let answerHung;
+    const hung = new Promise((resolve) => {
+      answerHung = resolve;
+    });
+
+    try {
+      for (let report = 0; report < 2; report += 1) {
+        const started = performance.now();
+
+        assert.equal((await agentServiceEntry(resolver(() => hung))).status, "ok");
+        assert.ok(performance.now() - started < 1000, "the report waited on the resolver");
+      }
+
+      assert.equal(looked.length, 1);
+    } finally {
+      answerHung([
+        { address: "172.18.0.5", family: 4 },
+        { address: "172.18.0.6", family: 4 },
+      ]);
+    }
+
+    // Once that lookup has ended, the next report looks the name up again.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await agentServiceEntry(resolver(() => hung))).status, "warning");
+    assert.equal(looked.length, 2);
   } finally {
     agentServer.closeAllConnections();
     await new Promise((resolve) => agentServer.close(resolve));

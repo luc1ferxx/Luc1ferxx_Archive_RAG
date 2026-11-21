@@ -241,8 +241,8 @@ if (serviceRole === DEFAULT_SERVICE_ROLE) {
 } else {
   const { startServiceRole } = await import("./rag/agent-service/role-server.js");
 
-  // Each role picks its port (PORT, or the tier's own default; see
-  // resolveRolePort), as its dedicated entry point would.
+  // Each role picks its port: PORT, or the tier's own default (see
+  // resolveRolePort).
   await startServiceRole({
     role: serviceRole,
     shutdownFinalizers: tracingFinalizers,

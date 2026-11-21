@@ -409,7 +409,7 @@ pgvector 稀疏检索最多使用查询里前 64 个不同的词。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `VECTOR_STORE_PROVIDER` | `pgvector` | 严格白名单：`pgvector`（默认，chunk 与向量存在 PostgreSQL）、`local`（本地 JSON 索引，显式 opt-in）、`qdrant`（显式 opt-in）。其他值在启动健康检查、ingest 和检索时都直接报错，不会静默回落到 `local`。拆分部署和独立入库 worker 也只用 `pgvector`：Qdrant 的稀疏词表在每个进程里，跨进程入库后稀疏分数对不上（见 deployment.md）。多租户只支持 `pgvector`：`local` 和 `qdrant` 只靠调用方传入的 docId 过滤，没有行级安全，配了 `API_AUTH_TOKENS`、JWT 或 OIDC 时 `checks.vectorStore` 报 warning；Qdrant 收到空的 docId 列表时返回空结果，不再搜整个 collection。 |
+| `VECTOR_STORE_PROVIDER` | `pgvector` | 严格白名单：`pgvector`（默认，chunk 与向量存在 PostgreSQL）、`local`（本地 JSON 索引，显式 opt-in）、`qdrant`（显式 opt-in）。其他值在启动健康检查、ingest 和检索时都直接报错，不会静默回落到 `local`。拆分部署、多实例和独立入库 worker 也只用 `pgvector`：Qdrant 的稀疏词表在每个进程里，跨进程入库后稀疏分数对不上（见 deployment.md）。多租户只支持 `pgvector`：`local` 和 `qdrant` 只靠调用方传入的 docId 过滤，没有行级安全，配了 `API_AUTH_TOKENS`、JWT 或 OIDC 时 `checks.vectorStore` 报 warning；Qdrant 收到空的 docId 列表时返回空结果，不再搜整个 collection。 |
 | `DOCUMENT_CHUNKS_POSTGRES_TABLE` | `rag_document_chunks` | pgvector chunk/向量表；外键级联到 `DOCUMENTS_POSTGRES_TABLE`。 |
 | `RAG_EMBEDDING_DIMENSIONS` | 由模型推导 | pgvector 列宽。留空时按 `OPENAI_EMBEDDING_MODEL` 推导（`text-embedding-3-small`=1536、`-large`=3072、`ada-002`=1536，未知模型 1536）。列宽或模型与库中已有 chunk 不一致时 ingest/检索明确失败并要求 `npm run vector:reindex`。 |
 | `RAG_PGVECTOR_TEXT_SEARCH_CONFIG` | `simple` | 稀疏路（PostgreSQL FTS）使用的 text search configuration。chunk 文本先用应用内 tokenizer 切分（汉字逐字；其他文字按字母、附加符号和数字连成词，小写、去英文停用词）再建 tsvector，因此默认 `simple`。2026-11-17 之前 tokenizer 只认 ASCII 和 U+4E00–U+9FFF，之前写入、含其他文字（带重音的拉丁字母、西里尔、韩文、假名等）的文档要跑一次 `npm run vector:reindex -- --from documents --apply`（重新切块和向量化，挑空闲时跑）；Qdrant 要等下一次上传或删除重写稀疏向量。怎样打分由下一行 `RAG_SPARSE_SCORING` 决定，默认是 BM25。 |
@@ -612,7 +612,7 @@ RBAC_MODE=enforce
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `ARCHIVE_RAG_ROLE` | `all` | 这个进程跑哪一层：`all`（单体）、`api`（公网入口）、`agent`（Agent 编排）、`retrieval`（检索）、`model-gateway`（模型网关）。忽略大小写和首尾空格；其他值在启动时直接报错，不会退回单体。 |
-| `AGENT_SERVICE_URL` | 空 | agent 层的副本地址，逗号分隔。设置后，`/chat`、`/chat/stream`、任务、触发器、agent run 及其操作、`/capabilities` 和 `POST /admin/actions/:action` 转发到 agent 层。`api` 角色必须设置。目前只支持一个 agent：列多个地址时启动打警告，因为每个 agent 的启动恢复会把别的 agent 正在跑的 run 转人工（见 deployment.md「给某一层加副本」）。一个主机名解析出同一协议族的多个地址时（例如 Compose 的 `--scale agent=2`），api 的 `/health` 里 `checks.agentService` 报 `warning`；负载均衡后面的多个 agent 查不出来。 |
+| `AGENT_SERVICE_URL` | 空 | agent 层的副本地址，逗号分隔。设置后，`/chat`、`/chat/stream`、任务、触发器、agent run 及其操作、`/capabilities` 和 `POST /admin/actions/:action` 转发到 agent 层。`api` 角色必须设置。目前只支持一个 agent：列多个地址时启动打警告，因为每个 agent 的启动恢复会把别的 agent 正在跑的 run 转人工（见 deployment.md「给某一层加副本」）。一个主机名解析出同一协议族的多个地址时（例如 Compose 的 `--scale agent=2`），api 的 `/health` 里 `checks.agentService` 报 `warning`；负载均衡后面的多个 agent 查不出来，解析出多个地址的负载均衡后面即使只有一个 agent 也会报。 |
 | `RETRIEVAL_SERVICE_URL` | 空 | 检索层的副本地址，逗号分隔。设置后，文档问答和对比的检索（查询 embedding、稠密 + 稀疏、融合、重排）交给检索层，本进程不再读分块表。`agent` 角色不设时在本进程检索，启动时打印警告。 |
 | `MODEL_GATEWAY_URL` | 空 | 模型网关的副本地址，逗号分隔。设置后，chat、embedding 和交叉编码器重排都经网关调用；配置了自定义 provider 的调用仍在本进程执行。 |
 

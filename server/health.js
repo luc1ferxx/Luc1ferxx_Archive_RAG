@@ -1612,21 +1612,35 @@ const probeAgentReplica = async ({ env, url }) => {
 // several hosts; one IPv4 plus one IPv6 address is one dual-stack host
 // (localhost, a container on an IPv6 network). A load balancer in front of
 // several agents answers on one address and stays unseen.
+//
+// /ready waits on the count, so the resolver gets AGENT_HOST_LOOKUP_TIMEOUT_MS
+// (Docker's DNS and CoreDNS answer in milliseconds) and a slower answer counts
+// nothing this time. The race cannot cancel getaddrinfo, which keeps a libuv
+// thread until it ends, so a name has one lookup at a time.
+const AGENT_HOST_LOOKUP_TIMEOUT_MS = 250;
+const agentHostLookups = new Map();
+
 const countAgentHosts = async (host, lookup) => {
   if (isIP(host)) {
     return 1;
   }
 
+  if (!agentHostLookups.has(host)) {
+    agentHostLookups.set(
+      host,
+      lookup(host, { all: true })
+        .catch(() => [])
+        .finally(() => agentHostLookups.delete(host))
+    );
+  }
+
   let timer;
-  // A resolver that does not answer must not hold /health past the probes.
   const addresses = await Promise.race([
-    lookup(host, { all: true }),
+    agentHostLookups.get(host),
     new Promise((resolve) => {
-      timer = setTimeout(resolve, AGENT_PROBE_TIMEOUT_MS, []);
+      timer = setTimeout(resolve, AGENT_HOST_LOOKUP_TIMEOUT_MS, []);
     }),
-  ])
-    .catch(() => [])
-    .finally(() => clearTimeout(timer));
+  ]).finally(() => clearTimeout(timer));
   const byFamily = { 4: new Set(), 6: new Set() };
 
   addresses.forEach(({ address, family }) => byFamily[family]?.add(address));
