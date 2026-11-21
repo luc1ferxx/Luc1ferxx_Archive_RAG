@@ -100,6 +100,15 @@ const mergeResultPair = (existing, incoming) => {
   };
 };
 
+// The id prefix of a retrieval query that searches a cross-language rewrite
+// (chat(), rag/query-translation.js).
+const TRANSLATION_QUERY_ID_PREFIX = "translation-";
+
+// Whether a candidate's stored keywordScore was measured against a rewrite:
+// mergeProvenance lists the winning copy's query first.
+const foundByTranslation = (result) =>
+  String(result?.provenance?.queries?.[0]?.queryId ?? "").startsWith(TRANSLATION_QUERY_ID_PREFIX);
+
 export const tagResultsWithQuery = (results = [], retrievalQuery = {}) =>
   (Array.isArray(results) ? results : []).map((result) => {
     const provenance = result.provenance ?? { fusion: null, routes: [] };
@@ -581,7 +590,7 @@ const buildRetrievalInputs = async ({
     ...queryTranslations
       .filter((translation) => translation.query)
       .map(({ query, script }) => ({
-        id: `translation-${script}`,
+        id: `${TRANSLATION_QUERY_ID_PREFIX}${script}`,
         label: `Question in ${script} script`,
         query,
         primary: false,
@@ -803,7 +812,10 @@ const executeQaRag = async ({
       docIds,
       queryAdapterScope,
     });
+  // A rewrite is a paraphrase in another language: a candidate it found may
+  // clear the gate on semantic similarity, as a comparison's may (X3).
   const confidence = assessQaConfidence({
+    allowSemanticBypassFor: foundByTranslation,
     coverageFromQueryText,
     results: retrievalResults,
     queryText: resolvedQuery,

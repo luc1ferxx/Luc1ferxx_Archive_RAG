@@ -174,8 +174,12 @@ const hasEnoughQueryCoverage = (
     return true;
   }
 
+  // A predicate decides per candidate (the QA gate's cross-language rewrites).
+  const bypass =
+    typeof allowSemanticBypass === "function" ? allowSemanticBypass(result) : allowSemanticBypass;
+
   return (
-    allowSemanticBypass &&
+    Boolean(bypass) &&
     typeof result?.vectorScore === "number" &&
     result.vectorScore >= getMinRelevanceScore()
   );
@@ -483,10 +487,15 @@ const selectByRerankProbability = ({ minProbability, queryText, results }) => {
 
 // coverageFromQueryText: measure coverage against queryText itself (see
 // buildQaCoverageReader); only the agent's follow-up retrieval sets it.
+// allowSemanticBypassFor: candidates that may clear the lexical gate on
+// semantic similarity alone, as comparisons do (hasEnoughQueryCoverage); the
+// QA route passes the ones a cross-language rewrite found, since a translation
+// is a paraphrase whose words seldom match the chunk's (KX round, X3).
 export const assessQaConfidence = ({
   results,
   queryText = "",
   coverageFromQueryText = false,
+  allowSemanticBypassFor = null,
 }) => {
   const minCoverage = getMinQaQueryTermCoverage();
   const minRerankProbability = getQaMinRerankProbability();
@@ -510,6 +519,7 @@ export const assessQaConfidence = ({
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
     : selectUsableResults({
+        ...(allowSemanticBypassFor ? { allowSemanticBypass: allowSemanticBypassFor } : {}),
         coverageOf,
         minCoverage,
         results,
