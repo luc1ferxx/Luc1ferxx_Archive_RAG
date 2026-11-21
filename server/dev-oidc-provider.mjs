@@ -181,10 +181,13 @@ const sendJson = (res, status, body, extraHeaders = {}) => {
   res.end(JSON.stringify(body));
 };
 
-const sendHtml = (res, status, html) => {
+// `redirectOrigin`: the login form's submission is answered with a redirect to
+// the (already validated) redirect_uri, and Chrome checks form-action against
+// that redirect too, so 'self' alone blocked every sign-in from the form.
+const sendHtml = (res, status, html, { redirectOrigin = "" } = {}) => {
   res.writeHead(status, {
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${redirectOrigin ? ` ${redirectOrigin}` : ""}`,
     "content-type": "text/html; charset=utf-8",
   });
   res.end(html);
@@ -381,7 +384,7 @@ export const startDevOidcProvider = async ({
     const user = findUser(params.get("login_hint"));
 
     if (!user) {
-      sendHtml(res, 200, renderLoginForm(params));
+      sendHtml(res, 200, renderLoginForm(params), { redirectOrigin: new URL(redirectUri).origin });
       return;
     }
 

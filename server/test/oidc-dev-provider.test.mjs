@@ -211,6 +211,12 @@ test("the login form lists users when no login_hint is given, escaped", async ()
     assert.match(html, /&lt;script&gt;x&lt;\/script&gt;/u);
     assert.equal(html.includes("<script>x"), false);
     assert.equal(html.includes("\"><b>"), false);
+    // The form's submission is answered with a redirect to redirect_uri, and
+    // Chrome checks form-action against that redirect too.
+    assert.match(
+      response.headers.get("content-security-policy"),
+      /form-action 'self' http:\/\/localhost:3000(;|$)/u
+    );
   } finally {
     await provider.stop();
   }
