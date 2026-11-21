@@ -181,9 +181,14 @@
   cursor: pointer;
 }
 
-.document-arxiv-recommendation-button:hover {
+.document-arxiv-recommendation-button:hover:not(:disabled) {
   border-color: rgba(15, 159, 122, 0.38);
   background: #effaf6;
+}
+
+.document-arxiv-recommendation-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .document-arxiv-recommendation-button svg {

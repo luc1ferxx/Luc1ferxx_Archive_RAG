@@ -34,7 +34,9 @@ const ArxivSuggestionPanel = ({
     () => papers.map((paper) => paper.arxivId).filter(Boolean),
     [papers]
   );
-  const paperIdsKey = paperIds.join("\n");
+  // Picks belong to one search: a new search (a new token) starts unchecked,
+  // even when it finds the same papers.
+  const paperIdsKey = [suggestion?.selectionToken, ...paperIds].join("\n");
   const [selectionState, setSelectionState] = useState({
     paperIdsKey: "",
     selectedPaperIds: [],

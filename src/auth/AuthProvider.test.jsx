@@ -438,6 +438,12 @@ describe("permission-based UI gating in the workspace sidebar", () => {
 
     expect(screen.queryByText("Uploader")).not.toBeInTheDocument();
     expect(screen.getByRole("note")).toHaveTextContent("Your role cannot upload documents.");
+    // Such a user could never import what an arXiv search finds.
+    expect(
+      screen.queryByRole("button", {
+        name: t("sidebar.findRelatedArxivFor", { fileName: "policy.pdf" }),
+      })
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Remove policy\.pdf/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: t("sidebar.clearWorkspace") })).toBeDisabled();
     expect(screen.getByRole("button", { name: t("quality.runEval") })).toBeDisabled();

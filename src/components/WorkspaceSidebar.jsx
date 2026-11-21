@@ -446,8 +446,9 @@ const WorkspaceSidebar = ({
                 ) : null}
 
                 {/* Only this click sends a document's topic to arXiv; one
-                    search at a time, since the panel shows one result. */}
-                {!isArxivDocument(document) ? (
+                    search at a time, since the panel shows one result.
+                    Uploaders only: a read-only role could never import. */}
+                {canUpload && !isArxivDocument(document) ? (
                   <button
                     type="button"
                     className="document-arxiv-recommendation-button"

@@ -383,13 +383,24 @@ const App = () => {
     },
     [openSavedArxivSuggestionForDocument, scrollSidebarSection, t]
   );
-  // The panel shows its loading state at once, so scroll to it on the click.
+  // The panel shows its loading state at once, so scroll to it on the click;
+  // a search that finds nothing shows no panel, so it says so.
   const requestArxivSuggestions = useCallback(
-    (document) => {
+    async (document) => {
       scrollSidebarSection(uploadRef);
-      return requestArxivSuggestionsForDocument(document);
+      const result = await requestArxivSuggestionsForDocument(document);
+
+      if (result && (result.papers ?? []).length === 0) {
+        message.info(
+          t(
+            result.reason === "external_query_blocked"
+              ? "app.arxivQueryBlocked"
+              : "app.arxivNoMatches"
+          )
+        );
+      }
     },
-    [requestArxivSuggestionsForDocument, scrollSidebarSection]
+    [requestArxivSuggestionsForDocument, scrollSidebarSection, t]
   );
 
   const selectConversationView = useCallback(

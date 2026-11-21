@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
 import axios from "axios";
+import { message } from "antd";
 import App from "./App";
 
 const DOCX_MIME_TYPE =
@@ -466,6 +467,10 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("rag-notes.pdf")).toBeInTheDocument();
     expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
+    // An upload from home sends nothing to arXiv either.
+    expect(
+      axios.get.mock.calls.some(([url]) => url.includes("/arxiv/suggestions?"))
+    ).toBe(false);
   });
 
   test("opens generated artifacts in the Drive without treating them as documents", async () => {
@@ -1126,4 +1131,46 @@ describe("App", () => {
     // The task-log poll now ticks every 5s, so this end-to-end flow can
     // outlast jest's default 5s test timeout.
   }, 20000);
+
+  // A search that finds nothing shows no panel, so the user is told why.
+  test("says so when a search for related arXiv papers finds nothing", async () => {
+    const info = vi.spyOn(message, "info").mockImplementation(() => {});
+    const defaultGet = axios.get.getMockImplementation();
+    let reason = "external_query_blocked";
+
+    axios.get.mockImplementation((url) =>
+      url.includes("/documents/doc-1/arxiv/suggestions?")
+        ? Promise.resolve({
+            data: {
+              document: { docId: "doc-1", fileName: "benefits-2025.pdf" },
+              papers: [],
+              reason,
+            },
+          })
+        : defaultGet(url)
+    );
+
+    render(<App />);
+    await openWorkspace();
+
+    const findButton = await screen.findByRole("button", {
+      name: "Find related arXiv papers for benefits-2025.pdf",
+    });
+
+    fireEvent.click(findButton);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "Nothing was sent to arXiv: this document has no searchable topic word left after cleaning."
+      )
+    );
+
+    reason = "no_relevant_arxiv_matches";
+    await waitFor(() => expect(findButton).toBeEnabled());
+    fireEvent.click(findButton);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith("No related arXiv papers found.")
+    );
+    expect(screen.queryByText("arXiv recommendations")).not.toBeInTheDocument();
+    info.mockRestore();
+  });
 });

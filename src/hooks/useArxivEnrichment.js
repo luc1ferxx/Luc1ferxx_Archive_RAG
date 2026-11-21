@@ -143,6 +143,8 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
       if ((nextSuggestion.papers ?? []).length > 0) {
         setSuggestion(nextSuggestion);
       }
+
+      return nextSuggestion;
     } catch (error) {
       message.warning(
         getBackendMessage(error, "Unable to check arXiv suggestions.")
