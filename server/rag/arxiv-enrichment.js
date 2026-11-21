@@ -139,6 +139,22 @@ export const createArxivEnrichmentService = ({
       docId,
     });
     const requestedMaxResults = normalizeArxivMaxResults(maxResults);
+    // A search rewrites the document's one recommendation task, which would
+    // stop an import still queued or running on it.
+    const currentTask = await recommendationTaskService?.getDocumentTask?.({
+      accessScope,
+      docId,
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+    });
+
+    if (
+      currentTask?.status === TASK_STATUSES.queued ||
+      currentTask?.status === TASK_STATUSES.running
+    ) {
+      const error = new Error("An arXiv import for this document is still running.");
+      error.status = 409;
+      throw error;
+    }
 
     if (!isExternalQueryPolicyAllowed(queryPolicy)) {
       const savedSuggestion = recommendationSnapshotService.save({

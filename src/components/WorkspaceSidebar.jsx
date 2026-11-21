@@ -271,6 +271,7 @@ const WorkspaceSidebar = ({
   onOpenSavedArxivSuggestion,
   onRecoveryAction,
   onRemoveDocument,
+  onRequestArxivSuggestions,
   onRunSyntheticQuality,
   onToggleChatScopeDocument,
   onNavigate,
@@ -441,6 +442,24 @@ const WorkspaceSidebar = ({
                         count: savedArxivPaperCount,
                       })}
                     </span>
+                  </button>
+                ) : null}
+
+                {/* Only this click sends a document's topic to arXiv; one
+                    search at a time, since the panel shows one result.
+                    Uploaders only: a read-only role could never import. */}
+                {canUpload && !isArxivDocument(document) ? (
+                  <button
+                    type="button"
+                    className="document-arxiv-recommendation-button"
+                    aria-label={t("sidebar.findRelatedArxivFor", {
+                      fileName: document.fileName,
+                    })}
+                    disabled={Boolean(isArxivSuggestionLoading)}
+                    onClick={() => void onRequestArxivSuggestions?.(document)}
+                  >
+                    <SearchOutlined />
+                    <span>{t("sidebar.findRelatedArxiv")}</span>
                   </button>
                 ) : null}
 

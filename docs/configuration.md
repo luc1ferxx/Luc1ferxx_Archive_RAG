@@ -117,6 +117,8 @@ STARTUP_HEALTH_STRICT=false
 
 arXiv topic 导入使用公开 Atom API，不需要额外 API key；后端需要能访问 `https://export.arxiv.org/api/query` 和对应 PDF URL。
 
+Web 界面只在用户点击文档列表里某份文档的“查找相关 arXiv 论文”（英文界面 “Find related arXiv papers”）时才请求文档的 arXiv 推荐，上传文档不会触发；直接调用 `GET /documents/:docId/arxiv/suggestions` 的 API 客户端同样会查询 arXiv（对话里的 arXiv 导入另走 `arxiv.import_topic` 审批门）。这一次请求让后端把该文档清理后的主题（最多 4 个词，取自文档 profile 的标签和摘要关键词，已去掉私密实体和内部术语；一个词都不剩时不发请求）作为检索词发给 `https://export.arxiv.org/api/query`，并记录一条 `external_recommendation` task。返回的论文默认一篇都不勾选，用户勾选并点 Import 之后才下载和导入。只有能上传文档的用户看得到这个按钮，从 arXiv 导入的文档没有这个按钮。
+
 ## Evaluation evidence 配置
 
 | 变量 | 默认值 | 作用 |

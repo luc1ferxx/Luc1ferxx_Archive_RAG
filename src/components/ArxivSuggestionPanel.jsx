@@ -34,7 +34,9 @@ const ArxivSuggestionPanel = ({
     () => papers.map((paper) => paper.arxivId).filter(Boolean),
     [papers]
   );
-  const paperIdsKey = paperIds.join("\n");
+  // Picks belong to one search: a new search (a new token) starts unchecked,
+  // even when it finds the same papers.
+  const paperIdsKey = [suggestion?.selectionToken, ...paperIds].join("\n");
   const [selectionState, setSelectionState] = useState({
     paperIdsKey: "",
     selectedPaperIds: [],
@@ -44,10 +46,11 @@ const ArxivSuggestionPanel = ({
     return null;
   }
 
+  // Nothing starts checked: each paper is a download the user picks.
   const selectedPaperIds =
     selectionState.paperIdsKey === paperIdsKey
       ? selectionState.selectedPaperIds
-      : paperIds;
+      : [];
   const selectedCount = selectedPaperIds.length;
   const sanitizedTopic = getSanitizedTopic(suggestion);
 
@@ -56,7 +59,7 @@ const ArxivSuggestionPanel = ({
       const currentPaperIds =
         currentSelectionState.paperIdsKey === paperIdsKey
           ? currentSelectionState.selectedPaperIds
-          : paperIds;
+          : [];
       let nextPaperIds;
 
       if (checked) {

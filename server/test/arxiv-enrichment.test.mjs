@@ -766,6 +766,79 @@ test("arxiv enrichment runner queues confirmed imports and records per-paper pro
   assert.equal(finalTask.items[0].result.docId, "doc-arxiv");
 });
 
+// A search rewrites the document's one task, which would stop its import.
+test("arxiv enrichment refuses a new search while the document's import is queued or running", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  let searchCount = 0;
+  const service = createArxivEnrichmentService({
+    arxivImportService: {},
+    arxivService: {
+      search: async () => {
+        searchCount += 1;
+
+        return [
+          {
+            arxivId: "2401.00001v1",
+            pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+            summary: "Retrieval augmented generation for archive search.",
+            title: "Retrieval Augmented Generation for Archives",
+          },
+        ];
+      },
+    },
+    recommendationTaskService: createRecommendationTaskService({
+      taskService,
+    }),
+    ragService: {
+      getDocument: () => ({
+        docId: "doc-1",
+        fileName: "private-notes.pdf",
+        profile: {
+          tags: ["retrieval", "augmented", "generation"],
+        },
+      }),
+    },
+  });
+  const suggestion = await service.suggestForDocument({
+    docId: "doc-1",
+    maxResults: 3,
+  });
+
+  await service.importJobRunner.resume({
+    action: "confirm",
+    payload: {
+      selectedArxivIds: ["2401.00001v1"],
+      selectionToken: suggestion.selectionToken,
+    },
+    task: suggestion.task,
+  });
+
+  for (const status of [TASK_STATUSES.queued, TASK_STATUSES.running]) {
+    await taskService.patchTask({
+      patch: { status },
+      taskId: suggestion.task.id,
+    });
+    await assert.rejects(
+      service.suggestForDocument({
+        docId: "doc-1",
+        maxResults: 3,
+      }),
+      {
+        message: "An arXiv import for this document is still running.",
+        status: 409,
+      }
+    );
+    assert.equal(
+      (await taskService.getTask({ taskId: suggestion.task.id })).status,
+      status
+    );
+  }
+
+  assert.equal(searchCount, 1);
+});
+
 test("arxiv background task writes remain fenced after cancellation", async () => {
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),

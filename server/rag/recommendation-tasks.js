@@ -33,6 +33,15 @@ export const createRecommendationTaskService = ({
       },
     });
 
+  const getDocumentTask = async ({ accessScope = {}, docId, provider } = {}) =>
+    taskService.getTask({
+      accessScope,
+      taskId: buildRecommendationTaskId({
+        docId,
+        provider,
+      }),
+    });
+
   const recordSuggestionResult = async ({
     accessScope = {},
     provider,
@@ -424,6 +433,7 @@ export const createRecommendationTaskService = ({
   };
 
   return {
+    getDocumentTask,
     recordImportCompleted,
     recordImportFailed,
     recordImportProgress,
