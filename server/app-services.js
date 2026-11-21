@@ -530,6 +530,7 @@ export const createAppServices = (options = {}, { uploadsDirectory }) => {
         options.agentRunService && !options.agentRunStore ? null : agentRunStore,
       feedbackStore,
       ingestJobStore,
+      recommendationTaskService,
       workspaceArtifactStore:
         options.workspaceArtifactService && !options.workspaceArtifactStore
           ? null

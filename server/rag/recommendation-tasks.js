@@ -42,6 +42,28 @@ export const createRecommendationTaskService = ({
       }),
     });
 
+  // The deleted documents' tasks (rag/document-deletion-cascade.js): their
+  // papers could only go into a document that is gone. One listing of the
+  // scope's recommendation tasks, so a clear of many documents deletes only
+  // the tasks there are. Resolves to how many were deleted.
+  const deleteDocumentTasks = async ({ accessScope = {}, docIds = [], provider } = {}) => {
+    const taskIds = new Set(docIds.map((docId) => buildRecommendationTaskId({ docId, provider })));
+    const { tasks } = await taskService.listTasks({
+      accessScope,
+      limit: "all",
+      type: RECOMMENDATION_TASK_TYPE,
+    });
+    let deleted = 0;
+
+    for (const task of tasks.filter((candidate) => taskIds.has(candidate.id))) {
+      if (await taskService.deleteTask({ accessScope, taskId: task.id })) {
+        deleted += 1;
+      }
+    }
+
+    return deleted;
+  };
+
   const recordSuggestionResult = async ({
     accessScope = {},
     provider,
@@ -433,6 +455,7 @@ export const createRecommendationTaskService = ({
   };
 
   return {
+    deleteDocumentTasks,
     getDocumentTask,
     recordImportCompleted,
     recordImportFailed,

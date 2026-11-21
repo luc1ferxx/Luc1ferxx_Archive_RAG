@@ -1,15 +1,17 @@
 // What deleting a document also removes (rag/document-deletion-cascade.js):
-// its waiting ingest jobs always, and with DOCUMENT_DELETE_REDACTION=on the
-// copies of its text in the deleting tenant's settled agent runs, workspace
-// artifacts and answer feedback. In-memory and file stores here, the
-// PostgreSQL stores through fake query functions; the real database cases
-// live in vector-store-pgvector-versions.integration.test.mjs.
+// its waiting ingest jobs and its arXiv recommendation task always, and with
+// DOCUMENT_DELETE_REDACTION=on the copies of its text in the deleting
+// tenant's settled agent runs, workspace artifacts and answer feedback.
+// In-memory and file stores here, the PostgreSQL stores through fake query
+// functions; the real database cases live in
+// vector-store-pgvector-versions.integration.test.mjs.
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { createAppServices } from "../app-services.js";
 import { createFileFeedbackStore } from "../feedback.js";
 import { createInMemoryAgentRunStore } from "../rag/agent-runs.js";
 import { isDocumentDeleteRedactionEnabled } from "../rag/config.js";
@@ -46,7 +48,9 @@ import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 import { createPostgresAgentRunStore } from "../rag/postgres-agent-run-store.js";
 import { createPostgresFeedbackStore } from "../rag/postgres-feedback-store.js";
 import { getDatabaseTenantContext, runWithDatabaseTenant } from "../rag/postgres-tenant.js";
+import { createRecommendationTaskService } from "../rag/recommendation-tasks.js";
 import { configureRagDataDirectory, getRagDataDirectory } from "../rag/storage.js";
+import { createInMemoryTaskStore, createTaskService } from "../rag/tasks.js";
 import { resetVectorStore } from "../rag/vector-store.js";
 import {
   createInMemoryWorkspaceArtifactStore,
@@ -364,7 +368,7 @@ test("with redaction off the cascade cancels jobs and leaves runs and artifacts 
   const cascade = createDocumentDeletionCascade({ ...stores, logger: silentLogger });
   const summary = await cascade.afterDocumentsDeleted({ accessScope: ALICE, docIds: ["doc-x"] });
 
-  assert.deepEqual(summary, { ingestJobs: { canceled: 1 }, redaction: null });
+  assert.deepEqual(summary, { ingestJobs: { canceled: 1 }, recommendationTasks: null, redaction: null });
   assert.deepEqual(stores.agentRunStore.get({ accessScope: ALICE, runId: "run-1" }), before);
   assert.equal(
     (await stores.workspaceArtifactStore.getArtifact({ accessScope: ALICE, artifactId: "artifact-1" })).sourceDeleted,
@@ -790,15 +794,37 @@ test("deleteDocument and clearDocuments run the cascade once the document is gon
     await ingest("doc-y", ALICE);
 
     const stores = createStores();
-    const cascade = createDocumentDeletionCascade({ ...stores, logger: silentLogger });
+    const taskService = createTaskService({ taskStore: createInMemoryTaskStore() });
+    const recommendationTaskService = createRecommendationTaskService({ taskService });
+    const cascade = createDocumentDeletionCascade({ ...stores, logger: silentLogger, recommendationTaskService });
+    // A search with papers to import leaves the document's task waiting for the user.
+    const recommend = (docId, scope = ALICE) =>
+      recommendationTaskService.recordSuggestionResult({
+        accessScope: scope,
+        provider: "arxiv",
+        suggestion: {
+          document: { docId, fileName: `${docId}.pdf` },
+          papers: [{ arxivId: "2401.00001v1", title: "Leave policies" }],
+          selectionToken: "selection-token",
+        },
+      });
+    const listTasks = async (scope = ALICE) =>
+      (await taskService.listTasks({ accessScope: scope })).tasks.map((task) => `${task.id} ${task.status}`).sort();
 
     await createRun(stores.agentRunStore, ALICE, { runId: "run-1" });
     await enqueueFor(stores.ingestJobStore, ALICE, { jobId: "job-x", kind: "replace" });
     await enqueueFor(stores.ingestJobStore, ALICE, { docId: "doc-y", jobId: "job-y", kind: "replace" });
+    await recommend("doc-x");
+    await recommend("doc-y");
+    await recommend("doc-x", BOB);
 
     // Bob cannot see doc-x: no delete, so no cascade.
     assert.equal(await deleteDocument("doc-x", { accessScope: BOB, cascade }), null);
     assert.equal((await stores.ingestJobStore.get("job-x", ALICE)).status, "queued");
+    assert.deepEqual(await listTasks(), [
+      "external_recommendation:arxiv:doc-x waiting_for_user",
+      "external_recommendation:arxiv:doc-y waiting_for_user",
+    ]);
 
     const deleted = await deleteDocument("doc-x", { accessScope: ALICE, cascade });
 
@@ -809,6 +835,10 @@ test("deleteDocument and clearDocuments run the cascade once the document is gon
       stores.agentRunStore.get({ accessScope: ALICE, runId: "run-1" }).steps[0].output.citations[0].excerpt,
       DELETED_SOURCE_TEXT_MARKER
     );
+    // Its arXiv task no longer waits for the user; another document's and
+    // another scope's stay.
+    assert.deepEqual(await listTasks(), ["external_recommendation:arxiv:doc-y waiting_for_user"]);
+    assert.deepEqual(await listTasks(BOB), ["external_recommendation:arxiv:doc-x waiting_for_user"]);
 
     // A second delete of the same document finds nothing and cascades nothing.
     assert.equal(await deleteDocument("doc-x", { accessScope: ALICE, cascade }), null);
@@ -817,6 +847,7 @@ test("deleteDocument and clearDocuments run the cascade once the document is gon
 
     assert.deepEqual(cleared.map((document) => document.docId), ["doc-y"]);
     assert.equal((await stores.ingestJobStore.get("job-y", ALICE)).canceledReason, "document_deleted");
+    assert.deepEqual(await listTasks(), [], "a clear takes its documents' arXiv tasks too");
 
     // Without a cascade the delete behaves as before.
     await ingest("doc-z", ALICE);
@@ -830,4 +861,23 @@ test("deleteDocument and clearDocuments run the cascade once the document is gon
     configureRagDataDirectory(originalDataDirectory);
     await rm(tempRoot, { force: true, recursive: true });
   }
+});
+
+test("the app's cascade deletes the deleting scope's arXiv task for the document (app-services.js)", async () => {
+  const services = createAppServices({ taskStore: createInMemoryTaskStore() }, { uploadsDirectory: os.tmpdir() });
+
+  await services.recommendationTaskService.recordSuggestionResult({
+    accessScope: ALICE,
+    provider: "arxiv",
+    suggestion: {
+      document: { docId: "doc-x", fileName: "doc-x.pdf" },
+      papers: [{ arxivId: "2401.00001v1", title: "Leave policies" }],
+      selectionToken: "selection-token",
+    },
+  });
+
+  const summary = await services.documentDeletionCascade.afterDocumentsDeleted({ accessScope: ALICE, docIds: ["doc-x"] });
+
+  assert.deepEqual(summary.recommendationTasks, { deleted: 1 });
+  assert.deepEqual((await services.taskService.listTasks({ accessScope: ALICE })).tasks, []);
 });
