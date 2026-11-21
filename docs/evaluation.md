@@ -489,7 +489,7 @@ npm run observability:report -- --json
 - execution planner requested/selected provider 分布
 - LLM planner selected count、fallback count 和 fallback rate
 - LLMOps operation / model route 指标、token/cost/SLO 聚合，以及 annotation、alert、budget status counts
-- planner fallback reason top list
+- planner fallback reason top list（模型调用失败统一记为 `planner_call_failed`，2026-11-20 起）
 - 各 `agentMode` 下的 planner `stepIds` 分布
 - recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率（自动续跑的图）、step retry 次数、step replay failure 数，并在同一区块展示 planner fallback count 和 skill graph 的 planned / executed / rejected whole（整张图被拒，不算 fallback，没有门槛，阶段 12 起）/ fallback / reused node / replan 计数
 - query planner intent、retrieval query 数量和 topK profile

@@ -14,6 +14,7 @@ import {
   deterministicDagPlannerAdapter,
   normalizeExecutionGraphPayload,
 } from "../rag/agent-dag-planner-adapter.js";
+import { createCircuitOpenError } from "../rag/model-call-guard.js";
 import { createSkillRegistry } from "../rag/skills/registry.js";
 import { withPlannerRollout } from "../rag/agent-planner-rollout.js";
 
@@ -395,6 +396,17 @@ test("createAgentExecutionGraphResult falls back when the planner throws", async
     result.graph.nodes.map((node) => node.skillId),
     ["compare_documents", "risk_review"]
   );
+
+  // A failed model call is a code: its message names the model endpoint.
+  const outage = await createAgentExecutionGraphResult(
+    baseOptions({
+      plannerAdapter: stubAdapter("llm_dag", () => {
+        throw createCircuitOpenError("http://10.0.0.5:11434/v1|qwen2.5:7b");
+      }),
+    })
+  );
+  assert.equal(outage.planner.status, "fallback");
+  assert.equal(outage.planner.fallbackReason, "planner_call_failed");
 });
 
 test("deterministic DAG fallback runs only intent-selected Skills, not the authorized catalog", async () => {

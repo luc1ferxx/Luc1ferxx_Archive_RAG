@@ -236,6 +236,7 @@ const rememberVerdict = (cacheKey, verdict) => {
 
 export const resetClaimJudgeCache = () => {
   verdictCache.clear();
+  reportedJudgeFailures.clear();
 };
 
 const getCitationRank = (citation, index) => {

@@ -27,7 +27,7 @@ flowchart LR
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
-- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。范围里有多份文档时，问题含 compare/differ/similar/contrast/conflict 的各种词形（differs、compared、similarities 等，不含 differential、contrastive 这类术语）、versus/same/between/across，或区别、差异、异同、相比、相似、类似、共同点等中文词，就算对比问题；所以只问一份文档的对比式问题（如 "How do RAG-Sequence and RAG-Token differ...?"）在多文档范围里也要两份文档的引用。
+- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。范围里有多份文档时，问题含 compare/differ/similar/contrast/conflict 的各种词形（differs、compared、similarities 等，不含 differential、contrastive、similarity 这类术语）、versus/same/between/across，或区别、差异、不一样、异同、相比、比起、相似（不含相似度）、类似、共同点等中文词，就算对比问题；所以只问一份文档的对比式问题（如 "How do RAG-Sequence and RAG-Token differ...?"）在多文档范围里也要两份文档的引用。回答走哪条路线另由 `query-router.js` 自己的词表决定（只认 compare、difference、different、similar、区别、差异、对比等整词），只靠上面这些新词形判成对比的问题仍走 QA 路线：从全局 top-K 检索（带对比画像的检索 query），不按文档分别取证据、也不用对比 prompt，只是按对比问题核对引用，答案只引用一份文档时先补检索，补检索的答案仍只引用一份就转成澄清。两份词表要不要合并（合并后这些问题按文档取证据，但只问一份文档的这类问题也会走对比路线）留给负责人决定。
 - Gap analysis 把 unsupported claim 转成 focused retrieval plan。
 - Budget guard 阻止无限 follow-up。
 - Finalizer 删除或降级仍未被 citation 支持的 claim。
@@ -468,6 +468,8 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 - `agentTrace`：plan、query planner、skill chain、document RAG、self-check、gap analysis、follow-up、finalizer 等步骤。
 - `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget（含 `budget.run` 的 token、成本、时长用量）、error 和 working memory。
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
+
+规划器回退的原因（`/chat` 里 intent / execution planner 的 `fallbackReason`，run 记录里 DAG 规划器的 `fallbackReason` 和 replanner 的 `reason`）保留规划器自己的解析、校验错误信息；模型调用失败（错误带 `code` 或 `status`：超时、HTTP 或网关错误、熔断）只记 `planner_call_failed`，不带上游错误信息，因为它可能带上游回复或模型端点；服务端日志对每种失败只记一次错误名和错误代码。
 
 前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
 

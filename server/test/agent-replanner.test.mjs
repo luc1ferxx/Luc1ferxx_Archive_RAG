@@ -23,6 +23,7 @@ import {
   detectReplanTrigger,
   fingerprintExecutionGraph,
 } from "../rag/agent-replanner.js";
+import { createCircuitOpenError } from "../rag/model-call-guard.js";
 import { createSkillRegistry } from "../rag/skills/registry.js";
 
 // The replanner is the one component allowed to change a plan mid-run, so
@@ -472,6 +473,17 @@ test("createReplanResult abstains when the replan adapter fails", async () => {
   assert.equal(result.decision, REPLAN_DECISIONS.abstain);
   assert.equal(result.reasonCode, REPLAN_REASON_CODES.adapterFailed);
   assert.match(result.reason, /replanner timed out/);
+
+  // A failed model call is a code: its message names the model endpoint.
+  const outage = await createReplanResult(
+    baseOptions({
+      replanAdapter: stubAdapter(() => {
+        throw createCircuitOpenError("http://10.0.0.5:11434/v1|qwen2.5:7b");
+      }),
+    })
+  );
+  assert.equal(outage.reasonCode, REPLAN_REASON_CODES.adapterFailed);
+  assert.equal(outage.reason, "planner_call_failed");
 });
 
 // ---------------------------------------------------------------------------

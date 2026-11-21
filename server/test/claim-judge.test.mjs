@@ -176,6 +176,16 @@ test("the judge can only confirm a rejection, and a failure keeps the lexical ve
   for (const text of [JSON.stringify([failed.judge, unparseable.judge]), logged]) {
     assert.doesNotMatch(text, /Vendor A|twelve|model down|Sure/);
   }
+
+  // A failure warns once per process; resetClaimJudgeCache re-arms it, so a
+  // test's warnings do not depend on the tests before it.
+  resetClaimJudgeCache();
+  await judgeClaimSupport({
+    citations: [CITATION],
+    claimSupport: lexical([PARAPHRASE]),
+    complete: async () => ({ text: "no verdict here" }),
+  });
+  assert.equal(warn.mock.calls.filter((call) => /no_verdict/.test(call.arguments.join(" "))).length, 2);
 });
 
 test("claims a reply leaves without a verdict keep the lexical verdict and are counted", async (t) => {

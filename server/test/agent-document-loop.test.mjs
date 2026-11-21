@@ -321,6 +321,8 @@ test("comparison wording in its inflections asks for two documents, and technica
     "两份远程办公政策有哪些异同？",
     "2025 年的政策相比 2024 年有什么变化？",
     "两份政策有哪些共同点？",
+    "两份远程办公政策有什么不一样？",
+    "比起 2024 年的政策，2025 年的政策有什么变化？",
   ]) {
     assert.equal(intentOf(question), "comparison", question);
   }
@@ -329,6 +331,8 @@ test("comparison wording in its inflections asks for two documents, and technica
     "Does the model use contrastive learning?",
     "Is differential privacy applied to the training data?",
     "What is stored in the engine compartment?",
+    "What similarity function does ColBERT use?",
+    "余弦相似度是怎么计算的？",
   ]) {
     assert.equal(intentOf(question), "fact", question);
   }

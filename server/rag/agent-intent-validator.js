@@ -6,8 +6,29 @@ export const normalizeIntentText = (value) =>
 export const normalizePlannerId = (plannerAdapter) =>
   normalizeIntentText(plannerAdapter?.id) || "unknown";
 
-export const serializePlannerError = (error) =>
-  normalizeIntentText(error instanceof Error ? error.message : error).slice(0, 500);
+// The four planners' failure reason (fallbackReason, the replanner's reason)
+// goes out in the /chat trace and the run record. A failed model call (an
+// error with a code or status: a timeout, an HTTP or gateway error, the circuit
+// breaker) is a fixed code there, since its message can carry the upstream
+// reply or name the model endpoint; the planner's own parse and validation
+// errors keep their message. The log gets the call's error name and code only,
+// once per distinct failure, as the claim judge's does.
+const reportedPlannerCallFailures = new Set();
+
+export const serializePlannerError = (error) => {
+  if (!error?.code && !error?.status) {
+    return normalizeIntentText(error instanceof Error ? error.message : error).slice(0, 500);
+  }
+
+  const failure = `${error.name ?? "Error"}${error.code ? ` ${error.code}` : ""}`;
+
+  if (!reportedPlannerCallFailures.has(failure)) {
+    reportedPlannerCallFailures.add(failure);
+    console.warn(`[planner] A planner model call failed (${failure}).`);
+  }
+
+  return "planner_call_failed";
+};
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
