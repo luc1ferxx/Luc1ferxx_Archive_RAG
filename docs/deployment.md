@@ -95,6 +95,12 @@ PDF_PARSER=auto docker compose --profile app --profile layout up -d
 docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profile rerank up -d --build
 ```
 
+- **默认不开。什么时候值得开**：2026-11-21 在 QASPER agent 面测了一轮，重排服务跑在本机 MPS 上（见 [evaluation.md](evaluation.md) 的"重排门控在 agent 面上测一轮"）：
+  - 收益：可回答的题答出 61 → 84/176，可答题 F1 +0.039，引用证据召回 +0.097，都显著；
+  - 代价：不可回答的题被答出 3 → 9/24；新答的 49 题里，评审判 16 题答错或答了不可回答的题；全部题的 F1 没有检出差异（+0.005）；多语言 25 道可答题答对 19 → 18；
+  - 时间：整轮折合每题多约 5.8 秒，包括重排（每题约 3.6 次调用）和因此多出来的补检索、作答；
+  - 有 GPU 或 MPS 的机器上推荐开。应用不进容器时，按下面"不用 Docker"起重排服务，再在 `server/.env` 里设 `RAG_RERANK_ENABLED=true`、`RAG_RERANK_PROVIDER=cross-encoder`、`RAG_CROSS_ENCODER_ENDPOINT=http://127.0.0.1:8081/rerank`，这三项和评测时的重排设置相同；
+  - 上面这条命令起的重排容器只能用 CPU，每题多花多少没有实测。按下面"速度"里 CPU 的数字（18 个候选 2.8–4.5 秒）、问答检索现在一次最多 30 个候选（top-K 10 × 3）、每题约 3.6 次调用粗算，每题多约 20–30 秒。开之前先在自己的机器上试。
 - **会多起一个 `reranker` 服务，配置和评测时完全一致：**
   - 服务脚本：`server/evaluation/neural-cross-encoder-endpoint.py`；
   - 依赖：`server/evaluation/neural-reranker-requirements.txt` 里固定的版本；
@@ -124,7 +130,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
   - 服务逐个处理请求。Docker Desktop 虚拟机分到的 CPU 一般更少，会更慢。
   - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`，不够时在 `server/.env` 里调大。超时或服务不可用时查询不会失败，只是这次不重排。
 - **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
-- **不用 Docker**：先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
+- **不用 Docker**：在 `server/` 目录下先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
 - **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
 - **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。
 
