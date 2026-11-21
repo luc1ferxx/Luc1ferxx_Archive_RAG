@@ -3,12 +3,12 @@ import {
 } from "./AgentTraceDetail";
 import { getEvidenceSummaryDetails } from "./evidenceSpine";
 
-const EvidenceSummaryPanel = ({ summary, sourceCount, variant = "card" }) => {
+const EvidenceSummaryPanel = ({ summary, sourceCount, t, variant = "card" }) => {
   if (!isPlainObject(summary) && !Number.isFinite(sourceCount)) {
     return null;
   }
 
-  const details = getEvidenceSummaryDetails(summary, sourceCount);
+  const details = getEvidenceSummaryDetails(summary, sourceCount, t);
 
   if (!details.hasEvidence) {
     return null;
@@ -21,7 +21,7 @@ const EvidenceSummaryPanel = ({ summary, sourceCount, variant = "card" }) => {
       }`}
     >
       <div className="archive-evidence-head">
-        <span>Evidence</span>
+        <span>{t("trace.evidence")}</span>
         <strong>{details.statusLabel}</strong>
       </div>
 

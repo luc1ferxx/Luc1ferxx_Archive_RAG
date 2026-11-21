@@ -3,7 +3,7 @@ import { formatStatusLabel } from "./workbenchFormatters";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
-const formatPreviewValue = (value) => {
+const formatPreviewValue = (value, t) => {
   if (typeof value === "string") {
     return value;
   }
@@ -16,23 +16,14 @@ const formatPreviewValue = (value) => {
     try {
       return JSON.stringify(value);
     } catch {
-      return "Preview unavailable";
+      return t("preview.unavailable");
     }
   }
 
   return String(value);
 };
 
-const formatRiskFlag = (value) =>
-  String(value ?? "")
-    .replaceAll("_", " ")
-    .trim();
-
-const ApprovalGatePreviewList = ({
-  ariaLabel = "Pending approvals",
-  gates = [],
-  t,
-}) => {
+const ApprovalGatePreviewList = ({ ariaLabel, gates = [], t }) => {
   const pendingGates = toArray(gates).filter(
     (gate) => (gate?.status ?? "pending") === "pending"
   );
@@ -46,11 +37,8 @@ const ApprovalGatePreviewList = ({
       aria-label={ariaLabel}
       className="archive-approval-panel"
     >
-      <div className="archive-source-section-label">Pending approval</div>
-      <div className="archive-approval-copy">
-        Only policy-approved fields are shown. Long values and lists may be
-        truncated or hidden; approval remains bound to the full input.
-      </div>
+      <div className="archive-source-section-label">{t("run.pendingApproval")}</div>
+      <div className="archive-approval-copy">{t("run.previewPolicy")}</div>
       {pendingGates.map((gate, gateIndex) => {
         const previewEntries = Object.entries(
           gate?.inputPreview &&
@@ -59,9 +47,7 @@ const ApprovalGatePreviewList = ({
             ? gate.inputPreview
             : {}
         );
-        const riskFlags = toArray(gate?.riskFlags)
-          .map(formatRiskFlag)
-          .filter(Boolean);
+        const riskFlags = toArray(gate?.riskFlags).filter(Boolean);
 
         return (
           <div
@@ -70,9 +56,7 @@ const ApprovalGatePreviewList = ({
           >
             <div className="archive-approval-head">
               <strong>
-                {gate?.capabilityLabel ??
-                  gate?.capabilityId ??
-                  "Capability"}
+                {gate?.capabilityLabel ?? gate?.capabilityId ?? t("run.capability")}
               </strong>
               <span>{formatStatusLabel(gate?.status, t)}</span>
             </div>
@@ -87,20 +71,18 @@ const ApprovalGatePreviewList = ({
                     key={field}
                   >
                     <span>{field}</span>
-                    <strong>{formatPreviewValue(value)}</strong>
+                    <strong>{formatPreviewValue(value, t)}</strong>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="archive-approval-copy">
-                Input preview hidden by policy.
-              </div>
+              <div className="archive-approval-copy">{t("run.inputHidden")}</div>
             )}
             {riskFlags.length > 0 ? (
               <div className="archive-approval-risk-list">
                 {riskFlags.map((flag) => (
                   <span className="archive-answer-chip is-warning" key={flag}>
-                    {flag}
+                    {formatStatusLabel(flag, t)}
                   </span>
                 ))}
               </div>

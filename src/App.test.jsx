@@ -292,6 +292,7 @@ describe("App", () => {
 
     expect(await screen.findByText("语料")).toBeInTheDocument();
     expect(screen.getByText("范围")).toBeInTheDocument();
+    expect(screen.getByText("选择一条引用或相关文档")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "切换语言到English" })
     ).toBeInTheDocument();

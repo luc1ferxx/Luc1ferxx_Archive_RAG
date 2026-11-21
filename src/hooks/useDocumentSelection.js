@@ -11,7 +11,10 @@ const EMPTY_SOURCES = [];
 // a PDF keeps the caption it always had.
 const describePreviewStatus = (source, t) => {
   if (!getLocationUnit(source)) {
-    return `${source.fileName} · page ${source.pageNumber ?? 1}`;
+    return t("preview.statusPage", {
+      fileName: source.fileName,
+      number: source.pageNumber ?? 1,
+    });
   }
 
   return [source.fileName, formatDocumentLocation(source, t)]
@@ -39,7 +42,7 @@ export const useDocumentSelection = ({
   );
   const previewStatus = selectedSource
     ? describePreviewStatus(selectedSource, t)
-    : "Choose a citation or relevant document";
+    : t("preview.statusEmpty");
 
   const resetSelection = useCallback(() => {
     setSelectedSource(null);

@@ -40,7 +40,7 @@ const getApprovalGates = (task = {}) =>
 const normalizeApprovalBinding = (value) =>
   typeof value === "string" ? value.trim() : "";
 
-const getPrimaryAction = (task = {}) => {
+const getPrimaryAction = (task = {}, t) => {
   if (task.type !== "agent_goal") {
     return null;
   }
@@ -55,7 +55,7 @@ const getPrimaryAction = (task = {}) => {
     return {
       action: "approve",
       disabled: !gateId || !approvalObjectHash,
-      label: "Approve",
+      label: t("run.approve"),
       payload: {
         approval: {
           approved: true,
@@ -83,7 +83,7 @@ const getPrimaryAction = (task = {}) => {
         approvalBindings.some(
           (binding) => !binding.gateId || !binding.approvalObjectHash
         ),
-      label: "Approve deliverables",
+      label: t("tasks.approveDeliverables"),
       payload: {
         approvalBindings,
       },
@@ -94,7 +94,7 @@ const getPrimaryAction = (task = {}) => {
     return {
       action: "continue",
       disabled: false,
-      label: "Continue",
+      label: t("tasks.continue"),
       payload: {},
     };
   }
@@ -113,15 +113,23 @@ const renderPlanMeta = (task = {}, t) => {
   }
 
   return (
-    <div className="archive-agent-task-meta" aria-label="Goal plan progress">
+    <div className="archive-agent-task-meta" aria-label={t("tasks.goalPlanProgress")}>
       <span>{formatStatusLabel(goalPlan.status, t)}</span>
       <span>
-        {counts.completed ?? 0}/{counts.total ?? 0} done
+        {t("tasks.doneCount", {
+          done: counts.completed ?? 0,
+          total: counts.total ?? 0,
+        })}
       </span>
       {goalPlan.maxIterations ? (
         <span>
-          {(goalPlan.completedIterations ?? 0) - overBudget}/{goalPlan.maxIterations} runs
-          {overBudget ? ` · ${overBudget} after approval` : null}
+          {t("tasks.runCount", {
+            max: goalPlan.maxIterations,
+            used: (goalPlan.completedIterations ?? 0) - overBudget,
+          })}
+          {overBudget
+            ? ` · ${t("tasks.afterApproval", { count: overBudget })}`
+            : null}
         </span>
       ) : null}
     </div>
@@ -133,9 +141,7 @@ const AgentTaskPlan = ({ t, task }) => {
 
   if (planItems.length === 0) {
     return (
-      <div className="archive-agent-plan-empty">
-        No public plan steps have been reported.
-      </div>
+      <div className="archive-agent-plan-empty">{t("tasks.noPlanSteps")}</div>
     );
   }
 
@@ -148,8 +154,8 @@ const AgentTaskPlan = ({ t, task }) => {
         >
           <span>{index + 1}</span>
           <div>
-            <strong>{item.label || `Step ${index + 1}`}</strong>
-            <p>{item.summary || "No step summary reported."}</p>
+            <strong>{item.label || t("tasks.step", { number: index + 1 })}</strong>
+            <p>{item.summary || t("tasks.noStepSummary")}</p>
           </div>
           <em>{formatStatusLabel(item.status, t)}</em>
         </div>
@@ -167,7 +173,7 @@ const AgentTaskResearchFlow = ({ t, task }) => {
   }
 
   return (
-    <div className="archive-agent-research-flow" aria-label="Research task flow">
+    <div className="archive-agent-research-flow" aria-label={t("tasks.researchFlow")}>
       {phases.map((phase, index) => (
         <div
           className={`archive-agent-research-phase is-${
@@ -177,7 +183,9 @@ const AgentTaskResearchFlow = ({ t, task }) => {
         >
           <span>{index + 1}</span>
           <div>
-            <strong>{phase.label || `Research phase ${index + 1}`}</strong>
+            <strong>
+              {phase.label || t("tasks.researchPhase", { number: index + 1 })}
+            </strong>
             <p>{phase.summary || phase.expectedSkill || phase.expectedCapability}</p>
           </div>
           <em>{formatStatusLabel(phase.status, t)}</em>
@@ -187,7 +195,7 @@ const AgentTaskResearchFlow = ({ t, task }) => {
   );
 };
 
-const getDeliverableOutputText = (deliverable = {}) => {
+const getDeliverableOutputText = (deliverable = {}, t) => {
   const output = deliverable.output ?? {};
 
   if (output.fileName) {
@@ -199,7 +207,7 @@ const getDeliverableOutputText = (deliverable = {}) => {
   }
 
   if (Number.isFinite(Number(output.documentCount))) {
-    return `${output.documentCount} documents`;
+    return t("common.documentCount", { count: Number(output.documentCount) });
   }
 
   return deliverable.title || deliverable.capabilityId || "";
@@ -213,7 +221,7 @@ const AgentTaskDeliverables = ({ t, task }) => {
   }
 
   return (
-    <div className="archive-agent-deliverables" aria-label="Goal deliverables">
+    <div className="archive-agent-deliverables" aria-label={t("tasks.deliverables")}>
       {deliverables.map((deliverable, index) => (
         <div
           className={`archive-agent-deliverable is-${
@@ -222,8 +230,10 @@ const AgentTaskDeliverables = ({ t, task }) => {
           key={deliverable.id ?? `${task.id}-deliverable-${index}`}
         >
           <div>
-            <strong>{deliverable.label || `Deliverable ${index + 1}`}</strong>
-            <p>{deliverable.summary || getDeliverableOutputText(deliverable)}</p>
+            <strong>
+              {deliverable.label || t("tasks.deliverable", { number: index + 1 })}
+            </strong>
+            <p>{deliverable.summary || getDeliverableOutputText(deliverable, t)}</p>
           </div>
           <span>{formatStatusLabel(deliverable.status, t)}</span>
         </div>
@@ -245,13 +255,13 @@ const AgentTaskGoalCompletion = ({ t, task }) => {
       className={`archive-agent-goal-completion is-${
         completion.status ?? "pending"
       }`}
-      aria-label="Goal completion checks"
+      aria-label={t("tasks.goalChecks")}
     >
       <div className="archive-agent-goal-completion-head">
-        <strong>Goal completion</strong>
+        <strong>{t("tasks.goalCompletion")}</strong>
         <span>{formatStatusLabel(completion.status, t)}</span>
       </div>
-      <p>{completion.summary || "Goal completion checks reported."}</p>
+      <p>{completion.summary || t("tasks.goalChecksReported")}</p>
       <div className="archive-agent-goal-checks">
         {checks.map((check) => (
           <span
@@ -267,7 +277,7 @@ const AgentTaskGoalCompletion = ({ t, task }) => {
 };
 
 const AgentTaskCard = ({ onTaskAction, t, task }) => {
-  const primaryAction = getPrimaryAction(task);
+  const primaryAction = getPrimaryAction(task, t);
   const goalPlan = getGoalPlan(task);
   const pendingApprovalGates = getApprovalGates(task);
   const showsApprovalAction =
@@ -283,8 +293,8 @@ const AgentTaskCard = ({ onTaskAction, t, task }) => {
       <header>
         <div>
           <span>{formatStatusLabel(task.status, t)}</span>
-          <strong>{task.label || "Agent task"}</strong>
-          <p>{goalPlan?.goal || task.summary || "No task summary reported."}</p>
+          <strong>{task.label || t("tasks.agentTask")}</strong>
+          <p>{goalPlan?.goal || task.summary || t("tasks.noTaskSummary")}</p>
         </div>
         {renderPlanMeta(task, t)}
       </header>
@@ -303,11 +313,11 @@ const AgentTaskCard = ({ onTaskAction, t, task }) => {
 
       {showsApprovalAction ? (
         <ApprovalGatePreviewList
-          ariaLabel={
+          ariaLabel={t(
             primaryAction.action === "approve_deliverables"
-              ? "Pending deliverable approvals"
-              : "Pending capability approvals"
-          }
+              ? "tasks.pendingDeliverableApprovals"
+              : "tasks.pendingCapabilityApprovals"
+          )}
           gates={displayedApprovalGates}
           t={t}
         />
@@ -339,7 +349,7 @@ const AgentRunCenter = ({
 }) => (
   <div className="archive-view-panel archive-tasks-view">
     <div className="archive-view-panel-head">
-      <span>Agent Run Center</span>
+      <span>{t("tasks.runCenter")}</span>
       <strong>
         {isLoading
           ? t("tasks.loading")

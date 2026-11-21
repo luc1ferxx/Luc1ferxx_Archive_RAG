@@ -788,7 +788,7 @@ describe("RenderQA", () => {
     expect(
       screen.getAllByText("Search the web for the current launch date.").length
     ).toBeGreaterThan(0);
-    expect(screen.getByText("External Call")).toBeInTheDocument();
+    expect(screen.getByText("External call")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(handleApprovalAction).toHaveBeenCalledWith(

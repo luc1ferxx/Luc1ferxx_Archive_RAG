@@ -30,32 +30,43 @@ const getCitedText = (source = {}) =>
 const getPreviewTabs = (evidence, t) => [
   {
     id: "preview",
-    label: evidence.hasInlinePreview ? "Page" : t("preview.fileTab"),
+    label: t(evidence.hasInlinePreview ? "preview.pageTab" : "preview.fileTab"),
   },
   {
     id: "chunks",
-    label: formatTabLabel("Chunk", "Chunks", evidence.chunks.length),
+    label: formatTabLabel(t("preview.chunk"), t("preview.chunks"), evidence.chunks.length),
   },
-  { id: "metadata", label: "Metadata" },
+  { id: "metadata", label: t("preview.metadataTab") },
   {
     id: "citations",
-    label: formatTabLabel("Citation", "Citations", evidence.citations.length),
+    label: formatTabLabel(
+      t("preview.citation"),
+      t("common.citations"),
+      evidence.citations.length
+    ),
   },
 ];
 
-const getObjectTags = (evidence) =>
+const getObjectTags = (evidence, t) =>
   [
-    Number.isFinite(evidence.rank) ? `rank ${evidence.rank}` : null,
-    Number.isFinite(evidence.chunkIndex) ? `chunk ${evidence.chunkIndex}` : null,
-    evidence.score ? `score ${evidence.score}` : null,
+    Number.isFinite(evidence.rank) ? t("preview.tagRank", { rank: evidence.rank }) : null,
+    Number.isFinite(evidence.chunkIndex)
+      ? t("preview.tagChunk", { number: evidence.chunkIndex })
+      : null,
+    evidence.score ? t("preview.tagScore", { score: evidence.score }) : null,
   ].filter(Boolean);
 
-const getChunkLabel = (chunk, index) => {
+const getChunkLabel = (chunk, index, t) => {
   if (typeof chunk === "string") {
-    return `Chunk ${index + 1}`;
+    return t("common.chunkNumber", { number: index + 1 });
   }
 
-  return chunk.label ?? (Number.isFinite(chunk.chunkIndex) ? `Chunk ${chunk.chunkIndex}` : `Chunk ${index + 1}`);
+  return (
+    chunk.label ??
+    t("common.chunkNumber", {
+      number: Number.isFinite(chunk.chunkIndex) ? chunk.chunkIndex : index + 1,
+    })
+  );
 };
 
 const getChunkExcerpt = (chunk) =>
@@ -63,14 +74,19 @@ const getChunkExcerpt = (chunk) =>
     ? chunk
     : chunk.excerpt ?? chunk.text ?? chunk.pageContent ?? "";
 
-const getCitationTitle = (citation, index, fallbackFileName) =>
-  citation.fileName ?? citation.title ?? fallbackFileName ?? `Citation ${index + 1}`;
+const getCitationTitle = (citation, index, fallbackFileName, t) =>
+  citation.fileName ??
+  citation.title ??
+  fallbackFileName ??
+  t("preview.citationNumber", { number: index + 1 });
 
 const getCitationMeta = (citation, t) =>
   [
     formatDocumentLocation(citation, t) || null,
-    Number.isFinite(citation.rank) ? `Rank #${citation.rank}` : null,
-    Number.isFinite(citation.chunkIndex) ? `Chunk ${citation.chunkIndex}` : null,
+    Number.isFinite(citation.rank) ? t("common.rankNumber", { rank: citation.rank }) : null,
+    Number.isFinite(citation.chunkIndex)
+      ? t("common.chunkNumber", { number: citation.chunkIndex })
+      : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -121,8 +137,8 @@ const PdfPreview = ({ source, t = defaultT }) => {
   if (!source || !evidence) {
     return (
       <div className="archive-preview-empty">
-        <div className="archive-preview-empty-mark">No source selected</div>
-        <div>Choose a citation to preview the related page.</div>
+        <div className="archive-preview-empty-mark">{t("preview.emptyTitle")}</div>
+        <div>{t("preview.emptyHint")}</div>
       </div>
     );
   }
@@ -139,13 +155,13 @@ const PdfPreview = ({ source, t = defaultT }) => {
   };
 
   const renderEvidenceObject = () => {
-    const tags = getObjectTags(evidence);
+    const tags = getObjectTags(evidence, t);
 
     return (
       <div className="archive-preview-evidence-object">
         <div className="archive-pdf-badge">{evidence.fileType}</div>
         <div className="archive-preview-object-main">
-          <span>Evidence object</span>
+          <span>{t("preview.evidenceObject")}</span>
           <strong>{evidence.fileName}</strong>
           <p>{evidence.previewDescription}</p>
           {tags.length > 0 ? (
@@ -221,8 +237,8 @@ const PdfPreview = ({ source, t = defaultT }) => {
       return (
         <div className="archive-preview-summary-page" role="alert">
           <div className="archive-preview-summary-mark">{evidence.fileType}</div>
-          <strong>Preview unavailable</strong>
-          <p>The selected source does not identify its document.</p>
+          <strong>{t("preview.unavailable")}</strong>
+          <p>{t("preview.missingDocument")}</p>
         </div>
       );
     }
@@ -235,8 +251,8 @@ const PdfPreview = ({ source, t = defaultT }) => {
       return (
         <div className="archive-preview-summary-page" aria-live="polite">
           <div className="archive-preview-summary-mark">{evidence.fileType}</div>
-          <strong>Loading secure preview…</strong>
-          <p>Fetching the selected document with your current access scope.</p>
+          <strong>{t("preview.loading")}</strong>
+          <p>{t("preview.loadingHint")}</p>
         </div>
       );
     }
@@ -245,8 +261,8 @@ const PdfPreview = ({ source, t = defaultT }) => {
       return (
         <div className="archive-preview-summary-page" role="alert">
           <div className="archive-preview-summary-mark">{evidence.fileType}</div>
-          <strong>Preview unavailable</strong>
-          <p>The document could not be loaded or was not a valid PDF.</p>
+          <strong>{t("preview.unavailable")}</strong>
+          <p>{t("preview.loadFailed")}</p>
         </div>
       );
     }
@@ -256,7 +272,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
         <iframe
           className="archive-preview-frame"
           src={previewUrl}
-          title={`${evidence.fileName} preview`}
+          title={t("preview.frameTitle", { fileName: evidence.fileName })}
           referrerPolicy="no-referrer"
         />
       );
@@ -287,8 +303,8 @@ const PdfPreview = ({ source, t = defaultT }) => {
   const renderChunkPanel = () => (
     <div className="archive-preview-tab-panel">
       {evidence.chunks.map((chunk, index) => (
-        <div key={chunk.id ?? `${getChunkLabel(chunk, index)}-${index}`} className="archive-preview-chunk">
-          <span>{getChunkLabel(chunk, index)}</span>
+        <div key={chunk.id ?? `chunk-${index}`} className="archive-preview-chunk">
+          <span>{getChunkLabel(chunk, index, t)}</span>
           <p>{getChunkExcerpt(chunk)}</p>
         </div>
       ))}
@@ -302,8 +318,12 @@ const PdfPreview = ({ source, t = defaultT }) => {
           key={`${citation.docId ?? evidence.fileName}-${citation.chunkIndex ?? index}`}
           className="archive-preview-citation"
         >
-          <span>{index === 0 ? "Selected citation" : `Citation ${index + 1}`}</span>
-          <strong>{getCitationTitle(citation, index, evidence.fileName)}</strong>
+          <span>
+            {index === 0
+              ? t("preview.selectedCitation")
+              : t("preview.citationNumber", { number: index + 1 })}
+          </span>
+          <strong>{getCitationTitle(citation, index, evidence.fileName, t)}</strong>
           {getCitationMeta(citation, t) ? <p>{getCitationMeta(citation, t)}</p> : null}
           {citation.excerpt || citation.text ? (
             <p>{citation.excerpt ?? citation.text}</p>
@@ -332,14 +352,14 @@ const PdfPreview = ({ source, t = defaultT }) => {
           <div className="archive-preview-search-panel">
             <Input
               autoFocus
-              placeholder="Search current source"
+              placeholder={t("preview.searchPlaceholder")}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
             />
             <span>
               {searchQuery
-                ? `1 match previewed for "${searchQuery}"`
-                : "Type to search this preview."}
+                ? t("preview.searchMatch", { query: searchQuery })
+                : t("preview.searchHint")}
             </span>
           </div>
         ) : null}
@@ -354,9 +374,9 @@ const PdfPreview = ({ source, t = defaultT }) => {
         <div>
           <div className="archive-preview-file">{evidence.fileName}</div>
           <div className="archive-preview-page">
-            {hasInlinePreview
-              ? `Source · ${pageLabel}`
-              : ["Source", evidence.locationText].filter(Boolean).join(" · ")}
+            {[t("preview.source"), hasInlinePreview ? pageLabel : evidence.locationText]
+              .filter(Boolean)
+              .join(" · ")}
           </div>
         </div>
         <span className="archive-status-dot" />
@@ -364,7 +384,7 @@ const PdfPreview = ({ source, t = defaultT }) => {
 
       {renderEvidenceObject()}
 
-      <div className="archive-preview-tabs" aria-label="Preview tabs">
+      <div className="archive-preview-tabs" aria-label={t("preview.tabs")}>
         {previewTabs.map((tab) => (
           <button
             key={tab.id}
@@ -377,15 +397,15 @@ const PdfPreview = ({ source, t = defaultT }) => {
         ))}
       </div>
 
-      <div className="archive-preview-toolbar" aria-label="Preview controls">
+      <div className="archive-preview-toolbar" aria-label={t("preview.controls")}>
         <Button
-          aria-label="Show chunks"
+          aria-label={t("preview.showChunks")}
           className="archive-icon-button"
           icon={<BookOutlined />}
           onClick={() => setActiveTab("chunks")}
         />
         <Button
-          aria-label="Search in source"
+          aria-label={t("preview.searchInSource")}
           className={`archive-icon-button ${isSearchOpen ? "is-active" : ""}`}
           icon={<SearchOutlined />}
           onClick={() => {
@@ -395,11 +415,19 @@ const PdfPreview = ({ source, t = defaultT }) => {
         />
         {hasInlinePreview ? (
           <span className="archive-page-stepper">
-            <button type="button" aria-label="Previous page" onClick={() => updatePage(-1)}>
+            <button
+              type="button"
+              aria-label={t("preview.previousPage")}
+              onClick={() => updatePage(-1)}
+            >
               ‹
             </button>
             {pageLabel}
-            <button type="button" aria-label="Next page" onClick={() => updatePage(1)}>
+            <button
+              type="button"
+              aria-label={t("preview.nextPage")}
+              onClick={() => updatePage(1)}
+            >
               ›
             </button>
           </span>
@@ -412,11 +440,11 @@ const PdfPreview = ({ source, t = defaultT }) => {
             rel="noopener noreferrer"
             icon={<DownloadOutlined />}
           >
-            Open
+            {t("preview.open")}
           </Button>
         ) : null}
         <Button
-          aria-label={isExpanded ? "Collapse preview" : "Expand preview"}
+          aria-label={t(isExpanded ? "preview.collapse" : "preview.expand")}
           className={`archive-icon-button ${isExpanded ? "is-active" : ""}`}
           icon={<ExpandOutlined />}
           onClick={() => setIsExpanded((expanded) => !expanded)}

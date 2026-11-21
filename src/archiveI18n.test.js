@@ -1,4 +1,18 @@
-import { createTranslator } from "./archiveI18n";
+import { TRANSLATIONS, createTranslator } from "./archiveI18n";
+
+describe("the translation tables", () => {
+  // A _plural entry is a second English form; Chinese adds one only to word a
+  // count differently, so the tables are compared by base key.
+  const baseKeys = (table) => new Set(Object.keys(table).map((key) => key.replace(/_plural$/, "")));
+
+  test("every English key has a Chinese entry, and every Chinese key an English one", () => {
+    const en = baseKeys(TRANSLATIONS.en);
+    const zh = baseKeys(TRANSLATIONS.zh);
+
+    expect([...en].filter((key) => !zh.has(key))).toEqual([]);
+    expect([...zh].filter((key) => !en.has(key))).toEqual([]);
+  });
+});
 
 describe("createTranslator counts", () => {
   test("take the key for 1 and its _plural entry for any other count", () => {
