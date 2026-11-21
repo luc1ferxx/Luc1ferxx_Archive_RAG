@@ -198,6 +198,12 @@ test("recommendation task service records failed imports", async () => {
     workspaceId: "workspace-a",
   };
 
+  await recommendationTaskService.recordImportStarted({
+    accessScope,
+    docId: "doc-1",
+    provider: "arxiv",
+    selectedPapers: [{ arxivId: "2401.00001v1" }],
+  });
   await recommendationTaskService.recordImportFailed({
     accessScope,
     docId: "doc-1",
@@ -219,4 +225,53 @@ test("recommendation task service records failed imports", async () => {
   assert.equal(task.status, TASK_STATUSES.failed);
   assert.equal(task.counts.failed, 1);
   assert.match(task.summary, /network timeout/);
+});
+
+// The direct import (POST /documents/:docId/arxiv/import) holds no claim, so a
+// delete of its document during the import must not be undone by its end.
+test("a task deleted with its document mid-import stays deleted when the import ends", async () => {
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore(),
+  });
+  const recommendationTaskService = createRecommendationTaskService({
+    taskService,
+  });
+  const accessScope = {
+    userId: "alice",
+    workspaceId: "workspace-a",
+  };
+  const paper = { arxivId: "2401.00001v1", title: "Retrieval Augmented Generation for Archives" };
+  const listTasks = async () =>
+    (await taskService.listTasks({ accessScope, type: RECOMMENDATION_TASK_TYPE })).tasks;
+
+  for (const end of ["recordImportCompleted", "recordImportFailed"]) {
+    await recommendationTaskService.recordImportStarted({
+      accessScope,
+      docId: "doc-x",
+      provider: "arxiv",
+      selectedPapers: [paper],
+    });
+    assert.equal(
+      await recommendationTaskService.deleteDocumentTasks({
+        accessScope,
+        docIds: ["doc-x"],
+        provider: "arxiv",
+      }),
+      1
+    );
+
+    const task = await recommendationTaskService[end]({
+      accessScope,
+      docId: "doc-x",
+      error: new Error("network timeout"),
+      importResult: { importedCount: 0 },
+      provider: "arxiv",
+      // Papers left to review would have made it wait for the user again.
+      remainingSuggestion: { papers: [{ arxivId: "2401.00002v1" }] },
+      selectedPapers: [paper],
+    });
+
+    assert.equal(task, null, end);
+    assert.deepEqual(await listTasks(), [], end);
+  }
 });

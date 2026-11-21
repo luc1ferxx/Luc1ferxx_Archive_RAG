@@ -27,7 +27,10 @@ import {
 // - Always: the deleting scope's arXiv recommendation task for the document
 //   (external_recommendation:arxiv:<docId>, rag/recommendation-tasks.js) is
 //   deleted, or it would wait for the user to import papers into a document
-//   that is gone; an import still running on it loses its claim and stops.
+//   that is gone. An import still running on it does not bring it back: a
+//   queued import job loses its claim and stops, and a direct import
+//   (POST /documents/:docId/arxiv/import) finds its task gone and writes no
+//   end state (recommendation-tasks.js).
 // - DOCUMENT_DELETE_REDACTION=on: the copies of its text in the deleting
 //   tenant's records (rag/document-deletion-redaction.js):
 //   * settled agent runs (completed, failed, canceled): steps, observations,

@@ -42,6 +42,12 @@ export const createRecommendationTaskService = ({
       }),
     });
 
+  // recordImportStarted wrote the import's task. Gone by the end of the
+  // import means its document was deleted meanwhile
+  // (rag/document-deletion-cascade.js): an upsert would bring it back.
+  const isImportTaskGone = async ({ accessScope = {}, docId, provider }) =>
+    !(await getDocumentTask({ accessScope, docId, provider }));
+
   // The deleted documents' tasks (rag/document-deletion-cascade.js): their
   // papers could only go into a document that is gone. One listing of the
   // scope's recommendation tasks, so a clear of many documents deletes only
@@ -315,6 +321,10 @@ export const createRecommendationTaskService = ({
       return null;
     }
 
+    if (await isImportTaskGone({ accessScope, docId: normalizedDocId, provider })) {
+      return null;
+    }
+
     const failedCount = countRecommendationImportFailures(importResult);
     const importedCount = Number(importResult.importedCount ?? 0) || 0;
     const remainingCount = countRemainingRecommendationPapers(remainingSuggestion);
@@ -410,6 +420,10 @@ export const createRecommendationTaskService = ({
     const normalizedDocId = normalizeRecommendationTaskText(docId ?? document.docId);
 
     if (!normalizedDocId) {
+      return null;
+    }
+
+    if (await isImportTaskGone({ accessScope, docId: normalizedDocId, provider })) {
       return null;
     }
 
