@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 import WorkspaceSidebar from "./WorkspaceSidebar";
 import { createTranslator } from "../archiveI18n";
@@ -105,5 +105,86 @@ describe("WorkspaceSidebar deletes only after a confirm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(onClearDocuments).toHaveBeenCalledTimes(1));
+  });
+});
+
+// The run a failed approved web search leaves: its self-check failed too, and
+// Retry replays the capability call.
+const CAPABILITY_CALL_SAFETY = {
+  label: "Web Search",
+  reasonCodes: ["non_idempotent"],
+  stepId: "capability:web.search:gate-1",
+  stepType: "capability_call",
+  summary: "Capability calls replay only from a hash-bound approved gate.",
+};
+const FAILED_CAPABILITY_RUN = {
+  goal: "Search the web for the launch date.",
+  recovery: {
+    actions: [
+      {
+        label: "Web Search",
+        reason: "failed_step_ready",
+        safety: CAPABILITY_CALL_SAFETY,
+        stepId: "capability:web.search:gate-1",
+        stepType: "capability_call",
+        type: "retry_failed_step",
+      },
+    ],
+    reason: "failed_step_ready",
+    replaySafety: {
+      reasonCodes: ["unsupported_step_type", "non_idempotent"],
+      steps: [
+        {
+          label: "Self-check",
+          reasonCodes: ["unsupported_step_type"],
+          stepId: "self-check",
+          stepType: "self_check",
+          summary: "No replay safety policy is registered for this step type.",
+        },
+        CAPABILITY_CALL_SAFETY,
+      ],
+    },
+    stepId: "capability:web.search:gate-1",
+  },
+  runId: "run-failed",
+  status: "failed",
+};
+
+describe("WorkspaceSidebar recovery card", () => {
+  test("describes the step its Retry replays, in labels rather than codes", () => {
+    const onRecoveryAction = vi.fn();
+
+    renderSidebar({ onRecoveryAction, recoveryRuns: [FAILED_CAPABILITY_RUN] });
+    const card = within(document.querySelector(".archive-recovery-item"));
+
+    expect(card.getAllByText("Failed")).toHaveLength(2);
+    expect(card.getByText("A failed step can be retried")).toBeInTheDocument();
+    expect(card.getByText("Web Search (capability call)")).toBeInTheDocument();
+    expect(card.getByText("Not idempotent")).toBeInTheDocument();
+    // The failed self-check is not what Retry runs, and no code shows raw.
+    expect(
+      card.queryByText(/self.check|Unsupported|No replay safety policy|hash-bound/i)
+    ).toBeNull();
+    expect(card.queryByText(/failed_step_ready|non_idempotent/)).toBeNull();
+
+    fireEvent.click(card.getByRole("button", { name: "Retry failed step" }));
+    expect(onRecoveryAction).toHaveBeenCalledWith({
+      action: "retry_failed_step",
+      runId: "run-failed",
+      stepId: "capability:web.search:gate-1",
+    });
+  });
+
+  test("follows the app's locale", () => {
+    renderSidebar({
+      recoveryRuns: [FAILED_CAPABILITY_RUN],
+      t: createTranslator("zh"),
+    });
+    const card = within(document.querySelector(".archive-recovery-item"));
+
+    expect(card.getAllByText("失败")).toHaveLength(2);
+    expect(card.getByText("失败的步骤可以重试")).toBeInTheDocument();
+    expect(card.getByText("Web Search（能力调用）")).toBeInTheDocument();
+    expect(card.getByText("非幂等")).toBeInTheDocument();
   });
 });

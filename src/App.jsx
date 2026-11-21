@@ -774,6 +774,7 @@ const App = () => {
         <AgentRunCenter
           isLoading={isTaskLogLoading || isRecoveryLoading}
           onTaskAction={handleTaskAction}
+          t={t}
           tasks={visibleTasks}
         />
       );

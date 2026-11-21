@@ -1,7 +1,11 @@
 import React from "react";
 import { Button } from "antd";
+import { createTranslator } from "../archiveI18n";
 import ApprovalGatePreviewList from "./ApprovalGatePreviewList";
-import { formatTaskStatus } from "./workbenchFormatters";
+import { formatStatusLabel } from "./workbenchFormatters";
+
+// English unless the app hands in its translator.
+const defaultT = createTranslator("en");
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -93,7 +97,7 @@ const getPrimaryAction = (task = {}) => {
   return null;
 };
 
-const renderPlanMeta = (task = {}) => {
+const renderPlanMeta = (task = {}, t) => {
   const goalPlan = getGoalPlan(task);
   const counts = goalPlan?.counts ?? {};
   // Runs past the budget, which only an approved gate allows (server/rag/agent-goal-plan.js).
@@ -105,7 +109,7 @@ const renderPlanMeta = (task = {}) => {
 
   return (
     <div className="archive-agent-task-meta" aria-label="Goal plan progress">
-      <span>{formatTaskStatus(goalPlan.status)}</span>
+      <span>{formatStatusLabel(goalPlan.status, t)}</span>
       <span>
         {counts.completed ?? 0}/{counts.total ?? 0} done
       </span>
@@ -119,7 +123,7 @@ const renderPlanMeta = (task = {}) => {
   );
 };
 
-const AgentTaskPlan = ({ task }) => {
+const AgentTaskPlan = ({ t, task }) => {
   const planItems = getPlanItems(task);
 
   if (planItems.length === 0) {
@@ -142,14 +146,14 @@ const AgentTaskPlan = ({ task }) => {
             <strong>{item.label || `Step ${index + 1}`}</strong>
             <p>{item.summary || "No step summary reported."}</p>
           </div>
-          <em>{formatTaskStatus(item.status)}</em>
+          <em>{formatStatusLabel(item.status, t)}</em>
         </div>
       ))}
     </div>
   );
 };
 
-const AgentTaskResearchFlow = ({ task }) => {
+const AgentTaskResearchFlow = ({ t, task }) => {
   const researchTask = getResearchTask(task);
   const phases = toArray(researchTask?.phases);
 
@@ -171,7 +175,7 @@ const AgentTaskResearchFlow = ({ task }) => {
             <strong>{phase.label || `Research phase ${index + 1}`}</strong>
             <p>{phase.summary || phase.expectedSkill || phase.expectedCapability}</p>
           </div>
-          <em>{formatTaskStatus(phase.status)}</em>
+          <em>{formatStatusLabel(phase.status, t)}</em>
         </div>
       ))}
     </div>
@@ -196,7 +200,7 @@ const getDeliverableOutputText = (deliverable = {}) => {
   return deliverable.title || deliverable.capabilityId || "";
 };
 
-const AgentTaskDeliverables = ({ task }) => {
+const AgentTaskDeliverables = ({ t, task }) => {
   const deliverables = getDeliverables(task);
 
   if (deliverables.length === 0) {
@@ -216,14 +220,14 @@ const AgentTaskDeliverables = ({ task }) => {
             <strong>{deliverable.label || `Deliverable ${index + 1}`}</strong>
             <p>{deliverable.summary || getDeliverableOutputText(deliverable)}</p>
           </div>
-          <span>{formatTaskStatus(deliverable.status)}</span>
+          <span>{formatStatusLabel(deliverable.status, t)}</span>
         </div>
       ))}
     </div>
   );
 };
 
-const AgentTaskGoalCompletion = ({ task }) => {
+const AgentTaskGoalCompletion = ({ t, task }) => {
   const completion = getGoalCompletion(task);
   const checks = toArray(completion?.checks);
 
@@ -240,7 +244,7 @@ const AgentTaskGoalCompletion = ({ task }) => {
     >
       <div className="archive-agent-goal-completion-head">
         <strong>Goal completion</strong>
-        <span>{formatTaskStatus(completion.status)}</span>
+        <span>{formatStatusLabel(completion.status, t)}</span>
       </div>
       <p>{completion.summary || "Goal completion checks reported."}</p>
       <div className="archive-agent-goal-checks">
@@ -257,7 +261,7 @@ const AgentTaskGoalCompletion = ({ task }) => {
   );
 };
 
-const AgentTaskCard = ({ onTaskAction, task }) => {
+const AgentTaskCard = ({ onTaskAction, t, task }) => {
   const primaryAction = getPrimaryAction(task);
   const goalPlan = getGoalPlan(task);
   const pendingApprovalGates = getApprovalGates(task);
@@ -273,20 +277,20 @@ const AgentTaskCard = ({ onTaskAction, task }) => {
     <article className={`archive-agent-task is-${task.status ?? "pending"}`}>
       <header>
         <div>
-          <span>{formatTaskStatus(task.status)}</span>
+          <span>{formatStatusLabel(task.status, t)}</span>
           <strong>{task.label || "Agent task"}</strong>
           <p>{goalPlan?.goal || task.summary || "No task summary reported."}</p>
         </div>
-        {renderPlanMeta(task)}
+        {renderPlanMeta(task, t)}
       </header>
 
-      <AgentTaskPlan task={task} />
+      <AgentTaskPlan t={t} task={task} />
 
-      <AgentTaskResearchFlow task={task} />
+      <AgentTaskResearchFlow t={t} task={task} />
 
-      <AgentTaskDeliverables task={task} />
+      <AgentTaskDeliverables t={t} task={task} />
 
-      <AgentTaskGoalCompletion task={task} />
+      <AgentTaskGoalCompletion t={t} task={task} />
 
       {goalPlan && task.summary ? (
         <p className="archive-agent-task-summary">{task.summary}</p>
@@ -300,6 +304,7 @@ const AgentTaskCard = ({ onTaskAction, task }) => {
               : "Pending capability approvals"
           }
           gates={displayedApprovalGates}
+          t={t}
         />
       ) : null}
 
@@ -321,7 +326,12 @@ const AgentTaskCard = ({ onTaskAction, task }) => {
   );
 };
 
-const AgentRunCenter = ({ isLoading = false, onTaskAction, tasks = [] }) => (
+const AgentRunCenter = ({
+  isLoading = false,
+  onTaskAction,
+  t = defaultT,
+  tasks = [],
+}) => (
   <div className="archive-view-panel archive-tasks-view">
     <div className="archive-view-panel-head">
       <span>Agent Run Center</span>
@@ -332,6 +342,7 @@ const AgentRunCenter = ({ isLoading = false, onTaskAction, tasks = [] }) => (
         <AgentTaskCard
           key={task.id ?? `${task.label}-${index}`}
           onTaskAction={onTaskAction}
+          t={t}
           task={task}
         />
       ))}

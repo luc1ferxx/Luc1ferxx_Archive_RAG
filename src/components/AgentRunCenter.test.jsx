@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
+import { createTranslator } from "../archiveI18n";
 import AgentRunCenter from "./AgentRunCenter";
 
 const APPROVAL_OBJECT_HASH = `sha256:${"a".repeat(64)}`;
@@ -165,6 +166,43 @@ describe("AgentRunCenter", () => {
 
     expect(screen.getByText("1/1 runs · 1 after approval")).toBeInTheDocument();
     expect(screen.queryByText("2/1 runs")).not.toBeInTheDocument();
+  });
+
+  test("shows task, step and approval statuses as labels in the app's language", () => {
+    const tasks = [
+      {
+        id: "agent_goal:labels",
+        type: "agent_goal",
+        status: "waiting_for_user",
+        label: "Agent task",
+        requiredUserAction: "approve_capability",
+        result: {
+          approvalGates: [
+            {
+              approvalObjectHash: APPROVAL_OBJECT_HASH,
+              capabilityId: "web.search",
+              id: "approval:web.search:1.0.0",
+              status: "pending",
+            },
+          ],
+        },
+        items: [
+          { id: "goal", label: "Goal", status: "completed", summary: "Find the date." },
+        ],
+      },
+    ];
+    const { rerender } = render(<AgentRunCenter tasks={tasks} />);
+
+    expect(screen.getByText("Waiting for user")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.queryByText(/waiting.for.user|^completed$|^pending$/)).toBeNull();
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+
+    expect(screen.getByText("等待用户处理")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("待处理")).toBeInTheDocument();
   });
 
   test("forwards approval actions through the task action callback", () => {

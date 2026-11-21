@@ -1,4 +1,5 @@
 import React from "react";
+import { formatStatusLabel } from "./workbenchFormatters";
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -30,6 +31,7 @@ const formatRiskFlag = (value) =>
 const ApprovalGatePreviewList = ({
   ariaLabel = "Pending approvals",
   gates = [],
+  t,
 }) => {
   const pendingGates = toArray(gates).filter(
     (gate) => (gate?.status ?? "pending") === "pending"
@@ -72,7 +74,7 @@ const ApprovalGatePreviewList = ({
                   gate?.capabilityId ??
                   "Capability"}
               </strong>
-              <span>{gate?.status ?? "pending"}</span>
+              <span>{formatStatusLabel(gate?.status, t)}</span>
             </div>
             {gate?.reason ? (
               <div className="archive-approval-copy">{gate.reason}</div>

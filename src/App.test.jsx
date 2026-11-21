@@ -675,6 +675,7 @@ describe("App", () => {
                   actions: [
                     {
                       safety: {
+                        label: "Document RAG",
                         reasonCodes: ["non_idempotent", "external_write"],
                         stepId: "step-document",
                         stepType: "document_rag",
@@ -714,6 +715,7 @@ describe("App", () => {
                     reasonCodes: ["requires_approval", "non_idempotent"],
                     steps: [
                       {
+                        label: "Web Search",
                         reasonCodes: ["requires_approval", "non_idempotent"],
                         stepId: "step-web",
                         stepType: "web_search",
@@ -766,23 +768,30 @@ describe("App", () => {
     expect(
       await screen.findByText("Recover interrupted document answer")
     ).toBeInTheDocument();
-    expect(screen.getByText("server_startup_recovery")).toBeInTheDocument();
+    const recoveryList = within(document.querySelector(".archive-recovery-list"));
+
+    // Reasons, statuses and risks read as labels, not the server's codes.
+    expect(recoveryList.getByText("Interrupted by a server restart")).toBeInTheDocument();
+    expect(recoveryList.queryByText("server_startup_recovery")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Retry failed step" })
+      recoveryList.getByRole("button", { name: "Retry failed step" })
     ).toBeInTheDocument();
     // No step is ever run on its own, so the panel has no "auto replay"
     // verdict: it shows what a replay would risk. (That "resume from step" has
     // no label of its own any more is in workbenchFormatters.test.js.)
     expect(screen.queryByText(/Auto replay/)).toBeNull();
-    expect(screen.getAllByText("Run status").length).toBeGreaterThan(0);
-    expect(screen.getByText("document_rag")).toBeInTheDocument();
+    expect(recoveryList.getAllByText("Run status").length).toBeGreaterThan(0);
+    expect(recoveryList.getAllByText("Waiting for user").length).toBe(4);
+    expect(recoveryList.getByText("Document RAG")).toBeInTheDocument();
     expect(
-      screen.getAllByText("non_idempotent, external_write").length
-    ).toBeGreaterThan(0);
-    expect(screen.getByText("web_search")).toBeInTheDocument();
+      recoveryList.getByText("Not idempotent, External write")
+    ).toBeInTheDocument();
+    // A run with nothing to retry describes the step it stopped at.
+    expect(recoveryList.getByText("Requires approval")).toBeInTheDocument();
+    expect(recoveryList.getByText("Web Search")).toBeInTheDocument();
     expect(
-      screen.getAllByText("requires_approval, non_idempotent").length
-    ).toBeGreaterThan(0);
+      recoveryList.getByText("Requires approval, Not idempotent")
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[0]);
 

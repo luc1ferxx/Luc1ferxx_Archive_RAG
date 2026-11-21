@@ -23,9 +23,8 @@ import PdfUploader from "./PdfUploader";
 import QualityGuardPanel from "./QualityGuardPanel";
 import {
   formatRecoveryActionLabel,
-  formatReplaySafetyReasonCodes,
-  formatTaskStatus,
-  getRecoveryReplaySafetyItems,
+  formatStatusLabel,
+  formatStepLabel,
 } from "./workbenchFormatters";
 
 const defaultT = (key, values = {}) =>
@@ -112,42 +111,6 @@ const RecoveryFactRow = ({ label, value }) => {
   );
 };
 
-const ReplaySafetyItem = ({ safety }) => {
-  const reasonDetails = Array.isArray(safety.reasons) ? safety.reasons : [];
-
-  return (
-    <div className="archive-recovery-safety-item">
-      <div className="archive-recovery-safety-head">
-        <span>{safety.stepType ?? "step"}</span>
-        <strong>{formatReplaySafetyReasonCodes(safety)}</strong>
-      </div>
-      {safety.summary ? <p>{safety.summary}</p> : null}
-      {reasonDetails.length > 0 ? (
-        <div className="archive-recovery-reason-list">
-          {reasonDetails.map((reason) => (
-            <span key={reason.code ?? reason.label}>
-              {reason.label ?? reason.code}
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-};
-
-const RecoveryActionSafety = ({ action }) => {
-  if (!action?.safety) {
-    return null;
-  }
-
-  return (
-    <div className="archive-recovery-action-safety">
-      <span>{formatRecoveryActionLabel(action.type)}</span>
-      <strong>{formatReplaySafetyReasonCodes(action.safety)}</strong>
-    </div>
-  );
-};
-
 const RecoveryQueuePanel = ({
   isActionPending,
   isLoading,
@@ -172,54 +135,58 @@ const RecoveryQueuePanel = ({
   return (
     <div className="archive-recovery-list">
       {runs.map((run) => {
-        const replaySafetyItems = getRecoveryReplaySafetyItems(run.recovery);
-        const replaySafety = run.recovery?.replaySafety ?? {};
-        const runStatus = formatTaskStatus(run.status);
+        const actions = run.recovery?.actions ?? [];
+        const retryAction = actions.find(
+          (action) => action.type === "retry_failed_step"
+        );
+        // The card describes the step its Retry replays, else the step the
+        // run stopped at: another failed step (a self-check, say) is not
+        // what the button runs.
+        const step = retryAction
+          ? retryAction.safety
+          : run.recovery?.replaySafety?.steps?.[0];
+        const runStatus = formatStatusLabel(run.status, t);
 
         return (
           <div className="archive-recovery-item" key={run.runId}>
             <div className="archive-recovery-item-main">
               <span>{runStatus}</span>
               <strong>{run.goal ?? run.runId}</strong>
-              <p>{run.recovery?.reason ?? t("sidebar.manualRecoveryRequired")}</p>
+              <p>
+                {run.recovery?.reason
+                  ? formatStatusLabel(run.recovery.reason, t)
+                  : t("sidebar.manualRecoveryRequired")}
+              </p>
               <div className="archive-recovery-facts">
                 <RecoveryFactRow label={t("sidebar.runStatus")} value={runStatus} />
                 <RecoveryFactRow
                   label={t("sidebar.recoveryMode")}
-                  value={run.recovery?.requestedMode}
+                  value={
+                    run.recovery?.requestedMode &&
+                    formatStatusLabel(run.recovery.requestedMode, t)
+                  }
                 />
-                <RecoveryFactRow label={t("sidebar.step")} value={run.recovery?.stepId} />
-                <RecoveryFactRow
-                  label={t("sidebar.replay")}
-                  value={formatReplaySafetyReasonCodes(replaySafety)}
-                />
+                {step ? (
+                  <>
+                    <RecoveryFactRow
+                      label={t("sidebar.step")}
+                      value={formatStepLabel(
+                        { label: step.label, type: step.stepType },
+                        t
+                      )}
+                    />
+                    <RecoveryFactRow
+                      label={t("sidebar.replay")}
+                      value={(step.reasonCodes ?? [])
+                        .map((code) => formatStatusLabel(code, t))
+                        .join(", ")}
+                    />
+                  </>
+                ) : null}
               </div>
-              {replaySafetyItems.length > 0 ? (
-                <div className="archive-recovery-safety-list">
-                  {replaySafetyItems.map((safety) => (
-                    <ReplaySafetyItem
-                      key={
-                        safety.stepId ??
-                        `${safety.stepType}-${formatReplaySafetyReasonCodes(safety)}`
-                      }
-                      safety={safety}
-                    />
-                  ))}
-                </div>
-              ) : null}
-              {(run.recovery?.actions ?? []).some((action) => action.safety) ? (
-                <div className="archive-recovery-action-safety-list">
-                  {(run.recovery?.actions ?? []).map((action) => (
-                    <RecoveryActionSafety
-                      action={action}
-                      key={`${run.runId}-${action.type}-${action.stepId ?? ""}-safety`}
-                    />
-                  ))}
-                </div>
-              ) : null}
             </div>
             <div className="archive-recovery-actions">
-              {(run.recovery?.actions ?? []).map((action) => (
+              {actions.map((action) => (
                 <button
                   key={`${run.runId}-${action.type}-${action.stepId}`}
                   type="button"

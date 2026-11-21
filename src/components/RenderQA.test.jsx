@@ -663,6 +663,61 @@ describe("RenderQA", () => {
     expect(screen.getByText("Capability call completed.")).toBeInTheDocument();
   });
 
+  test("tells the approved capability call apart from the step that asked for it", () => {
+    const conversation = [
+      {
+        question: "Search the web for the launch date.",
+        answer: {
+          agentAnswer: "Approve Web Search?",
+          agentMode: "web",
+          agentRunId: "run-web",
+          agentRunStatus: "failed",
+          agentRunSteps: [
+            {
+              id: "web_search:primary",
+              kind: "tool_call",
+              label: "Web Search",
+              status: "skipped",
+              summary: "Web Search was delegated to the approved capability call.",
+              type: "web_search",
+            },
+            {
+              error: { message: "Web search is not configured: SERPAPI_KEY is not set." },
+              id: "capability:web.search:gate-1",
+              kind: "capability_call",
+              label: "Web Search",
+              status: "failed",
+              summary: "Capability call failed: Web search is not configured: SERPAPI_KEY is not set.",
+              type: "capability_call",
+            },
+          ],
+          ragAnswer: "",
+          ragSources: [],
+          mcpAnswer: "Web search not used.",
+        },
+      },
+    ];
+    const getStepRows = () =>
+      within(document.querySelector(".archive-run-control-steps"));
+    const { rerender } = render(<RenderQA conversation={conversation} />);
+
+    expect(getStepRows().getByText("Web Search")).toBeInTheDocument();
+    expect(getStepRows().getByText("Web Search (capability call)")).toBeInTheDocument();
+    expect(getStepRows().getByText("Skipped")).toBeInTheDocument();
+    expect(getStepRows().getByText("Failed")).toBeInTheDocument();
+    const runStatus = within(
+      document.querySelector(".archive-run-control-metrics")
+    ).getByText("Status").parentElement;
+
+    expect(within(runStatus).getByText("Failed")).toBeInTheDocument();
+
+    rerender(<RenderQA conversation={conversation} t={createTranslator("zh")} />);
+
+    expect(getStepRows().getByText("Web Search（能力调用）")).toBeInTheDocument();
+    expect(getStepRows().getByText("已跳过")).toBeInTheDocument();
+    expect(getStepRows().getByText("失败")).toBeInTheDocument();
+  });
+
   test("renders pending capability approval gates without private raw input", () => {
     const handleApprovalAction = vi.fn();
 

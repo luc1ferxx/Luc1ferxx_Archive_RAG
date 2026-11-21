@@ -2,14 +2,15 @@ import React, { useCallback, useState } from "react";
 import { Spin } from "antd";
 import { createTranslator } from "../archiveI18n";
 import { formatDocumentLocation, getLocationUnit } from "../documentLocation";
-import AgentTraceDetail, {
-  formatAgentMode,
-  formatTraceStatus,
-} from "./AgentTraceDetail";
+import AgentTraceDetail, { formatAgentMode } from "./AgentTraceDetail";
 import AgentTraceOverview from "./AgentTraceOverview";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
-import { isStepRetrySupported } from "./workbenchFormatters";
+import {
+  formatStatusLabel,
+  formatStepLabel,
+  isStepRetrySupported,
+} from "./workbenchFormatters";
 
 // English unless the app hands in its translator: the citation location is
 // the one label here that follows the locale ("Page 4" / "第 4 页").
@@ -117,7 +118,7 @@ const isFailedStep = (step = {}) => getStepStatus(step) === "failed";
 
 const isPendingGate = (gate = {}) => (gate.status ?? "pending") === "pending";
 
-const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
+const ApprovalGatePanel = ({ gates, onApprovalAction, t, turnIndex }) => {
   if (!Array.isArray(gates) || gates.length === 0) {
     return null;
   }
@@ -134,7 +135,7 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
           <div key={gate.id ?? gate.capabilityId ?? gateIndex} className="archive-approval-item">
             <div className="archive-approval-head">
               <strong>{gate.capabilityLabel ?? gate.capabilityId ?? "Capability"}</strong>
-              <span>{gate.status ?? "pending"}</span>
+              <span>{formatStatusLabel(gate.status, t)}</span>
             </div>
             {gate.reason ? (
               <div className="archive-approval-copy">{gate.reason}</div>
@@ -199,7 +200,7 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
   );
 };
 
-const AgentRunStepDetails = ({ step, stepIndex }) => {
+const AgentRunStepDetails = ({ step, stepIndex, t }) => {
   const inputText = stringifyDetailValue(step.input);
   const outputText = stringifyDetailValue(step.output);
   const errorText = stringifyDetailValue(step.error);
@@ -210,8 +211,8 @@ const AgentRunStepDetails = ({ step, stepIndex }) => {
     <details className="archive-run-control-step">
       <summary>
         <span>{String(stepIndex + 1).padStart(2, "0")}</span>
-        <strong>{step.label ?? step.type ?? "Step"}</strong>
-        <em>{formatTraceStatus(getStepStatus(step))}</em>
+        <strong>{formatStepLabel(step, t)}</strong>
+        <em>{formatStatusLabel(getStepStatus(step), t)}</em>
       </summary>
       {hasDetails ? (
         <div className="archive-run-control-step-body">
@@ -256,6 +257,7 @@ const AgentRunControlPanel = ({
   onContinueRun,
   onStepRetry,
   steps = [],
+  t,
   turnIndex,
 }) => {
   const runId = answer.agentRunId;
@@ -297,7 +299,7 @@ const AgentRunControlPanel = ({
       <div className="archive-run-control-metrics">
         <div>
           <span>Status</span>
-          <strong>{formatTraceStatus(runStatus)}</strong>
+          <strong>{formatStatusLabel(runStatus, t)}</strong>
         </div>
         <div>
           <span>Steps</span>
@@ -316,6 +318,7 @@ const AgentRunControlPanel = ({
       <ApprovalGatePanel
         gates={pendingGates}
         onApprovalAction={onApprovalAction}
+        t={t}
         turnIndex={turnIndex}
       />
 
@@ -325,7 +328,7 @@ const AgentRunControlPanel = ({
           {failedSteps.map((step) => (
             <div key={step.id} className="archive-run-retry-item">
               <div>
-                <strong>{step.label ?? step.type ?? "Step"}</strong>
+                <strong>{formatStepLabel(step, t)}</strong>
                 <span>{step.error?.message ?? step.summary ?? "Step failed."}</span>
               </div>
               {onStepRetry && runId && isStepRetrySupported(step.type) ? (
@@ -357,6 +360,7 @@ const AgentRunControlPanel = ({
               key={step.id ?? `${step.label}-${stepIndex}`}
               step={step}
               stepIndex={stepIndex}
+              t={t}
             />
           ))}
         </div>
@@ -365,7 +369,7 @@ const AgentRunControlPanel = ({
   );
 };
 
-const AgentRunRail = ({ steps }) => {
+const AgentRunRail = ({ steps, t }) => {
   const visibleSteps = steps.slice(0, 5);
 
   if (visibleSteps.length === 0) {
@@ -383,7 +387,7 @@ const AgentRunRail = ({ steps }) => {
             className={`archive-run-stage is-${stepStatus}`}
           >
             <span className="archive-run-stage-index">{stepIndex + 1}</span>
-            <span className="archive-run-stage-label">{step.label}</span>
+            <span className="archive-run-stage-label">{formatStepLabel(step, t)}</span>
           </div>
         );
       })}
@@ -391,7 +395,7 @@ const AgentRunRail = ({ steps }) => {
   );
 };
 
-const AgentRunTimeline = ({ steps }) => {
+const AgentRunTimeline = ({ steps, t }) => {
   if (!Array.isArray(steps) || steps.length === 0) {
     return null;
   }
@@ -411,8 +415,8 @@ const AgentRunTimeline = ({ steps }) => {
               <span className="archive-run-timeline-dot" />
               <div className="archive-run-timeline-body">
                 <div className="archive-run-timeline-head">
-                  <strong>{step.label ?? step.type ?? "Step"}</strong>
-                  <span>{formatTraceStatus(stepStatus)}</span>
+                  <strong>{formatStepLabel(step, t)}</strong>
+                  <span>{formatStatusLabel(stepStatus, t)}</span>
                 </div>
                 <div className="archive-run-timeline-meta">
                   <span>{formatStepKind(step.kind ?? step.type)}</span>
@@ -534,7 +538,7 @@ const RenderQA = (props) => {
                     </span>
                   </div>
 
-                  <AgentRunRail steps={agentRunSteps} />
+                  <AgentRunRail steps={agentRunSteps} t={t} />
 
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
@@ -549,10 +553,11 @@ const RenderQA = (props) => {
                     onContinueRun={onContinueRun}
                     onStepRetry={onStepRetry}
                     steps={agentRunSteps}
+                    t={t}
                     turnIndex={index}
                   />
 
-                  <AgentRunTimeline steps={agentRunSteps} />
+                  <AgentRunTimeline steps={agentRunSteps} t={t} />
 
                   <AgentTraceOverview
                     answer={each.answer}
@@ -572,8 +577,8 @@ const RenderQA = (props) => {
                             className={`archive-agent-step is-${stepStatus}`}
                           >
                             <div className="archive-agent-step-head">
-                              <span>{step.label}</span>
-                              <span>{formatTraceStatus(stepStatus)}</span>
+                              <span>{formatStepLabel(step, t)}</span>
+                              <span>{formatStatusLabel(stepStatus, t)}</span>
                             </div>
                             <div className="archive-agent-step-copy">
                               {step.summary}

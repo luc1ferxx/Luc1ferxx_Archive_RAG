@@ -6,9 +6,11 @@ import {
   isStepRetryAllowed,
   listStepReplaySafetyPolicies,
 } from "../../server/rag/agent-run-step-replay-safety.js";
+import { createTranslator } from "../archiveI18n";
 import {
   formatRecoveryActionLabel,
-  formatReplaySafetyReasonCodes,
+  formatStatusLabel,
+  formatStepLabel,
   getRecoveryActionSuccessMessage,
   isStepRetrySupported,
   listSelfRetryableStepTypes,
@@ -57,11 +59,32 @@ describe("workbench formatters", () => {
     expect(getRecoveryActionSuccessMessage("cancel")).toBe("Agent run canceled.");
   });
 
-  test("replay safety is shown as the server's reason codes", () => {
+  test("run, task and step statuses, recovery reasons and replay risks read as labels", () => {
+    const en = createTranslator("en");
+    const zh = createTranslator("zh");
+
+    expect(formatStatusLabel("waiting_for_user", en)).toBe("Waiting for user");
+    expect(formatStatusLabel("completed", en)).toBe("Completed");
+    expect(formatStatusLabel("failed_step_ready", en)).toBe("A failed step can be retried");
+    expect(formatStatusLabel("non_idempotent", en)).toBe("Not idempotent");
+    expect(formatStatusLabel("unsupported_step_type", en)).toBe("Unsupported step type");
+    expect(formatStatusLabel("waiting_for_user", zh)).toBe("等待用户处理");
+    expect(formatStatusLabel("non_idempotent", zh)).toBe("非幂等");
+    // A value without a label still reads as words; a missing one is pending.
+    expect(formatStatusLabel("graph_resume_failed", en)).toBe("Graph resume failed");
+    expect(formatStatusLabel(undefined, en)).toBe("Pending");
+  });
+
+  test("a capability call step is told apart from the step whose approval queued it", () => {
+    const en = createTranslator("en");
+
+    expect(formatStepLabel({ label: "Web Search", type: "capability_call" }, en)).toBe(
+      "Web Search (capability call)"
+    );
+    expect(formatStepLabel({ label: "Web Search", type: "web_search" }, en)).toBe("Web Search");
     expect(
-      formatReplaySafetyReasonCodes({ reasonCodes: ["graph_node_step", "external_write"] })
-    ).toBe("graph_node_step, external_write");
-    expect(formatReplaySafetyReasonCodes({})).toBe("No reason codes reported");
-    expect(formatReplaySafetyReasonCodes()).toBe("No reason codes reported");
+      formatStepLabel({ label: "Web Search", type: "capability_call" }, createTranslator("zh"))
+    ).toBe("Web Search（能力调用）");
+    expect(formatStepLabel({ type: "self_check" }, en)).toBe("self_check");
   });
 });

@@ -1,5 +1,29 @@
-export const formatTaskStatus = (status) =>
-  String(status ?? "pending").replace(/_/g, " ");
+// A run, task, step or approval status, a recovery reason or a replay risk as
+// the server sends it, translated (the status.* keys; a recovery reason can be
+// a replay risk, so they share them). A value without a key reads as words.
+export const formatStatusLabel = (status, t) => {
+  const value = String(status ?? "pending");
+  const key = `status.${value}`;
+  const label = t(key);
+
+  if (label !== key) {
+    return label;
+  }
+
+  const words = value.replace(/_/g, " ");
+
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+// A capability_call step is labelled with its Capability, like the step whose
+// approval queued it ("Web Search" twice): this tells the call apart.
+export const formatStepLabel = ({ label, type } = {}, t) => {
+  const name = label || type || t("sidebar.step");
+
+  return type === "capability_call"
+    ? t("workbench.capabilityCall", { label: name })
+    : name;
+};
 
 // The two things an operator can do with a run from the recovery panel.
 // (There is no "resume step": the server never runs a step on its own, and it
@@ -39,20 +63,4 @@ export const getRecoveryActionSuccessMessage = (action) => {
   }
 
   return "Agent run recovery action completed.";
-};
-
-export const getRecoveryReplaySafetyItems = (recovery) =>
-  Array.isArray(recovery?.replaySafety?.steps)
-    ? recovery.replaySafety.steps
-    : [];
-
-// What replaying a step would risk or lack, as the server's reason codes.
-export const formatReplaySafetyReasonCodes = (safety = {}) => {
-  const reasonCodes = Array.isArray(safety.reasonCodes)
-    ? safety.reasonCodes.filter(Boolean)
-    : [];
-
-  return reasonCodes.length > 0
-    ? reasonCodes.join(", ")
-    : "No reason codes reported";
 };
