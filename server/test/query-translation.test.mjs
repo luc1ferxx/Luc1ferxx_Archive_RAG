@@ -371,25 +371,22 @@ test("a rewrite worded unlike the chunk still admits it on its dense score", asy
   assert.equal(admitted.provenance.queries[0].queryId, "translation-latin");
 });
 
-// X3' (the review of X3): not when the chunk is about a neighbouring topic of
-// the rewrite ("annual leave" for "parental leave"), which the rival-word
-// check on the user's question cannot see across scripts.
-test("the gate's rewrite bypass skips a chunk about a neighbouring topic of the rewrite", () => {
+// Only a candidate whose winning copy a rewrite found gets the bypass, and no
+// candidate when nothing was rewritten. (No rival-word check against the
+// rewrite: X3' measured one and did not keep it; a shortcut in the module.)
+test("the gate's rewrite bypass covers the candidates a rewrite found, and only those", () => {
   const bypass = buildTranslationBypass([
     { id: "primary", query: "员工的育儿假有多久？" },
     { id: "translation-latin", query: "How long is parental leave for employees?" },
   ]);
-  const chunk = (queryId, pageContent) => ({
-    document: { id: pageContent, metadata: { fileName: "policy.pdf", sectionHeading: "" }, pageContent },
+  const chunk = (queryId) => ({
+    document: { id: queryId, metadata: { fileName: "policy.pdf", sectionHeading: "" }, pageContent: DOCUMENTS.en },
     provenance: { queries: [{ queryId }] },
   });
 
-  assert.equal(bypass(chunk("translation-latin", DOCUMENTS.en)), false, "annual leave is not parental leave");
-  assert.equal(
-    bypass(chunk("translation-latin", "Parental leave lasts sixteen weeks for every employee.")),
-    true
-  );
-  assert.equal(bypass(chunk("primary", "Parental leave lasts sixteen weeks for every employee.")), false);
+  assert.equal(bypass(chunk("translation-latin")), true);
+  assert.equal(bypass(chunk("primary")), false);
+  assert.equal(bypass(chunk("translation-hangul")), false, "a rewrite this request did not search");
   assert.equal(buildTranslationBypass([{ id: "primary", query: "How long is parental leave?" }]), null);
 });
 

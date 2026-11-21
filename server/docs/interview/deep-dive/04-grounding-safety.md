@@ -53,7 +53,7 @@
 7. agent-finalization-flow.js：getBoundSelfCheckEvidenceContext 取回 memo，对同样的文本和证据直接命中，开评审时走 judgeClaimSupport。然后 finalizeAgentAnswer（即 finalizeGroundedAnswer）：全部 claim 被支持时原文原样返回；有不被支持的就重建文本，只保留被支持的 claim，formatSupportedClaim 只写已验证的 [Source N]；一条证据 claim 都不剩时输出 GROUNDED_ABSTENTION_TEXT。
 8. /chat/stream 额外的部分：createAnswerDraftReleaser 用 findCompletePrefix 等到句末、来源标签和下一个字符都到了，才对已写出的前缀调 evaluateClaimSupport。通过的句子先 formatSupportedClaim；如果 guardAnswerLinks 会删掉其中的链接，这句就不推；否则 emitAgentEvent(answer_draft)。以 NOT_IN_EVIDENCE: 开头的回复不出草稿。模型重试或切换时发 answer_draft_reset。最后的 result 事件与 /chat 的 body 完全一致，替换掉所有草稿。
 9. 对比路径（executeComparisonRag）：
-   - retrievePerDocumentContextForQueries 逐文档召回。assessComparisonConfidence 要求至少 min(2, 文档数) 份文档有证据，允许 vectorScore ≥ 0.32 的语义豁免（allowSemanticBypass：对比对所有候选开；单文档问答只对跨语言改写找到、且与那条改写不是相邻话题的候选开，见 docs/evaluation.md 的 X3′）。
+   - retrievePerDocumentContextForQueries 逐文档召回。assessComparisonConfidence 要求至少 min(2, 文档数) 份文档有证据，允许 vectorScore ≥ 0.32 的语义豁免（allowSemanticBypass：对比对所有候选开；单文档问答只对跨语言改写找到的候选开，没有拿改写做换词否决，见 docs/evaluation.md 的 X3 与 X3′）。
    - alignComparisonEvidence → prepareComparisonSourceBundle，再由 buildComparisonAnalysisFromContexts（内部调 analyzeComparison）判近重复、双向蕴含和数值冲突。
    - writeComparisonAnswer：先看近重复能否短路成"无实质差异"（buildNoMaterialDifferenceAnswer，不调模型）；否则调模型，经 normalizeGroupedSourceLabels 和 guardAnswerLinks 后进 assessStructuredDifferenceAnswer。不过门就换 buildGroundedDifferenceAnswer 模板，模板也过不了就拒答。modelRejectReason（只有代码和计数）只进 trace。
 

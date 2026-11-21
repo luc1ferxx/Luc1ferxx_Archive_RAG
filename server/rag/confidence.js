@@ -134,9 +134,9 @@ export const findQueryTermSubstitution = (queryText, evidenceText) => {
 // called.
 //
 // The bypass is deliberately limited to comparison (and, in single-document QA,
-// to candidates a cross-language rewrite found that are not about a neighbouring
-// topic of that rewrite: a translation is a paraphrase by construction; see
-// buildTranslationBypass in document-rag-execution.js), because in single-document QA
+// to candidates a cross-language rewrite found: a translation is a paraphrase by
+// construction; see buildTranslationBypass in document-rag-execution.js), because
+// in single-document QA
 // low coverage carries real information: it marks a chunk that addresses only part
 // of a multi-aspect question, which is what drives the gap-suggestion machinery
 // ("when does this take effect AND which regions"). Relaxing it there made a
@@ -578,13 +578,6 @@ export const assessQaConfidence = ({
  * reach `minCoverage`, name one of the question's anchors when it has any, and
  * not replace a query word with a rival (findQueryTermSubstitution).
  */
-/**
- * Whether `result` is about a neighbouring thing of `queryText`
- * (findQueryTermSubstitution on its section heading and text).
- */
-export const isNeighbouringTopic = (queryText, result) =>
-  Boolean(findQueryTermSubstitution(queryText, buildSubstitutionEvidenceText(result)));
-
 export const selectQaContext = ({ confidence, limit, minCoverage, queryText = "", results }) => {
   if (!confidence?.confident) {
     return [];
@@ -600,7 +593,7 @@ export const selectQaContext = ({ confidence, limit, minCoverage, queryText = ""
       getAdmissionScore(result) >= minimumScore &&
       (typeof result?.keywordScore !== "number" || result.keywordScore >= minCoverage) &&
       (anchorGroups.length === 0 || getMatchedAnchorIndexes(result, anchorGroups).length > 0) &&
-      !isNeighbouringTopic(queryText, result)
+      !findQueryTermSubstitution(queryText, buildSubstitutionEvidenceText(result))
   );
 
   return [...admitted, ...extras].slice(0, Math.max(limit, admitted.length));

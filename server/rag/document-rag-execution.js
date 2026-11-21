@@ -18,7 +18,6 @@ import {
 import {
   assessComparisonConfidence,
   assessQaConfidence,
-  isNeighbouringTopic,
   selectQaContext,
 } from "./confidence.js";
 import {
@@ -105,30 +104,28 @@ const mergeResultPair = (existing, incoming) => {
 // (chat(), rag/query-translation.js).
 const TRANSLATION_QUERY_ID_PREFIX = "translation-";
 
-// The QA gate's semantic bypass for cross-language rewrites (KX round, X3'):
+// The QA gate's semantic bypass for cross-language rewrites (KX round, X3):
 // a rewrite is a paraphrase in another language, so a candidate whose stored
 // keywordScore was measured against one (mergeProvenance lists the winning
-// copy's query first) may clear the coverage floor on its dense score, unless
-// it is about a neighbouring topic of that rewrite ("annual leave" for
-// "parental leave"). selectQaContext's rival-word check reads the user's
-// question, which never matches a chunk in another script. Null when nothing
-// was rewritten, so the gate is unchanged then.
+// copy's query first) may clear the coverage floor on its dense score. Null
+// when nothing was rewritten, so the gate is unchanged then.
+// shortcut: no rival-word check against the rewrite, so a chunk about a
+// neighbouring topic of it ("annual leave" for "parental leave") passes on a
+// dense score nomic gives nearly every chunk; the check was measured (X3' in
+// docs/evaluation.md) and not kept under its rules; add it back once a run
+// with repeatable rewrites shows it costs no answers.
 export const buildTranslationBypass = (retrievalQueries = []) => {
-  const rewrites = new Map(
+  const rewriteIds = new Set(
     retrievalQueries
-      .filter((retrievalQuery) => String(retrievalQuery.id).startsWith(TRANSLATION_QUERY_ID_PREFIX))
-      .map((retrievalQuery) => [retrievalQuery.id, retrievalQuery.query])
+      .map((retrievalQuery) => String(retrievalQuery.id))
+      .filter((id) => id.startsWith(TRANSLATION_QUERY_ID_PREFIX))
   );
 
-  if (rewrites.size === 0) {
+  if (rewriteIds.size === 0) {
     return null;
   }
 
-  return (result) => {
-    const rewrite = rewrites.get(String(result?.provenance?.queries?.[0]?.queryId ?? ""));
-
-    return Boolean(rewrite) && !isNeighbouringTopic(rewrite, result);
-  };
+  return (result) => rewriteIds.has(String(result?.provenance?.queries?.[0]?.queryId ?? ""));
 };
 
 export const tagResultsWithQuery = (results = [], retrievalQuery = {}) =>
