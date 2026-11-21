@@ -106,7 +106,11 @@ const renderPlanMeta = (task = {}, t) => {
   const goalPlan = getGoalPlan(task);
   const counts = goalPlan?.counts ?? {};
   // Runs past the budget, which only an approved gate allows (server/rag/agent-goal-plan.js).
-  const overBudget = goalPlan?.overBudgetIterations ?? 0;
+  // A plan stored before the server counted them has no field: they are the
+  // runs past maxIterations.
+  const overBudget =
+    goalPlan?.overBudgetIterations ??
+    Math.max(0, (goalPlan?.completedIterations ?? 0) - (goalPlan?.maxIterations ?? Infinity));
 
   if (!goalPlan) {
     return null;
