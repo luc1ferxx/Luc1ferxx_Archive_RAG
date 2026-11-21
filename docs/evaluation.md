@@ -367,7 +367,7 @@ Recovery 与仍需区分的证据：
 
 ```bash
 cd server
-AGENT_PLANNER_ROLLOUT=llm AGENT_SKILL_GRAPH_ROLLOUT=guarded npm run runtime:smoke
+AGENT_PLANNER_ROLLOUT=llm npm run runtime:smoke
 ```
 
 `runtime:smoke` 需要 `OPENAI_API_KEY` 和 `POSTGRES_DATABASE_URL` 或 `LONG_MEMORY_DATABASE_URL`。它会启动真实 Express app，走 `/health` 和两次 `/chat` HTTP 请求，不注入 deterministic planner。文档 RAG 使用 smoke stub，避免依赖上传文件和 embedding；intent/execution 与 DAG planner 仍走真实 LLM provider。`server/.env` 里如果写着 `AGENT_SKILL_GRAPH_ROLLOUT=off` 或 `shadow`，进程拒绝启动，要先删掉这一行。
@@ -381,7 +381,7 @@ Smoke 断言：
 - 第二次请求加载该 memory 为 planning hint
 - `ragSources` 只包含 smoke document source，不包含 `agent_experience` 或 `successful_plan`
 
-报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。需要时在本机带 `OPENAI_API_KEY`、接 PostgreSQL，在纯 LLM + guarded Skill graph 环境下先运行这个 smoke（原来定时做这件事的 `Planner Real Provider Gate` workflow 2026-11-17 已删除），再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成灰度准备信号；完整发布还需 `release:gate` 的同提交证据校验。
+报告写入 `evaluation/results/latest-runtime-smoke.json` 和 `.md`。需要时在本机带 `OPENAI_API_KEY`、接 PostgreSQL，在纯 LLM 规划的环境下先运行这个 smoke（原来定时做这件事的 `Planner Real Provider Gate` workflow 2026-11-17 已删除），再运行 `rollout:readiness` 把 smoke、real/mock planner gate、trajectory 和 recovery 汇总成灰度准备信号；完整发布还需 `release:gate` 的同提交证据校验。
 
 ## DocCompare quality verification
 

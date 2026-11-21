@@ -13,8 +13,11 @@ import { createDraftEvalPlanners } from "../evaluation/run-answer-draft-eval.mjs
 // eval:answer-drafts plans as /chat does. Until 2026-11-20 it passed
 // runAgentRag no planners, so every case planned with the rules whatever
 // AGENT_PLANNER_ROLLOUT said, and its timings had no LLM planning in them.
+// shortcut: main() needs a real model, so this checks only the planners it
+// builds, not that each case gets them or that the report records the
+// rollout; test main() too once a case can run on a stub model.
 
-test("eval:answer-drafts runs with the four planners /chat builds and records AGENT_PLANNER_ROLLOUT", async () => {
+test("createDraftEvalPlanners builds /chat's four planners, names the rollout, and refuses removed values", async () => {
   // As createAppServices builds them for buildChatResponse.
   const appPlanners = () => {
     const dagPlannerAdapter = createDagPlannerAdapter();
