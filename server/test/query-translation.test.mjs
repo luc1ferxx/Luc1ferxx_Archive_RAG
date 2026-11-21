@@ -66,12 +66,12 @@ const embed = (text) => {
 
 const translationPrompts = [];
 const answerPrompts = [];
-const readExample = (prompt) => prompt.split("Example text:\n")[1].split("\n\nQuestion:")[0];
+const readExample = (prompt) => prompt.split("Document excerpt:\n")[1].split("\n\nQuestion:")[0];
 
 const useModel = ({ rewrite = (script) => REWRITES[script] } = {}) =>
   configureOpenAIProvider({
     completeText: async (prompt) => {
-      if (prompt.includes("Rewritten question:")) {
+      if (prompt.includes("Translated question:")) {
         translationPrompts.push(prompt);
         return rewrite(detectScript(readExample(prompt)));
       }
@@ -174,8 +174,14 @@ test("a Chinese question over an English document also searches its English rewr
   const [trace] = await readRagTraces();
 
   assert.equal(translationPrompts.length, 1);
-  assert.ok(translationPrompts[0].includes(`Example text:\n${DOCUMENTS.en}`));
+  assert.ok(translationPrompts[0].includes(`Document excerpt:\n${DOCUMENTS.en}`));
   assert.ok(translationPrompts[0].includes(`Question:\n${ZH_QUESTION}`));
+  // Named, not "the language of the example": a 7B model translated only then.
+  assert.ok(
+    translationPrompts[0].startsWith(
+      "Translate the question into a language written in Latin letters (such as English), "
+    )
+  );
   assert.deepEqual(trace.queryTranslations, [{ query: REWRITES.latin, script: "latin" }]);
   assert.deepEqual(trace.retrievalQueries.at(-1), {
     id: "translation-latin",
@@ -253,7 +259,7 @@ test("a Chinese question over Chinese and English documents is rewritten into En
   const [trace] = await readRagTraces();
 
   assert.equal(translationPrompts.length, 1);
-  assert.ok(translationPrompts[0].includes(`Example text:\n${DOCUMENTS.en}`));
+  assert.ok(translationPrompts[0].includes(`Document excerpt:\n${DOCUMENTS.en}`));
   assert.deepEqual(trace.queryTranslations, [{ query: REWRITES.latin, script: "latin" }]);
 });
 
