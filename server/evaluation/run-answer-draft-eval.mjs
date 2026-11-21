@@ -15,8 +15,13 @@
 //   most paraphrased answers here, so this set shows how often a user would
 //   see any draft at all.
 //
-// Planners are the deterministic ones, so timings cover retrieval and
-// answering, not LLM planning.
+// Planners are the four /chat builds (createAgentSurfacePlanners, shared with
+// eval:qasper-answers --surface agent), as AGENT_PLANNER_ROLLOUT picks them;
+// the report records the value as config.plannerRollout. By default (llm) the
+// model plans, so both timings include LLM planning, as /chat's do.
+// AGENT_PLANNER_ROLLOUT=deterministic plans with the rules and gives the old
+// timings, retrieval and answering only (reports without
+// config.plannerRollout ran that way).
 //
 // A draft is retained when its text, labels and punctuation aside, appears in
 // the final answer. A run retracts when any draft it showed is missing from
@@ -45,6 +50,8 @@ import {
   summarizeAgentOutcomes,
 } from "./agent-answer-outcome.js";
 import { useEvaluationDataDirectory } from "./eval-data-directory.mjs";
+import { createAgentSurfacePlanners } from "./run-qasper-answer-eval.mjs";
+import { getAgentPlannerRollout } from "../rag/config.js";
 
 // The answer-rate flags this run used (rag/config.js); null on a checkout
 // that predates them.
@@ -108,6 +115,16 @@ export const scoreDraftRun = ({ drafts = [], finalAnswer = "", agentMode, follow
               : "other",
   };
 };
+
+/**
+ * The planners every case runs with, the four /chat builds, and the
+ * AGENT_PLANNER_ROLLOUT they were built for. A removed or mistyped
+ * AGENT_PLANNER_ROLLOUT, or a removed agent dial, throws.
+ */
+export const createDraftEvalPlanners = async () => ({
+  plannerRollout: getAgentPlannerRollout(),
+  planners: await createAgentSurfacePlanners(),
+});
 
 const percentile = (values, p) => {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
@@ -202,7 +219,7 @@ const renderMarkdown = (report) =>
     "",
     `- Generated: ${report.generatedAt}`,
     `- Chat model: ${report.config.chatModel}; embedding model: ${report.config.embeddingModel}`,
-    "- Single-document QA through runAgentRag with a streaming sink; deterministic planners",
+    `- Single-document QA through runAgentRag with a streaming sink and /chat's planners (AGENT_PLANNER_ROLLOUT ${report.config.plannerRollout}); timings include planning`,
     "",
     ...report.sets.map(renderSetMarkdown),
   ].join("\n");
@@ -267,6 +284,8 @@ const main = async () => {
   const rag = await import("../chat.js");
   const { runAgentRag } = await import("../rag/agent.js");
   const { runWithAgentEventSink } = await import("../rag/agent-event-stream.js");
+  // Before anything is ingested, so a wrong value stops the run here.
+  const { plannerRollout, planners } = await createDraftEvalPlanners();
   const corpus = JSON.parse(await readFile(CORPUS_PATH, "utf8"));
   const arxivCases = pickCases(corpus, arxivCaseCount);
   const sets = [
@@ -327,6 +346,7 @@ const main = async () => {
           (event) => events.push({ ...event, atMs: performance.now() - started }),
           () =>
             runAgentRag({
+              ...planners,
               accessScope,
               docIds: [testCase.docId],
               question: testCase.question,
@@ -394,6 +414,7 @@ const main = async () => {
         answerRateFlags: await describeAnswerRateFlags(),
         claimJudge: (await import("../rag/config.js")).getClaimJudgeMode(),
         embeddingModel: process.env.OPENAI_EMBEDDING_MODEL ?? null,
+        plannerRollout,
         promptTemplates: await describePromptTemplates(),
       },
       generatedAt: new Date().toISOString(),
