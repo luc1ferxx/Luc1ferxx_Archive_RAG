@@ -230,8 +230,10 @@ export const AuthProvider = ({
       postLogoutRedirectUri: settings?.postLogoutRedirectUri,
     });
 
-    if (endSessionUrl && location) {
-      location.assign(endSessionUrl);
+    // Without an IdP logout, load the app again: the documents, conversation
+    // and tasks the signed-in user had loaded must not stay on screen.
+    if (location) {
+      location.assign(endSessionUrl || settings?.postLogoutRedirectUri || `${location.origin}/`);
     }
   }, [clearRefreshTimer, location]);
 

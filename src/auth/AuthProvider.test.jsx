@@ -374,6 +374,37 @@ describe("AuthProvider", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
+  test("Sign out with no end-session endpoint loads the app again, so nothing of the session stays on screen", async () => {
+    savePendingLogin({
+      codeVerifier: "verifier-1",
+      createdAt: Date.now(),
+      nonce: "nonce-1",
+      redirectUri: "http://localhost:3000/",
+      state: "state-1",
+    });
+    const location = createLocation("http://localhost:3000/?code=code-1&state=state-1");
+    const sessionFetch = createFetch();
+    const fetchImpl = vi.fn(async (url, init) =>
+      url === `${ISSUER}/.well-known/openid-configuration`
+        ? jsonResponse({ ...discoveryDocument, end_session_endpoint: undefined })
+        : sessionFetch(url, init)
+    );
+
+    renderAuth({
+      env: {},
+      fetchImpl,
+      loadMe: async () => ({ permissions: [], roles: [], userId: "alice", workspaceId: "w1" }),
+      loadServerConfig: async () => oidcConfig,
+      location,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(getAccessToken()).toBe("");
+    expect(location.assign).toHaveBeenCalledTimes(1);
+    expect(location.assign).toHaveBeenCalledWith("http://localhost:3000/");
+  });
+
   test("a failed timed refresh signs out and starts a new login, as an unrecoverable 401 does", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     savePendingLogin({
