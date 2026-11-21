@@ -7,7 +7,8 @@
 // research brief and the timeline Skill end with it when nothing survives.
 // Such a body is not a clarification (agentMode stays document or the Skill's
 // id), so counting only clarifications as abstentions overstated the answer
-// rate and scored the abstention sentence as a wrong answer.
+// rate and scored the abstention sentence as a wrong answer. Nor is the
+// document RAG's own abstention when the agent passes it on as the answer.
 
 import { GROUNDED_ABSTENTION_TEXT } from "../rag/agent-finalizer.js";
 import { attachRetrievedEvidence } from "../rag/citations.js";
@@ -19,6 +20,7 @@ export const AGENT_ABSTAIN_SOURCES = Object.freeze({
   clarification: "clarification",
   emptyAnswer: "empty_answer",
   groundedAbstention: "grounded_abstention",
+  ragAbstention: "rag_abstention",
 });
 
 export const classifyAgentAnswer = (body = {}) => {
@@ -36,6 +38,17 @@ export const classifyAgentAnswer = (body = {}) => {
   // marked abstained.
   if (text === GROUNDED_ABSTENTION_TEXT || (body?.ragAbstained === true && text.includes(GROUNDED_ABSTENTION_TEXT))) {
     return { abstainSource: AGENT_ABSTAIN_SOURCES.groundedAbstention, answered: false };
+  }
+
+  // The document RAG's own abstention passed on as the answer: the QA gate's
+  // gap-plan message ("I found material related to …, but I still cannot
+  // confirm … reliably.", or its Chinese form), which the agent returns as is
+  // when no follow-up or web search comes after it. The body marks it in any
+  // language: ragAbstained, with the answer being ragAbstainReason. Read as an
+  // answer, it put 1 (L1) and 3 (T1) refusals among the answered QASPER
+  // questions (docs/evaluation.md, KX round).
+  if (body?.ragAbstained === true && text === String(body?.ragAbstainReason ?? "").trim()) {
+    return { abstainSource: AGENT_ABSTAIN_SOURCES.ragAbstention, answered: false };
   }
 
   return { abstainSource: null, answered: true };
