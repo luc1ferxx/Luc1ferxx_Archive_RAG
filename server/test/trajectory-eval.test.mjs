@@ -177,7 +177,6 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
   const originalAgentExperienceMemory =
     process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;
   const originalLongMemory = process.env.RAG_LONG_MEMORY_ENABLED;
-  const originalSkillGraphRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
 
   process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED = "true";
   process.env.RAG_LONG_MEMORY_ENABLED = "true";
@@ -206,10 +205,6 @@ test("trajectory eval isolates memory configuration from CI runtime", async () =
     );
     assert.equal(process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED, "true");
     assert.equal(process.env.RAG_LONG_MEMORY_ENABLED, "true");
-    // The graph cases pin AGENT_SKILL_GRAPH_ROLLOUT for their own duration
-    // only; a leaked `guarded` here would silently move every later suite
-    // onto the V2 path.
-    assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
   } finally {
     if (originalAgentExperienceMemory === undefined) {
       delete process.env.RAG_AGENT_EXPERIENCE_MEMORY_ENABLED;

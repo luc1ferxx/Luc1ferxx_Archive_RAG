@@ -103,7 +103,6 @@ const runAnswerPart = async ({ only = null, rounds }) => {
   useEvaluationDataDirectory(path.join(tempRoot, "rag-data"));
   process.env.DOCCOMPARE_STANDALONE = "1";
   Object.assign(process.env, {
-    AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
     RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
     RAG_CLAIM_JUDGE: "off",
     RAG_LONG_MEMORY_ENABLED: "false",

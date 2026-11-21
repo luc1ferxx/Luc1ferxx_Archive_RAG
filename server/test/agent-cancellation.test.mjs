@@ -678,8 +678,6 @@ test("a custom-Skill stage whose every Skill failed on an outage ends the run wi
 });
 
 test("a deadline that passes inside a guarded custom-Skill graph node settles that node and ends the run", { timeout: 20_000 }, async (t) => {
-  withEnv(t, { AGENT_SKILL_GRAPH_ROLLOUT: "guarded" });
-
   const model = installSlowModel(t);
   const { agentRunService } = createRunService();
   const deadline = createDeadlineOnCue();

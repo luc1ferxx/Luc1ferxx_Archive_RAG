@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { withEnvironmentOverrides } from "../evaluation/agent-eval-harness.js";
 import {
+  createDefaultPlannerCases,
   formatPlannerReportMarkdown,
   getPlannerReportFileNames,
   runPlannerEvaluation,
@@ -49,6 +51,28 @@ test("planner eval passes default mock LLM planner trajectories", async () => {
   assert.match(
     fallbackCase.response.planner.fallbackReason,
     /unknown execution step shell_tool/
+  );
+});
+
+// The dynamic graph case pinned AGENT_SKILL_GRAPH_ROLLOUT to guarded until
+// 2026-11-20, so under a removed value it alone still passed.
+test("planner eval's dynamic graph case refuses a removed AGENT_SKILL_GRAPH_ROLLOUT value like every other case", async () => {
+  const report = await withEnvironmentOverrides({ AGENT_SKILL_GRAPH_ROLLOUT: "off" }, () =>
+    runPlannerEvaluation({
+      cases: createDefaultPlannerCases().filter(
+        (caseDefinition) => caseDefinition.id === "planner_dynamic_skill_graph"
+      ),
+      createdAt: "2026-11-20T00:00:00.000Z",
+      provider: "mock",
+      runId: "planner-removed-dial",
+    })
+  );
+  const [graphCase] = report.cases;
+
+  assert.equal(graphCase.passed, false);
+  assert.match(
+    graphCase.checks.find((check) => check.id === "case_error")?.detail ?? "",
+    /^AGENT_SKILL_GRAPH_ROLLOUT=off was removed \(ADR 0001 phase 8\)/u
   );
 });
 

@@ -60,20 +60,14 @@ const runContractReview = async () => {
   });
 };
 
-const withGuardedGraph = async (t) => {
-  const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
-  t.after(() => {
-    if (previous === undefined) delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    else process.env.AGENT_SKILL_GRAPH_ROLLOUT = previous;
-  });
+const withStubModel = async (t) => {
   configureOpenAIProvider({ completeText: async () => MODEL_ANSWER });
   t.after(() => resetOpenAIProvider());
 };
 
 // Runs first, before any SDK is registered in this process.
 test("without a tracing SDK the response carries no trace id", async (t) => {
-  await withGuardedGraph(t);
+  await withStubModel(t);
 
   const response = await runContractReview();
 
@@ -85,7 +79,7 @@ test("one agent run is one trace: planners, tools, and model calls nest under it
   const exporter = new InMemorySpanExporter();
   const provider = startTracing({ batch: false, exporters: [exporter] });
   t.after(() => provider.shutdown());
-  await withGuardedGraph(t);
+  await withStubModel(t);
 
   const response = await runContractReview();
   await provider.forceFlush();

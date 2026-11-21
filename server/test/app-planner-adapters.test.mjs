@@ -169,143 +169,141 @@ const createContractRagService = ({ questions }) => {
 const requestBinding = (field) => ({ field, source: "request" });
 
 test("the background agent task path runs on the same governed planner and replanner as /chat", async () => {
-  await withEnv({ AGENT_SKILL_GRAPH_ROLLOUT: "guarded" }, async () => {
-    const plannerContexts = [];
-    const replanContexts = [];
-    const questions = [];
-    const dagPlannerAdapter = {
-      createExecutionGraph: (context) => {
-        plannerContexts.push(context);
+  const plannerContexts = [];
+  const replanContexts = [];
+  const questions = [];
+  const dagPlannerAdapter = {
+    createExecutionGraph: (context) => {
+      plannerContexts.push(context);
 
-        return {
-          nodes: [
-            {
-              dependsOn: [],
-              failurePolicy: "continue",
-              inputBindings: {
-                docIds: requestBinding("docIds"),
-                question: requestBinding("question"),
-              },
-              nodeId: "summary",
-              rationale: "Summarize first.",
-              skillId: "summarize_contract",
+      return {
+        nodes: [
+          {
+            dependsOn: [],
+            failurePolicy: "continue",
+            inputBindings: {
+              docIds: requestBinding("docIds"),
+              question: requestBinding("question"),
             },
-            {
-              dependsOn: ["summary"],
-              failurePolicy: "continue",
-              inputBindings: {
-                docIds: requestBinding("docIds"),
-                priorFindings: { nodeId: "summary", output: "text", source: "node" },
-                question: requestBinding("question"),
-              },
-              nodeId: "risk",
-              rationale: "Review risks against the summary.",
-              skillId: "risk_review",
+            nodeId: "summary",
+            rationale: "Summarize first.",
+            skillId: "summarize_contract",
+          },
+          {
+            dependsOn: ["summary"],
+            failurePolicy: "continue",
+            inputBindings: {
+              docIds: requestBinding("docIds"),
+              priorFindings: { nodeId: "summary", output: "text", source: "node" },
+              question: requestBinding("question"),
             },
-          ],
-        };
+            nodeId: "risk",
+            rationale: "Review risks against the summary.",
+            skillId: "risk_review",
+          },
+        ],
+      };
+    },
+    id: DAG_PLANNER_IDS.llm,
+  };
+  const replanAdapter = {
+    createPatch: (context) => {
+      replanContexts.push(context);
+
+      return { addNodes: [], removeNodeIds: [] };
+    },
+    id: "test_replan",
+  };
+  const services = createAppServices(
+    {
+      // One custom-Skill call more than the graph's two nodes spend: the
+      // replanner is asked only while the Skills' own budget can still pay
+      // for a patch node (agent-replanner.js hasSpendableBudget).
+      agentBudget: { maxCustomSkillCalls: 3 },
+      agentRunStore: createInMemoryAgentRunStore(),
+      dagPlannerAdapter,
+      healthService: {
+        buildHealthReport: async () => ({ checks: {}, status: "ok" }),
+        runStartupHealthChecks: async () => ({ checks: {}, status: "ok" }),
       },
-      id: DAG_PLANNER_IDS.llm,
-    };
-    const replanAdapter = {
-      createPatch: (context) => {
-        replanContexts.push(context);
+      ragService: createContractRagService({ questions }),
+      replanAdapter,
+      taskStore: createInMemoryTaskStore(),
+      workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
+    },
+    { uploadsDirectory: os.tmpdir() }
+  );
 
-        return { addNodes: [], removeNodeIds: [] };
+  assert.equal(services.dagPlannerAdapter, dagPlannerAdapter);
+  assert.equal(services.replanAdapter, replanAdapter);
+
+  const outcome = await services.agentTaskRunner.run({
+    accessScope: TASK_ACCESS_SCOPE,
+    patchTask: async () => {},
+    task: {
+      id: "agent_goal:governed-task",
+      input: {
+        docIds: ["contract-1"],
+        maxIterations: 1,
+        question: "Review this contract for risks and key terms.",
+        sessionId: "task-session",
+        userId: TASK_ACCESS_SCOPE.userId,
       },
-      id: "test_replan",
-    };
-    const services = createAppServices(
-      {
-        // One custom-Skill call more than the graph's two nodes spend: the
-        // replanner is asked only while the Skills' own budget can still pay
-        // for a patch node (agent-replanner.js hasSpendableBudget).
-        agentBudget: { maxCustomSkillCalls: 3 },
-        agentRunStore: createInMemoryAgentRunStore(),
-        dagPlannerAdapter,
-        healthService: {
-          buildHealthReport: async () => ({ checks: {}, status: "ok" }),
-          runStartupHealthChecks: async () => ({ checks: {}, status: "ok" }),
-        },
-        ragService: createContractRagService({ questions }),
-        replanAdapter,
-        taskStore: createInMemoryTaskStore(),
-        workspaceArtifactStore: createInMemoryWorkspaceArtifactStore(),
-      },
-      { uploadsDirectory: os.tmpdir() }
-    );
-
-    assert.equal(services.dagPlannerAdapter, dagPlannerAdapter);
-    assert.equal(services.replanAdapter, replanAdapter);
-
-    const outcome = await services.agentTaskRunner.run({
-      accessScope: TASK_ACCESS_SCOPE,
-      patchTask: async () => {},
-      task: {
-        id: "agent_goal:governed-task",
-        input: {
-          docIds: ["contract-1"],
-          maxIterations: 1,
-          question: "Review this contract for risks and key terms.",
-          sessionId: "task-session",
-          userId: TASK_ACCESS_SCOPE.userId,
-        },
-      },
-    });
-
-    assert.equal(outcome.status, "completed");
-
-    // The task's planner call went through the injected adapter, and it saw
-    // the redacted planning view only: no scope, no identity, no handles.
-    assert.equal(plannerContexts.length, 1);
-    assert.deepEqual(Object.keys(plannerContexts[0]).sort(), [
-      "authorizedDocIds",
-      "capabilities",
-      "documentCount",
-      "goal",
-      "intentPlan",
-      "limits",
-      "taskMemoryPlanningContext",
-    ]);
-    assert.deepEqual(plannerContexts[0].authorizedDocIds, ["contract-1"]);
-    assert.doesNotMatch(JSON.stringify(plannerContexts[0]), /alice|workspace-a/);
-
-    // The empty risk review consulted the injected replanner, which likewise
-    // saw statuses rather than evidence or identity.
-    assert.equal(replanContexts.length, 1);
-    assert.equal(replanContexts[0].trigger, "insufficient_evidence");
-    assert.deepEqual(
-      replanContexts[0].nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.abstained]),
-      [
-        ["summary", "completed", false],
-        ["risk", "completed", true],
-      ]
-    );
-    assert.doesNotMatch(JSON.stringify(replanContexts[0]), /alice|workspace-a|Late notice/);
-
-    // And the persisted run says the injected graph -- not a fallback and not
-    // the V1 chain -- is what executed for this task.
-    const run = await services.agentRunService.getRun({
-      accessScope: TASK_ACCESS_SCOPE,
-      runId: outcome.payload.agentRunId,
-    });
-    const graphEvents = run.events.filter((event) => event.type === "skill_graph_planned");
-
-    assert.equal(graphEvents.length, 1);
-    assert.equal(graphEvents[0].payload.executed, true);
-    assert.equal(graphEvents[0].payload.mode, "guarded");
-    assert.equal(graphEvents[0].payload.fallback, null);
-    assert.equal(graphEvents[0].payload.planner.selectedPlannerId, DAG_PLANNER_IDS.llm);
-    assert.equal(graphEvents[0].payload.planner.fallback, false);
-    assert.deepEqual(graphEvents[0].payload.graph.nodeIds, ["summary", "risk"]);
-    assert.deepEqual(
-      graphEvents[0].payload.replans.map((replan) => replan.reasonCode),
-      [REPLAN_REASON_CODES.noProgress]
-    );
-    assert.deepEqual(
-      run.steps.filter((step) => step.type === "custom_skill").map((step) => step.id),
-      ["custom_skill:summary", "custom_skill:risk"]
-    );
-    assert.equal(questions.length, 2);
+    },
   });
+
+  assert.equal(outcome.status, "completed");
+
+  // The task's planner call went through the injected adapter, and it saw
+  // the redacted planning view only: no scope, no identity, no handles.
+  assert.equal(plannerContexts.length, 1);
+  assert.deepEqual(Object.keys(plannerContexts[0]).sort(), [
+    "authorizedDocIds",
+    "capabilities",
+    "documentCount",
+    "goal",
+    "intentPlan",
+    "limits",
+    "taskMemoryPlanningContext",
+  ]);
+  assert.deepEqual(plannerContexts[0].authorizedDocIds, ["contract-1"]);
+  assert.doesNotMatch(JSON.stringify(plannerContexts[0]), /alice|workspace-a/);
+
+  // The empty risk review consulted the injected replanner, which likewise
+  // saw statuses rather than evidence or identity.
+  assert.equal(replanContexts.length, 1);
+  assert.equal(replanContexts[0].trigger, "insufficient_evidence");
+  assert.deepEqual(
+    replanContexts[0].nodeRuns.map((nodeRun) => [nodeRun.nodeId, nodeRun.status, nodeRun.abstained]),
+    [
+      ["summary", "completed", false],
+      ["risk", "completed", true],
+    ]
+  );
+  assert.doesNotMatch(JSON.stringify(replanContexts[0]), /alice|workspace-a|Late notice/);
+
+  // And the persisted run says the injected graph -- not a fallback and not
+  // the V1 chain -- is what executed for this task.
+  const run = await services.agentRunService.getRun({
+    accessScope: TASK_ACCESS_SCOPE,
+    runId: outcome.payload.agentRunId,
+  });
+  const graphEvents = run.events.filter((event) => event.type === "skill_graph_planned");
+
+  assert.equal(graphEvents.length, 1);
+  assert.equal(graphEvents[0].payload.executed, true);
+  assert.equal(graphEvents[0].payload.mode, "guarded");
+  assert.equal(graphEvents[0].payload.fallback, null);
+  assert.equal(graphEvents[0].payload.planner.selectedPlannerId, DAG_PLANNER_IDS.llm);
+  assert.equal(graphEvents[0].payload.planner.fallback, false);
+  assert.deepEqual(graphEvents[0].payload.graph.nodeIds, ["summary", "risk"]);
+  assert.deepEqual(
+    graphEvents[0].payload.replans.map((replan) => replan.reasonCode),
+    [REPLAN_REASON_CODES.noProgress]
+  );
+  assert.deepEqual(
+    run.steps.filter((step) => step.type === "custom_skill").map((step) => step.id),
+    ["custom_skill:summary", "custom_skill:risk"]
+  );
+  assert.equal(questions.length, 2);
 });

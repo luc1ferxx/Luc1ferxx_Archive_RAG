@@ -285,7 +285,7 @@ npm run eval:planner
 - validator 拒绝未注册 step
 - 非法 LLM-style plan fallback 到 deterministic planner
 - `agentObservability.executionPlanner` 记录 selected/fallback 状态
-- `planner_dynamic_skill_graph` 将上游 Intent 固定为仅 `compare_documents`，在 `guarded` 下要求 DAG planner 从按 `accessScope` / `docIds` 核验的原子 catalog 独立选出 `compare_documents -> risk_review`，同时检查节点依赖、真实执行、最终 selectedSkills / trace 和文档 scope。mock provider 用固定模型响应验证接线；real provider 才检验真实 LLM 的这次规划。
+- `planner_dynamic_skill_graph` 将上游 Intent 固定为仅 `compare_documents`，要求 DAG planner 从按 `accessScope` / `docIds` 核验的原子 catalog 独立选出 `compare_documents -> risk_review`，同时检查节点依赖、真实执行、最终 selectedSkills / trace 和文档 scope。mock provider 用固定模型响应验证接线；real provider 才检验真实 LLM 的这次规划。
 
 需要真实模型灰度时显式开启：
 

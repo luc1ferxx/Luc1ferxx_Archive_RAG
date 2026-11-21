@@ -105,11 +105,9 @@ const main = async () => {
     exporters: args.has("--otlp") ? [exporter, createOtlpExporter()] : [exporter],
   });
 
-  // Pinned rather than read from .env: the demo shows the default executor (the
-  // typed DAG, so the graph planner span appears) and must not depend on a
-  // memory database being up.
+  // Pinned rather than read from .env: the demo must not depend on a memory
+  // database being up.
   Object.assign(process.env, {
-    AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
     RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
     RAG_LONG_MEMORY_ENABLED: "false",
   });

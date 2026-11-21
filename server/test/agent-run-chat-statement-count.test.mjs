@@ -574,7 +574,7 @@ test("a PostgreSQL CAS on a caller-supplied base run rejects a stale revision wi
 // checkpointer, so it adds nothing to the counts; until phase 7 a second pass
 // with the outer plan on the native loop pinned exactly the same counts:
 // a contract review that the deterministic planner turns into
-// the two-node summarize -> risk DAG under AGENT_SKILL_GRAPH_ROLLOUT=guarded.
+// the two-node summarize -> risk DAG.
 // LangGraph checkpoints its thread into the same run row through
 // rag/langgraph/checkpointer.js, so every superstep and every task write is
 // one more event-less CAS, and the thread is read back once when the graph is
@@ -684,13 +684,12 @@ const withEnv = async (overrides, work) => {
 };
 
 // The removed runtime dials stay unset (the only setting that selects
-// nothing); the custom-Skill rollout is pinned to guarded.
+// nothing).
 const runOneGuardedGraphChat = (agentRunService) =>
   withEnv(
     {
       AGENT_OUTER_PLAN_RUNTIME: undefined,
       AGENT_RUNTIME: undefined,
-      AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
     },
     () =>
       runAgentRag({
