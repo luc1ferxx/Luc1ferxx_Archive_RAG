@@ -2321,3 +2321,32 @@ test("a cancelled run stays retryable unless a Capability write already complete
   assert.equal(wrote.error.retryable, false, "a retry would repeat the Capability write");
   assert.equal(wrote.error.reason, "deadline_exceeded");
 });
+
+// run.error and the run_failed event are public (GET /agent-runs/:runId), so
+// a failed run's message follows lib/error-text.js: an internal error stays in
+// the server log; the deadline's message, written for the user, stays.
+test("a failed run records an error's message only when it was raised for the client", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const { RequestCancelledError } = await import("../rag/request-deadline.js");
+  const agentRunService = createAgentRunService({
+    agentRunStore: createInMemoryAgentRunStore(),
+  });
+  const accessScope = { userId: "alice", workspaceId: "workspace-a" };
+  const fail = async (runId, error) => {
+    await agentRunService.createRun({ accessScope, goal: "Fail", runId });
+    await agentRunService.failRun({ accessScope, error, runId });
+
+    const run = await agentRunService.getRun({ accessScope, runId });
+
+    return [run.error.message, run.events.find((event) => event.type === "run_failed").payload.error.message];
+  };
+
+  assert.deepEqual(
+    await fail("run-internal", new Error('relation "agent_runs" does not exist at db.internal.example:5432')),
+    ["Agent run failed.", "Agent run failed."]
+  );
+  assert.deepEqual(await fail("run-deadline", new RequestCancelledError("deadline_exceeded")), [
+    "The request deadline passed before the answer was complete.",
+    "The request deadline passed before the answer was complete.",
+  ]);
+});

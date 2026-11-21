@@ -155,20 +155,33 @@ test("comparison summaries pass through when present", () => {
 });
 
 test("tool errors are reported in abstention shape rather than thrown", () => {
-  const result = formatToolError(new Error("OPENAI_API_KEY is not configured."));
+  const message = "Document not found for docId doc-9. Upload the PDF again and use the latest docId.";
+  const result = formatToolError(Object.assign(new Error(message), { status: 404 }));
 
   assert.equal(result.abstained, true);
-  assert.equal(result.abstainReason, "OPENAI_API_KEY is not configured.");
-  assert.equal(result.error, "OPENAI_API_KEY is not configured.");
+  assert.equal(result.abstainReason, message);
+  assert.equal(result.error, message);
   assert.deepEqual(result.citations, []);
   assert.deepEqual(result.evidence, []);
 });
 
-test("tool errors without a message still produce a reason", () => {
-  assert.equal(
-    formatToolError(undefined).abstainReason,
-    "The archive request failed."
-  );
+test("a tool error not raised for the caller, or without a message, gives the fallback reason", (t) => {
+  t.mock.method(console, "error", () => {});
+
+  for (const error of [
+    undefined,
+    // A server-side setting (rag/openai.js), and the model backend's own answer.
+    Object.assign(new Error("OPENAI_API_KEY is not configured."), { status: 500 }),
+    Object.assign(new Error("Incorrect API key sk-live-0123 for https://llm.internal.example/v1"), {
+      status: 401,
+      upstreamStatus: 401,
+    }),
+  ]) {
+    const result = formatToolError(error);
+
+    assert.equal(result.abstainReason, "The archive request failed.");
+    assert.equal(result.error, "The archive request failed.");
+  }
 });
 
 test("docId lists drop blanks and trim entries", () => {

@@ -1,5 +1,6 @@
+import { serializeError } from "../../lib/error-text.js";
 import { normalizeText } from "../../lib/normalize-text.js";
-export { normalizeText };
+export { normalizeText, serializeError };
 
 export const normalizeRecord = (value, fallback = {}) =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -10,14 +11,6 @@ export const toArray = (value) => (Array.isArray(value) ? value : []);
 
 export const normalizeTextList = (value) =>
   toArray(value).map(normalizeText).filter(Boolean);
-
-export const serializeError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return fallbackMessage;
-};
 
 export const buildErrorPayload = (error, fallbackMessage) => ({
   message: serializeError(error, fallbackMessage),

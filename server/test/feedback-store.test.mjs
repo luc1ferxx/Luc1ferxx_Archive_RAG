@@ -559,10 +559,10 @@ describe("the /feedback routes", () => {
     buildHealthReport: async () => ({ checks: {}, status: "ok" }),
     runStartupHealthChecks: async () => ({ checks: {}, status: "ok" }),
   };
-  const createApp = (feedbackStore) =>
+  const createApp = (feedbackStore, recordFromFeedback = async () => null) =>
     createProductionApp({
       adminAuditService: createAdminAuditService({ store: createInMemoryAdminAuditStore() }),
-      agentExperienceMemoryService: { recordFromFeedback: async () => null },
+      agentExperienceMemoryService: { recordFromFeedback },
       agentRunStore: createInMemoryAgentRunStore(),
       executionPlannerAdapter: deterministicPlannerAdapter,
       feedbackStore,
@@ -742,6 +742,38 @@ describe("the /feedback routes", () => {
         const lines = (await readFile(path.join(directory, "feedback.jsonl"), "utf8")).trim().split("\n");
 
         assert.equal(lines.length, 2);
+      });
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  // The answer's experience-memory error follows lib/error-text.js: the store's
+  // error stays in the server log.
+  test("an experience-memory write that fails answers write_failed, never the store's error", async (t) => {
+    t.mock.method(console, "error", () => {});
+    const directory = await mkdtemp(path.join(os.tmpdir(), "feedback-routes-"));
+
+    try {
+      await withEnv({ API_AUTH_ENABLED: undefined, RBAC_MODE: undefined }, async () => {
+        const server = await startServer(
+          await createApp(createFileFeedbackStore({ directory }), async () => {
+            throw new Error('duplicate key value violates unique constraint "long_memories_pkey" on db.internal.example');
+          })
+        );
+
+        try {
+          const response = await call(server, { body: samplePayload({ userId: "dave" }), method: "POST", path: "/feedback" });
+
+          assert.equal(response.status, 201);
+          assert.deepEqual(response.json.agentExperienceMemory, {
+            error: "write_failed",
+            status: "error",
+            writeAttempted: true,
+          });
+        } finally {
+          await server.close();
+        }
       });
     } finally {
       await rm(directory, { force: true, recursive: true });

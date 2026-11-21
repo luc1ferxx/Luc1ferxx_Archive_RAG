@@ -483,6 +483,18 @@ test("an approved capability step's summary says how the call ended", async () =
   assert.equal(failed.step.status, "failed");
   assert.equal(failed.step.error.message, reason);
   assert.equal(failed.step.summary, `Capability call failed: ${reason}`);
+
+  // The model backend's own answer is not the client's: the step shows the
+  // fallback (lib/error-text.js) and the route its own.
+  const upstream = await approve(async () => {
+    throw Object.assign(new Error("Incorrect API key sk-live-0123 for https://llm.internal.example/v1"), {
+      status: 401,
+      upstreamStatus: 401,
+    });
+  });
+
+  assert.equal(upstream.step.error.message, "Capability execution failed.");
+  assert.equal(upstream.step.summary, "Capability call failed: Capability execution failed.");
 });
 
 test("agent run step executor has no resume: an interrupted step is never run on its own", () => {

@@ -234,6 +234,9 @@ export class DependencyOutageError extends Error {
     this.name = "DependencyOutageError";
     this.code = timedOut ? DEPENDENCY_OUTAGE_CODES.timeout : DEPENDENCY_OUTAGE_CODES.unavailable;
     this.status = timedOut ? 504 : 503;
+    // Written for the user (never the cause's text): the run record keeps it
+    // (lib/error-text.js).
+    this.expose = true;
     this.dependency = dependency;
     this.causeCode = causeCode;
     this.retryable = true;

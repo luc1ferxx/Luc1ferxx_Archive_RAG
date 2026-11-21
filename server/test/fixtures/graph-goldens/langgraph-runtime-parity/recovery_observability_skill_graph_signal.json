@@ -1540,7 +1540,7 @@
           "decision": "",
           "detail": null,
           "error": {
-            "message": "Primary step failed.",
+            "message": "Step failed.",
             "name": "Error"
           },
           "id": "document_rag:primary",

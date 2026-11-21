@@ -78,6 +78,8 @@ export class RequestCancelledError extends Error {
     this.reason = CANCELLATION_DETAILS[reason] ? reason : REQUEST_CANCELLATION_REASONS.deadlineExceeded;
     this.retryable = detail.retryable;
     this.status = detail.status;
+    // Written for the user: the run record keeps it (lib/error-text.js).
+    this.expose = true;
     this.runFailure = { code: this.code, reason: this.reason, retryable: this.retryable };
   }
 }

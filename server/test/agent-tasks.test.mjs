@@ -1359,7 +1359,9 @@ test("goal completion rejects completed deliverables with invalid artifact refer
   });
 });
 
-test("goal deliverable execution fails when capability compatibility output lacks an artifact", async () => {
+test("goal deliverable execution fails when capability compatibility output lacks an artifact", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
   const deliverables = await executeAgentGoalDeliverables({
     accessScope,
     capabilityRegistry: {
@@ -1374,13 +1376,15 @@ test("goal deliverable execution fails when capability compatibility output lack
 
   assert.equal(deliverables.status, "failed");
   assert.equal(deliverables.results[0].status, "failed");
-  assert.match(
-    deliverables.results[0].error,
-    /did not return a stored workspace artifact reference/
-  );
+  // The task record shows the fallback; the reason goes to the server log
+  // (lib/error-text.js).
+  assert.equal(deliverables.results[0].error, "Report failed.");
+  assert.match(logged[0][1].message, /did not return a stored workspace artifact reference/);
 });
 
-test("goal deliverable execution rejects a stored artifact reference of the wrong type", async () => {
+test("goal deliverable execution rejects a stored artifact reference of the wrong type", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
   const deliverables = await executeAgentGoalDeliverables({
     accessScope,
     capabilityRegistry: {
@@ -1400,10 +1404,8 @@ test("goal deliverable execution rejects a stored artifact reference of the wron
 
   assert.equal(deliverables.status, "failed");
   assert.equal(deliverables.results[0].status, "failed");
-  assert.match(
-    deliverables.results[0].error,
-    /did not return a stored workspace artifact reference/
-  );
+  assert.equal(deliverables.results[0].error, "Report failed.");
+  assert.match(logged[0][1].message, /did not return a stored workspace artifact reference/);
 });
 
 test("goal deliverable preflight rejects snapshot or scope drift before any capability executes", async () => {

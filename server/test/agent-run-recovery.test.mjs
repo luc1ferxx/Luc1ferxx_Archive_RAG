@@ -683,7 +683,9 @@ test("a graph resume that settles nothing is handed to an operator", async () =>
   assert.equal(outcome.manualRecoveredCount, 1);
   assert.deepEqual(
     run.events.filter((event) => event.type === "auto_recovery_failed").map((event) => event.payload),
-    [{ error: "Graph resume did not settle the agent run.", status: 500, type: "execution_graph" }]
+    // The run's events are public: the reason ("Graph resume did not settle
+    // the agent run.") goes to the server log only (lib/error-text.js).
+    [{ error: "Graph auto recovery failed.", status: 500, type: "execution_graph" }]
   );
   assert.equal(run.result.recovery.reason, "graph_resume_failed");
 });

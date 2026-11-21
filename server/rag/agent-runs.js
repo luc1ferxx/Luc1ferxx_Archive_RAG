@@ -39,6 +39,7 @@ export {
   isRetryableAgentRunStatus,
   normalizeAgentRunStatus,
 } from "./agent-run-state-machine.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import { summarizeTenantRecords, tenantSelectorMatches } from "./tenant-records.js";
 import {
@@ -1017,13 +1018,16 @@ const hasCommittedCapabilityWrite = (steps = []) =>
       step?.type === "capability_call" && step?.status === AGENT_RUN_STEP_STATUSES.completed
   );
 
+// A run's and a step's error are what GET /agent-runs/:runId and the run's
+// events show: an Error goes through lib/error-text.js; text and a
+// { message, name } record were made public where they were built.
 const buildRunError = (error) => {
   if (!error) {
     return null;
   }
 
   return {
-    message: error instanceof Error ? error.message : normalizeText(error),
+    message: error instanceof Error ? serializeError(error, "Agent run failed.") : normalizeText(error),
     name: error instanceof Error ? error.name : "Error",
     ...pickRunFailure(error?.runFailure),
   };
@@ -1032,6 +1036,13 @@ const buildRunError = (error) => {
 const buildStepError = (error) => {
   if (!error) {
     return undefined;
+  }
+
+  if (error instanceof Error) {
+    return {
+      message: normalizeText(serializeError(error, "Step failed.")) || "Step failed.",
+      name: normalizeText(error.name) || "Error",
+    };
   }
 
   if (error && typeof error === "object" && !Array.isArray(error)) {

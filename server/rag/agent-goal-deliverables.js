@@ -10,6 +10,7 @@ import {
   ARTIFACT_STATUSES,
   ARTIFACT_TYPES,
 } from "./workspace-artifacts/index.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeClampedText } from "../lib/normalize-text.js";
 
 export const AGENT_GOAL_DELIVERABLE_STATUSES = Object.freeze({
@@ -746,7 +747,7 @@ const completeSpec = ({ result = {}, spec = {} } = {}) => ({
 
 const failSpec = ({ error, spec = {} } = {}) => ({
   ...spec,
-  error: error instanceof Error ? error.message : String(error),
+  error: serializeError(error, `${spec.label} failed.`),
   status: AGENT_GOAL_DELIVERABLE_STATUSES.failed,
   summary: `${spec.label} failed.`,
 });

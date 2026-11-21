@@ -1,3 +1,4 @@
+import { serializeError } from "../lib/error-text.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 
@@ -30,9 +31,10 @@ export const buildStepError = (result = {}, fallbackMessage = "Step failed.") =>
     return null;
   }
 
+  // A string is text already made public (a research finding's error).
   const error = result.error;
   const message = error instanceof Error
-    ? error.message
+    ? serializeError(error, fallbackMessage)
     : normalizeText(error) || fallbackMessage;
 
   return {

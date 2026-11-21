@@ -228,7 +228,8 @@ test("primary document RAG persists failed Result steps with serialized error", 
   assert.deepEqual(documentStep.input.docIds, ["doc-1"]);
   assert.equal(documentStep.input.question, question);
   assertMemoryWritingRagStep(documentStep);
-  assert.equal(documentStep.error.message, "Vector store unavailable.");
+  // An error not raised for the client is its fallback text (lib/error-text.js).
+  assert.equal(documentStep.error.message, "Unable to answer from the document.");
   assert.equal(documentStep.error.name, "Error");
   assertEventOrder({
     after: "step_failed",
@@ -302,7 +303,7 @@ test("document loop fails persisted step before rethrowing execution errors", as
   );
 
   assert.equal(documentStep.status, AGENT_RUN_STEP_STATUSES.failed);
-  assert.equal(documentStep.error.message, "Observed execution crashed.");
+  assert.equal(documentStep.error.message, "Step failed.");
   assert.deepEqual(getEventTypes(run), [
     "run_created",
     "step_started",
@@ -391,7 +392,7 @@ test("custom skill failed Result persists structured error message", async () =>
   assert.equal(response.status, 200);
   assert.equal(customStep.type, "custom_skill");
   assert.equal(customStep.status, AGENT_RUN_STEP_STATUSES.failed);
-  assert.equal(customStep.error.message, "Custom review unavailable.");
+  assert.equal(customStep.error.message, "Unable to run custom skill.");
   assert.notEqual(customStep.error.message, "[object Object]");
   // A node that failed leaves a partial graph, never a second attempt.
   assert.equal(customStep.input.nodeId, "risk_review");
@@ -469,7 +470,9 @@ test("research brief persists lifecycle-backed research question steps", async (
   assert.equal(failedStep.status, AGENT_RUN_STEP_STATUSES.failed);
   assert.equal(failedStep.input.researchQuestionId, "rq-2");
   assertMemoryWritingRagStep(failedStep);
-  assert.equal(failedStep.error.message, "Research lookup unavailable.");
+  assert.equal(failedStep.error.message, "Step failed.");
+  // Nor does the brief or any other part of the answer carry it.
+  assert.doesNotMatch(JSON.stringify(response.body), /Research lookup unavailable/);
   assert.equal(countSteps(run, "research_question:rq-1"), 1);
   assert.equal(countSteps(run, "research_question:rq-2"), 1);
   assert.ok(eventTypes.indexOf("step_started") < eventTypes.indexOf("step_completed"));
@@ -550,7 +553,7 @@ test("web search failed Result persists structured error message", async () => {
   assert.equal(response.status, 502);
   assert.equal(webStep.type, "web_search");
   assert.equal(webStep.status, AGENT_RUN_STEP_STATUSES.failed);
-  assert.equal(webStep.error.message, "Capability registry unavailable.");
+  assert.equal(webStep.error.message, "Unable to answer from web search.");
   assert.notEqual(webStep.error.message, "[object Object]");
 });
 

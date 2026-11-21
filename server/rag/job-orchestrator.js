@@ -11,6 +11,7 @@ import { getTenantMaxQueuedTasks, getTenantMaxRunningTasks } from "./config.js";
 import { recordRagTrace } from "./observability.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
 import { runOutsideRequestDeadline } from "./request-deadline.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 export const TASK_ACTIONS = Object.freeze({
@@ -601,7 +602,7 @@ export const createJobOrchestrator = ({
       } else {
         try {
           failedTask = await patchClaimedTask({
-            error: error instanceof Error ? error.message : String(error),
+            error: serializeError(error, "Task failed."),
             status: TASK_STATUSES.failed,
           });
         } catch (claimError) {

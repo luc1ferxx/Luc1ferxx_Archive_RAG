@@ -579,6 +579,13 @@ test("a dependency outage ends the run as the golden records: the thrown 503, th
   assert.equal(run.outcome.error.causeCode, "SERVICE_UNREACHABLE");
   assert.equal(run.outcome.runs[0].status, AGENT_RUN_STATUSES.failed);
   assert.equal(run.outcome.runs[0].error.retryable, true);
+  // Its golden was rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1)
+  // when the agent's error text started following lib/error-text.js
+  // (2026-11-21): the failed document_rag step's error message, in its
+  // trace_step event, is "Unable to answer from the document.", not the
+  // ServiceUnavailableError's (a 503, not the client's). Nothing else in it
+  // changed: the run's error is the outage's, which is the user's, and the same
+  // test with the old rule (any Error's message) matched the old golden.
   assertMatchesNativeGolden("direct-dependency-outage", run);
   assertScheduledOnLangGraph(run);
 });

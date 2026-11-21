@@ -145,7 +145,8 @@ test("finalization flow answers a document_web plan without Web results from its
       webResult: null,
     },
     {
-      mcpAnswer: "Web search unavailable: Capability registry unavailable.",
+      // An error not raised for the client is its fallback text (lib/error-text.js).
+      mcpAnswer: "Web search unavailable: Unable to answer from web search.",
       skippedWebBecauseBudget: false,
       webResult: {
         ok: false,

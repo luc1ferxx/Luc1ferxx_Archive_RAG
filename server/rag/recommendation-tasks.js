@@ -1,3 +1,4 @@
+import { serializeError } from "../lib/error-text.js";
 import { createTaskService, TASK_STATUSES } from "./tasks.js";
 import {
   buildCompletedRecommendationPaperTaskItems,
@@ -270,7 +271,6 @@ export const createRecommendationTaskService = ({
   const recordImportProgress = async ({
     accessScope = {},
     docId,
-    error,
     paper = {},
     provider,
     result = {},
@@ -298,9 +298,9 @@ export const createRecommendationTaskService = ({
 
     const nextItem = buildRecommendationPaperTaskItem({
       paper,
+      // A failed paper's error is the importer's, already public (arxiv-importer.js).
       result: {
         ...result,
-        error: error instanceof Error ? error.message : result.error,
         status,
       },
       status: mapRecommendationPaperProgressStatus(status),
@@ -463,7 +463,7 @@ export const createRecommendationTaskService = ({
           failed: toRecommendationTaskArray(selectedPapers).length,
           selected: toRecommendationTaskArray(selectedPapers).length,
         },
-        error: normalizeRecommendationTaskText(error?.message) || "Unknown error.",
+        error: normalizeRecommendationTaskText(serializeError(error, "Unknown error.")) || "Unknown error.",
         input: {
           ...buildRecommendationExternalQueryInput({
             queryPolicy,

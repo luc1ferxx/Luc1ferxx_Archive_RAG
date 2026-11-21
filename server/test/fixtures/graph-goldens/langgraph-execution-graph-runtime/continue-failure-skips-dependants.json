@@ -489,7 +489,7 @@
       "budgetDelta": {},
       "citationCount": 0,
       "durationMs": "<duration>",
-      "error": "Skill output contract failed: citations must be citation[], text must be string.",
+      "error": "risk_review failed.",
       "label": "risk_review",
       "phase": "primary",
       "skillId": "risk_review",
@@ -542,7 +542,7 @@
       "decision": "",
       "detail": null,
       "error": {
-        "message": "Skill output contract failed: citations must be citation[], text must be string.",
+        "message": "Unable to run custom skill.",
         "name": "SkillOutputContractError"
       },
       "id": "custom_skill:risk",
@@ -664,7 +664,7 @@
         "skillVersion": "1.0.0"
       },
       "error": {
-        "message": "Skill output contract failed: citations must be citation[], text must be string.",
+        "message": "Unable to run custom skill.",
         "name": "SkillOutputContractError"
       },
       "id": "custom_skill:risk",
@@ -702,7 +702,7 @@
       "label": "risk_review",
       "output": null,
       "status": "failed",
-      "summary": "risk_review failed: Skill output contract failed: citations must be citation[], text must be string.",
+      "summary": "risk_review failed: Unable to run custom skill.",
       "type": "custom_skill"
     },
     {

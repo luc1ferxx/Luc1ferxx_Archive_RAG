@@ -712,7 +712,7 @@
       "budgetDelta": {},
       "citationCount": 0,
       "durationMs": "<duration>",
-      "error": "timeline failed",
+      "error": "extract_timeline failed.",
       "label": "extract_timeline",
       "phase": "primary",
       "skillId": "extract_timeline",
@@ -846,7 +846,7 @@
       "decision": "",
       "detail": null,
       "error": {
-        "message": "timeline failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:x",
@@ -1083,7 +1083,7 @@
         "skillVersion": "1.0.0"
       },
       "error": {
-        "message": "timeline failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:x",
@@ -1121,7 +1121,7 @@
       "label": "extract_timeline",
       "output": null,
       "status": "failed",
-      "summary": "extract_timeline failed: timeline failed",
+      "summary": "extract_timeline failed: Unable to run custom skill.",
       "type": "custom_skill"
     },
     {

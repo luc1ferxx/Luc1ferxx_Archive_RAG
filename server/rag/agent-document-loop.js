@@ -1,10 +1,8 @@
 import { runWithAnswerDraftChannel } from "./answer-drafts.js";
 import { consumeBudget } from "./agent-budget.js";
 import { buildAgentRetrievalPlan } from "./agent-query-planner.js";
-import {
-  buildEvidenceClarification,
-  serializeAgentError as serializeError,
-} from "./agent-response-builder.js";
+import { serializeError } from "../lib/error-text.js";
+import { buildEvidenceClarification } from "./agent-response-builder.js";
 import {
   buildEvidenceGaps,
   buildFollowUpQuestion,
@@ -20,7 +18,7 @@ import {
   bindSelfCheckEvidenceContext,
   createSelfCheckEvidenceContext,
 } from "./self-check/evidence-context.js";
-import { buildFailedSkillResult } from "./skills/registry.js";
+import { buildSkippedSkillResult } from "./skills/registry.js";
 import {
   SKILL_EFFECTS,
   SKILL_IDEMPOTENCY,
@@ -48,19 +46,6 @@ const buildRagStepError = (result = {}, fallbackMessage) =>
         message: serializeError(result.error, fallbackMessage),
         name: result.error?.name ?? "Error",
       };
-
-const buildLifecycleStepError = (result = {}, fallbackMessage) => {
-  const serialized = buildRagStepError(result, fallbackMessage);
-
-  if (!serialized) {
-    return null;
-  }
-
-  const error = new Error(serialized.message);
-  error.name = serialized.name;
-
-  return error;
-};
 
 const DOCUMENT_RAG_PRIMARY_STEP_ID = "document_rag:primary";
 
@@ -191,7 +176,7 @@ export const runDocumentRagLoop = async ({
       });
     } else {
       await stepLifecycle?.failStep?.({
-        error: buildLifecycleStepError(
+        error: buildRagStepError(
           primaryRagResult,
           "Unable to answer from the document."
         ),
@@ -210,10 +195,7 @@ export const runDocumentRagLoop = async ({
       }
     }
   } else {
-    primaryRagResult = buildFailedSkillResult(
-      documentRagSkill,
-      new Error(primaryBudget.reason)
-    );
+    primaryRagResult = buildSkippedSkillResult(documentRagSkill, primaryBudget.reason);
   }
 
   ragResult = primaryRagResult;
@@ -345,10 +327,7 @@ export const runDocumentRagLoop = async ({
       });
       recordSkippedSkill({
         skill: documentRagSkill,
-        result: buildFailedSkillResult(
-          documentRagSkill,
-          new Error(followUpBudget.reason)
-        ),
+        result: buildSkippedSkillResult(documentRagSkill, followUpBudget.reason),
         phase: "follow_up",
         budget: followUpBudget,
       });
@@ -406,7 +385,7 @@ export const runDocumentRagLoop = async ({
         });
       } else {
         await stepLifecycle?.failStep?.({
-          error: buildLifecycleStepError(
+          error: buildRagStepError(
             followUpRagResult,
             "Unable to run follow-up document evidence lookup."
           ),

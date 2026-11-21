@@ -615,9 +615,10 @@ test("execution plan runner preserves the default skill execution order", async 
     AGENT_SKILL_IDS.webSearch,
   ]);
   assert.equal(result.inventoryAnswer, "Inventory answer.");
+  // An error not raised for the client is its fallback text (lib/error-text.js).
   assert.equal(
     result.discoveryAnswer,
-    "Document discovery unavailable: Discovery input refused."
+    "Document discovery unavailable: Unable to inspect workspace metadata."
   );
   assert.equal(result.customSkillResults[0].skillId, "custom_review");
   assert.equal(result.documentRagSkill.id, AGENT_SKILL_IDS.documentRag);

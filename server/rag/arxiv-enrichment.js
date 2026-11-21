@@ -1,3 +1,4 @@
+import { serializeError } from "../lib/error-text.js";
 import {
   DEFAULT_ARXIV_MAX_RESULTS,
   normalizeArxivMaxResults,
@@ -483,7 +484,6 @@ export const createArxivEnrichmentService = ({
             {
               accessScope,
               docId,
-              error: event.error,
               paper: event.paper,
               provider: ARXIV_RECOMMENDATION_PROVIDER,
               result: event.result,
@@ -528,7 +528,7 @@ export const createArxivEnrichmentService = ({
       });
 
       return error.task ?? {
-        error: error instanceof Error ? error.message : String(error),
+        error: serializeError(error, "Failed to import arXiv suggestions."),
         payload: offer,
         status: "failed",
       };

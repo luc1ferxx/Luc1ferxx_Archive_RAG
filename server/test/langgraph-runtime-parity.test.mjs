@@ -366,6 +366,12 @@ test("the recovery-observability replan and startup-resume signal on LangGraph m
   // graph rejected whole); the golden's two recovery blocks hold it as 0,
   // since both graph events in this pass executed. Nothing the native pass
   // produced changed.
+  // The golden was rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1)
+  // when the run store started passing an Error through lib/error-text.js
+  // (2026-11-21): the eval's failed lifecycle step ("Primary step failed.", an
+  // Error with no status) records "Step failed.". Only that message changed,
+  // and the same test with the old rule (any Error's message) matched the old
+  // golden.
   assertPassMatchesGolden("recovery_observability_skill_graph_signal", langgraph);
 
   assert.deepStrictEqual(langgraph.invocations, [

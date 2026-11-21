@@ -134,7 +134,7 @@
             "decision": "",
             "detail": null,
             "error": {
-              "message": "The retrieval service is unreachable.",
+              "message": "Unable to answer from the document.",
               "name": "ServiceUnavailableError"
             },
             "id": "document_rag:primary",
