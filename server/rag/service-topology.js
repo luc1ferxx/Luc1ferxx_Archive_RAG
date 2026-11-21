@@ -304,6 +304,20 @@ export const validateServiceTopology = (env = process.env) => {
     warnings.push("Role agent has no RETRIEVAL_SERVICE_URL and retrieves in process.");
   }
 
+  // Qdrant's sparse vocabulary (term numbering, BM25 statistics) is built in
+  // each process and refreshed only by that process's own writes
+  // (vector-store-qdrant.js): where one tier ingests and another searches,
+  // the searcher keeps the old numbering after the stored vectors moved on.
+  if (
+    normalizeText(env.VECTOR_STORE_PROVIDER).toLowerCase() === "qdrant" &&
+    (["api", "agent", "retrieval"].includes(role) ||
+      (role === DEFAULT_SERVICE_ROLE && (hasUrls(SERVICE_TIERS.agent) || hasUrls(SERVICE_TIERS.retrieval))))
+  ) {
+    warnings.push(
+      "VECTOR_STORE_PROVIDER=qdrant keeps its sparse vocabulary in each process: a tier that searches never sees the terms another tier ingests, so its sparse scores stop matching the stored vectors; split deployments use pgvector."
+    );
+  }
+
   if (
     ["api", "agent", "retrieval"].includes(role) &&
     !hasUrls(SERVICE_TIERS.modelGateway)

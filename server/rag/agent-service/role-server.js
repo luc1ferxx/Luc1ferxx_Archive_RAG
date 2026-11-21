@@ -31,7 +31,7 @@ import { createAgentApp } from "./app.js";
 //   agent          createAgentApp(): agent routes behind internal identity,
 //                  startup recovery, background tasks.
 //   retrieval      createRetrievalApp() from rag/retrieval-service/app.js,
-//                  after the checks retrieval-service.mjs runs first.
+//                  after preflightRetrievalRole's checks.
 //   model-gateway  createModelGatewayApp() from rag/model-gateway/app.js.
 //
 // The topology is validated first and any error refuses the start, so a typo
@@ -41,11 +41,10 @@ import { createAgentApp } from "./app.js";
 // left, and exits. An app may expose an async app.locals.stop(), which runs
 // after the drain.
 
-// What `node retrieval-service.mjs` refuses is refused here too, so starting
-// the tier through server.js is no looser than its own entry point: without
-// PostgreSQL (or under the standalone profile) its document registry, and with
-// VECTOR_STORE_PROVIDER=local its index, would be this process's own copy, and
-// documents uploaded at the edge would stay invisible to every search. Its
+// The retrieval tier refuses to start where it would search a copy of its own:
+// without PostgreSQL (or under the standalone profile) its document registry,
+// and with VECTOR_STORE_PROVIDER=local its index, would be this process's own,
+// and documents uploaded at the edge would stay invisible to every search. Its
 // start-up health report is logged, and stops the start under
 // STARTUP_HEALTH_STRICT=true.
 const preflightRetrievalRole = async ({ logger, module }) => {
@@ -57,7 +56,7 @@ const preflightRetrievalRole = async ({ logger, module }) => {
 
   if (getVectorStoreProviderConfigStatus().provider === "local") {
     throw new Error(
-      "Role retrieval cannot start: VECTOR_STORE_PROVIDER=local keeps the index in each process, so this one would search a stale copy; use pgvector or qdrant."
+      "Role retrieval cannot start: VECTOR_STORE_PROVIDER=local keeps the index in each process, so this one would search a stale copy; use pgvector."
     );
   }
 
@@ -160,9 +159,8 @@ const startEdgeIngestWorker = ({ app, logger }) => {
 };
 
 // The port each role listens on when the caller names none: PORT for the edge
-// and the agent tier (5001, as the monolith), and the defaults of the tiers'
-// own entry points (retrieval-service.mjs, model-gateway.mjs) for the others,
-// so both ways of starting a tier bind the same port.
+// and the agent tier (5001, as the monolith), PORT or 5002 for retrieval, and
+// MODEL_GATEWAY_PORT, then PORT, then 5003 for the model gateway.
 export const resolveRolePort = (role, env = process.env) => {
   const port = Number.parseInt(String(env.PORT ?? "").trim(), 10);
   const explicit = Number.isInteger(port) && port >= 0 ? port : null;
@@ -226,8 +224,8 @@ export const createRoleApp = async ({ appOptions = {}, loaders, logger = console
     case "model-gateway": {
       const app = await loadTierApp(role, { appOptions, loaders, logger });
 
-      // What model-gateway.mjs does on shutdown: close the upstream pools and
-      // the shared-state connection.
+      // On shutdown the gateway closes its upstream pools and the
+      // shared-state connection.
       return {
         app,
         finalizers: [async () => app.locals?.modelGateway?.close?.(), resetSharedState],

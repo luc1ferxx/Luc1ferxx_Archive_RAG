@@ -4,14 +4,14 @@
 # and starts through the image's own `node server.js`:
 #   export INTERNAL_SERVICE_KEYS="k1:$(openssl rand -hex 32)"
 #   docker compose -f docker-compose.yml -f compose.services.yml up -d --build
-#   docker compose -f docker-compose.yml -f compose.services.yml up -d --scale agent=3 --scale retrieval=2
+#   docker compose -f docker-compose.yml -f compose.services.yml up -d --scale retrieval=2
 #
-# Only the api publishes a port: ARCHIVE_RAG_API_PORTS (default 5001; a range
-# such as 5001-5003 gives each of `--scale api=3` its own host port), bound to
-# ARCHIVE_RAG_BIND_HOST (default 127.0.0.1, loopback only; 0.0.0.0 exposes it
-# on every interface, as docker-compose.yml explains). The database URLs use
-# the same POSTGRES_PASSWORD as the postgres service. The other tiers are
-# reached on the compose network only, with signed internal tokens. Do not add
+# Only the api publishes a port: ARCHIVE_RAG_API_PORTS (the host port, default
+# 5001; the api runs as one container), bound to ARCHIVE_RAG_BIND_HOST
+# (default 127.0.0.1, loopback only; 0.0.0.0 exposes it on every interface, as
+# docker-compose.yml explains). The database URLs use the same
+# POSTGRES_PASSWORD as the postgres service. The other tiers are reached on
+# the compose network only, with signed internal tokens. Do not add
 # `--profile app`, which runs the monolith on the same host port.
 #
 # Internal identity (server/rag/service-identity.js) comes from the shell
@@ -38,12 +38,15 @@
 # OPENAI_API_KEY. A query adapter (RAG_EMBEDDING_QUERY_ADAPTER) must be mounted
 # into the retrieval tier, which embeds the queries.
 #
-# Scaling: `--scale` gives a service several containers behind one DNS name.
-# A caller's service client (server/rag/service-client.js) sees that name as
+# Scaling: only retrieval and the model gateway take replicas; the api and
+# the agent run one container each (docs/deployment.md), and the api's
+# /health warns when the agent's name resolves to several addresses.
+# `--scale` gives a service several containers behind one DNS name. A
+# caller's service client (server/rag/service-client.js) sees that name as
 # one replica, so the containers share the load by DNS at connect time; its
 # per-replica failover and least-outstanding choice apply to URLs listed
-# explicitly (comma-separated AGENT_SERVICE_URL, RETRIEVAL_SERVICE_URL,
-# MODEL_GATEWAY_URL). The inference backends scale behind the gateway:
+# explicitly (comma-separated RETRIEVAL_SERVICE_URL, MODEL_GATEWAY_URL).
+# The inference backends scale behind the gateway:
 # MODEL_GATEWAY_CHAT_UPSTREAMS, MODEL_GATEWAY_EMBEDDING_UPSTREAMS and
 # MODEL_GATEWAY_RERANK_UPSTREAMS (in server/.env) each take several replicas.
 #

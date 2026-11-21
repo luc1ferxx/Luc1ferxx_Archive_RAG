@@ -1436,7 +1436,7 @@ test("an API process keeps its ingest worker where the queue or the index is per
   });
 
   assert.equal(local.start, true);
-  assert.match(local.errors[0], /VECTOR_STORE_PROVIDER=local/);
+  assert.match(local.errors[0], /VECTOR_STORE_PROVIDER=local.* Use pgvector to ingest in other processes\.$/);
   assert.match(local.warnings[0], /single API process/);
 });
 

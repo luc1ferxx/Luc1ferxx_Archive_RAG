@@ -9,7 +9,6 @@ import {
   RESILIENCE_SCENARIOS,
   startFaultInjectingServer,
 } from "../evaluation/run-llm-resilience-eval.mjs";
-import { runModelGatewayProcess } from "../model-gateway.mjs";
 import { runWithAgentEventSink } from "../rag/agent-event-stream.js";
 import { createAnswerDraftReleaser, runWithAnswerDraftChannel } from "../rag/answer-drafts.js";
 import { createModelGatewayApp } from "../rag/model-gateway/app.js";
@@ -1070,28 +1069,4 @@ test("a process that hosts the gateway never calls MODEL_GATEWAY_URL, and withou
 
   assert.equal((await completeTextWithMetadata("ping")).text, "pong");
   assert.equal(upstream.requests.length, 2);
-});
-
-test("the entry point runs only as role model-gateway", async (t) => {
-  withEnv(t, BASE_ENV);
-  const logged = [];
-  const logger = { error: (line) => logged.push(line), log: () => {}, warn: () => {} };
-
-  assert.equal(
-    await runModelGatewayProcess({ environment: { ARCHIVE_RAG_ROLE: "api" }, listen: false, logger }),
-    null
-  );
-  assert.match(logged[0], /runs only as role model-gateway/);
-  assert.equal(
-    await runModelGatewayProcess({ environment: {}, listen: false, logger }),
-    null,
-    "without INTERNAL_SERVICE_KEYS the topology is invalid"
-  );
-
-  const environment = { INTERNAL_SERVICE_KEYS: `k1:${SECRET}` };
-  const started = await runModelGatewayProcess({ environment, listen: false, logger });
-
-  t.after(() => started?.app.locals.modelGateway.close());
-  assert.equal(environment.ARCHIVE_RAG_ROLE, "model-gateway");
-  assert.equal(typeof started.app, "function");
 });

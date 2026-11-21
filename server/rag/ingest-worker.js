@@ -1051,7 +1051,7 @@ export const resolveApiIngestWorkerPlan = ({
   if (vectorStoreProvider === "local") {
     if (!workerEnabled) {
       plan.errors.push(
-        "[ingest-worker] RAG_INGEST_WORKER_ENABLED=false is ignored: VECTOR_STORE_PROVIDER=local keeps the index in each process's own files, so chunks a dedicated worker wrote would never be searched here (and `npm run worker:ingest` refuses to start). Use pgvector or qdrant to ingest in other processes."
+        "[ingest-worker] RAG_INGEST_WORKER_ENABLED=false is ignored: VECTOR_STORE_PROVIDER=local keeps the index in each process's own files, so chunks a dedicated worker wrote would never be searched here (and `npm run worker:ingest` refuses to start). Use pgvector to ingest in other processes."
       );
     }
 

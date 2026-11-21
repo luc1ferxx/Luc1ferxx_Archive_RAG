@@ -96,25 +96,3 @@ export const createTracingShutdownFinalizer = (provider) => async () => {
     console.error("[tracing] failed to flush spans on shutdown.", error);
   }
 };
-
-/**
- * Flushes buffered spans and exits on SIGTERM/SIGINT. It exits as soon as the
- * flush settles, so next to a graceful drain it races the drain and cuts off
- * the requests the drain waits for; server.js therefore uses
- * createTracingShutdownFinalizer. retrieval-service.mjs and model-gateway.mjs
- * still register this next to their own close handlers.
- */
-export const shutdownTracingOnExit = (provider) => {
-  const shutdown = async () => {
-    try {
-      await provider.shutdown();
-    } catch (error) {
-      console.error("[tracing] failed to flush spans on shutdown.", error);
-    } finally {
-      process.exit(0);
-    }
-  };
-
-  process.once("SIGTERM", shutdown);
-  process.once("SIGINT", shutdown);
-};

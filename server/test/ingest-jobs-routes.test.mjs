@@ -614,7 +614,7 @@ test("the dedicated worker process refuses the per-process local vector index", 
     });
 
     assert.equal(started, null);
-    assert.match(errors[0], /VECTOR_STORE_PROVIDER=local keeps the index in each process/);
+    assert.match(errors[0], /needs a shared vector store \(pgvector\): VECTOR_STORE_PROVIDER=local keeps the index in each process/);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) {

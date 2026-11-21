@@ -17,9 +17,9 @@ import { buildFakeChatAnswer, hashEmbedding } from "../evaluation/run-api-load-b
 //                        \______________________/^
 //
 // api, agent and model-gateway start through `node server.js` with their
-// ARCHIVE_RAG_ROLE, exactly as the image does. The retrieval tier's own entry
-// points refuse VECTOR_STORE_PROVIDER=local (its index would be a per-process
-// copy), so it starts from a two-line harness over the same app factory after
+// ARCHIVE_RAG_ROLE, exactly as the image does. Role retrieval refuses
+// VECTOR_STORE_PROVIDER=local (its index would be a per-process copy), so
+// the tier starts from a two-line harness over the same app factory after
 // the document is uploaded, when the copy on disk is complete. Every tier
 // listens on port 0; the internal URLs point at taps in this process that
 // forward to the tier once its port is known and record what arrives at each

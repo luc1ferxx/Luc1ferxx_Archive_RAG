@@ -12,7 +12,7 @@ import { SPAN_KINDS, setSpanAttributes, withSpan } from "../tracing.js";
 import { getServiceCallBudgetMs } from "./call-deadline.js";
 import { decodeWireValue, encodeWireValue } from "./wire.js";
 
-// The calling side of the retrieval tier (retrieval-service.mjs). A process
+// The calling side of the retrieval tier (ARCHIVE_RAG_ROLE=retrieval). A process
 // whose retrieval runs remotely (service-topology.js isRemoteRetrievalEnabled:
 // RETRIEVAL_SERVICE_URL is set and this process is not the retrieval tier)
 // sends each retrieval of the document RAG path here instead of reading the

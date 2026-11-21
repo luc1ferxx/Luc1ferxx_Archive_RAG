@@ -9,8 +9,6 @@ import { fileURLToPath } from "node:url";
 
 import { createArchiveMcpShutdown } from "../archive-mcp-tools.js";
 import { runIngestWorkerProcess } from "../ingest-worker.mjs";
-import { runModelGatewayProcess } from "../model-gateway.mjs";
-import { runRetrievalServiceProcess } from "../retrieval-service.mjs";
 import { createInMemoryIngestJobStore } from "../rag/ingest-job-store.js";
 import {
   configureTenantUsageLedger,
@@ -22,14 +20,13 @@ import {
 // The tenant usage ledger (rag/tenant-usage.js) holds its totals in memory
 // and writes them on a timer that does not keep a process alive, so every
 // entry point that records usage must write them before it exits: server.js
-// and startServiceRole do, and so must the dedicated ingest worker, the
-// retrieval service, the model gateway (the only process that books model
-// tokens in a split deployment) and the archive-ingest command. The database
-// URLs below point at a closed port and are never connected to: the ledger's
-// writes go to a list.
+// and startServiceRole do (every split role, the model gateway included,
+// which books model tokens in a split deployment; service-roles-server.test.mjs),
+// and so must the dedicated ingest worker and the archive-ingest command. The
+// database URLs below point at a closed port and are never connected to: the
+// ledger's writes go to a list.
 
 const SERVER_DIRECTORY = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const SECRET = `${"u".repeat(24)}-usage-flush-0123456789`;
 const ALICE = { userId: "alice", workspaceId: "ws-a" };
 const KEYS = [
   "ARCHIVE_RAG_ROLE",
@@ -142,53 +139,6 @@ test("the dedicated ingest worker writes the usage it holds before it exits", as
   } finally {
     await rm(tempDirectory, { force: true, recursive: true });
   }
-});
-
-test("the retrieval service writes the usage it holds before it exits", async () => {
-  setEnvironment({
-    ARCHIVE_RAG_ROLE: "retrieval",
-    INTERNAL_SERVICE_KEYS: `k1:${SECRET}`,
-    POSTGRES_DATABASE_URL: "postgres://archive:unused@127.0.0.1:1/never-connected",
-    VECTOR_STORE_PROVIDER: "qdrant",
-  });
-
-  const order = [];
-  const rows = useRecordingLedger(order);
-  const logger = createLogger();
-  const started = await runRetrievalServiceProcess({
-    exit: (code) => order.push(`exit ${code}`),
-    logger,
-    port: 0,
-    signals: new EventEmitter(),
-  });
-
-  assert.ok(started, logger.lines.error.join("\n"));
-  recordIngest();
-  await started.shutdown("SIGTERM");
-
-  assert.deepEqual(order, ["ledger flushed", "exit 0"]);
-  assert.deepEqual(rows, EXPECTED_ROWS);
-});
-
-test("the model gateway writes the model usage it metered before it exits", async () => {
-  setEnvironment({ MODEL_GATEWAY_PORT: "0" });
-
-  const order = [];
-  const rows = useRecordingLedger(order);
-  const logger = createLogger();
-  const started = await runModelGatewayProcess({
-    environment: { INTERNAL_SERVICE_KEYS: `k1:${SECRET}` },
-    exit: (code) => order.push(`exit ${code}`),
-    logger,
-    signals: new EventEmitter(),
-  });
-
-  assert.ok(started?.server, logger.lines.error.join("\n"));
-  recordTenantUsage(ALICE, { [TENANT_USAGE_METRICS.modelTokens]: 42 });
-  await started.shutdown("SIGTERM");
-
-  assert.deepEqual(order, ["ledger flushed", "exit 0"]);
-  assert.deepEqual(rows, [{ metric: "model_tokens", userId: "alice", value: 42, workspaceId: "ws-a" }]);
 });
 
 test("archive-ingest writes the usage ledger before the command ends", async () => {

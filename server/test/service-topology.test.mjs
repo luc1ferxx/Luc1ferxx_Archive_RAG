@@ -182,6 +182,33 @@ test("more than one agent replica warns", () => {
   ]);
 });
 
+test("Qdrant warns wherever one tier ingests and another searches", () => {
+  const shared = {
+    AGENT_SERVICE_URL: "http://agent-1:5001",
+    INTERNAL_SERVICE_KEYS: KEYS,
+    MODEL_GATEWAY_URL: "http://gw:8080",
+    RETRIEVAL_SERVICE_URL: "http://retrieval:5002",
+  };
+  const qdrantWarning =
+    "VECTOR_STORE_PROVIDER=qdrant keeps its sparse vocabulary in each process: a tier that searches never sees the terms another tier ingests, so its sparse scores stop matching the stored vectors; split deployments use pgvector.";
+  const warns = (env) => validateServiceTopology({ ...shared, VECTOR_STORE_PROVIDER: " Qdrant ", ...env }).warnings.includes(qdrantWarning);
+
+  for (const role of ["api", "agent", "retrieval"]) {
+    assert.equal(warns({ ARCHIVE_RAG_ROLE: role }), true, role);
+  }
+
+  // The monolith as the edge (AGENT_SERVICE_URL) or in front of a retrieval tier.
+  assert.equal(warns({ ARCHIVE_RAG_ROLE: "all", RETRIEVAL_SERVICE_URL: undefined }), true);
+  assert.equal(warns({ AGENT_SERVICE_URL: undefined, ARCHIVE_RAG_ROLE: "all" }), true);
+  // Ingest and search in one process, or no vector store at all: nothing to say.
+  assert.equal(warns({ AGENT_SERVICE_URL: undefined, ARCHIVE_RAG_ROLE: "all", RETRIEVAL_SERVICE_URL: undefined }), false);
+  assert.equal(warns({ ARCHIVE_RAG_ROLE: "model-gateway" }), false);
+  assert.deepEqual(
+    validateServiceTopology({ ...shared, ARCHIVE_RAG_ROLE: "retrieval", VECTOR_STORE_PROVIDER: "pgvector" }).warnings,
+    ["RETRIEVAL_SERVICE_URL is ignored by role retrieval: a tier never calls itself."]
+  );
+});
+
 test("a complete split validates clean", () => {
   const shared = {
     AGENT_SERVICE_URL: "http://agent-1:5001",
