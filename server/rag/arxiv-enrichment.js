@@ -23,6 +23,7 @@ import {
   buildArxivRecommendationSuggestion,
   buildBlockedArxivSuggestion,
 } from "./arxiv-recommendation-builder.js";
+import { loadDocumentsIngestedElsewhere } from "./ingest-worker.js";
 import { createRecommendationTaskService } from "./recommendation-tasks.js";
 import { TASK_STATUSES } from "./tasks.js";
 
@@ -162,9 +163,10 @@ export const createArxivEnrichmentService = ({
       throw error;
     }
 
-    // A delete that landed while the task was written ran its cascade before
-    // the write, so the task goes here. One after this check finds the task
-    // in its own cascade, and the snapshot below is saved in this same tick.
+    // A document deleted while the task was written: its cascade may have run
+    // before the write landed, so the task goes here. A delete after this
+    // check finds the task in its own cascade, and the snapshot below is
+    // saved in this same tick.
     try {
       getScopedDocument({ accessScope, docId, ragService });
     } catch (error) {
@@ -253,13 +255,18 @@ export const createArxivEnrichmentService = ({
     });
   };
 
-  const prepareImportForDocument = ({
+  const prepareImportForDocument = async ({
     accessScope = {},
     docId,
     issuedSelectionToken,
     selectedArxivIds,
     selectionToken,
   } = {}) => {
+    // With a PostgreSQL registry another process may have registered the
+    // document since this one last read it: the agent tier of a split
+    // deployment confirms what the api tier uploaded and searched.
+    await loadDocumentsIngestedElsewhere(ragService, [docId]);
+
     return prepareArxivImportForDocument({
       accessScope,
       docId,
@@ -407,7 +414,7 @@ export const createArxivEnrichmentService = ({
   // recommendation.import_selected Capability) confirms the saved suggestion,
   // which this process holds.
   const importForDocument = async (options = {}) => {
-    const preparedImport = prepareImportForDocument({
+    const preparedImport = await prepareImportForDocument({
       ...options,
       issuedSelectionToken: recommendationSnapshotService.getSelectionToken({
         accessScope: options.accessScope,
@@ -539,7 +546,7 @@ export const createArxivEnrichmentService = ({
     // internal payload), which holds the offer this confirms: the token is
     // checked against it on whichever tier runs this.
     const issuedSelectionToken = task.payload?.selectionToken;
-    const preparedImport = prepareImportForDocument({
+    const preparedImport = await prepareImportForDocument({
       accessScope,
       docId: payload.docId ?? task.subject?.id,
       issuedSelectionToken,

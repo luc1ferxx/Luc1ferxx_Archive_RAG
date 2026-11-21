@@ -1170,8 +1170,9 @@ test("a forwarded task route and admin action carry the edge's workspace roles t
 // /documents/:docId/arxiv/suggestions), and its Import confirms the
 // recommendation task (POST /tasks/:taskId/actions/confirm), which the edge
 // forwards to the agent tier, where the import job runs. The tiers share the
-// task store as they share PostgreSQL; arXiv's search and PDF download are
-// stubs that record which tier called them.
+// task store and the document registry as they share PostgreSQL: the edge
+// uploaded the document, and the agent's map has not read it yet. arXiv's
+// search and PDF download are stubs that record which tier called them.
 test("an arXiv suggestion searched at the edge is confirmed and imported by the agent tier", async () => {
   const uploadsRoot = await mkdtemp(path.join(os.tmpdir(), "service-roles-arxiv-"));
   const taskStore = createInMemoryTaskStore();
@@ -1181,8 +1182,9 @@ test("an arXiv suggestion searched at the edge is confirmed and imported by the 
     summary: "Retrieval augmented generation for archive search.",
     title: "Retrieval Augmented Generation for Archives",
   };
-  const createTier = (name) => {
+  const createTier = (name, knownDocIds) => {
     const calls = [];
+    const known = new Set(knownDocIds);
 
     return {
       calls,
@@ -1202,7 +1204,7 @@ test("an arXiv suggestion searched at the edge is confirmed and imported by the 
         ragService: {
           ...createStubRagService(),
           getDocument: (docId) =>
-            docId === "doc-1"
+            known.has(docId)
               ? { docId, fileName: "notes.pdf", profile: { tags: ["retrieval", "augmented", "generation"] } }
               : null,
           ingestDocument: async ({ fileName, source }) => {
@@ -1210,14 +1212,22 @@ test("an arXiv suggestion searched at the edge is confirmed and imported by the 
 
             return { docId: "doc-arxiv", fileName };
           },
+          isDocumentRegistryShared: () => true,
+          // The shared registry holds doc-1.
+          loadDocumentsFromStore: async (docIds) => {
+            calls.push(`load ${docIds.join(",")}`);
+            docIds.filter((docId) => docId === "doc-1").forEach((docId) => known.add(docId));
+          },
+          // The importer's duplicate check reads the tenant's listing first.
+          refreshDocumentRegistry: async () => {},
         },
         taskStore,
         uploadsDirectory: path.join(uploadsRoot, name),
       },
     };
   };
-  const edgeTier = createTier("edge");
-  const agentTier = createTier("agent");
+  const edgeTier = createTier("edge", ["doc-1"]);
+  const agentTier = createTier("agent", []);
   const split = await startSplitDeployment({ agentOptions: agentTier.options, edgeOptions: edgeTier.options });
 
   try {
@@ -1249,7 +1259,7 @@ test("an arXiv suggestion searched at the edge is confirmed and imported by the 
 
     assert.equal(task.counts.imported, 1);
     assert.deepEqual(edgeTier.calls, ["search"]);
-    assert.deepEqual(agentTier.calls, [`download ${paper.pdfUrl}`, `ingest ${paper.arxivId}`]);
+    assert.deepEqual(agentTier.calls, ["load doc-1", `download ${paper.pdfUrl}`, `ingest ${paper.arxivId}`]);
   } finally {
     await split.close();
     await rm(uploadsRoot, { force: true, recursive: true });
