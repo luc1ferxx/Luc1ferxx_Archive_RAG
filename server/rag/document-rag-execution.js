@@ -746,10 +746,11 @@ const executeComparisonRag = async ({
 
 /**
  * The single-document QA route up to its confidence gate: the candidates
- * assessQaConfidence judges, built exactly as executeDocumentRag builds them
- * when no agent retrieval plan is given. Exported so the abstention-gate
- * analysis can replay the real gate over real candidates under different
- * thresholds without calling a chat model.
+ * assessQaConfidence judges, built as executeDocumentRag builds them when no
+ * agent retrieval plan is given, except that no cross-language rewrite
+ * (rag/query-translation.js) is searched, since that takes a model call.
+ * Exported so the abstention-gate analysis can replay the real gate over real
+ * candidates under different thresholds without calling a chat model.
  */
 export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolvedQuery }) => {
   const inputs = await buildRetrievalInputs({

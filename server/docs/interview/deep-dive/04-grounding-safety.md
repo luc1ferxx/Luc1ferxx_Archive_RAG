@@ -30,7 +30,7 @@
 | `server/rag/comparison-engine.js` | analyzeComparison：近重复（NEAR_DUPLICATE_TERM_JACCARD 0.75 / NEAR_DUPLICATE_SENTENCE_OVERLAP 0.6）、shouldShortCircuitNoMaterialDifference、显式数值冲突 |
 | `server/rag/comparison-equivalence.js` | evaluateBidirectionalEvidenceEntailment：双向蕴含判等价 |
 | `server/rag/gap-planner.js` | planQaEvidenceGap：拒答时说明'找到了什么、缺什么'，生成补充查询 |
-| `server/rag/prompt-registry.js` | definePrompt / fingerprintPromptSource（SHA-256 前 12 位）/ hashPromptSet / PROMPT_IDS（10 个） |
+| `server/rag/prompt-registry.js` | definePrompt / fingerprintPromptSource（SHA-256 前 12 位）/ hashPromptSet / PROMPT_IDS（11 个） |
 | `server/rag/prompt-catalog.js` | listPromptTemplates / describeActivePromptTemplates 汇总全部模板和当前生效集 |
 | `server/test/prompt-registry.test.mjs` | PINNED_PROMPT_TEMPLATES 钉死 16 个 id@version 的指纹 |
 | `server/evaluation/release-evidence-gate.js` | buildPromptLineageCheck：发布报告必须同一 prompt setHash |

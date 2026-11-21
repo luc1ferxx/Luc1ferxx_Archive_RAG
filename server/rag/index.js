@@ -1634,6 +1634,11 @@ const chat = async (docIds, query, options = {}) => {
     // coverage against the question text (coverageFromQueryText), which a
     // rewrite does not raise; give it one when follow-ups over documents in
     // another script need it.
+    // shortcut: the gate's anchors still come from resolvedQuery, so a phrase
+    // quoted in the question's script ("员工有多少天“带薪年假”？") must appear in
+    // chunks of the documents' script too and the question abstains; drop
+    // anchors in a script no selected document uses once users quote across
+    // scripts.
     const queryTranslations =
       agentRetrievalPlan?.phase === "follow_up"
         ? []

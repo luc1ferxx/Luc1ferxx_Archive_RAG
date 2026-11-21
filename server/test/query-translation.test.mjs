@@ -149,15 +149,20 @@ after(() => {
   }
 });
 
-test("the script of a text is the script most of its letters are in", () => {
+test("the script of a text is the script most of its words are in", () => {
   assert.equal(detectScript(ZH_QUESTION), "han");
   assert.equal(detectScript("他们在哪些数据集上评估了BERT？"), "han");
-  // Letters, not words: ten Latin letters outnumber eight Han characters.
-  assert.equal(detectScript("BERT模型在SQuAD上的F1是多少？"), "latin");
+  // A Han letter is a word: eight of them outnumber three Latin words.
+  assert.equal(detectScript("BERT模型在SQuAD上的F1是多少？"), "han");
+  assert.equal(detectScript("他们用的baseline是什么？"), "han");
+  assert.equal(detectScript("What does 带薪年假 mean in this policy?"), "latin");
   assert.equal(detectScript("What does カタカナ mean?"), "latin");
-  // Kanji count as Japanese next to kana, hanja as Korean next to Hangul.
+  // Kanji count as Japanese next to kana, hanja as Korean next to Hangul...
   assert.equal(detectScript("東京都庁の所在地は新宿区です"), "kana");
   assert.equal(detectScript("大韓民國의 首都는 서울이다"), "hangul");
+  // ...but not next to one quoted Japanese or Korean word.
+  assert.equal(detectScript("鲜の每日C的维生素含量是多少？"), "han");
+  assert.equal(detectScript("韩国首都首尔（서울）是韩国最大的城市，人口约一千万。"), "han");
   assert.equal(detectScript("Срок уведомления — 30 дней"), "cyrillic");
   assert.equal(detectScript("2024？"), null);
   assert.equal(detectScript(""), null);
@@ -294,6 +299,43 @@ test("a failed or unusable rewrite leaves the question searched alone, without a
   }
 
   assert.equal(translationPrompts.length, 3);
+});
+
+test("a rewrite that keeps more Latin names than words of its own script is searched", async () => {
+  const docIds = await ingest("ko");
+  const rewrite = "HR, IT, QA, R&D 팀의 휴가는?";
+
+  useModel({ rewrite: () => rewrite });
+  await chat(docIds, "How many leave days do the HR, IT, QA and R&D teams get?");
+  const [trace] = await readRagTraces();
+
+  assert.deepEqual(trace.queryTranslations, [{ query: rewrite, script: "hangul" }]);
+  assert.equal(trace.retrievalQueries.at(-1).id, "translation-hangul");
+});
+
+test("a rewrite longer than the session rewrite's 500 characters is still searched", async () => {
+  const docIds = await ingest("en");
+  const rewrite = `${REWRITES.latin} ${"Answer from the annual leave policy only. ".repeat(12)}`.trim();
+
+  assert.ok(rewrite.length > 500);
+  useModel({ rewrite: () => rewrite });
+  await chat(docIds, ZH_QUESTION);
+  const [trace] = await readRagTraces();
+
+  assert.deepEqual(trace.queryTranslations, [{ query: rewrite, script: "latin" }]);
+});
+
+test("a phrase quoted in the question's script stays an anchor the English chunk lacks (a shortcut in chat())", async () => {
+  const docIds = await ingest("en");
+  const response = await chat(docIds, "员工每年有多少天“带薪年假”？");
+  const [trace] = await readRagTraces();
+
+  assert.deepEqual(trace.queryTranslations, [{ query: REWRITES.latin, script: "latin" }]);
+  assert.equal(response.abstained, true);
+  assert.deepEqual(
+    trace.confidence.missingAnchorGroups.map((group) => group.label),
+    ["带薪年假"]
+  );
 });
 
 test("a question with no letters makes no call", async () => {

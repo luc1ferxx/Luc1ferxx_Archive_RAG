@@ -1,4 +1,5 @@
 import { createPromptTemplate } from "../lib/prompt-template.js";
+import { getChatMaxQuestionChars } from "./config.js";
 import { sanitizeRewriteQueryText } from "./memory.js";
 import { completeText } from "./openai.js";
 import { screenUntrustedText } from "./prompt-injection-screen.js";
@@ -11,48 +12,50 @@ import { definePrompt, PROMPT_IDS } from "./prompt-registry.js";
 // chat() (rag/index.js) therefore asks the chat model to rewrite the question
 // into the language of each selected document written in another script, and
 // searches every rewrite as an extra retrieval query. The question itself
-// stays what the gate's anchors and the answer prompt read.
+// stays what the gate's anchors and the answer prompt read. A rewrite is used
+// only as a search query, but the gate also measures each chunk it finds
+// against the rewrite's terms, so an injection in the example document's
+// summary that got past screenUntrustedText could pick the words that let that
+// document's chunks through the gate.
 //
 // shortcut: script, not language (a French question over English documents is
 // not rewritten); detect the language when archives mix languages within one
 // script.
 
-// Letters of any other script are not counted.
+// A Han letter each, else a run of letters of one script: the terms the QA
+// gate's tokenizer (rag/text-utils.js tokenize) splits text into. Letters of
+// any other script are not counted.
 const SCRIPT_PATTERNS = Object.freeze([
-  ["han", /\p{Script=Han}/u],
-  ["kana", /[\p{Script=Hiragana}\p{Script=Katakana}]/u],
-  ["hangul", /\p{Script=Hangul}/u],
-  ["cyrillic", /\p{Script=Cyrillic}/u],
-  ["latin", /\p{Script=Latin}/u],
-  ["greek", /\p{Script=Greek}/u],
-  ["arabic", /\p{Script=Arabic}/u],
-  ["hebrew", /\p{Script=Hebrew}/u],
-  ["thai", /\p{Script=Thai}/u],
-  ["devanagari", /\p{Script=Devanagari}/u],
+  ["han", /\p{Script=Han}/gu],
+  ["kana", /[\p{Script=Hiragana}\p{Script=Katakana}]+/gu],
+  ["hangul", /\p{Script=Hangul}+/gu],
+  ["cyrillic", /\p{Script=Cyrillic}+/gu],
+  ["latin", /\p{Script=Latin}+/gu],
+  ["greek", /\p{Script=Greek}+/gu],
+  ["arabic", /\p{Script=Arabic}+/gu],
+  ["hebrew", /\p{Script=Hebrew}+/gu],
+  ["thai", /\p{Script=Thai}+/gu],
+  ["devanagari", /\p{Script=Devanagari}+/gu],
 ]);
 
 /**
- * The script most of a text's letters are written in (`han`, `kana`,
- * `hangul`, `cyrillic`, `latin`, `greek`, `arabic`, `hebrew`, `thai`,
- * `devanagari`), or null for a text with no letter of these. Han letters
- * count as kana in a text with any kana, else as Hangul in one with any
- * Hangul: Japanese writes kanji between its kana, Korean may write hanja. A tie
- * goes to the script listed first. Letters, not words, are counted, so a
- * Chinese question made mostly of English names ("BERT模型在SQuAD上的F1是多少？")
- * counts as Latin.
+ * The script most of a text's words are written in (`han`, `kana`, `hangul`,
+ * `cyrillic`, `latin`, `greek`, `arabic`, `hebrew`, `thai`, `devanagari`), or
+ * null for a text with no letter of these. A Han letter counts as a word, so a
+ * Chinese question that names English terms ("BERT模型在SQuAD上的F1是多少？")
+ * stays Han; Thai, written without spaces, counts a phrase as one word. Han
+ * letters count as kana (Japanese writes kanji between its kana), else as
+ * Hangul (Korean may write hanja), when those make up at least a fifth of the
+ * Han and kana or Hangul together, so a Chinese text quoting one Japanese or
+ * Korean word stays Han. A tie goes to the script listed first.
  */
 export const detectScript = (text) => {
-  const counts = new Map(SCRIPT_PATTERNS.map(([script]) => [script, 0]));
-
-  for (const letter of String(text ?? "").match(/\p{L}/gu) ?? []) {
-    const match = SCRIPT_PATTERNS.find(([, pattern]) => pattern.test(letter));
-
-    if (match) {
-      counts.set(match[0], counts.get(match[0]) + 1);
-    }
-  }
-
-  const hanReader = counts.get("kana") > 0 ? "kana" : counts.get("hangul") > 0 ? "hangul" : null;
+  // Marks stay: Thai and Devanagari write vowels inside words as marks.
+  const letters = String(text ?? "").replace(/[^\p{L}\p{M}]+/gu, " ");
+  const counts = new Map(SCRIPT_PATTERNS.map(([script, pattern]) => [script, letters.match(pattern)?.length ?? 0]));
+  const hanReader = ["kana", "hangul"].find(
+    (script) => counts.get(script) > 0 && counts.get(script) * 4 >= counts.get("han")
+  );
 
   if (hanReader) {
     counts.set(hanReader, counts.get(hanReader) + counts.get("han"));
@@ -76,6 +79,11 @@ const MAX_TRANSLATION_SCRIPTS = 3;
  */
 export const planQueryTranslations = ({ documents = [], query }) => {
   const queryScript = detectScript(query);
+
+  if (!queryScript) {
+    return [];
+  }
+
   const examples = new Map();
 
   for (const document of documents) {
@@ -87,12 +95,10 @@ export const planQueryTranslations = ({ documents = [], query }) => {
     }
   }
 
-  return queryScript
-    ? [...examples]
-        .filter(([script]) => script !== queryScript)
-        .slice(0, MAX_TRANSLATION_SCRIPTS)
-        .map(([script, example]) => ({ example, script }))
-    : [];
+  return [...examples]
+    .filter(([script]) => script !== queryScript)
+    .slice(0, MAX_TRANSLATION_SCRIPTS)
+    .map(([script, example]) => ({ example, script }));
 };
 
 const translationPrompt = createPromptTemplate(
@@ -121,8 +127,9 @@ export const getQueryTranslationPromptDescriptor = () => TRANSLATION_PROMPT;
 /**
  * One completion per planned script, in parallel, through the same model-call
  * path as the session rewrite. Resolves [{ script, query }], `query` null when
- * the call failed or its reply was not one bounded line in that script; never
- * rejects. A rewrite is a search query only: it is never shown or answered.
+ * the call failed or its reply was not one line, at most as long as a question
+ * may be (a translation out of Chinese runs about four times as long), in that
+ * script; never rejects. A rewrite is never shown or answered.
  */
 export const translateQueryForDocuments = ({ documents = [], query }) =>
   Promise.all(
@@ -133,10 +140,16 @@ export const translateQueryForDocuments = ({ documents = [], query }) =>
             translationPrompt.format({ example: screenUntrustedText(example).text, question: query }),
             { promptTemplate: TRANSLATION_PROMPT }
           ),
-          ""
+          "",
+          getChatMaxQuestionChars()
+        );
+        // The names the prompt keeps unchanged are mostly Latin: they do not
+        // make a rewrite into another script Latin.
+        const rewriteScript = detectScript(
+          script === "latin" ? rewrite : rewrite.replace(/\p{Script=Latin}+/gu, " ")
         );
 
-        return { query: detectScript(rewrite) === script ? rewrite : null, script };
+        return { query: rewriteScript === script ? rewrite : null, script };
       } catch {
         return { query: null, script };
       }
