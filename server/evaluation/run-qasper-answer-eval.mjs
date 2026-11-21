@@ -238,8 +238,8 @@ export const describeRagSurfaceAnswer = (result) => {
 // self-checks (describeAgentChecks). graphEvents are the payloads of the run's
 // skill_graph_planned events, read for its planners (describeAgentPlanners).
 export const describeAgentSurfaceAnswer = (body = {}, ragReplies = [], graphEvents = []) => {
-  // A clarification and the grounded abstention sentence are both
-  // abstentions (agent-answer-outcome.js).
+  // A clarification, the grounded abstention sentence and document RAG's own
+  // abstention passed on as the answer are abstentions (agent-answer-outcome.js).
   const outcome = classifyAgentAnswer(body);
   // The finalizer projects ragSources and rebases the answer's labels to
   // them, so the labels resolve against ragSources as on the rag surface.
@@ -424,7 +424,7 @@ const formatMarkdown = (report) => {
     "",
     ...(summary.agentOutcomes
       ? [
-          `- Agent answered (not a clarification or grounded abstention): ${summary.agentOutcomes.answered}/${summary.agentOutcomes.cases}; abstentions by source: ${Object.entries(summary.agentOutcomes.abstainSources).map(([source, n]) => `${source} ${n}`).join(", ") || "none"}; follow-ups run / resolved: ${summary.agentOutcomes.followUpRuns} / ${summary.agentOutcomes.followUpResolved}`,
+          `- Agent answered (not a clarification, grounded abstention or passed-on RAG abstention): ${summary.agentOutcomes.answered}/${summary.agentOutcomes.cases}; abstentions by source: ${Object.entries(summary.agentOutcomes.abstainSources).map(([source, n]) => `${source} ${n}`).join(", ") || "none"}; follow-ups run / resolved: ${summary.agentOutcomes.followUpRuns} / ${summary.agentOutcomes.followUpResolved}`,
         ]
       : []),
     `- Answer replies cut off at an output limit: answerable ${summary.answerTruncations?.answerable ?? 0}, unanswerable ${summary.answerTruncations?.unanswerable ?? 0}`,
