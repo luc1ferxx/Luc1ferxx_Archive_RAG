@@ -520,7 +520,7 @@ export const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery, maxLengt
     .trim()
     .replace(/^(```(?:text)?|```)/gi, "")
     .replace(
-      /^(standalone retrieval question|standalone question|rewritten question|question)\s*:\s*/i,
+      /^(standalone retrieval question|standalone question|rewritten question|translated question|question)\s*:\s*/i,
       ""
     )
     .trim();

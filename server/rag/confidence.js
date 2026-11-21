@@ -133,7 +133,10 @@ export const findQueryTermSubstitution = (queryText, evidenceText) => {
 // measured landed at exactly 0.50 and was rejected before the model was ever
 // called.
 //
-// The bypass is deliberately limited to comparison, because in single-document QA
+// The bypass is deliberately limited to comparison (and, in single-document QA,
+// to candidates a cross-language rewrite found that are not about a neighbouring
+// topic of that rewrite: a translation is a paraphrase by construction; see
+// buildTranslationBypass in document-rag-execution.js), because in single-document QA
 // low coverage carries real information: it marks a chunk that addresses only part
 // of a multi-aspect question, which is what drives the gap-suggestion machinery
 // ("when does this take effect AND which regions"). Relaxing it there made a
@@ -553,7 +556,8 @@ export const assessQaConfidence = ({
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
-    // Admitted below the coverage floor, which only the rerank gate does.
+    // Admitted below the coverage floor: by the rerank gate, or on the dense
+    // score of a candidate a cross-language rewrite found.
     partialCoverageResultCount: selection.usableResults.filter((result) => {
       const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
 
@@ -574,6 +578,13 @@ export const assessQaConfidence = ({
  * reach `minCoverage`, name one of the question's anchors when it has any, and
  * not replace a query word with a rival (findQueryTermSubstitution).
  */
+/**
+ * Whether `result` is about a neighbouring thing of `queryText`
+ * (findQueryTermSubstitution on its section heading and text).
+ */
+export const isNeighbouringTopic = (queryText, result) =>
+  Boolean(findQueryTermSubstitution(queryText, buildSubstitutionEvidenceText(result)));
+
 export const selectQaContext = ({ confidence, limit, minCoverage, queryText = "", results }) => {
   if (!confidence?.confident) {
     return [];
@@ -589,7 +600,7 @@ export const selectQaContext = ({ confidence, limit, minCoverage, queryText = ""
       getAdmissionScore(result) >= minimumScore &&
       (typeof result?.keywordScore !== "number" || result.keywordScore >= minCoverage) &&
       (anchorGroups.length === 0 || getMatchedAnchorIndexes(result, anchorGroups).length > 0) &&
-      !findQueryTermSubstitution(queryText, buildSubstitutionEvidenceText(result))
+      !isNeighbouringTopic(queryText, result)
   );
 
   return [...admitted, ...extras].slice(0, Math.max(limit, admitted.length));
@@ -609,7 +620,8 @@ export const assessComparisonConfidence = ({
     const selection = selectUsableResults({
       results,
       queryText,
-      // Only comparison opts in: see hasEnoughQueryCoverage for why the same
+      // Comparison opts in for every candidate (QA only for those a
+      // cross-language rewrite found): see hasEnoughQueryCoverage for why the same
       // lexical measure means something different here than in single-document QA.
       allowSemanticBypass: true,
     });

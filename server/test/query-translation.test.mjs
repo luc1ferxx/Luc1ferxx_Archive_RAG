@@ -6,6 +6,7 @@ import path from "node:path";
 
 import chat, { clearDocuments, ingestDocumentPages } from "../chat.js";
 import { buildAgentRetrievalQueries } from "../rag/agent-retrieval-queries.js";
+import { buildTranslationBypass } from "../rag/document-rag-execution.js";
 import {
   configureDocumentRegistryStore,
   resetDocumentRegistry,
@@ -352,4 +353,52 @@ test("a question with no letters makes no call", async () => {
 
   assert.equal(translationPrompts.length, 0);
   assert.equal(Object.hasOwn(trace, "queryTranslations"), false);
+});
+
+// X3 (docs/evaluation.md, KX round): a rewrite is a paraphrase, so a chunk it
+// found may clear the coverage floor on its dense score. This goes through the
+// real wiring: the rewrite's copy of the chunk wins the merge and is listed
+// first (mergeProvenance), and the QA route lets it through.
+test("a rewrite worded unlike the chunk still admits it on its dense score", async () => {
+  const docIds = await ingest("en");
+
+  useModel({ rewrite: () => "How many days of paid vacation do staff members get annually?" });
+  const response = await chat(docIds, ZH_QUESTION);
+  const [admitted] = (await readRagTraces())[0].confidence.usableResults;
+
+  assert.equal(response.abstained, false);
+  assert.ok(admitted.keywordScore < 0.51, `coverage ${admitted.keywordScore} is below the floor`);
+  assert.equal(admitted.provenance.queries[0].queryId, "translation-latin");
+});
+
+// X3' (the review of X3): not when the chunk is about a neighbouring topic of
+// the rewrite ("annual leave" for "parental leave"), which the rival-word
+// check on the user's question cannot see across scripts.
+test("the gate's rewrite bypass skips a chunk about a neighbouring topic of the rewrite", () => {
+  const bypass = buildTranslationBypass([
+    { id: "primary", query: "员工的育儿假有多久？" },
+    { id: "translation-latin", query: "How long is parental leave for employees?" },
+  ]);
+  const chunk = (queryId, pageContent) => ({
+    document: { id: pageContent, metadata: { fileName: "policy.pdf", sectionHeading: "" }, pageContent },
+    provenance: { queries: [{ queryId }] },
+  });
+
+  assert.equal(bypass(chunk("translation-latin", DOCUMENTS.en)), false, "annual leave is not parental leave");
+  assert.equal(
+    bypass(chunk("translation-latin", "Parental leave lasts sixteen weeks for every employee.")),
+    true
+  );
+  assert.equal(bypass(chunk("primary", "Parental leave lasts sixteen weeks for every employee.")), false);
+  assert.equal(buildTranslationBypass([{ id: "primary", query: "How long is parental leave?" }]), null);
+});
+
+test("the rewrite's label, if the model repeats it, is not searched", async () => {
+  const docIds = await ingest("en");
+
+  useModel({ rewrite: () => `Translated question: ${REWRITES.latin}` });
+  await chat(docIds, ZH_QUESTION);
+  const [trace] = await readRagTraces();
+
+  assert.deepEqual(trace.queryTranslations, [{ query: REWRITES.latin, script: "latin" }]);
 });

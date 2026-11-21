@@ -18,6 +18,7 @@ import {
 import {
   assessComparisonConfidence,
   assessQaConfidence,
+  isNeighbouringTopic,
   selectQaContext,
 } from "./confidence.js";
 import {
@@ -104,10 +105,31 @@ const mergeResultPair = (existing, incoming) => {
 // (chat(), rag/query-translation.js).
 const TRANSLATION_QUERY_ID_PREFIX = "translation-";
 
-// Whether a candidate's stored keywordScore was measured against a rewrite:
-// mergeProvenance lists the winning copy's query first.
-const foundByTranslation = (result) =>
-  String(result?.provenance?.queries?.[0]?.queryId ?? "").startsWith(TRANSLATION_QUERY_ID_PREFIX);
+// The QA gate's semantic bypass for cross-language rewrites (KX round, X3'):
+// a rewrite is a paraphrase in another language, so a candidate whose stored
+// keywordScore was measured against one (mergeProvenance lists the winning
+// copy's query first) may clear the coverage floor on its dense score, unless
+// it is about a neighbouring topic of that rewrite ("annual leave" for
+// "parental leave"). selectQaContext's rival-word check reads the user's
+// question, which never matches a chunk in another script. Null when nothing
+// was rewritten, so the gate is unchanged then.
+export const buildTranslationBypass = (retrievalQueries = []) => {
+  const rewrites = new Map(
+    retrievalQueries
+      .filter((retrievalQuery) => String(retrievalQuery.id).startsWith(TRANSLATION_QUERY_ID_PREFIX))
+      .map((retrievalQuery) => [retrievalQuery.id, retrievalQuery.query])
+  );
+
+  if (rewrites.size === 0) {
+    return null;
+  }
+
+  return (result) => {
+    const rewrite = rewrites.get(String(result?.provenance?.queries?.[0]?.queryId ?? ""));
+
+    return Boolean(rewrite) && !isNeighbouringTopic(rewrite, result);
+  };
+};
 
 export const tagResultsWithQuery = (results = [], retrievalQuery = {}) =>
   (Array.isArray(results) ? results : []).map((result) => {
@@ -812,10 +834,8 @@ const executeQaRag = async ({
       docIds,
       queryAdapterScope,
     });
-  // A rewrite is a paraphrase in another language: a candidate it found may
-  // clear the gate on semantic similarity, as a comparison's may (X3).
   const confidence = assessQaConfidence({
-    allowSemanticBypassFor: foundByTranslation,
+    allowSemanticBypassFor: buildTranslationBypass(plannedRetrievalQueries),
     coverageFromQueryText,
     results: retrievalResults,
     queryText: resolvedQuery,
