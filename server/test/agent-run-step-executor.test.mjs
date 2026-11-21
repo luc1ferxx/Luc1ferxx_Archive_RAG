@@ -443,6 +443,48 @@ test("agent run step executor resumes an approved capability step", async () => 
   );
 });
 
+test("an approved capability step's summary says how the call ended", async () => {
+  // The step is queued as "approved and ready to resume"; once the call has
+  // run, that no longer holds.
+  const approve = async (execute) => {
+    const agentRunService = createAgentRunService({
+      agentRunStore: createInMemoryAgentRunStore(),
+    });
+    const approval = await createPendingApprovalRun(agentRunService);
+    const error = await createAgentRunStepExecutor({
+      agentRunService,
+      capabilityRegistry: { execute },
+    })
+      .applyApprovalAction({
+        accessScope,
+        action: "approve",
+        gateId: approval.gate.id,
+        payload: { approvalObjectHash: approval.gate.approvalObjectHash },
+        runId: "run-approval",
+      })
+      .then(() => null, (rejection) => rejection);
+    const run = await agentRunService.getRun({ accessScope, runId: "run-approval" });
+
+    return { error, step: run.steps.find((step) => step.kind === "capability_call") };
+  };
+
+  const completed = await approve(async () => ({ text: "Launch is on 1 March." }));
+
+  assert.equal(completed.error, null);
+  assert.equal(completed.step.status, "completed");
+  assert.equal(completed.step.summary, "Capability call completed.");
+
+  const reason = "Web search is not configured: SERPAPI_KEY is not set.";
+  const failed = await approve(async () => {
+    throw Object.assign(new Error(reason), { status: 409 });
+  });
+
+  assert.equal(failed.error?.message, reason);
+  assert.equal(failed.step.status, "failed");
+  assert.equal(failed.step.error.message, reason);
+  assert.equal(failed.step.summary, `Capability call failed: ${reason}`);
+});
+
 test("agent run step executor has no resume: an interrupted step is never run on its own", () => {
   const executor = createAgentRunStepExecutor({
     agentRunService: createAgentRunService({

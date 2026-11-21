@@ -331,6 +331,11 @@ const TRAJECTORY_CASES = [
     { customSkillGraph: ["risk_review"] },
   ],
   ["budget_exhaustion_clarification", createBudgetCase, "budget exhaustion in the document loop"],
+  // Its golden was rewritten once from LangGraph (UPDATE_GRAPH_GOLDENS=1) when
+  // a capability call that has run started saying so: the completed
+  // capability_call step's summary is "Capability call completed.", no longer
+  // the "approved and ready to resume" it was queued with. Nothing else in it
+  // changed.
   [
     "capability_approval_resume",
     createApprovalResumeCase,

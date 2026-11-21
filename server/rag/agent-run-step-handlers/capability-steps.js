@@ -183,6 +183,9 @@ const executeCapabilityBackedStep = async ({
       result,
     });
 
+  // The summary replaces the one the step was queued with ("approved and
+  // ready to resume", "Retry queued for ..."), which no longer holds once
+  // the call has run.
   return runRetriableStep({
     accessScope,
     agentMode: getCapabilityAgentMode(capabilityId),
@@ -192,10 +195,16 @@ const executeCapabilityBackedStep = async ({
         citationCount: citations.length,
         text: buildAnswer(result).text,
       },
+      summary: "Capability call completed.",
     }),
-    buildFailedPatch: ({ error }) => ({
-      error: buildErrorPayload(error, "Capability execution failed."),
-    }),
+    buildFailedPatch: ({ error }) => {
+      const stepError = buildErrorPayload(error, "Capability execution failed.");
+
+      return {
+        error: stepError,
+        summary: `Capability call failed: ${stepError.message}`,
+      };
+    },
     buildObservation: () => ({
       capabilityId,
       status: AGENT_RUN_STEP_STATUSES.completed,
