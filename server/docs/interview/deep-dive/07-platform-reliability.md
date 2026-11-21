@@ -51,7 +51,7 @@
 | `server/evaluation/run-api-load-bench.mjs` | 压测：子进程里跑真实 app + 假模型，可选多实例、拆分、读副本；wrapper 脚本可加载 pg_stat_statements |
 | `server/evaluation/run-llm-resilience-eval.mjs` | LLM 容错故障注入评测（429、503、挂起、空响应、主模型宕机、饱和） |
 | `server/evaluation/run-shared-state-eval.mjs` | 4 个进程对比状态放进程内和放 Redis 的区别 |
-| `Dockerfile / docker-compose.yml / compose.services.yml` | 一个镜像对应多种角色；端口默认只绑 127.0.0.1；stop_grace_period 30s；compose.services.yml 只用 docker compose config 校验过 |
+| `Dockerfile / docker-compose.yml / compose.services.yml` | 一个镜像对应多种角色；端口默认只绑 127.0.0.1；stop_grace_period 30s；compose.services.yml 只在 2026-11-20 手动构建启动过一次，CI 只按文本固定 |
 | `server/archive-mcp-server.js` | stdio MCP server（archive_ask / archive_list_documents / archive_refresh），只读，调用 server/chat.js 的 chat()，不经 agent 规划器；租户范围只来自 ARCHIVE_MCP_USER_ID / ARCHIVE_MCP_WORKSPACE_ID |
 | `src/archiveApi.js / src/components/ChatComponent.jsx` | 前端 streamChat：用 fetch + response.body.getReader() 解析 SSE；ChatComponent 经 streamChatAnswer 处理 trace_step、answer_draft、answer_draft_reset |
 
@@ -407,7 +407,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 
 代码：`server/server.js startMonolith`；`server/rag/service-topology.js getServiceRole / hostsServiceTier / validateServiceTopology`；`server/archive-mcp-server.js`
 
-> ⚠ 不要说「我做了一套微服务架构」。安全说法：默认是单体，拆分是可选的部署形态，四层之间的契约有测试保证和单体结果一致；拆分版的 compose.services.yml 只用 docker compose config 校验过，从没真正构建和启动过。
+> ⚠ 不要说「我做了一套微服务架构」。安全说法：默认是单体，拆分是可选的部署形态，四层之间的契约有测试保证和单体结果一致；拆分版的 compose.services.yml 只在一台机器上手动构建并启动过一次（2026-11-20），CI 不构建它。
 
 ### Q2. 拆成四层以后性能怎么样？既然更慢，为什么还要拆？
 
@@ -629,7 +629,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 - 共享状态：Redis 必须上（全局模型并发上限、熔断、防重放），否则多副本时配额和上限按进程叠加
 - 数据库是唯一的共享瓶颈和单点：调大副本连接池（这次回退全是池满）；入库库和查询库分开；任务字节移到对象存储；评估用 PgBouncer 做事务级连接池
 - 模型侧：按在途数的上限要改成按 TPM 或自适应（AIMD）；按租户的配额已经在网关里
-- 重做：拆分之前先把单体内的度量做足（claim memo 一项就带来约 2.6 倍，比拆分划算）；网关可能直接用 LiteLLM，前面放自研的租户和配额层；层间协议考虑 gRPC，拿到原生的 deadline；compose.services.yml 要真正构建、启动跑一遍
+- 重做：拆分之前先把单体内的度量做足（claim memo 一项就带来约 2.6 倍，比拆分划算）；网关可能直接用 LiteLLM，前面放自研的租户和配额层；层间协议考虑 gRPC，拿到原生的 deadline；compose.services.yml 要真正构建、启动跑一遍（2026-11-20 已手动跑过一次，CI 里还没有）
 
 代码：`server/rag/service-topology.js validateServiceTopology`；`compose.services.yml`；`server/rag/model-call-guard.js createSharedConcurrencyLimiter`；`server/rag/postgres-replicas.js acquireReadReplica`
 
@@ -664,7 +664,7 @@ CURRENT-TRUTH 3.25：测试在 /chat 处理到一半时发 SIGTERM，请求 200�
 ## 要主动说出口的边界
 
 - 拆分部署只在一台机器上测过；同机、同进程数下单体快 1.56 倍；没有 K8s、服务发现和自动扩缩，副本列表写在环境变量里，增减副本要重启调用方
-- compose.services.yml 只用 docker compose config 校验过解析，从没构建和启动过；用 --scale 扩容时多个容器共用一个 DNS 名，客户端的最少在途和故障转移都不生效
+- compose.services.yml 只在 2026-11-20 于一台机器上手动构建并启动过一次，CI 不构建它；用 --scale 扩容时多个容器共用一个 DNS 名，客户端的最少在途和故障转移都不生效
 - 层间身份不是 mTLS，层间也没有加密；默认 hmac 下 issuer 是自报的，防重放默认关闭（60 s 内同一个请求可以原样重放）；防重放缓存按进程有上限，Redis 出错时以本副本的判定为准
 - ed25519 只在四个进程的测试里跑通过，那次检索层用的是 local 向量库，没在 Docker 或 PostgreSQL 的检索层上跑过；老的几组拆分测试只在 hmac 下通过
 - 所有层共用一个 PostgreSQL，它是共享瓶颈也是单点；PDF 字节存在任务表里

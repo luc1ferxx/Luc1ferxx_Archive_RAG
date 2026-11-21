@@ -55,7 +55,7 @@ STARTUP_HEALTH_STRICT=false
 | `VITE_OIDC_SCOPES` | `openid profile email` | 登录 scope；总会补上 `openid`。 |
 | `VITE_OIDC_AUDIENCE` | 空 | 非空时在 authorize 请求里附带 `audience` 参数（Auth0 风格）。 |
 | `VITE_OIDC_REDIRECT_URI` | `${window.location.origin}/` | 回调地址，必须在 IdP 登记（开发 `http://localhost:3000/`，单容器 `http://localhost:5001/`）。 |
-| `VITE_OIDC_POST_LOGOUT_REDIRECT_URI` | 同 redirect URI | IdP 提供 `end_session_endpoint` 时，退出后的回跳地址。 |
+| `VITE_OIDC_POST_LOGOUT_REDIRECT_URI` | 同 redirect URI | 退出登录后落到的地址。IdP 提供 `end_session_endpoint` 时作为 `post_logout_redirect_uri` 交给 IdP；没有时前端直接跳过去，默认值会重新加载应用，上一位用户的数据不会留在页面上。 |
 
 ## 后端基础配置
 

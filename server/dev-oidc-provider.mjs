@@ -181,10 +181,13 @@ const sendJson = (res, status, body, extraHeaders = {}) => {
   res.end(JSON.stringify(body));
 };
 
-const sendHtml = (res, status, html) => {
+// `redirectSource`: the login form's submission is answered with a redirect to
+// the (already validated) redirect_uri, and Chrome checks form-action against
+// that redirect too, so 'self' alone blocked every sign-in from the form.
+const sendHtml = (res, status, html, { redirectSource = "" } = {}) => {
   res.writeHead(status, {
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${redirectSource ? ` ${redirectSource}` : ""}`,
     "content-type": "text/html; charset=utf-8",
   });
   res.end(html);
@@ -381,7 +384,12 @@ export const startDevOidcProvider = async ({
     const user = findUser(params.get("login_hint"));
 
     if (!user) {
-      sendHtml(res, 200, renderLoginForm(params));
+      const target = new URL(redirectUri);
+      // A CSP host-source cannot name an IPv6 literal, and a custom scheme's
+      // origin is "null": the scheme alone allows those.
+      const redirectSource = target.hostname.startsWith("[") || target.origin === "null" ? target.protocol : target.origin;
+
+      sendHtml(res, 200, renderLoginForm(params), { redirectSource });
       return;
     }
 
