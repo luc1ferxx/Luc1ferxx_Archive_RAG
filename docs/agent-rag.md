@@ -47,6 +47,9 @@ flowchart LR
 ## QA 路径
 
 1. 结合会话记忆把追问改写成独立检索问题。
+   - 跨语言检索（`server/rag/query-translation.js`，没有开关）：按 Unicode 文字系统（汉字、假名、韩文、西里尔、拉丁、希腊、阿拉伯、希伯来、泰文、天城文，数字母个数取最多的；有假名时汉字算日文，有韩文时算韩文；没有字母就没有文字系统）判断问题的文字，以及每份所选文档入库摘要的文字（摘要为空的文档不算）。所选文档里有与问题不同的文字时，用聊天模型把问题改写成这些文档的语言：每种文字以第一份该文字文档的摘要为样例，最多 3 种，并行各调一次（`query_translation@v1`）。
+   - 改写结果只当检索查询用：经过与会话改写相同的清洗（取最后一行，超过 500 字的丢弃），而且必须是目标文字，才作为额外的非主查询 `translation-<文字>` 和计划内的查询一起检索（只走 RAG 的路径和 Agent 的主计划都一样；远程检索层照样收到）；调用失败或结果不可用时只检索原问题。门控照旧按找到该块的那条查询算词覆盖；门控的 anchor、回答 prompt 和会话记录仍用原问题，回答用用户的语言写。
+   - RAG trace 在发起了改写时才多一个 `queryTranslations: [{ script, query }]`（失败时 `query` 为 null），同文字问题的 trace 不变。Agent 的 follow-up 阶段不改写（它的门控按原问题算覆盖，改写帮不上）。只按文字系统判断，所以同为拉丁字母的法文问题配英文文档不会触发。
 2. 对复杂问题拆分 evidence requirements，例如时间、生效范围、适用地区。
 3. 生成 query embedding，并按选中文档检索。
 4. 默认跑两路独立召回：dense 路（pgvector cosine；local / qdrant 为显式 opt-in）与 sparse 路（pgvector 上为 PostgreSQL FTS，默认 Okapi BM25，`RAG_SPARSE_SCORING=bm25`；可选 `ts_rank_cd`，它不是 BM25），用 RRF 融合（weighted 可选，`RAG_HYBRID_ENABLED=false` 只跑 dense）。每个候选记录 route、原始 rank/score、fusion 分数和命中它的 retrieval query；多 query × 多路的结果按 `docId:chunkIndex` 稳定去重。`/chat` 响应附加 `retrieval` 块记录 provider 和两路是否真实产生候选。
@@ -338,9 +341,9 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 
 每个发给聊天模型的 prompt 都有一个身份：`id`（这个 prompt 做什么）、`version`（使用的模板版本）和 `fingerprint`（模板原文 SHA-256 的前 12 位）。
 
-- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 10 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
+- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 11 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
 - **fingerprint 怎么算**：模板类 prompt 对未渲染的模板原文算；函数拼出来的 prompt（意图/执行/DAG 规划器、重规划器、claim 评审）对函数在空输入下的输出算，即指令文本加输入字段名，不含请求数据。
-- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 16 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
+- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 17 个模板变体，当前配置下生效 10 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
 - **记录位置**：
   - 模型调用把描述符作为 `promptTemplate` 传给 `completeTextWithMetadata`，它进入 LLMOps 事件和模型 span（`llmops.prompt_template.id` / `.version` / `.fingerprint`），不进入请求。
   - 每次运行在 `agentObservability.promptTemplates` 里列出用过的模板和调用次数、token 数。
