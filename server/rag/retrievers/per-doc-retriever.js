@@ -3,7 +3,6 @@ import {
   getRerankCandidateMultiplier,
   isRerankEnabled,
 } from "../config.js";
-import { rerankResultsOrKeepOrder } from "../reranker.js";
 import { searchDocumentsPerDocumentWithRoutes } from "../vector-store.js";
 
 // One query's fused candidates per document, before any rerank, as
@@ -30,27 +29,3 @@ export const searchPerDocumentCandidatesWithRoutes = async ({
 
   return { resultsByDocument: search.resultsByDocument, routes: search.routes, topKPerDoc };
 };
-
-export const retrievePerDocumentContextWithRoutes = async (args) => {
-  const search = await searchPerDocumentCandidatesWithRoutes(args);
-  const resultsByDocument = new Map(
-    await Promise.all(
-      [...search.resultsByDocument.entries()].map(async ([docId, results]) => [
-        docId,
-        await rerankResultsOrKeepOrder({
-          queryText: args.queryText,
-          results,
-          topK: search.topKPerDoc,
-        }),
-      ])
-    )
-  );
-
-  return {
-    resultsByDocument,
-    routes: search.routes,
-  };
-};
-
-export const retrievePerDocumentContext = async (args) =>
-  (await retrievePerDocumentContextWithRoutes(args)).resultsByDocument;

@@ -6,10 +6,11 @@ import {
   rerankResultsWithProvider,
   resetCrossEncoderProvider,
 } from "../rag/reranker.js";
+import { runWithDatabaseTenant } from "../rag/postgres-tenant.js";
 
 // The cross-encoder score cache (rag/reranker.js): a passage is scored once
-// per (transport, model, score scale, query) in this process, only misses are
-// sent, and a cached run orders exactly like an uncached one.
+// per (tenant, transport, model, score scale, query) in this process, only
+// misses are sent, and a cached run orders exactly like an uncached one.
 
 const originalFetch = globalThis.fetch;
 
@@ -158,6 +159,48 @@ test("the query text, model, endpoint and score scale each key their own scores"
   });
 });
 
+test("each tenant has its own scores: what one tenant cached is a miss for another", async () => {
+  await withEnv(CROSS_ENCODER_ENV, async () => {
+    const requests = stubHttpCrossEncoder();
+    const asTenant = (scope) => runWithDatabaseTenant(scope, () => rerank("quartz capsule approval", ["a", "b"]));
+
+    await asTenant({ userId: "alice", workspaceId: "ws-a" });
+    await asTenant({ userId: "alice", workspaceId: "ws-a" });
+    assert.equal(requests.length, 1);
+
+    // The same question over the same passage text, from another tenant, the
+    // same user in another workspace, and a call bound to no tenant.
+    await asTenant({ userId: "bob", workspaceId: "ws-b" });
+    await asTenant({ userId: "alice", workspaceId: "ws-b" });
+    await rerank("quartz capsule approval", ["a", "b"]);
+    assert.equal(requests.length, 4);
+  });
+});
+
+test("the key is the exact text sent: the same chunk id with new text, or another file name, is scored again", async () => {
+  await withEnv(CROSS_ENCODER_ENV, async () => {
+    const requests = stubHttpCrossEncoder();
+    const { a, d } = CANDIDATES;
+    const scoreOne = async (result) =>
+      (await rerankResultsWithProvider({ queryText: "quartz capsule approval", results: [result], topK: 1 }))[0]
+        .crossEncoderScore;
+
+    assert.equal(await scoreOne(a), LOGITS.a);
+    // A replaced document keeps its chunk ids.
+    assert.equal(await scoreOne({ ...a, document: { ...a.document, pageContent: d.document.pageContent } }), LOGITS.d);
+    assert.equal(await scoreOne({ ...a, document: { ...a.document, metadata: { fileName: "renamed.pdf" } } }), LOGITS.a);
+
+    assert.deepEqual(
+      requests.map((request) => request.texts),
+      [
+        ["capsule.pdf\nPassage a about the quartz capsule approval."],
+        ["capsule.pdf\nPassage d about the quartz capsule approval."],
+        ["renamed.pdf\nPassage a about the quartz capsule approval."],
+      ]
+    );
+  });
+});
+
 test("configuring or resetting the cross-encoder provider empties the cache", async () => {
   await withEnv(CROSS_ENCODER_ENV, async () => {
     const calls = [];
@@ -258,5 +301,37 @@ test(`the cache holds at most ${CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES} scores an
     assert.equal(sent.length, 2);
     assert.equal(sent[0].length, CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES + 1);
     assert.deepEqual(sent[1], ["chunk-0"]);
+  });
+});
+
+test("a call whose new scores evict its own cached ones still uses the cached scores", async () => {
+  await withEnv(CROSS_ENCODER_ENV, async () => {
+    const sent = [];
+
+    configureCrossEncoderProvider({
+      score: async ({ pairs }) => {
+        sent.push(pairs.map((pair) => pair.id));
+        // Every score of the nth request is n.
+        return pairs.map(() => sent.length);
+      },
+    });
+
+    const chunkNamed = (id) => ({ document: { id, pageContent: id, metadata: {} }, score: 0 });
+    const full = Array.from({ length: CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES }, (_, index) => chunkNamed(`chunk-${index}`));
+    const rerankAll = (results) => rerankResultsWithProvider({ queryText: "q", results, topK: results.length });
+
+    await rerankAll(full);
+    // chunk-0 and chunk-1 are the oldest entries: storing this call's two new
+    // scores evicts them.
+    const mixed = await rerankAll([full[0], full[1], chunkNamed("new-0"), chunkNamed("new-1")]);
+
+    assert.deepEqual(sent[1], ["new-0", "new-1"]);
+    assert.deepEqual(
+      Object.fromEntries(mixed.map((result) => [result.document.id, result.crossEncoderScore])),
+      { "chunk-0": 1, "chunk-1": 1, "new-0": 2, "new-1": 2 }
+    );
+
+    await rerankAll([full[0]]);
+    assert.deepEqual(sent[2], ["chunk-0"]);
   });
 });

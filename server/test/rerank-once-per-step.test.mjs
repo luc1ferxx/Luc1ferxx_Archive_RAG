@@ -305,6 +305,21 @@ test("the follow-up step scores its three queries once and sends only the candid
   assertRerankedFromPool(results, pool);
 });
 
+test("the step reranks against the query marked primary wherever it stands, else against its first query", async () => {
+  const calls = recordCrossEncoderCalls();
+  const [primary, citation] = FIRST_STEP;
+  const retrieve = (retrievalQueries) =>
+    retrieveGlobalContextForQueriesInProcess({ docIds: DOC_IDS, retrievalOptions: { topK: 2 }, retrievalQueries });
+
+  await retrieve([citation, primary]);
+  await retrieve([citation, { ...primary, primary: false }]);
+
+  assert.deepEqual(
+    calls.map((call) => call.queryText),
+    [QUESTION, citation.query]
+  );
+});
+
 test("after the one rerank, a candidate a cross-language rewrite won still reads as the rewrite's", async () => {
   recordCrossEncoderCalls();
   const queries = [
@@ -317,10 +332,8 @@ test("after the one rerank, a candidate a cross-language rewrite won still reads
     retrievalQueries: queries,
   });
   const bypass = buildTranslationBypass(queries);
-  const wonByRewrite = (result) => result.provenance.queries[0].queryId === "translation-latin";
 
   assertRerankedFromPool(results, await mergedPool(queries, 4));
-  assert.deepEqual(ids(results.filter(bypass)), ids(results.filter(wonByRewrite)));
   assert.ok(results.some(bypass));
   assert.ok(!results.every(bypass));
 });

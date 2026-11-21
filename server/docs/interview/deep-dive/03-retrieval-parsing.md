@@ -36,7 +36,7 @@
 | `server/rag/vector-store-pgvector-version-lifecycle.js` | 建版本、校验、激活、回滚、退役；runBuildDocuments 并行建；runIndexVersionRecallProbe 召回探针 |
 | `server/rag/sparse-store.js` | 本地 BM25 searchSparseDocuments（参照实现，Lucene IDF）；评测的 standalone 档走它 |
 | `server/rag/retrievers/global-retriever.js` | searchGlobalCandidatesWithRoutes：开 rerank 时每个查询取 topK×3 个融合候选，不重排；retrieveGlobalContextWithRoutes：单查询的调用方（缺口检索）检索完自己重排 |
-| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序；交叉编码器分数按（传输、模型、分数刻度、查询、段落文字）在进程内缓存，最多 2 万条 |
+| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序；交叉编码器分数按（租户、传输、模型、分数刻度、查询、段落文字）在进程内缓存，最多 2 万条 |
 | `server/rag/query-router.js` | routeQuery：用正则信号判 qa / compare（多文档且置信度 ≥0.5 才走 compare） |
 | `server/rag/query-decomposer.js` | buildEvidenceRequirements / buildRetrievalQueries：按 and、also、以及、分号等拆多部分问题（最多 4 个，RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS） |
 | `server/rag/agent-query-planner.js` | buildAgentRetrievalPlan：agent 路径的检索计划（意图 → topK，INTENT_OPTIONS；模板化子查询在 agent-retrieval-queries.js buildAgentRetrievalQueries） |
@@ -496,7 +496,7 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 *L3 为什么不用 X / 怎么证明*
 
 - 启发式重排在 QASPER 上 −0.007，不显著
-- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的；默认 topK 改为 10 后是 30 选 10，权重和概率门槛没在新值上重测）
+- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的；默认 topK 改为 10 后每个检索查询取 30 个候选，一个检索步骤合并后只重排一次，留下 10 × 查询数个：单查询 30 选 10，agent 事实题首轮最多 60 选 20；权重和概率门槛没在新值上重测）
 - dev：上下文里的证据 +0.063，显著；F1 +0.008，不显著；可回答题被拒答 −4.4pp，显著
 - 默认关是因为要单独的模型服务；服务挂了，这次查询退回融合顺序并告警
 - 开重排时默认用重排概率做门控（阈值 0.02）：AUC 0.641 vs 0.588，误拒大幅下降，但不可回答题识别从 80% 降到 45%（只有 20 题）

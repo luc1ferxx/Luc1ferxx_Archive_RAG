@@ -52,6 +52,7 @@ CLEARED_ENVIRONMENT.forEach((key) => delete process.env[key]);
 
 const { configureOpenAIProvider, resetOpenAIProvider } = await import("../rag/openai.js");
 const { resetEmbeddingCache } = await import("../rag/embedding-cache.js");
+const { resetCrossEncoderProvider } = await import("../rag/reranker.js");
 const { buildTermSet } = await import("../rag/text-utils.js");
 const { configureDocumentRegistryStore, registerDocument, resetDocumentRegistry, resetDocumentRegistryStore } =
   await import("../rag/doc-registry.js");
@@ -230,13 +231,16 @@ const useInProcess = () => {
 };
 
 // Same inputs, cold caches: the in-process run must not warm the remote one.
+// Resetting the cross-encoder provider empties the rerank score cache.
 const runBothWays = async (run, { urls = replica.url } = {}) => {
   useInProcess();
   resetEmbeddingCache();
+  resetCrossEncoderProvider();
   const local = await run();
 
   useRemote(urls);
   resetEmbeddingCache();
+  resetCrossEncoderProvider();
   try {
     return { local, remote: await run() };
   } finally {
@@ -444,10 +448,12 @@ test("each seam function returns deep-equal results remotely: multi-query plans,
 });
 
 test("reranker scores cross the wire unchanged: heuristic rerankScore and cross-encoder crossEncoderScore", async (t) => {
+  let rerankRequests = 0;
   const crossEncoder = await startServer(
     express()
       .use(express.json())
       .post("/rerank", (req, res) => {
+        rerankRequests += 1;
         // A deterministic logit per text: longer texts that share more words
         // with the query score higher.
         const queryTerms = buildTermSet(req.body.query);
@@ -488,10 +494,21 @@ test("reranker scores cross the wire unchanged: heuristic rerankScore and cross-
   process.env.RAG_RERANK_PROVIDER = "cross-encoder";
   process.env.RAG_CROSS_ENCODER_ENDPOINT = `${crossEncoder.url}/rerank`;
 
-  const crossEncoded = await runBothWays(() =>
-    retrieveQaCandidates({ accessScope: ALICE, docIds: ["leave-policy"], resolvedQuery: "annual leave days" })
-  );
+  const requestsPerArm = [];
+  const crossEncoded = await runBothWays(async () => {
+    const before = rerankRequests;
+    const result = await retrieveQaCandidates({
+      accessScope: ALICE,
+      docIds: ["leave-policy"],
+      resolvedQuery: "annual leave days",
+    });
 
+    requestsPerArm.push(rerankRequests - before);
+    return result;
+  });
+
+  // Each arm sends its own rerank: the in-process run caches no score the remote one reads.
+  assert.deepEqual(requestsPerArm, [1, 1]);
   assert.ok(crossEncoded.local.results.length > 0);
   assert.ok(crossEncoded.local.results.every((result) => Number.isFinite(result.crossEncoderScore)));
   assert.deepStrictEqual(crossEncoded.remote, crossEncoded.local);

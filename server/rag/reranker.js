@@ -23,6 +23,7 @@ import { admitModelCallQuota, recordModelMetricEventWithQuota } from "./model-ca
 import { requestModelGatewayRerank } from "./model-gateway/client.js";
 import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
 import { observeRerank, recordRerankDegradation } from "./metrics-retrieval.js";
+import { getActiveDatabaseTenant, getDatabaseTenantContext } from "./postgres-tenant.js";
 import { withRequestSignal } from "./request-deadline.js";
 import { getModelGatewayUrls, isModelGatewayEnabled } from "./service-topology.js";
 import {
@@ -43,12 +44,14 @@ let rerankMetricsCollector = null;
 
 // Cross-encoder scores this process already has, so each passage is scored
 // once per question: a step's queries and the agent's follow-up step meet the
-// question's candidates again. Keyed by a sha256 of where the request goes,
-// the model it names, the score scale, the query text and the exact passage
-// text sent (rerankResultsWithCrossEncoder). Shared across requests and
-// tenants, which leaks nothing: the key holds the passage text itself, so a
-// hit only returns the score of a text the caller already retrieved for that
-// same query. Only successful scores are stored; the oldest entry goes first.
+// question's candidates again. Keyed by a sha256 of the tenant the call acts
+// for (the bound database tenant, else the non-tenant context), where the
+// request goes, the model it names, the score scale, the query text and the
+// exact passage text sent (rerankResultsWithCrossEncoder). A hit skips the
+// model call and its quota, so it shows: shared across tenants, it would tell
+// a tenant that another one recently asked the same question about the same
+// text (AGENTS.md "Cross-tenant cache timing"). Only successful scores are
+// stored; the oldest entry goes first.
 export const CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES = 20_000;
 const crossEncoderScoreCache = new Map();
 
@@ -705,6 +708,7 @@ const rerankResultsWithCrossEncoder = async ({ queryText = "", results = [], top
 
   const target = resolveCrossEncoderTarget();
   const keyPrefix = [
+    getActiveDatabaseTenant() ?? getDatabaseTenantContext(),
     target.transport,
     target.address,
     target.routeSelection.model,
