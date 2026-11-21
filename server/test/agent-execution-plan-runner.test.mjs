@@ -16,6 +16,7 @@ import {
 import { deterministicDagPlannerAdapter } from "../rag/agent-dag-planner-adapter.js";
 import { REPLAN_DECISIONS, REPLAN_REASON_CODES } from "../rag/agent-replanner.js";
 import { createAgentSkillTracker } from "../rag/agent-skill-observability.js";
+import { createCircuitOpenError } from "../rag/model-call-guard.js";
 import { AGENT_SKILL_IDS } from "../rag/skills/registry.js";
 
 const createSkill = ({
@@ -425,6 +426,21 @@ test("execution planner result reports fallback metadata", async () => {
     result.planner.stepIds,
     createDeterministicAgentExecutionPlan().map((step) => step.id)
   );
+
+  // A failed model call is a code: its message names the model endpoint.
+  const outage = await createAgentExecutionPlanResult({
+    accessScope: {},
+    plannerAdapter: {
+      id: "llm",
+      createExecutionPlan: async () => {
+        throw createCircuitOpenError("http://10.0.0.5:11434/v1|qwen2.5:7b");
+      },
+    },
+    registry: createRegistry([]),
+    selectedSkills: [],
+  });
+  assert.equal(outage.planner.status, "fallback");
+  assert.equal(outage.planner.fallbackReason, "planner_call_failed");
 });
 
 test("execution plan validator rejects unknown or mismatched steps", () => {

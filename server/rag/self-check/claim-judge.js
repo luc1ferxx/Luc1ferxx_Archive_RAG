@@ -236,6 +236,7 @@ const rememberVerdict = (cacheKey, verdict) => {
 
 export const resetClaimJudgeCache = () => {
   verdictCache.clear();
+  reportedJudgeFailures.clear();
 };
 
 const getCitationRank = (citation, index) => {
@@ -388,14 +389,23 @@ const upgradeClaim = ({ claim, citationByRank, verdict }) => {
   };
 };
 
+// /chat returns the judge summary in its trace, so a failure there is a stable
+// code, never the reply (which can quote the documents) or an upstream error
+// message. The server log gets a warning, once per distinct failure (as the
+// reranker logs its fallbacks), naming the error by its name and code only, as
+// the model gateway does: a message can carry what the request carried. A
+// failed call is also an LLMOps event, like every model attempt.
+const reportedJudgeFailures = new Set();
+
 /**
  * Returns claimSupport with lexically rejected claims re-judged, or the input
  * unchanged when the judge is off, has nothing eligible, or fails. Adds a
- * `judge` summary so traces show what the judge did: status "failed" (with
- * `error`) when the call threw or its reply held no verdict, and
- * `missingVerdictCount` for the claims a reply left out. `accessScope` names the
- * tenant whose cache partition is used (default: the active database tenant);
- * `sharedRedis` is a test seam for the RAG_SHARED_STATE=redis client.
+ * `judge` summary so traces show what the judge did: status "failed" with
+ * `error` "call_failed" when the call threw or "no_verdict" when its reply held
+ * none, and `missingVerdictCount` for the claims a reply left out.
+ * `accessScope` names the tenant whose cache partition is used (default: the
+ * active database tenant); `sharedRedis` is a test seam for the
+ * RAG_SHARED_STATE=redis client.
  */
 export const judgeClaimSupport = async ({
   accessScope = null,
@@ -509,7 +519,9 @@ export const judgeClaimSupport = async ({
 
       // A reply with no usable verdict is a failed call, not a judged one.
       if (parsed.size === 0) {
-        throw new Error(`no verdict could be parsed from the reply: ${completion?.text ?? ""}`);
+        const error = new Error("The judge reply held no verdict.");
+        error.code = "no_verdict";
+        throw error;
       }
 
       summary.missingVerdictCount = uncached.length - parsed.size;
@@ -528,8 +540,15 @@ export const judgeClaimSupport = async ({
       await writeSharedVerdicts(judged, redis);
     } catch (error) {
       // Fail closed: the lexical verdict stands.
+      const failure = `${error?.name ?? "Error"}${error?.code ? ` ${error.code}` : ""}`;
+
       summary.status = "failed";
-      summary.error = String(error?.message ?? error).slice(0, 200);
+      summary.error = error?.code === "no_verdict" ? "no_verdict" : "call_failed";
+
+      if (!reportedJudgeFailures.has(failure)) {
+        reportedJudgeFailures.add(failure);
+        console.warn(`[claim-judge] The judge failed (${failure}); the lexical verdict stands.`);
+      }
     }
   }
 

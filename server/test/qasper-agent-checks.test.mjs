@@ -1,18 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {
+  createDagPlannerAdapter,
+  createExecutionPlannerAdapter,
+  createIntentPlannerAdapter,
+  createReplanAdapter,
+} from "../app-services.js";
+import { runAgentRag } from "../rag/agent.js";
+import { DAG_PLANNER_IDS } from "../rag/agent-dag-planner-adapter.js";
+import { replanAdapter } from "../rag/agent-replan-adapter.js";
 import { evaluateDocumentEvidence } from "../rag/self-check/evaluate.js";
 import {
   describeAgentChecks,
   describeClaimFailures,
   summarizeAgentChecks,
+  summarizeAgentPlanners,
 } from "../evaluation/agent-answer-outcome.js";
-import { describeAgentSurfaceAnswer } from "../evaluation/run-qasper-answer-eval.mjs";
+import {
+  askAgentSurface,
+  createAgentSurfacePlanners,
+  describeAgentSurfaceAnswer,
+  formatAgentPlanners,
+} from "../evaluation/run-qasper-answer-eval.mjs";
 
 // What eval:qasper-answers --surface agent records about the agent's
 // self-checks: per row, every self_check step with the answer it read, and for
 // each claim it rejected the check's own fields and the cited sources' text as
 // the check compared it; in the summary, those claims by failure and the
-// failed checks by reason.
+// failed checks by reason. And how it plans: with the planners /chat builds,
+// recording per row whether each fell back to the rules and why.
 
 const citation = (rank, pageNumber, chunkIndex, excerpt) => ({
   chunkIndex,
@@ -208,7 +224,7 @@ test("each check records the claim judge's summary, and the summary counts check
     upgradedClaimCount: 0,
     ...fields,
   });
-  const failed = judge("failed", { error: "no verdict could be parsed from the reply: Sure!" });
+  const failed = judge("failed", { error: "no_verdict" });
   const partial = judge("judged", { missingVerdictCount: 1, upgradedClaimCount: 1 });
   const selfCheck = (claimSupport) => ({
     detail: { claimSupport: { claims: [], ...claimSupport }, passed: false, reasons: [] },
@@ -220,4 +236,253 @@ test("each check records the claim judge's summary, and the summary counts check
 
   assert.deepEqual(checks.map((check) => check.judge), [failed, partial, null]);
   assert.deepEqual(summarizeAgentChecks([{ checks, id: "q1" }]).judgeStatuses, { failed: 1, judged: 1, none: 1 });
+});
+
+// Planners ------------------------------------------------------------------
+
+const withEnv = async (name, value, callback) => {
+  const previous = process.env[name];
+
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = previous;
+    }
+  }
+};
+const withPlannerRollout = (value, callback) => withEnv("AGENT_PLANNER_ROLLOUT", value, callback);
+
+test("the agent surface gets the four planners /chat builds, as AGENT_PLANNER_ROLLOUT picks them", async () => {
+  // As createAppServices builds them for buildChatResponse.
+  const appPlanners = () => {
+    const dagPlannerAdapter = createDagPlannerAdapter();
+
+    return {
+      dagPlannerAdapter,
+      executionPlannerAdapter: createExecutionPlannerAdapter(),
+      intentPlannerAdapter: createIntentPlannerAdapter(),
+      replanAdapter: createReplanAdapter(dagPlannerAdapter),
+    };
+  };
+  const ids = (planners) => [
+    planners.intentPlannerAdapter.id,
+    planners.executionPlannerAdapter.id,
+    planners.dagPlannerAdapter.id,
+  ];
+
+  // Unset: the model plans, as /chat's default, with the replanner.
+  await withPlannerRollout(undefined, async () => {
+    const planners = await createAgentSurfacePlanners();
+
+    assert.deepEqual(planners, appPlanners());
+    assert.deepEqual(ids(planners), ["llm", "llm", DAG_PLANNER_IDS.llm]);
+    assert.equal(planners.intentPlannerAdapter.rolloutMode, "llm");
+    assert.equal(planners.replanAdapter, replanAdapter);
+  });
+
+  // deterministic: the rules, the earlier agent runs' planners, and no replanner.
+  await withPlannerRollout("deterministic", async () => {
+    const planners = await createAgentSurfacePlanners();
+
+    assert.deepEqual(planners, appPlanners());
+    assert.deepEqual(ids(planners), ["deterministic", "deterministic", DAG_PLANNER_IDS.deterministic]);
+    assert.equal(planners.replanAdapter, null);
+  });
+
+  // A removed value refuses, as it does /chat's start.
+  await withPlannerRollout("shadow", () =>
+    assert.rejects(createAgentSurfacePlanners(), { code: "AGENT_PLANNER_ROLLOUT_REMOVED" })
+  );
+  // So does a removed agent dial the runner no longer pins: before the
+  // ingest, not at the first question.
+  await withEnv("AGENT_SKILL_GRAPH_ROLLOUT", "off", () =>
+    assert.rejects(createAgentSurfacePlanners(), { code: "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED" })
+  );
+});
+
+test("an agent question runs with the given planners and records whether each fell back, and why", async () => {
+  const contract = {
+    chunkIndex: 0,
+    docId: "contract-1",
+    excerpt: "The services agreement renews every 12 months unless either party gives 30 days notice.",
+    fileName: "services-agreement.pdf",
+    pageNumber: 3,
+    rank: 1,
+  };
+  const ragService = {
+    chat: async () => ({
+      abstained: false,
+      citations: [contract],
+      memoryApplied: false,
+      resolvedQuery: "contract terms",
+      text: `${contract.excerpt} [Source 1]`,
+    }),
+    // The custom-Skill stage plans only over documents this lookup verifies.
+    getDocument: (docId) => (docId === contract.docId ? { docId, fileName: contract.fileName } : null),
+    listDocuments: () => [{ docId: contract.docId, fileName: contract.fileName }],
+  };
+  // Planners standing in for the model: each refuses, so each falls back to
+  // the rules. The replanner is there but not asked: no node fails.
+  const refuse = (message) => async () => {
+    throw new Error(message);
+  };
+  const planners = {
+    dagPlannerAdapter: { createExecutionGraph: refuse("graph model unavailable"), id: DAG_PLANNER_IDS.llm },
+    executionPlannerAdapter: { createExecutionPlan: refuse("plan model unavailable"), id: "llm" },
+    intentPlannerAdapter: { id: "llm", selectIntentPlan: refuse("intent model unavailable") },
+    replanAdapter: { createPatch: async () => ({ addNodes: [], removeNodeIds: [] }), id: "llm_replan" },
+  };
+  let asked = 0;
+  const ask = (question, dagPlannerAdapter = planners.dagPlannerAdapter) =>
+    askAgentSurface({
+      accessScope: { authenticated: false, userId: "", workspaceId: "" },
+      docId: contract.docId,
+      planners: { ...planners, dagPlannerAdapter },
+      question,
+      ragService,
+      runAgentRag,
+      sessionId: `qasper-agent-planners-${(asked += 1)}`,
+    });
+  const fellBack = (fallbackReason) => ({ fallback: true, fallbackReason, status: "fallback" });
+
+  // The rules review a contract with two custom Skills, so a graph is
+  // planned: its planner and replans come from the run's skill_graph_planned
+  // event, which the body does not carry.
+  const review = await ask("Review this contract for risks and key terms.");
+
+  assert.deepEqual(review.agent.planners, {
+    dag: { ...fellBack("graph model unavailable"), fallbackReasonCodes: [] },
+    execution: fellBack("plan model unavailable"),
+    intent: fellBack("intent model unavailable"),
+    replans: [{ decision: "abstain", reasonCode: "replan_not_triggered" }],
+  });
+  assert.equal(review.abstained, false);
+
+  // A graph the validator refuses falls back too. Its message names the
+  // model's node ids; the row keeps the validator's codes, by which the
+  // summary counts one failure across rows.
+  const invalid = [];
+
+  for (const suffix of ["a1", "b2"]) {
+    const answer = await ask("Review this contract for risks and key terms.", {
+      createExecutionGraph: async () => ({
+        nodes: [{ dependsOn: [`ghost_${suffix}`], inputBindings: {}, nodeId: `risk_${suffix}`, skillId: "risk_review" }],
+      }),
+      id: DAG_PLANNER_IDS.llm,
+    });
+
+    assert.match(answer.agent.planners.dag.fallbackReason, new RegExp(`Node risk_${suffix} depends on unknown node ghost_${suffix}`));
+    assert.deepEqual(answer.agent.planners.dag.fallbackReasonCodes, [
+      "dangling_dependency",
+      "missing_required_input",
+      "missing_required_input",
+    ]);
+    invalid.push({ id: suffix, planners: answer.agent.planners });
+  }
+
+  assert.deepEqual(summarizeAgentPlanners(invalid).dag.fallbackReasons, [
+    { reason: "dangling_dependency, missing_required_input", rows: 2 },
+  ]);
+
+  // A question about the document plans no graph.
+  const fact = await ask("How long does the services agreement renew for?");
+
+  assert.deepEqual(fact.agent.planners, {
+    dag: null,
+    execution: fellBack("plan model unavailable"),
+    intent: fellBack("intent model unavailable"),
+    replans: null,
+  });
+
+  // A planner that did not run is null: no execution plan after a
+  // clarification during preparation.
+  assert.deepEqual(
+    describeAgentSurfaceAnswer({
+      agentMode: "clarification",
+      agentObservability: {
+        executionPlanner: { fallback: false, fallbackReason: null, status: "not_run" },
+        intentPlanner: { fallback: false, fallbackReason: null, status: "selected" },
+      },
+    }).agent.planners,
+    { dag: null, execution: null, intent: { fallback: false, fallbackReason: null, status: "selected" }, replans: null }
+  );
+});
+
+test("the summary gives each planner's fallback rate and reasons, and the Markdown prints them", () => {
+  const selected = { fallback: false, fallbackReason: null, status: "selected" };
+  const fellBack = (fallbackReason, status = "fallback") => ({ fallback: true, fallbackReason, status });
+  const rows = [
+    {
+      id: "q1",
+      planners: {
+        dag: fellBack("graph refused"),
+        execution: fellBack("plan refused"),
+        intent: selected,
+        replans: [
+          { decision: "applied", reasonCode: null },
+          { decision: "abstain", reasonCode: "replan_limit_reached" },
+        ],
+      },
+    },
+    { id: "q2", planners: { dag: null, execution: selected, intent: fellBack("intent | refused"), replans: null } },
+    // A graph rejected whole falls back with nothing in its place.
+    { id: "q3", planners: { dag: fellBack("graph refused", "rejected"), execution: null, intent: fellBack("intent | refused"), replans: [] } },
+    // A row without planners (a report from before the field) counts nothing.
+    { id: "q4" },
+    // One invalid graph in two rows, its message naming each row's node ids,
+    // is one reason by its codes. A replan that was not triggered (no node
+    // failed: the replanner was not asked) counts nowhere.
+    ...["risk_a1", "risk_b2"].map((nodeId, index) => ({
+      id: `q${index + 5}`,
+      planners: {
+        dag: {
+          ...fellBack(`Invalid AgentRAG execution graph: dangling_dependency: Node ${nodeId} depends on unknown node ghost.`),
+          fallbackReasonCodes: ["missing_required_input", "dangling_dependency", "missing_required_input"],
+        },
+        execution: selected,
+        intent: selected,
+        replans: [{ decision: "abstain", reasonCode: "replan_not_triggered" }],
+      },
+    })),
+  ];
+  const summary = summarizeAgentPlanners(rows);
+
+  assert.deepEqual(summary, {
+    dag: {
+      fallback: 4,
+      fallbackRate: 1,
+      fallbackReasons: [
+        { reason: "dangling_dependency, missing_required_input", rows: 2 },
+        { reason: "graph refused", rows: 2 },
+      ],
+      ran: 4,
+      selected: 0,
+    },
+    execution: { fallback: 1, fallbackRate: 0.25, fallbackReasons: [{ reason: "plan refused", rows: 1 }], ran: 4, selected: 3 },
+    intent: { fallback: 2, fallbackRate: 0.4, fallbackReasons: [{ reason: "intent | refused", rows: 2 }], ran: 5, selected: 3 },
+    replans: { applied: 1, considered: 1, notApplied: [{ reason: "replan_limit_reached", rows: 1 }] },
+  });
+
+  const markdown = formatAgentPlanners(summary, "llm").join("\n");
+
+  assert.match(markdown, /^Agent planners \(AGENT_PLANNER_ROLLOUT llm;/);
+  assert.match(
+    markdown,
+    /Replans considered in 1 rows \(a node failed, was skipped or came back without evidence\), applied in 1; not applied by reason: replan_limit_reached 1\./
+  );
+  assert.match(markdown, /\n\| intent \| 5 \| 3 \| 2 \| 0\.4 \|\n\| execution \| 4 \| 3 \| 1 \| 0\.25 \|\n\| dag \| 4 \| 0 \| 4 \| 1 \|\n/);
+  // A pipe in a reason does not split the table's cell.
+  assert.match(markdown, /\n\| intent \| intent \\\| refused \| 2 \|\n/);
+  assert.match(markdown, /\n\| dag \| dangling_dependency, missing_required_input \| 2 \|\n\| dag \| graph refused \| 2 \|\n/);
+  // A planner that never ran has no rate.
+  assert.match(formatAgentPlanners(summarizeAgentPlanners([]), "deterministic").join("\n"), /\| dag \| 0 \| 0 \| 0 \| – \|/);
 });

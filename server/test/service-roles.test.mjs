@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
+import os from "node:os";
+import path from "node:path";
 
 import express from "express";
 
@@ -21,6 +24,7 @@ import { deterministicIntentPlannerAdapter } from "../rag/agent-intent-planner.j
 import { AGENT_RUN_STATUSES } from "../rag/agent-runs.js";
 import { describeEffectiveAccess } from "../rag/rbac.js";
 import { resetServiceClients, SERVICE_CLIENT_ERROR_CODES } from "../rag/service-client.js";
+import { createInMemoryTaskStore } from "../rag/tasks.js";
 import {
   SERVICE_DEADLINE_HEADER,
   SERVICE_IDENTITY_ERROR_CODES,
@@ -1160,6 +1164,106 @@ test("a forwarded task route and admin action carry the edge's workspace roles t
       }
     }
   );
+});
+
+// The arXiv panel across the tiers: its search runs at the edge (GET
+// /documents/:docId/arxiv/suggestions), and its Import confirms the
+// recommendation task (POST /tasks/:taskId/actions/confirm), which the edge
+// forwards to the agent tier, where the import job runs. The tiers share the
+// task store and the document registry as they share PostgreSQL: the edge
+// uploaded the document, and the agent's map has not read it yet. arXiv's
+// search and PDF download are stubs that record which tier called them.
+test("an arXiv suggestion searched at the edge is confirmed and imported by the agent tier", async () => {
+  const uploadsRoot = await mkdtemp(path.join(os.tmpdir(), "service-roles-arxiv-"));
+  const taskStore = createInMemoryTaskStore();
+  const paper = {
+    arxivId: "2401.00001v1",
+    pdfUrl: "https://arxiv.org/pdf/2401.00001v1",
+    summary: "Retrieval augmented generation for archive search.",
+    title: "Retrieval Augmented Generation for Archives",
+  };
+  const createTier = (name, knownDocIds) => {
+    const calls = [];
+    const known = new Set(knownDocIds);
+
+    return {
+      calls,
+      options: {
+        arxivService: {
+          downloadPdf: async (requested) => {
+            calls.push(`download ${requested.pdfUrl}`);
+
+            return Buffer.from("%PDF-1.4\n%stub\n");
+          },
+          search: async () => {
+            calls.push("search");
+
+            return [paper];
+          },
+        },
+        ragService: {
+          ...createStubRagService(),
+          getDocument: (docId) =>
+            known.has(docId)
+              ? { docId, fileName: "notes.pdf", profile: { tags: ["retrieval", "augmented", "generation"] } }
+              : null,
+          ingestDocument: async ({ fileName, source }) => {
+            calls.push(`ingest ${source.arxivId}`);
+
+            return { docId: "doc-arxiv", fileName };
+          },
+          isDocumentRegistryShared: () => true,
+          // The shared registry holds doc-1.
+          loadDocumentsFromStore: async (docIds) => {
+            calls.push(`load ${docIds.join(",")}`);
+            docIds.filter((docId) => docId === "doc-1").forEach((docId) => known.add(docId));
+          },
+          // The importer's duplicate check reads the tenant's listing first.
+          refreshDocumentRegistry: async () => {},
+        },
+        taskStore,
+        uploadsDirectory: path.join(uploadsRoot, name),
+      },
+    };
+  };
+  const edgeTier = createTier("edge", ["doc-1"]);
+  const agentTier = createTier("agent", []);
+  const split = await startSplitDeployment({ agentOptions: agentTier.options, edgeOptions: edgeTier.options });
+
+  try {
+    const searched = await fetch(`${split.edge.baseUrl}/documents/doc-1/arxiv/suggestions?maxResults=3`);
+    const suggestion = await searched.json();
+
+    assert.equal(searched.status, 200, JSON.stringify(suggestion));
+
+    const taskPath = `/tasks/${encodeURIComponent(suggestion.task.id)}`;
+    const confirmed = await postJson(`${split.edge.baseUrl}${taskPath}/actions/confirm`, {
+      docId: "doc-1",
+      selectedArxivIds: [paper.arxivId],
+      selectionToken: suggestion.selectionToken,
+    });
+
+    assert.equal(confirmed.status, 202, await confirmed.text());
+    assert.ok(split.agent.requests.some((request) => request.path === `${taskPath}/actions/confirm`));
+
+    let task;
+
+    await waitFor(
+      async () => {
+        task = await (await fetch(`${split.edge.baseUrl}${taskPath}`)).json();
+
+        return task.status === "completed";
+      },
+      { label: "the import task to complete" }
+    );
+
+    assert.equal(task.counts.imported, 1);
+    assert.deepEqual(edgeTier.calls, ["search"]);
+    assert.deepEqual(agentTier.calls, ["load doc-1", `download ${paper.pdfUrl}`, `ingest ${paper.arxivId}`]);
+  } finally {
+    await split.close();
+    await rm(uploadsRoot, { force: true, recursive: true });
+  }
 });
 
 test("the agent tier refuses an authenticated scope with neither user nor workspace outside admin actions", async () => {

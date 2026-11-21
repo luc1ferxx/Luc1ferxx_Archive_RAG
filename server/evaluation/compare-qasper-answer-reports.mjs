@@ -29,8 +29,8 @@ export const readAnswered = (row) =>
   typeof row?.answered === "boolean" ? row.answered : !row?.abstained;
 
 // The config fields two answer runs are compared on, each with its reader: the
-// scalar settings, the answer-rate flags and the prompt set (a prompt version
-// is this project's usual A/B).
+// scalar settings, the answer-rate flags, the agent's planners and the prompt
+// set (a prompt version is this project's usual A/B).
 const COMPARED_CONFIG_FIELDS = Object.freeze([
   // answerTemperature, answerMaxTokens, answerMaxTokensField: a report from
   // before the field ran without one, as null says.
@@ -50,6 +50,12 @@ const COMPARED_CONFIG_FIELDS = Object.freeze([
   ].map(
     (field) => [field, (config) => config?.[field]]
   ),
+  // AGENT_PLANNER_ROLLOUT, null on the rag surface. An agent report without
+  // the field ran the deterministic planners and did not record it.
+  [
+    "plannerRollout",
+    (config) => config?.plannerRollout ?? (config?.surface === "agent" ? "deterministic (not recorded)" : null),
+  ],
   ["promptTemplates.setHash", (config) => config?.promptTemplates?.setHash],
 ]);
 

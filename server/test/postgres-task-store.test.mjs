@@ -379,6 +379,60 @@ test("postgres task store list() uses parameterized LIMIT/OFFSET (never interpol
   assert.equal(listQuery.values[4], 25);
 });
 
+test("postgres task store upsert overwrites a stored task, when asked, only while it is as the caller read it", async () => {
+  const capturedQueries = [];
+  let refuse = false;
+  const query = async (queryText, values = []) => {
+    capturedQueries.push({ queryText, values });
+
+    if (queryText.includes("INSERT INTO rag_tasks_test")) {
+      // The row the conflict's WHERE kept back is not returned.
+      return refuse ? { rowCount: 0, rows: [] } : { rowCount: 1, rows: [buildFakeTaskRow(values)] };
+    }
+
+    return { rowCount: 1, rows: [] };
+  };
+  const store = createPostgresTaskStore({
+    eventsTableName: "rag_task_events_test",
+    now: () => "2026-06-13T00:00:00.000Z",
+    query,
+    runMigrations: async () => ({ appliedMigrations: [], status: "ok" }),
+    tableName: "rag_tasks_test",
+  });
+  const accessScope = { userId: "alice", workspaceId: "workspace-a" };
+  const task = { id: "task-1", status: TASK_STATUSES.waitingForUser, type: "external_recommendation" };
+  const upsertValues = () =>
+    capturedQueries.filter(({ queryText }) => queryText.includes("INSERT INTO rag_tasks_test")).at(-1).values.slice(21);
+
+  assert.equal((await store.upsert({ accessScope, task })).id, "task-1");
+  assert.deepEqual(upsertValues(), [false, null, null]);
+  await store.upsert({ accessScope, expected: null, task });
+  assert.deepEqual(upsertValues(), [true, null, null]);
+  await store.upsert({
+    accessScope,
+    expected: { status: TASK_STATUSES.waitingForUser, updatedAt: "2026-06-12T00:00:00.000Z" },
+    task,
+  });
+  assert.deepEqual(upsertValues(), [true, TASK_STATUSES.waitingForUser, "2026-06-12T00:00:00.000Z"]);
+
+  const upsertQuery = capturedQueries.find(({ queryText }) => queryText.includes("INSERT INTO rag_tasks_test"));
+
+  assert.match(
+    upsertQuery.queryText,
+    /DO UPDATE SET[\s\S]+WHERE NOT \$22::boolean\s+OR \(\s+rag_tasks_test\.status = \$23\s+AND rag_tasks_test\.updated_at = \$24::timestamptz\s+\)\s+RETURNING/
+  );
+
+  const eventCount = capturedQueries.filter(({ queryText }) => queryText.includes("rag_task_events_test")).length;
+
+  refuse = true;
+  assert.equal(await store.upsert({ accessScope, expected: null, task }), null);
+  assert.equal(
+    capturedQueries.filter(({ queryText }) => queryText.includes("rag_task_events_test")).length,
+    eventCount,
+    "a refused upsert records no event"
+  );
+});
+
 test("postgres task store claims atomically and fences writes by claim and attempt", async () => {
   const capturedQueries = [];
   let row = null;

@@ -156,6 +156,8 @@ test("config differences name the changed fields: settings, flags, the prompt se
     [
       { current: "rag", field: "surface", other: "agent" },
       { current: "a", field: "chatModel", other: "b" },
+      // The rag surface plans nothing; an agent report without the field ran the rules.
+      { current: null, field: "plannerRollout", other: "deterministic (not recorded)" },
     ]
   );
   assert.deepEqual(describeAnswerRunDifferences({ chunking, git, surface: "rag" }, { chunking, git, surface: "rag" }), []);
@@ -178,6 +180,34 @@ test("config differences name the changed fields: settings, flags, the prompt se
   assert.deepEqual(describeAnswerRunDifferences({ surface: "rag" }, { surface: "rag" }), [
     { current: null, field: "git.sha", other: null },
   ]);
+});
+
+test("the agent's planner rollout is compared, and an agent report without it counts as deterministic, not recorded", () => {
+  const git = { dirty: false, sha: "abc" };
+  const agent = (plannerRollout) => ({ git, surface: "agent", ...(plannerRollout ? { plannerRollout } : {}) });
+
+  // Today's default against an agent report from before the field.
+  assert.deepEqual(describeAnswerRunDifferences(agent("llm"), agent()), [
+    { current: "llm", field: "plannerRollout", other: "deterministic (not recorded)" },
+  ]);
+  assert.deepEqual(describeAnswerRunDifferences(agent("llm"), agent("deterministic")), [
+    { current: "llm", field: "plannerRollout", other: "deterministic" },
+  ]);
+  assert.deepEqual(describeAnswerRunDifferences(agent("llm"), agent("llm")), []);
+  // Two reports from before the field planned alike.
+  assert.deepEqual(describeAnswerRunDifferences(agent(), agent()), []);
+  // On the rag surface nothing plans: a report without the field reads as null.
+  assert.deepEqual(describeAnswerRunDifferences({ git, plannerRollout: null, surface: "rag" }, { git, surface: "rag" }), []);
+
+  const markdown = formatComparisonMarkdown(
+    compareQasperAnswerReports(
+      { config: { ...THIS_RUN.config, plannerRollout: "llm" }, rows: THIS_RUN.rows },
+      OTHER_RUN,
+      { against: "other.json", iterations: 50 }
+    )
+  ).join("\n");
+
+  assert.match(markdown, /plannerRollout \("llm" vs "deterministic \(not recorded\)"\)/);
 });
 
 test("rows the comparison cannot pair honestly are refused", () => {
@@ -510,12 +540,24 @@ test("the comparison command prints the paired table for two saved reports", asy
     assert.match(result.stdout, /Paired against `other.json` \(6 questions, 4 answerable, out of 7 rows here and 7 there; this run minus that one, bootstrap 95% CI, 200 iterations, seed 5\)/);
     assert.match(result.stdout, /\| Answer rate \(answerable questions\) \| 4 \| \+0\.25 \|/);
     assert.match(result.stdout, /flipped: \+2 answered \/ −1 abstained/);
+    // Both agent reports predate the planner field: they planned alike.
+    assert.doesNotMatch(result.stdout, /plannerRollout/);
 
     const compare = (...args) =>
       runNode([path.join(serverDirectory, "evaluation", "compare-qasper-answer-reports.mjs"), ...args], {
         cwd: serverDirectory,
         env: {},
       });
+
+    // A run planned by the model against one from before the field.
+    await writeFile(
+      thisPath,
+      JSON.stringify({ ...THIS_RUN, config: { ...THIS_RUN.config, plannerRollout: "llm" }, reportType: "qasper-answers" })
+    );
+    assert.match(
+      compare(thisPath, otherPath, "--iterations", "50").stdout,
+      /plannerRollout \("llm" vs "deterministic \(not recorded\)"\)/
+    );
 
     // Seed 0 is a seed; a fraction or a negative number is refused, not replaced.
     assert.match(compare(thisPath, otherPath, "--iterations", "50", "--seed", "0").stdout, /50 iterations, seed 0\)/);

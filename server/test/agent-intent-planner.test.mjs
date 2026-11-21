@@ -14,6 +14,7 @@ import {
   getIntentPlanner,
   getSelectedSkillIds,
 } from "../evaluation/chat-response-contract.js";
+import { createCircuitOpenError } from "../rag/model-call-guard.js";
 import {
   configureOpenAIProvider,
   resetOpenAIProvider,
@@ -127,6 +128,28 @@ test("invalid intent planner output falls back to deterministic candidates", asy
   assert.equal(result.planner.requestedPlannerId, "llm");
   assert.equal(result.planner.selectedPlannerId, "deterministic");
   assert.match(result.planner.fallbackReason, /shell_tool/);
+});
+
+test("a failed planner model call is recorded as a code, never its upstream message", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const result = await createAgentIntentPlanResult({
+    docIds: ["contract-1"],
+    plannerAdapter: {
+      id: "llm",
+      selectIntentPlan: async () => {
+        throw createCircuitOpenError("http://10.0.0.5:11434/v1|qwen2.5:7b");
+      },
+    },
+    question: "Review this contract for risks and key terms.",
+  });
+
+  assert.equal(result.planner.status, "fallback");
+  assert.equal(result.planner.selectedPlannerId, "deterministic");
+  // fallbackReason goes out in the /chat trace; the log is the operator's.
+  assert.equal(result.planner.fallbackReason, "planner_call_failed");
+  const logged = warn.mock.calls.map((call) => call.arguments.join(" ")).join("\n");
+  assert.match(logged, /\[planner\] A planner model call failed \(Error CIRCUIT_OPEN\)/);
+  assert.doesNotMatch(`${JSON.stringify(result.planner)}\n${logged}`, /10\.0\.0\.5|qwen|cooldown/);
 });
 
 test("LLM intent planner parses a provider-selected candidate id", async () => {

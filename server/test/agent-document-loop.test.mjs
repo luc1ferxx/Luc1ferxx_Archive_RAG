@@ -309,6 +309,37 @@ test("a fact question over two documents passes on one cited document, in the pr
   assert.equal(followUpHarness.executionLoop.stoppedReason, "follow_up_resolved");
 });
 
+test("comparison wording in its inflections asks for two documents, and technical terms on those stems do not", () => {
+  const intentOf = (question, docIds = ["doc-1", "doc-2"]) =>
+    buildAgentRetrievalPlan({ docIds, plan: { mode: "document" }, question }).intent;
+
+  for (const question of [
+    "How do the two remote work policies differ?",
+    "What remote allowance does the 2025 policy give compared with the 2024 one?",
+    "What are the similarities of the two remote work policies?",
+    "Which conflicting approval rules do the policies have?",
+    "两份远程办公政策有哪些异同？",
+    "2025 年的政策相比 2024 年有什么变化？",
+    "两份政策有哪些共同点？",
+    "两份远程办公政策有什么不一样？",
+    "比起 2024 年的政策，2025 年的政策有什么变化？",
+  ]) {
+    assert.equal(intentOf(question), "comparison", question);
+  }
+
+  for (const question of [
+    "Does the model use contrastive learning?",
+    "Is differential privacy applied to the training data?",
+    "What is stored in the engine compartment?",
+    "What similarity function does ColBERT use?",
+    "余弦相似度是怎么计算的？",
+  ]) {
+    assert.equal(intentOf(question), "fact", question);
+  }
+
+  assert.equal(intentOf("How do the two remote work policies differ?", ["doc-1"]), "fact");
+});
+
 test("a comparison answer that cites one document still gets the follow-up", async () => {
   const harness = createLoopHarness({
     docIds: ["doc-1", "doc-2"],

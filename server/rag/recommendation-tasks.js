@@ -23,9 +23,10 @@ export { RECOMMENDATION_TASK_TYPE };
 export const createRecommendationTaskService = ({
   taskService = createTaskService(),
 } = {}) => {
-  const upsertRecommendationTask = async ({ accessScope = {}, provider, task }) =>
+  const upsertRecommendationTask = async ({ accessScope = {}, expected, provider, task }) =>
     taskService.upsertTask({
       accessScope,
+      expected,
       task: {
         provider: buildRecommendationProvider(provider),
         type: RECOMMENDATION_TASK_TYPE,
@@ -70,10 +71,16 @@ export const createRecommendationTaskService = ({
     return deleted;
   };
 
+  // A search's result, written only while the document's task is still the
+  // one the search read before it called the provider (`searchedTask`, null
+  // for none), in the same step as the write (tasks.js matchesExpectedTask):
+  // an import confirmed meanwhile, queued, running or already ended, or
+  // another search's result is never overwritten. Null when it was refused.
   const recordSuggestionResult = async ({
     accessScope = {},
     provider,
     runnerId = "",
+    searchedTask = null,
     suggestion = {},
   } = {}) => {
     const document = suggestion.document ?? {};
@@ -93,6 +100,10 @@ export const createRecommendationTaskService = ({
 
     return upsertRecommendationTask({
       accessScope,
+      expected: searchedTask && {
+        status: searchedTask.status,
+        updatedAt: searchedTask.updatedAt,
+      },
       provider,
       task: {
         id: buildRecommendationTaskId({
@@ -124,6 +135,11 @@ export const createRecommendationTaskService = ({
             : TASK_STATUSES.completed,
         }),
         label: `${providerLabel} recommendations`,
+        // The offer a confirmation of this task is checked against
+        // (arxiv-selection-token.js); internal, never in a public task.
+        payload: hasImportableRecommendations
+          ? { selectionToken: suggestion.selectionToken }
+          : null,
         requiredUserAction: hasImportableRecommendations ? "confirm_import" : "",
         result: {
           paperIds: papers.map((paper) => normalizeRecommendationTaskText(paper.arxivId ?? paper.id)),
@@ -368,6 +384,11 @@ export const createRecommendationTaskService = ({
           status === TASK_STATUSES.waitingForUser
             ? `${providerLabel} recommendations`
             : `${providerLabel} import`,
+        // The papers left (not selected, or failed) are a new offer to confirm.
+        payload:
+          remainingCount > 0 && remainingSuggestion?.selectionToken
+            ? { selectionToken: remainingSuggestion.selectionToken }
+            : null,
         requiredUserAction:
           status === TASK_STATUSES.waitingForUser ? "confirm_import" : "",
         result: {

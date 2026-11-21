@@ -427,6 +427,35 @@ test("in-memory task store list() returns the complete set for limit \"all\"", a
   assert.equal(completeViaService.tasks.length, 250);
 });
 
+test("an upsert given the task as the caller read it writes only while the stored one is still that task", async () => {
+  let second = 0;
+  const taskService = createTaskService({
+    taskStore: createInMemoryTaskStore({
+      now: () => `2026-06-13T00:00:0${second++}.000Z`,
+    }),
+  });
+  const write = (status, expected) =>
+    taskService.upsertTask({ expected, task: { id: "task-1", status, type: "external_recommendation" } });
+
+  // Read none: written while there is none, refused once there is one.
+  const read = await write(TASK_STATUSES.waitingForUser, null);
+
+  assert.equal(read.status, TASK_STATUSES.waitingForUser);
+  assert.equal(await write(TASK_STATUSES.completed, null), null);
+
+  // Read one: refused after another write changed it, written while it is
+  // unchanged, and written again once the task is gone.
+  await write(TASK_STATUSES.queued);
+  assert.equal(await write(TASK_STATUSES.completed, read), null);
+  assert.equal((await taskService.getTask({ taskId: "task-1" })).status, TASK_STATUSES.queued);
+
+  const current = await taskService.getTask({ taskId: "task-1" });
+
+  assert.equal((await write(TASK_STATUSES.completed, current)).status, TASK_STATUSES.completed);
+  await taskService.deleteTask({ taskId: "task-1" });
+  assert.equal((await write(TASK_STATUSES.waitingForUser, current)).status, TASK_STATUSES.waitingForUser);
+});
+
 test("task normalization rejects incomplete tasks and defaults unknown statuses", () => {
   assert.equal(
     normalizeTask({

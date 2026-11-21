@@ -56,7 +56,7 @@ import {
 } from "./remote-retrieval.js";
 import { decodeWireValue, encodeWireValue } from "./wire.js";
 
-// The retrieval tier (ARCHIVE_RAG_ROLE=retrieval, retrieval-service.mjs).
+// The retrieval tier (`ARCHIVE_RAG_ROLE=retrieval node server.js`).
 //
 // Three internal endpoints run the document RAG path's retrieval
 // (document-rag-execution.js *InProcess functions: query embedding, dense and

@@ -134,6 +134,8 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 RAG_SHARED_STATE=redis docker compose --profile app --profile shared-state up -d
 ```
 
+- 多个单体实例之间，下面"给某一层加副本"里 agent 层和 api 层的限制同样成立：每个实例启动时都做启动恢复，会把别的实例正在跑的 run 转人工；api 层那一条列出的进程内状态每个实例各一份。向量库只用 pgvector（见下面的"异步入库"）。
+
 ### 异步入库（可选）
 
 ```bash
@@ -142,7 +144,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 
 - 上传在校验后立即返回 202，解析、向量化和写索引由 worker 完成。默认每个 API 进程同时运行 worker（每进程 2 个任务）。
 - 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、`RAG_DOCUMENT_FORMATS`、Office 文件的 `RAG_OFFICE_*` 和 `RAG_XLSX_MAX_CELLS` 上限、上传目录；这几个格式设置不合法时 worker 拒绝启动），只跑 worker、不监听端口。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务不会同时交给两个 worker。
-- 跨进程入库需要共享的向量库（pgvector 或 qdrant）。`VECTOR_STORE_PROVIDER=local` 的索引在每个进程自己的内存和文件里：独立 worker 拒绝启动，API 进程忽略 `RAG_INGEST_WORKER_ENABLED=false`、在本进程运行 worker 并打印错误。没有 PostgreSQL 时队列在 API 进程内存里，同样只由本进程处理。
+- 跨进程入库要用 pgvector。`VECTOR_STORE_PROVIDER=local` 的索引在每个进程自己的内存和文件里：独立 worker 拒绝启动，API 进程忽略 `RAG_INGEST_WORKER_ENABLED=false`、在本进程运行 worker 并打印错误。Qdrant 的稀疏词表（词的编号和 BM25 统计）也在每个进程里，只随本进程自己的写入更新：独立 worker 入库后，API 进程的稀疏检索仍按旧的编号打分，直到重启；这个组合目前既不拒绝也不警告。没有 PostgreSQL 时队列在 API 进程内存里，同样只由本进程处理。
 - 每个运行 worker 的进程额外保持一个不走连接池的 PostgreSQL 连接，用来 `LISTEN` 新任务的通知，算连接数时要算上。它必须直连数据库或经过会话池：PgBouncer 事务池下收不到 `NOTIFY`，worker 退回每 `RAG_INGEST_WORKER_POLL_MS` 轮询一次。
 - 多实例部署时，每个实例按请求租户从 PostgreSQL 重读文档注册表（`GET /documents`、每个 `/chat` 开头、arXiv 查重），删除前按 id 重读，所以别的实例上传或删除的文档在这里立即可见；代价是每个 `/chat` 多一次按租户列出文档的查询。这对 `sync` 和 `async` 都成立。
 - 停机：收到 SIGTERM 或 SIGINT 后停止领取新任务，给运行中的任务 5 秒；没完成的归还队列（不计入尝试次数），其他 worker 可以立即接手。进程被强制结束时，任务在租约过期后由其他 worker 重试。
@@ -196,14 +198,13 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 | `retrieval` | `PORT`，否则 5002 | 按调用方的租户（行级安全）做查询 embedding、稠密 + 稀疏检索、融合、重排。只接受内部签名身份。 | 模型网关 |
 | `model-gateway` | `MODEL_GATEWAY_PORT`，否则 `PORT`，否则 5003 | OpenAI 兼容的模型服务：重试、退避、切换备用模型、并发上限、熔断、用量计量、按 workspace 的配额，并在多个上游副本之间分配请求。 | chat、embedding、重排的上游 |
 
-- `retrieval` 和 `model-gateway` 也有单独的入口：`node retrieval-service.mjs`、`node model-gateway.mjs`。两种启动方式做同样的启动检查；用 `node server.js` 启动时，停机有 `SERVICE_SHUTDOWN_GRACE_MS` 的上限，单独入口没有。
 - 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，状态码都不需要身份（检索层和模型网关的完整报告要内部身份，见下）；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
 - 检索层的 `GET /health`、`GET /ready` 和模型网关的 `GET /health` 对谁都返回同样的状态码，但完整报告（检索层：向量库、索引版本、query adapter、拓扑和密钥 id；网关：每个上游副本的在途数、熔断状态、配额设置和密钥 id）只给带有效内部身份 token 的请求：audience 是这一层，issuer 在 `SERVICE_CALL_POLICY` 允许探测这一层的列表里，系统 token 也算，按 `requireServiceIdentity` 的规则校验（请求绑定、防重放）。其他调用方（包括容器健康检查）只拿到 `{status}`。要看细节，用 service client 签名请求（`createServiceClient({ audience }).request({ path: "/health", system: true })`）。`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
 
 ### 前提
 
 - **一个 PostgreSQL**：所有层用同一个 `POSTGRES_DATABASE_URL`。文档、分块、运行记录、任务、审计和入库队列都在里面，公网入口上传的文档靠它对检索层可见。内存存储不能跨层使用，拓扑检查不会发现这种配置。
-- **共享的向量库**：`pgvector`（默认）或 `qdrant`。检索层拒绝 `VECTOR_STORE_PROVIDER=local` 和 standalone 模式。
+- **共享的向量库**：`pgvector`（默认）。检索层拒绝 `VECTOR_STORE_PROVIDER=local` 和 standalone 模式。`qdrant` 不拒绝，但拆分后入库和检索不在同一个进程，它的稀疏分数会对不上（见下面"给某一层加副本"的"向量库"）：`api`、`agent`、`retrieval` 角色和设了 `AGENT_SERVICE_URL` 或 `RETRIEVAL_SERVICE_URL` 的 `all` 配了 `qdrant` 时，启动时的拓扑检查打警告。
 - **内部身份**：二选一（`INTERNAL_SERVICE_AUTH`，详见下面的"内部身份与密钥"）：
   - `hmac`（默认）：所有层设同一个 `INTERNAL_SERVICE_KEYS`。生成一个：
 
@@ -243,7 +244,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 
 - **检索层**：在另一个端口（或另一台机器）再起一个 `retrieval` 进程，然后把它加进调用方的地址列表，例如 `RETRIEVAL_SERVICE_URL=http://127.0.0.1:5002,http://127.0.0.1:5012`，再重启调用方。没有服务发现，副本列表只从环境变量读。
 - **agent 层**：只跑一个。每个 agent 进程启动时都做启动恢复，它分不出存储里"运行中"的 run 是中断了还是另一个 agent 正在跑，会把别的 agent 正在跑的 run 转人工。重叠的滚动重启（新 agent 起来时旧的还在跑）也一样：先停旧的，再起新的。`AGENT_SERVICE_URL` 列了多个地址时启动会打警告。要支持多副本，得先给 run 加归属、租约和心跳，写入时拒绝旧执行者。
-- **api 层**：只跑一个。arXiv 选择 token 的签名密钥只在本进程里，换一个实例（或重启）就验不过；上传认领按进程 PID 判断，多个 api 共享上传目录时会误判；按 IP 限流每个进程各算。
+- **api 层**：只跑一个。保存的 arXiv 推荐（recommendation snapshot）只在本进程内存里，换一个实例（或重启）就没有了，从它直接导入（`POST /documents/:docId/arxiv/import`）也随之被拒，返回 409 提示重新查询（检索后在 task 上确认的导入对照 task 里存的 token，由 agent 层执行，不受影响；导入剩下的候选按确认的那份 token 算出，存回 task，结果和单体部署一样）。agent 层执行的导入不会更新 api 层保存的推荐：它仍列出已导入的论文，从它再导入时这些论文按已索引跳过；上传认领按进程 PID 判断，多个 api 共享上传目录时会误判；按 IP 限流每个进程各算。
 - **向量库**：拆分部署只用 pgvector。Qdrant 的稀疏词表存在进程内，入库和检索不在同一进程时可能对不上。
 - **模型网关**：同样起多个网关进程，列进 `MODEL_GATEWAY_URL`。多个网关副本要共享并发上限、熔断和配额计数，设 `RAG_SHARED_STATE=redis`；不设时每个网关进程各算各的。
 - **推理后端（embedding、重排）**：在网关上列多个上游，例如 `MODEL_GATEWAY_EMBEDDING_UPSTREAMS=http://gpu-a:11434/v1,http://gpu-b:11434/v1`、`MODEL_GATEWAY_RERANK_UPSTREAMS=http://r1:8081/rerank,http://r2:8081/rerank`。网关选进行中请求最少的健康副本，每个副本有自己的并发上限和熔断；连接被拒或熔断打开时立即换下一个副本。
@@ -258,7 +259,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 
   ```bash
   export INTERNAL_SERVICE_KEYS="k1:<32 个字符以上的密钥>"
-  docker compose -f docker-compose.yml -f compose.services.yml up -d --build --scale agent=2
+  docker compose -f docker-compose.yml -f compose.services.yml up -d --build
   ```
 
   改用 `ed25519`：
@@ -271,9 +272,10 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
   - 内部身份只从 shell 读取，文件里没有默认值。`INTERNAL_SERVICE_SIGNING_KEY_API`、`_AGENT`、`_RETRIEVAL` 分别只映射到对应服务的 `INTERNAL_SERVICE_SIGNING_KEY`；`INTERNAL_SERVICE_TRUSTED_KEYS` 所有服务共用。
   - 缺密钥时 compose 不会在解析阶段报错，而是容器启动时拓扑校验拒绝启动、进程退出，`restart: unless-stopped` 会一直重启它。看到某个层反复重启，先查 `docker compose logs <服务>`。
   - 这几项变量也可能从 `server/.env` 流进各个层（`env_file`）：`INTERNAL_SERVICE_SIGNING_KEY_ID`、`INTERNAL_SERVICE_ISSUER`、`INTERNAL_SERVICE_REQUEST_BINDING`、`INTERNAL_SERVICE_REPLAY_CACHE`；model-gateway 服务没有覆盖 `INTERNAL_SERVICE_SIGNING_KEY`，`server/.env` 里如果有这个值会被网关继承。不要在 `server/.env` 里放私钥。
-  - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。多个 api 副本要把 `ARCHIVE_RAG_API_PORTS` 设成端口范围（例如 `5001-5003`），或者自己在前面放负载均衡。
+  - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。api 只跑一个容器（见上面的"给某一层加副本"），`ARCHIVE_RAG_API_PORTS` 只用来换宿主机端口。
   - api 的端口和基础文件里的端口一样绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`），各层的数据库地址用同一个 `POSTGRES_PASSWORD`，见上面的"端口与网络暴露"。
-  - `--scale` 起的副本共用一个 DNS 名（例如 `http://agent:5001`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。
+  - `--scale` 起的副本共用一个 DNS 名（例如 `--scale retrieval=2` 的 `http://retrieval:5002`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。只有检索层和模型网关能这样扩，api 和 agent 各跑一个。
+  - `--scale agent=2` 时 `AGENT_SERVICE_URL=http://agent:5001` 仍只有一个地址，启动时的拓扑检查看不出来。api 的 `/health` 每次都解析这个主机名（最多等 250 毫秒，同一个名字同时只解析一次；解析器更慢时这次不报）：同一协议族解析出多个地址时，`checks.agentService` 报 `warning`（`warnings: ["several_agents_behind_one_name"]`，启动时的健康摘要里是 `agentService=warning`）。一个 IPv4 加一个 IPv6 地址算一台主机。前面放了负载均衡（或 Kubernetes 的 ClusterIP Service）、只解析出一个地址时查不出来；反过来，负载均衡本身解析出多个地址时（例如跨多个可用区的云负载均衡、DNS 轮询），后面即使只有一个 agent 也会报，这时以负载均衡的目标数为准。
   - 这个文件还没有真正构建和启动过，只用 `docker compose config` 校验过解析，由 `test/deployment-contract.test.mjs` 固定。
 - 仓库里没有 Kubernetes 清单。
 

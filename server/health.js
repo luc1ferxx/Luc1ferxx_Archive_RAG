@@ -1,5 +1,7 @@
+import { lookup as lookupHostAddresses } from "dns/promises";
 import { constants as fsConstants } from "fs";
 import { access, mkdir } from "fs/promises";
+import { isIP } from "net";
 
 import { isJwtSecretTooShort } from "./auth-jwt.js";
 import {
@@ -1604,11 +1606,54 @@ const probeAgentReplica = async ({ env, url }) => {
   }
 };
 
+// How many hosts answer on one agent URL's name. Compose `--scale agent=2`
+// puts two agents behind http://agent:5001, which the topology's count of
+// AGENT_SERVICE_URL entries sees as one. Several addresses of one family are
+// several hosts; one IPv4 plus one IPv6 address is one dual-stack host
+// (localhost, a container on an IPv6 network). A load balancer in front of
+// several agents answers on one address and stays unseen.
+//
+// /ready waits on the count, so the resolver gets AGENT_HOST_LOOKUP_TIMEOUT_MS
+// (Docker's DNS and CoreDNS answer in milliseconds) and a slower answer counts
+// nothing this time. The race cannot cancel getaddrinfo, which keeps a libuv
+// thread until it ends, so a name has one lookup at a time.
+const AGENT_HOST_LOOKUP_TIMEOUT_MS = 250;
+const agentHostLookups = new Map();
+
+const countAgentHosts = async (host, lookup) => {
+  if (isIP(host)) {
+    return 1;
+  }
+
+  if (!agentHostLookups.has(host)) {
+    agentHostLookups.set(
+      host,
+      lookup(host, { all: true })
+        .catch(() => [])
+        .finally(() => agentHostLookups.delete(host))
+    );
+  }
+
+  let timer;
+  const addresses = await Promise.race([
+    agentHostLookups.get(host),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, AGENT_HOST_LOOKUP_TIMEOUT_MS, []);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  const byFamily = { 4: new Set(), 6: new Set() };
+
+  addresses.forEach(({ address, family }) => byFamily[family]?.add(address));
+
+  return Math.max(byFamily[4].size, byFamily[6].size);
+};
+
 // The edge forwards chat, tasks and agent runs to AGENT_SERVICE_URL. An agent
 // tier that does not answer is a warning, not an error: /ready stays 200, so
 // the edge stays in rotation and keeps serving documents and uploads while the
-// agent routes answer 503.
-const checkAgentServiceHealth = async ({ env = process.env } = {}) => {
+// agent routes answer 503. So is a name that several agents answer on (only
+// one agent is supported; see validateServiceTopology).
+const checkAgentServiceHealth = async ({ env = process.env, lookup = lookupHostAddresses } = {}) => {
   let urls;
 
   try {
@@ -1619,18 +1664,32 @@ const checkAgentServiceHealth = async ({ env = process.env } = {}) => {
     });
   }
 
-  const replicas = await Promise.all(urls.map((url) => probeAgentReplica({ env, url })));
+  const hosts = [...new Set(urls.map((url) => new URL(url).hostname.replace(/^\[(.*)\]$/u, "$1")))];
+  const [replicas, hostCounts] = await Promise.all([
+    Promise.all(urls.map((url) => probeAgentReplica({ env, url }))),
+    Promise.all(hosts.map((host) => countAgentHosts(host, lookup))),
+  ]);
   const reachableReplicas = replicas.filter((replica) => replica.ok).length;
+  const sharedNames = hosts
+    .map((host, index) => ({ count: hostCounts[index], host }))
+    .filter(({ count }) => count > 1)
+    .map(
+      ({ count, host }) =>
+        `AGENT_SERVICE_URL's host ${host} resolves to ${count} addresses, so ${count} agents may answer there (for example Compose --scale agent=${count}); run a single agent: each agent's startup recovery treats every running run as interrupted, another agent's live ones included.`
+    );
 
-  return buildEntry(reachableReplicas === replicas.length ? "ok" : "warning", {
-    message:
+  return buildEntry(reachableReplicas === replicas.length && sharedNames.length === 0 ? "ok" : "warning", {
+    message: [
       reachableReplicas === replicas.length
         ? "Every agent replica answered."
         : reachableReplicas > 0
           ? `${replicas.length - reachableReplicas} of ${replicas.length} agent replicas did not answer; the others take the agent routes.`
           : "No agent replica answered: chat, tasks and agent runs answer 503 until one does; documents and uploads keep working.",
+      ...sharedNames,
+    ].join(" "),
     reachableReplicas,
     replicas,
+    ...(sharedNames.length > 0 ? { warnings: ["several_agents_behind_one_name"] } : {}),
   });
 };
 
@@ -1645,7 +1704,8 @@ const buildServiceTopologyEntry = (topology) =>
     warnings: topology.warnings,
   });
 
-export const buildHealthReport = async ({ env = process.env } = {}) => {
+// `lookup` (dns.promises.lookup's signature) is for tests.
+export const buildHealthReport = async ({ env = process.env, lookup } = {}) => {
   const { remoteAgent, split, tiers, topology } = describeHealthTiers(env);
   // Where documents are chunked: uploads and their ingestion (api), arXiv
   // imports (agent). Only there do the chunking entry and the index
@@ -1673,7 +1733,7 @@ export const buildHealthReport = async ({ env = process.env } = {}) => {
   const names = Object.keys(runnable).filter((name) => selected.has(name));
   const [results, agentService, readReplicas] = await Promise.all([
     Promise.all(names.map((name) => runnable[name]())),
-    remoteAgent ? checkAgentServiceHealth({ env }) : null,
+    remoteAgent ? checkAgentServiceHealth({ env, lookup }) : null,
     // Only where searches run, and only with POSTGRES_READ_REPLICA_URLS set:
     // lag, a down replica or an open circuit is a warning (the primary takes
     // the reads), never an error that takes the process out of rotation.

@@ -357,7 +357,7 @@ test("role api starts the public edge: documents answer while agent routes wait 
   });
 });
 
-// What the retrieval tier's own entry point requires: PostgreSQL and a shared
+// What role retrieval requires: PostgreSQL and a shared
 // vector store. The URL is never connected to; the health report is a stub.
 const RETRIEVAL_PREFLIGHT_ENVIRONMENT = {
   ARCHIVE_RAG_ROLE: "retrieval",
@@ -409,7 +409,7 @@ test("retrieval and model-gateway roles load their own app lazily", async () => 
   assert.deepEqual(stops, ["stopped"]);
   assert.deepEqual(exitSpy.codes, [0]);
 
-  // The gateway's pools close as model-gateway.mjs closes them.
+  // The gateway's finalizers close its upstream pools.
   const closed = [];
   const gateway = await createRoleApp({
     loaders: {
@@ -450,7 +450,7 @@ test("retrieval and model-gateway roles load their own app lazily", async () => 
   );
 });
 
-test("role retrieval through server.js refuses what retrieval-service.mjs refuses", async () => {
+test("role retrieval refuses a document registry or an index of its own", async () => {
   const created = [];
   let health = { checks: { vectorStore: { status: "error" } }, status: "error" };
   const loaders = {
@@ -471,7 +471,7 @@ test("role retrieval through server.js refuses what retrieval-service.mjs refuse
   // A per-process index would be searched as a stale copy.
   await assert.rejects(
     startRetrieval({ VECTOR_STORE_PROVIDER: "local" }),
-    /Role retrieval cannot start: VECTOR_STORE_PROVIDER=local/u
+    /Role retrieval cannot start: VECTOR_STORE_PROVIDER=local .*; use pgvector\.$/u
   );
   // Without PostgreSQL the document registry would be this process's own.
   await assert.rejects(
@@ -579,7 +579,7 @@ test("a split role writes its tenant usage before a span flush that does not set
   }
 });
 
-test("each role listens where its own entry point would", async () => {
+test("each role listens on its own default port", async () => {
   assert.equal(resolveRolePort("api", {}), 5001);
   assert.equal(resolveRolePort("agent", { PORT: "7001" }), 7001);
   assert.equal(resolveRolePort("retrieval", {}), 5002);
@@ -741,7 +741,7 @@ test("an index version's chunk profile is compared with this process's only on t
       );
     }
 
-    // The dedicated retrieval service's own report (retrieval-service.mjs).
+    // The retrieval tier's own report (rag/retrieval-service/app.js).
     await withHealthEnvironment({ ARCHIVE_RAG_ROLE: "retrieval", VECTOR_STORE_PROVIDER: "pgvector" }, async () => {
       resetVectorStore();
       invalidateIndexVersionSnapshot();
@@ -809,6 +809,97 @@ test("the edge's health probes every agent replica and never fails on the agent 
       assert.equal(report.checks.agentService.status, "warning");
       assert.equal(report.checks.agentService.replicas[0].code, "SERVICE_TOKEN_UNKNOWN_KEY");
     });
+  } finally {
+    agentServer.closeAllConnections();
+    await new Promise((resolve) => agentServer.close(resolve));
+  }
+});
+
+test("the edge's health warns when one AGENT_SERVICE_URL name resolves to several agents", async () => {
+  const agentApp = await withEnvironment({ ARCHIVE_RAG_ROLE: "agent" }, () =>
+    createAgentApp(appOptions())
+  );
+  const agentServer = createServer(agentApp);
+
+  await new Promise((resolve) => agentServer.listen(0, "127.0.0.1", resolve));
+
+  const { port } = agentServer.address();
+  const looked = [];
+  // A stubbed resolver: `localhost` is the one name the probe itself reaches
+  // without a DNS server.
+  const resolver = (answer) => async (host, options) => {
+    looked.push([host, options]);
+    return answer();
+  };
+  const agentServiceEntry = (lookup, agentUrl = `http://localhost:${port}`) =>
+    withHealthEnvironment({ AGENT_SERVICE_URL: agentUrl, ARCHIVE_RAG_ROLE: "api" }, async () =>
+      (await buildHealthReport({ lookup })).checks.agentService
+    );
+
+  try {
+    // Compose `--scale agent=2`: one service name, two containers.
+    const scaled = await agentServiceEntry(
+      resolver(() => [
+        { address: "172.18.0.5", family: 4 },
+        { address: "172.18.0.6", family: 4 },
+      ])
+    );
+
+    assert.equal(scaled.status, "warning");
+    assert.deepEqual(scaled.warnings, ["several_agents_behind_one_name"]);
+    assert.match(scaled.message, /AGENT_SERVICE_URL's host localhost resolves to 2 addresses/u);
+    assert.match(scaled.message, /run a single agent/u);
+    assert.deepEqual(looked, [["localhost", { all: true }]]);
+
+    // One dual-stack host, and a name the resolver cannot answer for: no warning.
+    for (const answer of [
+      () => [
+        { address: "127.0.0.1", family: 4 },
+        { address: "::1", family: 6 },
+      ],
+      () => {
+        throw Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+      },
+    ]) {
+      const entry = await agentServiceEntry(resolver(answer));
+
+      assert.equal("warnings" in entry, false);
+      assert.doesNotMatch(entry.message, /resolves to/u);
+    }
+
+    // An address is not looked up.
+    looked.length = 0;
+    assert.equal((await agentServiceEntry(resolver(() => []), `http://127.0.0.1:${port}`)).status, "ok");
+    assert.deepEqual(looked, []);
+
+    // A resolver that hangs: each report gives up on it after a short wait,
+    // not the probe timeout, and starts no second lookup of the name while
+    // the first one still holds its thread.
+    let answerHung;
+    const hung = new Promise((resolve) => {
+      answerHung = resolve;
+    });
+
+    try {
+      for (let report = 0; report < 2; report += 1) {
+        const started = performance.now();
+
+        assert.equal((await agentServiceEntry(resolver(() => hung))).status, "ok");
+        assert.ok(performance.now() - started < 1000, "the report waited on the resolver");
+      }
+
+      assert.equal(looked.length, 1);
+    } finally {
+      answerHung([
+        { address: "172.18.0.5", family: 4 },
+        { address: "172.18.0.6", family: 4 },
+      ]);
+    }
+
+    // Once that lookup has ended, the next report looks the name up again.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await agentServiceEntry(resolver(() => hung))).status, "warning");
+    assert.equal(looked.length, 2);
   } finally {
     agentServer.closeAllConnections();
     await new Promise((resolve) => agentServer.close(resolve));

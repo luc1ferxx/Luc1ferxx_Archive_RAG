@@ -1051,7 +1051,7 @@ export const resolveApiIngestWorkerPlan = ({
   if (vectorStoreProvider === "local") {
     if (!workerEnabled) {
       plan.errors.push(
-        "[ingest-worker] RAG_INGEST_WORKER_ENABLED=false is ignored: VECTOR_STORE_PROVIDER=local keeps the index in each process's own files, so chunks a dedicated worker wrote would never be searched here (and `npm run worker:ingest` refuses to start). Use pgvector or qdrant to ingest in other processes."
+        "[ingest-worker] RAG_INGEST_WORKER_ENABLED=false is ignored: VECTOR_STORE_PROVIDER=local keeps the index in each process's own files, so chunks a dedicated worker wrote would never be searched here (and `npm run worker:ingest` refuses to start). Use pgvector to ingest in other processes."
       );
     }
 
@@ -1072,9 +1072,11 @@ export const resolveApiIngestWorkerPlan = ({
 // delete or clear made elsewhere. These read the store before a lookup or a
 // listing answers from a stale map: /chat refreshes the tenant before its run
 // (app-services.js buildChatResponse), GET /documents and the arXiv duplicate
-// check refresh the tenant, and DELETE /documents/:docId and GET
-// /ingest-jobs/:jobId read the named document. A file-backed or in-memory
-// registry has one writer (this process), so they do nothing there.
+// check refresh the tenant, and DELETE /documents/:docId, GET
+// /ingest-jobs/:jobId and an arXiv import's confirmation (the agent tier of a
+// split deployment confirms what the api uploaded) read the named document.
+// A file-backed or in-memory registry has one writer (this process), so they
+// do nothing there.
 //
 // Whether the registry is shared comes from the ragService when it says so
 // (the app's ragService does; a test stub can), otherwise from the registry

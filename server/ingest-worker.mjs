@@ -61,7 +61,7 @@ export const runIngestWorkerProcess = async ({
 
   if (getVectorStoreProviderConfigStatus().provider === "local") {
     logger.error(
-      "[ingest-worker] A dedicated ingest worker needs a shared vector store (pgvector or qdrant): VECTOR_STORE_PROVIDER=local keeps the index in each process, so the API processes would never search what this worker indexed."
+      "[ingest-worker] A dedicated ingest worker needs a shared vector store (pgvector): VECTOR_STORE_PROVIDER=local keeps the index in each process, so the API processes would never search what this worker indexed."
     );
     return null;
   }

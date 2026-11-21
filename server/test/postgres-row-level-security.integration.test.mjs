@@ -267,6 +267,64 @@ if (!adminDatabaseUrl) {
     assert.equal(ownTask?.id, "alice-1");
   });
 
+  // An arXiv search's write (`expected` on upsert, tasks.js
+  // matchesExpectedTask) on the real ON CONFLICT ... DO UPDATE ... WHERE.
+  test("a conditional task upsert lands only while the row is the task the caller read", async () => {
+    let second = 0;
+    const store = modules.taskStore.createPostgresTaskStore({
+      // A second between writes, so a stale read never matches by chance.
+      now: () => new Date(Date.UTC(2026, 10, 20, 0, 0, second++)).toISOString(),
+      runMigrations: async () => ({ status: "ok" }),
+    });
+    const task = {
+      id: "alice-conditional",
+      status: "waiting_for_user",
+      summary: "first",
+      type: "external_recommendation",
+    };
+    const summaryNow = async () => (await store.get({ accessScope: ALICE, taskId: task.id })).summary;
+
+    try {
+      await asAlice(async () => {
+        await store.upsert({ accessScope: ALICE, task });
+
+        // The caller read no task, and there is one now.
+        assert.equal(
+          await store.upsert({ accessScope: ALICE, expected: null, task: { ...task, summary: "late" } }),
+          null
+        );
+        assert.equal(await summaryNow(), "first");
+
+        // As read back after updateTaskSnapshot wrote the row.
+        await store.transition({
+          accessScope: ALICE,
+          expectedStatuses: ["waiting_for_user"],
+          patch: { summary: "transitioned" },
+          taskId: task.id,
+        });
+
+        const read = await store.get({ accessScope: ALICE, taskId: task.id });
+        const expected = { status: read.status, updatedAt: read.updatedAt };
+
+        assert.equal(read.summary, "transitioned");
+        assert.equal(
+          (await store.upsert({ accessScope: ALICE, expected, task: { ...task, summary: "applied" } }))?.summary,
+          "applied"
+        );
+        // Read before that write: stale now.
+        assert.equal(
+          await store.upsert({ accessScope: ALICE, expected, task: { ...task, summary: "stale" } }),
+          null
+        );
+        assert.equal(await summaryNow(), "applied");
+      });
+    } finally {
+      // The suite counts each tenant's task rows.
+      await modules.postgres.queryPostgres(`DELETE FROM ${tables.tasks} WHERE task_id = $1`, [task.id]);
+      await modules.postgres.queryPostgres(`DELETE FROM ${tables.taskEvents} WHERE task_id = $1`, [task.id]);
+    }
+  });
+
   test("transactions carry the tenant, raw sessions refuse it, and nothing leaks onto the pool", async () => {
     const inTransaction = await asAlice(() =>
       modules.postgres.withPostgresTransaction(async (client) => {

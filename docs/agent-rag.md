@@ -27,7 +27,7 @@ flowchart LR
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
-- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。
+- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。范围里有多份文档时，问题含 compare/differ/similar/contrast/conflict 的各种词形（differs、compared、similarities 等，不含 differential、contrastive、similarity 这类术语）、versus/same/between/across，或区别、差异、不一样、异同、相比、比起、相似（不含相似度）、类似、共同点等中文词，就算对比问题；所以只问一份文档的对比式问题（如 "How do RAG-Sequence and RAG-Token differ...?"）在多文档范围里也要两份文档的引用。回答走哪条路线另由 `query-router.js` 自己的词表决定（只认 compare、difference、different、similar、区别、差异、对比等整词），只靠上面这些新词形判成对比的问题仍走 QA 路线：从全局 top-K 检索（带对比画像的检索 query），不按文档分别取证据、也不用对比 prompt，只是按对比问题核对引用，答案只引用一份文档时先补检索，补检索的答案仍只引用一份就转成澄清。两份词表要不要合并（合并后这些问题按文档取证据，但只问一份文档的这类问题也会走对比路线）留给负责人决定。
 - Gap analysis 把 unsupported claim 转成 focused retrieval plan。
 - Budget guard 阻止无限 follow-up。
 - Finalizer 删除或降级仍未被 citation 支持的 claim。
@@ -211,7 +211,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
 | 普通问答 | `src/components/ChatComponent.jsx` 经 `streamChatAnswer` 调 `/chat/stream`（进度和校验过的草稿实时推送，最终结果与 `/chat` 相同） | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
-| arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和签名候选，task service 记录等待确认 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
+| arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和候选 token，task service 记录等待确认并存下这份候选 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
 | Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 判断能否自动续跑：只续跑图，guarded graph 需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills`；其余中断的 run 转人工。replay safety matrix 决定哪类失败 step 能由人重试，并给出原因码 | 符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时转人工；`agent-run-step-executor.js` 只执行审批后的 capability step 和人工重试的失败 step，不恢复中断的 step |
 | 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
@@ -230,7 +230,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
 | `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |
 | `server/rag/arxiv-client.js` | arXiv Atom API 查询、feed 解析和 PDF 下载校验。 |
-| `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile keyphrases 生成 arXiv topic、过滤私密实体和内部术语、对候选做 relevance check、返回签名候选 token，保存 recommendation snapshot，并提供 arXiv recommendation import runner。 |
+| `server/rag/arxiv-enrichment.js` | 从已上传文档的本地 profile keyphrases 生成 arXiv topic、过滤私密实体和内部术语、对候选做 relevance check、返回候选 token，保存 recommendation snapshot，并提供 arXiv recommendation import runner。 |
 | `server/rag/arxiv-importer.js` | 按 topic 或已确认候选列表下载 arXiv PDF，导入前按 arXiv ID / PDF URL / title hash 去重，写入 `profile.source` provenance，通过现有文档 ingestion 写入索引，并通过可选 progress callback 汇报 per-paper 状态。 |
 | `server/rag/arxiv-identity.js` | 规范化 arXiv ID、PDF URL 和 title hash，集中提供导入去重所需的身份匹配规则。 |
 | `server/rag/external-query-policy.js` | 外部工具调用前的 query policy，统一清理 candidate query 中的私密实体、内部项目码和泛化敏感词；返回可记录的 sanitized query、redacted removed terms、risk flags 和 allow/deny 状态。 |
@@ -260,7 +260,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/llmops-metrics.js` | 定义 LLMOps metric event contract，统一记录 completion、embedding 和 cross-encoder rerank 的 operation、stage、status、latency、公开 `modelRoute`、输入/输出规模、token usage、估算成本、latency SLO 和 policy signals，不记录 prompt 原文或 secret。 |
 | `server/rag/llmops-policy.js` | 集中处理 LLMOps annotation、alert 和 per-event budget verdict；`enforcementMode: "block"` 可在模型调用前按已知 usage/cost estimate 拦截，避免把预算判断散进各个 provider 调用点。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
-| `server/rag/arxiv-selection-token.js` | 对文档级 arXiv 推荐结果签名和验签，确保确认导入的是用户看到的候选。 |
+| `server/rag/arxiv-selection-token.js` | 把文档级 arXiv 推荐结果编码成 token（不签名），确认时要求它和服务端存下的那份（task 的内部 payload，或本进程的 snapshot）一致（不一致返回 409，提示重新查询），确保确认导入的是服务端从 arXiv 拿到、用户看到的候选；任何读得到 task store 的进程都能校验，split 部署的 api 层检索、agent 层确认也成立。 |
 | `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
 | `server/rag/agent-retrieval-queries.js` | 检索查询模板（按意图和阶段）。会话记忆改写了问题时，`chat()` 用同一套模板按改写后的问题重建主计划的查询，意图和 topK 不变；follow-up 计划不重建。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |
@@ -366,7 +366,7 @@ Durable agent task 支持一个 task-level `research_task` / dossier 流程。�
 Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Center 可以展示目标、已完成 step、等待用户动作和最终交付状态：
 
 - 公开计划步骤写在 task `items`，沿用通用 task item contract：`id`、`status`、`label`、`summary`、`result`、`error`。
-- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`overBudgetIterations`（超出 `maxIterations` 的轮数，只有已批准的审批会让任务多跑；Run Center 显示为 "x/max runs · N after approval"）、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
+- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`overBudgetIterations`（超出 `maxIterations` 的轮数，只有已批准的审批会让任务多跑；Run Center 显示为 "x/max runs · N after approval"；这个字段出现之前保存的计划没有它，Run Center 按超出 `maxIterations` 的轮数补算，不会显示 "2/1 runs"）、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
 - 生成逻辑集中在 `server/rag/agent-goal-plan.js`；`agent-tasks.js` 只在 create / run / resume 边界调用它。
 - Goal plan 是展示和恢复控制合同，不作为 citation、claim support 或答案证据。
 
@@ -376,7 +376,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 `task.result.goalCompletion` / `task.result.goalPlan.goalCompletion` 是目标完成自检 contract。它统一检查：task 是否 terminal completed、公开 plan steps 是否全部 completed、working memory 是否还有 unresolved gaps / unsupported claims、已请求 deliverables 是否全部 created、是否仍有 pending approval / user action、research task phases 是否完成，以及 workflow lifecycle contract 是否已记录。这个自检不重新执行 RAG，不把 evidence 写入 task memory；iteration 里只保存 working-memory 计数，供批准产物后仍可验证目标状态。
 
-前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
+前端 `src/components/AgentRunCenter.jsx` 只消费 `/tasks` 返回的公开 task contract（没有 task 时，`src/App.jsx` 改给它当前回答的 `agentTrace` 步骤）。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。审批被拒绝或失败后，回答保留原来的 trace，该轮的 run 却已往前走（`useAgentRunActions` 刷新了 `agentRunStatus` 和 `agentRunSteps`）：trace 里等待用户的步骤（`needs_input`）因此显示 run 中同 id step 的状态；该 step 仍为 `paused` 时，run 还在等待用户（`waiting_for_user`）就不变，run 已不再等待就显示 run 的状态（`cancelRun` 取消等待中的 run 只改 run 的状态，step 留在 `paused`，于是显示为 `canceled`），不再算作未完成；trace 的其他状态在服务端已是终态。
 
 ## Prompt 注入防护
 
@@ -415,7 +415,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 - 调用失败、输出无法解析、缺某条 verdict，一律保留词法结论。
 - 结论按 claim 文本 + 证据全文缓存，自检和 finalizer 对同一条 claim 只调一次。
 
-生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、research 的最终校验和流式草稿仍只用词法规则；批准后执行的 Web 搜索直接用 Capability 返回的文本作答，不做 claim 校验。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条；评审回复里解析不出任何结论时记 `status: "failed"` 并带 `error`（回复开头最多 200 字符），只漏了部分 claim 时 `missingVerdictCount` 记漏掉的条数，两种情况词法结论都保持不变；升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
+生效位置是文档问答的自检（`evaluateDocumentEvidenceWithJudge`，决定答还是澄清）和文档模式的 finalizer；custom Skill、research 的最终校验和流式草稿仍只用词法规则；批准后执行的 Web 搜索直接用 Capability 返回的文本作答，不做 claim 校验。trace 的 `claimSupport.judge` 记录复核了几条、升级了几条、被数字规则挡下几条；评审调用抛错或回复里解析不出任何结论时记 `status: "failed"`，`error` 只是固定代码（调用抛错为 `call_failed`，回复里没有结论为 `no_verdict`），不带回复原文（可能引用文档内容）也不带上游错误信息，因为这份摘要随 `/chat` 的 trace 返回给客户端；服务端日志对每种失败只记一次警告，只写错误名和错误代码。只漏了部分 claim 时 `missingVerdictCount` 记漏掉的条数，两种情况词法结论都保持不变；升级的 claim 保留 `lexicalMissingAnchors` 和评审理由。校准结果见 [evaluation.md](evaluation.md)。
 
 ## 流式进度与校验过的答案草稿
 
@@ -468,6 +468,8 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 - `agentTrace`：plan、query planner、skill chain、document RAG、self-check、gap analysis、follow-up、finalizer 等步骤。
 - `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget（含 `budget.run` 的 token、成本、时长用量）、error 和 working memory。
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
+
+规划器回退的原因（`/chat` 里 intent / execution planner 的 `fallbackReason`，run 记录里 DAG 规划器的 `fallbackReason` 和 replanner 的 `reason`）保留规划器自己的解析、校验错误信息；模型调用失败（错误带 `code` 或 `status`：超时、HTTP 或网关错误、熔断）只记 `planner_call_failed`，不带上游错误信息，因为它可能带上游回复或模型端点；服务端日志对每种失败只记一次错误名和错误代码。
 
 前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
 

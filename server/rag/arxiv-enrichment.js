@@ -23,6 +23,7 @@ import {
   buildArxivRecommendationSuggestion,
   buildBlockedArxivSuggestion,
 } from "./arxiv-recommendation-builder.js";
+import { loadDocumentsIngestedElsewhere } from "./ingest-worker.js";
 import { createRecommendationTaskService } from "./recommendation-tasks.js";
 import { TASK_STATUSES } from "./tasks.js";
 
@@ -129,6 +130,63 @@ export const createArxivEnrichmentService = ({
     }
   };
 
+  // A search's result: the document's task, then its snapshot. The search
+  // read the task (`searchedTask`) before it called arXiv, which can take
+  // seconds, so what it publishes is checked now. The task store refuses the
+  // task once it is no longer the one read (an import confirmed meanwhile,
+  // queued, running or already ended, is never overwritten), and nothing is
+  // published for a document the caller's scope no longer has.
+  const publishSuggestion = async ({ accessScope, docId, searchedTask, suggestion }) => {
+    getScopedDocument({ accessScope, docId, ragService });
+
+    let task;
+
+    try {
+      task = await recommendationTaskService?.recordSuggestionResult?.({
+        accessScope,
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
+        searchedTask,
+        suggestion,
+      });
+    } catch {
+      // A failing task store does not fail the search: it answers without
+      // its task, as it always has.
+      task = undefined;
+    }
+
+    if (task === null) {
+      const error = new Error(
+        "This document's arXiv recommendations changed during the search: an import was confirmed or another search finished first."
+      );
+      error.status = 409;
+      throw error;
+    }
+
+    // A document deleted while the task was written: its cascade may have run
+    // before the write landed, so the task goes here. A delete after this
+    // check finds the task in its own cascade, and the snapshot below is
+    // saved in this same tick.
+    try {
+      getScopedDocument({ accessScope, docId, ragService });
+    } catch (error) {
+      await recordRecommendationTask("deleteDocumentTasks", {
+        accessScope,
+        docIds: [docId],
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+      });
+      throw error;
+    }
+
+    return {
+      ...recommendationSnapshotService.save({
+        accessScope,
+        suggestion,
+      }),
+      task: task ?? null,
+    };
+  };
+
   const suggestForDocument = async ({
     accessScope = {},
     docId,
@@ -157,8 +215,10 @@ export const createArxivEnrichmentService = ({
     }
 
     if (!isExternalQueryPolicyAllowed(queryPolicy)) {
-      const savedSuggestion = recommendationSnapshotService.save({
+      return publishSuggestion({
         accessScope,
+        docId,
+        searchedTask: currentTask,
         suggestion: buildBlockedArxivSuggestion({
           document,
           queryPolicy,
@@ -166,18 +226,6 @@ export const createArxivEnrichmentService = ({
           topic,
         }),
       });
-
-      const task = await recordRecommendationTask("recordSuggestionResult", {
-        accessScope,
-        provider: ARXIV_RECOMMENDATION_PROVIDER,
-        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
-        suggestion: savedSuggestion,
-      });
-
-      return {
-        ...savedSuggestion,
-        task,
-      };
     }
 
     const searchedPapers = await arxivService.search({
@@ -190,44 +238,39 @@ export const createArxivEnrichmentService = ({
       topic,
     });
 
-    const suggestion = buildArxivRecommendationSuggestion({
+    return publishSuggestion({
+      accessScope,
       docId,
-      document,
-      papers,
-      queryPolicy,
-      requestedMaxResults,
-      searchedPaperCount: searchedPapers.length,
-      selectionTokenService,
-      topic,
+      searchedTask: currentTask,
+      suggestion: buildArxivRecommendationSuggestion({
+        docId,
+        document,
+        papers,
+        queryPolicy,
+        requestedMaxResults,
+        searchedPaperCount: searchedPapers.length,
+        selectionTokenService,
+        topic,
+      }),
     });
-
-    const savedSuggestion = recommendationSnapshotService.save({
-      accessScope,
-      suggestion,
-    });
-
-    const task = await recordRecommendationTask("recordSuggestionResult", {
-      accessScope,
-      provider: ARXIV_RECOMMENDATION_PROVIDER,
-      runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
-      suggestion: savedSuggestion,
-    });
-
-    return {
-      ...savedSuggestion,
-      task,
-    };
   };
 
-  const prepareImportForDocument = ({
+  const prepareImportForDocument = async ({
     accessScope = {},
     docId,
+    issuedSelectionToken,
     selectedArxivIds,
     selectionToken,
   } = {}) => {
+    // With a PostgreSQL registry another process may have registered the
+    // document since this one last read it: the agent tier of a split
+    // deployment confirms what the api tier uploaded and searched.
+    await loadDocumentsIngestedElsewhere(ragService, [docId]);
+
     return prepareArxivImportForDocument({
       accessScope,
       docId,
+      issuedSelectionToken,
       resolveTopicForDocument,
       selectedArxivIds,
       selectionToken,
@@ -240,6 +283,7 @@ export const createArxivEnrichmentService = ({
     assertClaimActive,
     docId,
     document,
+    offerSelectionToken,
     onPaperProgress,
     queryPolicy,
     relevantSelectedPapers = [],
@@ -329,6 +373,7 @@ export const createArxivEnrichmentService = ({
       accessScope,
       docId,
       importResult,
+      offerSelectionToken,
       selectedPapers: relevantSelectedPapers,
       topic,
     });
@@ -367,13 +412,24 @@ export const createArxivEnrichmentService = ({
     };
   };
 
+  // A direct import (POST /documents/:docId/arxiv/import, the
+  // recommendation.import_selected Capability) confirms the saved suggestion,
+  // which this process holds.
   const importForDocument = async (options = {}) => {
-    const preparedImport = prepareImportForDocument(options);
+    const issuedSelectionToken = recommendationSnapshotService.getSelectionToken({
+      accessScope: options.accessScope,
+      docId: options.docId,
+    });
+    const preparedImport = await prepareImportForDocument({
+      ...options,
+      issuedSelectionToken,
+    });
 
     const { task, ...result } = await executePreparedImport({
       ...preparedImport,
       accessScope: options.accessScope,
       assertClaimActive: options.assertClaimActive,
+      offerSelectionToken: issuedSelectionToken,
       signal: options.signal,
     });
 
@@ -439,6 +495,8 @@ export const createArxivEnrichmentService = ({
             }
           );
         },
+        // The offer this job's confirmation was checked against.
+        offerSelectionToken: payload.selectionToken,
         queryPolicy,
         relevantSelectedPapers: selectedPapers,
         signal,
@@ -447,9 +505,11 @@ export const createArxivEnrichmentService = ({
         topic,
       });
 
+      // The task's end state carries the offer of the papers left, if any
+      // (recordImportCompleted), in place of this job's payload.
       return {
-        ...(result.task ?? {}),
         payload: null,
+        ...(result.task ?? {}),
       };
     } catch (error) {
       if (isCooperativeAbortError(error, signal)) {
@@ -460,13 +520,16 @@ export const createArxivEnrichmentService = ({
         throw error;
       }
 
+      // A failed import can be confirmed again from the offer it came from.
+      const offer = payload.selectionToken ? { selectionToken: payload.selectionToken } : null;
+
       await patchTask?.({
-        payload: null,
+        payload: offer,
       });
 
       return error.task ?? {
         error: error instanceof Error ? error.message : String(error),
-        payload: null,
+        payload: offer,
         status: "failed",
       };
     }
@@ -485,9 +548,18 @@ export const createArxivEnrichmentService = ({
       throw error;
     }
 
-    const preparedImport = prepareImportForDocument({
+    // `task` is the stored task (the job orchestrator reads it with its
+    // internal payload), which holds the offer this confirms: the token is
+    // checked against it on whichever tier runs this. The orchestrator's
+    // transition to queued then checks the status only, so a search that
+    // publishes in between (the registry read below) is replaced by this
+    // import of the older offer, which the server issued too; that search's
+    // token then gets the 409.
+    const issuedSelectionToken = task.payload?.selectionToken;
+    const preparedImport = await prepareImportForDocument({
       accessScope,
       docId: payload.docId ?? task.subject?.id,
+      issuedSelectionToken,
       selectedArxivIds: payload.selectedArxivIds,
       selectionToken: payload.selectionToken,
     });
@@ -501,6 +573,7 @@ export const createArxivEnrichmentService = ({
           docId: preparedImport.docId,
           queryPolicy: preparedImport.queryPolicy,
           selectedPapers: preparedImport.relevantSelectedPapers,
+          selectionToken: issuedSelectionToken,
           topic: preparedImport.topic,
         },
         provider: ARXIV_RECOMMENDATION_PROVIDER,

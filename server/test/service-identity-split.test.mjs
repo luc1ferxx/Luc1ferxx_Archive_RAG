@@ -20,7 +20,7 @@ import { signServiceToken } from "../rag/service-identity.js";
 //                        \______________________/^
 //
 // api, agent and model-gateway start through `node server.js` with their
-// role, the retrieval tier from its app factory (its entry points refuse the
+// role, the retrieval tier from its app factory (role retrieval refuses the
 // local vector store this test uses to need no database). The gateway holds
 // no private key at all. Request binding and the replay cache run at their
 // ed25519 defaults (required, on). Taps in this process forward each internal

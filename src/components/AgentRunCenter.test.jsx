@@ -140,7 +140,12 @@ describe("AgentRunCenter", () => {
     ).toBeInTheDocument();
   });
 
-  test("counts runs within the budget and shows approval runs past it separately", () => {
+  // A plan stored before the server counted the runs past the budget
+  // (2db8b776) has no overBudgetIterations.
+  test.each([
+    ["a current plan", { overBudgetIterations: 1 }],
+    ["a plan stored before overBudgetIterations", {}],
+  ])("counts runs within the budget and shows approval runs past it separately: %s", (_, planFields) => {
     render(
       <AgentRunCenter
         tasks={[
@@ -154,7 +159,7 @@ describe("AgentRunCenter", () => {
                 counts: { completed: 3, total: 3 },
                 goal: "Search the web for the launch date.",
                 maxIterations: 1,
-                overBudgetIterations: 1,
+                ...planFields,
                 status: "completed",
               },
             },

@@ -489,7 +489,7 @@ npm run observability:report -- --json
 - execution planner requested/selected provider 分布
 - LLM planner selected count、fallback count 和 fallback rate
 - LLMOps operation / model route 指标、token/cost/SLO 聚合，以及 annotation、alert、budget status counts
-- planner fallback reason top list
+- planner fallback reason top list（模型调用失败统一记为 `planner_call_failed`，2026-11-20 起）
 - 各 `agentMode` 下的 planner `stepIds` 分布
 - recovery/replay 指标：recoverable run 数、manual recovery 数、auto replay 成功率（自动续跑的图）、step retry 次数、step replay failure 数，并在同一区块展示 planner fallback count 和 skill graph 的 planned / executed / rejected whole（整张图被拒，不算 fallback，没有门槛，阶段 12 起）/ fallback / reused node / replan 计数
 - query planner intent、retrieval query 数量和 topK profile
@@ -618,7 +618,7 @@ npm run rerank:cross-encoder:local
 | --- | --- |
 | `npm run eval:retrieval-comparison -- --embedding-provider openai` | 四组检索配置用真实 embedding 对比（任何 OpenAI 兼容端点，含 Ollama），每个 split 带配对 bootstrap 95% CI；报告写到 `latest-retrieval-comparison-openai.*`，不覆盖确定性报告。加 `--rerank-provider cross-encoder --cross-encoder-endpoint <url>` 测神经 reranker（服务见 `npm run rerank:cross-encoder:docker`）。 |
 | `npm run corpus:qasper -- --input <qasper-dev-v0.3.json> [--papers 20\|all] [--granularity paragraph\|section]` | 把 QASPER（allenai.org/data/qasper，CC BY 4.0，需自行下载解压）转成本仓库语料格式。默认按段落切"页"：摘要是第 1 页，之后每个段落一页并带上所在章节的标题，证据精确到被标注的段落；`section` 按整节切，长节里任何一块都算命中，召回会偏高。保留所有标注者的答案（官方 F1 取最优），不可回答题成为 `shouldAbstain`，证据只在图表里的题跳过。输出默认在已忽略的 `evaluation/generated/`。 |
-| `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024 npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`。2026-11-10 起答案侧评测固定温度 0 加输出上限 1024（见“答案温度 0 重测：带输出上限”）；之前的答案报告除 24 题的机制检查（`latest-qasper-answers-cap-smoke`）外都是端点默认 1.0、无上限，`compare:qasper-answers` 会列出这两项差别。 |
+| `RAG_ANSWER_TEMPERATURE=0 RAG_ANSWER_MAX_TOKENS=1024 npm run eval:qasper-answers [-- --cases 200] [--surface rag\|agent]` | 在 QASPER 语料上测答案：官方 QASPER 答案 F1（SQuAD 式归一化，取所有标注者中的最优，拒答记为 "Unanswerable"），外加可回答题的拒答率、不可回答题的拒答召回和精度、答案来源里是否含标注的证据段落。不用 LLM 评审。`rag` 走 MCP `archive_ask` 的文档 RAG 答案，`agent` 走 `runAgentRag`，规划和 `/chat` 一样：用 `app-services.js` 给 `/chat` 建的四个规划器（意图、执行、custom Skill 图、replan），由 `AGENT_PLANNER_ROLLOUT` 决定（默认 `llm`：模型规划，模型出错或计划被校验拒绝时回退到规则；`deterministic`：只用规则，没有 replan）。规划器的模型调用也和 `/chat` 一样用端点默认温度、没有输出上限（答案侧的温度 0 和上限 1024 只管写答案的调用），所以两次 `llm` 运行可能规划得不一样。这个变量取值不对，或者环境里还有已删除的 agent 开关（如 `AGENT_SKILL_GRAPH_ROLLOUT=off`），运行在入库之前就停下。这次改动（2026-11-20）之前的 agent 报告没有 `config.plannerRollout`，不管这个变量都用确定性规划器；要复现它们就设 `AGENT_PLANNER_ROLLOUT=deterministic`。agent 面的报告记 `config.plannerRollout`（rag 面为 null），每行的 `planners` 记意图、执行和图规划器是否回退到规则及原因（图规划器另记校验错误码 `fallbackReasonCodes`；没运行的为 null）和图的 replan，汇总 `summary.agentPlanners` 和 .md 报告给每个规划器的回退率和回退原因计数（图被校验拒绝时错误信息里有模型起的节点名，所以按错误码计，没有错误码才按错误信息），以及被触发的 replan（有节点失败、被跳过或没拿到证据）在几行、用上的在几行，没触发的 `replan_not_triggered` 没问 replanner，不计；`compare:qasper-answers` 把没有这一项的旧 agent 报告记作 `deterministic (not recorded)` 并列出差别。2026-11-10 起答案侧评测固定温度 0 加输出上限 1024（见“答案温度 0 重测：带输出上限”）；之前的答案报告除 24 题的机制检查（`latest-qasper-answers-cap-smoke`）外都是端点默认 1.0、无上限，`compare:qasper-answers` 会列出这两项差别。 |
 | `npm run probe:output-limit [-- [--max-tokens 8] [--json]]` | 检查模型端点认不认答案的输出上限。经应用自己的对话客户端发一个请求，端点、模型、字段都按答案调用的设置，要的回复远长于上限 8 token。结果按退出码区分：回复因长度停下、端点报的 token 数不超过上限，算认（0）；端点报的 token 数超过上限，算不认（1）；参数或设置不对（不发请求）、被模型调用保护拒绝、请求失败、回复在上限内自己结束，或端点没报 token 数，都算没有结论（2）。打印结论、结束原因、token 数、上限、字段、模型和端点主机。端点返回错误时，还打印 HTTP 状态和端点的报错（去掉 key 和 URL 里的账号密码，截到 300 字符）；还没收到回答就出错时，只打印错误名和错误码。从不打印回复和 key。真实模型 CI 在答题前跑它。见“答案输出上限”。 |
 | `npm run eval:judge -- --input <answers.json> [--labels <labels.json>]` | LLM 评审：对 `{id, question, answer, referenceAnswer?, evidence?}` 按意思判 correct / partially_correct / incorrect / correct_abstention / wrong_abstention，并判忠实度。给了人工标注就报告一致率和 Cohen's kappa；没有校准过的评审分数不应对外引用。评审走 chat 路由，应把 `OPENAI_CHAT_MODEL` 设成与作答模型不同的模型。 |
 | `npm run label:answers -- --report <答案报告.json> --corpus <QASPER 语料.json>` | 不调模型。为答案报告里每道作答的题生成人工标注页（自包含 HTML，结论用评审的判定词表，可导出成 `eval:judge --labels` 读的形状）和同一批题的 `eval:judge` 输入。见“默认配置的答案漏斗、延迟和 token”。 |
@@ -815,7 +815,7 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 
 答案评测以前不算区间，文档里的区间都来自一次性脚本；干净的确认样本也是手工在一次性目录里拼的。现在：
 
-- `npm run compare:qasper-answers -- <本次报告.json> <对照报告.json> [--iterations 10000] [--seed 12345]`（`evaluation/compare-qasper-answer-reports.mjs`）按题号配对两份 `qasper-answers` 报告，输出本次减对照的配对 bootstrap 95% 区间：官方 F1（全部题）、可答题 F1（拒答记 0）、答题率（只算可答题）、不可答被回答（只算不可答题）、引用证据召回和上下文证据召回（两份都记录了的可答题；旧报告的 `evidenceHit` 只配 `contextEvidenceHit`），以及可答题翻转数 +N / −M；还列出两份报告配置上的差异或无法确认一致的地方（surface、模型、评审、答题率开关、prompt 集的哈希、切块设置、提交号；旧报告没记提交号就算"无法确认"）。两份报告没有共同题号时直接报错，题号重复或缺失、f1 不是数的行也拒绝。`eval:qasper-answers -- --compare <对照报告.json>` 把同一块写进报告的 `comparison`。
+- `npm run compare:qasper-answers -- <本次报告.json> <对照报告.json> [--iterations 10000] [--seed 12345]`（`evaluation/compare-qasper-answer-reports.mjs`）按题号配对两份 `qasper-answers` 报告，输出本次减对照的配对 bootstrap 95% 区间：官方 F1（全部题）、可答题 F1（拒答记 0）、答题率（只算可答题）、不可答被回答（只算不可答题）、引用证据召回和上下文证据召回（两份都记录了的可答题；旧报告的 `evidenceHit` 只配 `contextEvidenceHit`），以及可答题翻转数 +N / −M；还列出两份报告配置上的差异或无法确认一致的地方（surface、模型、评审、答题率开关、agent 规划器 `plannerRollout`、prompt 集的哈希、切块设置、提交号；旧报告没记提交号就算"无法确认"，没记规划器的旧 agent 报告记作 `deterministic (not recorded)`）。两份报告没有共同题号时直接报错，题号重复或缺失、f1 不是数的行也拒绝。`eval:qasper-answers -- --compare <对照报告.json>` 把同一块写进报告的 `comparison`。
 - `--exclude-report <报告.json>` 在抽样前去掉那份报告跑过的题，报告的 `config.excluded` 记录对照报告名、生成时间、提交号、去掉的题数和题号摘要；可以重复给多份（2026-10-29 起），去掉的是各份题目的并集，`config.excluded` 这时在 `reports` 里逐份记录（每份单独会去掉多少），旁边是并集的题数和题号摘要，只给一份时形状不变；`--list-cases` 打印样本（题数、可答 / 不可答、论文数、题号）后退出，不入库、不调模型。
 - 2026-10-29 起答案报告也记录 `config.retrieval`（门控报告 `eval:abstention-gate` 还记 `chunking` 和 `git`），`--compare` 和 `compare:qasper-answers` 多两项配对指标：`answeredBothF1`（两次运行都作答的可答题上的官方 F1，不受作答集合变化的影响）和 `contextCharsBothAnswered`（这些题上模型读到的上下文字符，检索设置的每答成本）。
 - 每行多一个诊断列 `f1DashNormalized`：官方归一化只去 ASCII 标点，连字符会消失、长短破折号却留在词里，一条写法只差破折号的正确答案记 0 分（见"第二轮"的局限）；这一列先把破折号折成连字符再算，只作诊断，不进汇总也不进判定规则。
@@ -3349,7 +3349,7 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 | 单体 ×7 | 7 | 398.1–407.8 | 78.2 / 100.2 | 同样 7 个进程，比 agent ×4 快 1.56 倍 |
 
 - 判定规则事先定好：某一层扩到 2 副本，吞吐至少 1.5 倍且 3 次的区间不重叠，才算扩了有效。只有瓶颈层（延迟 0 时是 agent，800 ms 时是网关的并发上限）符合。
-- 一台机器上拆分不提高效率：层间 HTTP 和序列化多花约 21% 的 CPU，同样进程数的单体更快。拆分换来的是按层扩容、故障隔离和集中的模型调用管控。
+- 一台机器上拆分不提高效率：层间 HTTP 和序列化多花约 21% 的 CPU，同样进程数的单体更快。拆分换来的是按层扩容、故障隔离和集中的模型调用管控。表里的 agent ×2、×4 只是压测拓扑：部署只支持一个 agent，因为每个 agent 启动时的恢复会把别的 agent 正在跑的 run 转人工（见 [deployment.md](deployment.md#给某一层加副本) 的"给某一层加副本"）。
 - 模型并发上限在单体里按实例计，在拆分里按网关进程计；加 `--with-redis` 时都是一个全局上限，800 ms 那一行的差别会消失。
 - 主机在测量期间有约 2 核的后台负载；最后重跑的 1/1/1/1 对照与第一次的吞吐比为 1.00–1.01，没有漂移。
 

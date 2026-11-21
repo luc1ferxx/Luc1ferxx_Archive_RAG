@@ -1,6 +1,7 @@
 import { normalizePromptDescriptor } from "./prompt-registry.js";
 import { AGENT_SKILL_IDS } from "./skills/registry.js";
 import { getPlannerRolloutMode } from "./agent-planner-rollout.js";
+import { serializePlannerError } from "./agent-intent-validator.js";
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 export const AGENT_EXECUTION_STEP_IDS = {
@@ -77,9 +78,6 @@ const normalizePlannerId = (plannerAdapter) =>
 
 const getStepId = (step) =>
   typeof step === "string" ? normalizeText(step) : normalizeText(step?.id);
-
-const serializePlannerError = (error) =>
-  normalizeText(error instanceof Error ? error.message : error).slice(0, 500);
 
 const buildPlannerSelection = ({
   executionPlan,

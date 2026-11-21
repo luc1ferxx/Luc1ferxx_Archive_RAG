@@ -52,7 +52,7 @@ import { createModelGatewayQuotas } from "./quotas.js";
 import { createUpstreamPool, parseUpstreamUrls } from "./upstream-pool.js";
 import { createModelUsageLedger } from "./usage-ledger.js";
 
-// The model gateway (ARCHIVE_RAG_ROLE=model-gateway, `node model-gateway.mjs`):
+// The model gateway (`ARCHIVE_RAG_ROLE=model-gateway node server.js`):
 // an OpenAI-compatible HTTP service in front of the chat, embedding and rerank
 // backends, so model access scales and is governed in one place.
 //

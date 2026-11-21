@@ -325,7 +325,7 @@ const tierEnvironment = (storage, { role, signingKey, ...rest }) => ({
   ...rest,
 });
 
-// The retrieval tier's entry points refuse VECTOR_STORE_PROVIDER=local (its
+// Role retrieval refuses VECTOR_STORE_PROVIDER=local (its
 // index would be a per-process copy), so the local variant starts it from its
 // app factory, with the metrics listener server.js would add.
 const LOCAL_RETRIEVAL_HARNESS = [

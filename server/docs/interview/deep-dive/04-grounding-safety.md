@@ -630,7 +630,7 @@ qwen2.5:7b 写的对比答案全部被拒，用户看到的是模板文本，可
 - 拒答标记、override 和三个词面开关都测过、没过事先规则，2026-11-20 已删除；讲的时候是"做过、测过、删了"（override 是看着 verify:quality 的失败样例写的，QASPER 上作答 0 次）
 - 只用本地 qwen2.5:7b 验证过，没有 GPT 级模型和生产流量的数据
 - claim memo 的加速是在假模型、短答案上测的，真实长答案没测
-- 多文档范围里的单文档事实题曾被 min(docIds 数, 2) 的引用覆盖要求转成澄清（浏览器冒烟测试里看到的；仓库里的依据是 agent-document-loop.test.mjs 的两份文档事实题用例，在改前的代码上以澄清结束）；2026-11-20 起文档循环只对 comparison 意图要求两份。comparison 看计划或问题里的词，两头都会错：问题里带 between、same、different 这类对比词时仍按对比处理、仍要两份；不带这些词的对比问题（differ、compared、similarities、both policies、2024 or 2025）按事实题处理，引用一份就通过，只答了一边也拦不住；最终自检（skill_chain/custom/research）也仍是 min(docIds 数, 2)
+- 多文档范围里的单文档事实题曾被 min(docIds 数, 2) 的引用覆盖要求转成澄清（浏览器冒烟测试里看到的；仓库里的依据是 agent-document-loop.test.mjs 的两份文档事实题用例，在改前的代码上以澄清结束）；2026-11-20 起文档循环只对 comparison 意图要求两份。comparison 看计划或问题里的词，两头都会错：问题里带 between、same、different 这类对比词时仍按对比处理、仍要两份，2026-11-20 起词表按词干放宽（differ、compared、similarities 等词形和异同、相比、相似、共同点等中文词也算），于是只问一份文档的 "How do RAG-Sequence and RAG-Token differ...?" 在多文档范围里也要两份（仓库评测集和用例的 248 条问题里只有这 2 个问题因此变化，各在两个语料文件里出现一次，共 4 条；trajectory/planner 评测结果不变）；不带这些词的对比问题（both policies、2024 or 2025）按事实题处理，引用一份就通过，只答了一边也拦不住；最终自检（skill_chain/custom/research）也仍是 min(docIds 数, 2)
 - 多子问题只看覆盖率下限；单个问题只答了一部分（比如漏了条款的例外）也可能通过校验
 
 ## 只能当推理讲的内容

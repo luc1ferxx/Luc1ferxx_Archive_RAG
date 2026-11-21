@@ -2629,7 +2629,8 @@ export const getIngestJobOutputsPostgresTable = () => `${getIngestJobsPostgresTa
 // Read by the gateway process, except MODEL_GATEWAY_TIMEOUT_MS, which is the
 // caller's budget for one model call through the gateway.
 
-// Port of `node model-gateway.mjs`: MODEL_GATEWAY_PORT, then PORT, then 5003.
+// Port of the model gateway (ARCHIVE_RAG_ROLE=model-gateway): MODEL_GATEWAY_PORT,
+// then PORT, then 5003.
 // 0 asks the OS for a free port, as PORT=0 does for the other roles
 // (role-server.js resolveRolePort); an empty or invalid value is skipped.
 const toListenPort = (rawValue) => {
@@ -2721,7 +2722,7 @@ export const getServiceShutdownGraceMs = () =>
   });
 // --- End ROLES track ---------------------------------------------------------
 
-// --- RETRIEVAL track: retrieval tier (retrieval-service.mjs) ----------------
+// --- RETRIEVAL track: retrieval tier (ARCHIVE_RAG_ROLE=retrieval) ----------
 // Bounds the retrieval service enforces on one request (a request past one is
 // answered 400 with a stable code before any work), and the budget of one
 // remote retrieval call made by a process whose retrieval runs remotely.

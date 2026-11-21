@@ -8,6 +8,7 @@ import {
   EXECUTION_GRAPH_SKIP_REASONS,
 } from "./agent-execution-graph-runner.js";
 import { normalizeExecutionGraphNodes } from "./agent-dag-planner-adapter.js";
+import { serializePlannerError } from "./agent-intent-validator.js";
 import {
   SKILL_EFFECTS,
   SKILL_VALUE_TYPES,
@@ -81,9 +82,6 @@ const isRecord = (value) =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
-
-const serializeError = (error) =>
-  normalizeText(error instanceof Error ? error.message : error).slice(0, 500);
 
 const getContract = (registry, skillId) => {
   const skill = registry?.get?.(normalizeText(skillId)) ?? null;
@@ -526,7 +524,7 @@ export const createReplanResult = async ({
   try {
     patch = normalizeReplanPatch(await replanAdapter.createPatch(replanContext));
   } catch (error) {
-    return refuse(REPLAN_REASON_CODES.adapterFailed, serializeError(error));
+    return refuse(REPLAN_REASON_CODES.adapterFailed, serializePlannerError(error));
   }
 
   if (patch.addNodes.length === 0 && patch.removeNodeIds.length === 0) {

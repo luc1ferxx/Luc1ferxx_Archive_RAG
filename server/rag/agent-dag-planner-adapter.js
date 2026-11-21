@@ -5,6 +5,7 @@ import {
   createExecutionGraph,
   validateExecutionGraph,
 } from "./agent-execution-graph.js";
+import { serializePlannerError } from "./agent-intent-validator.js";
 import { getPlannerRolloutMode } from "./agent-planner-rollout.js";
 import { buildAgentTaskPlanningContext } from "./agent-task-memory.js";
 import { completePlannerText } from "./langgraph/planner-model.js";
@@ -58,9 +59,6 @@ const isRecord = (value) =>
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
 const clamp = (value, maxLength) => normalizeText(value).slice(0, maxLength);
-
-const serializePlannerError = (error) =>
-  normalizeText(error instanceof Error ? error.message : error).slice(0, 500);
 
 const normalizePlannerId = (plannerAdapter) =>
   normalizeText(plannerAdapter?.id) || "unknown";

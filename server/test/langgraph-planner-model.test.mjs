@@ -43,6 +43,14 @@ import {
 // scenarios see, so key-by-key reruns did not settle. The same pass on the
 // code before the change left every golden as it was.
 //
+// They were rewritten the same way a second time (2026-11-20) when a failed
+// planner model call stopped reaching the /chat trace as its message:
+// serializePlannerError (agent-intent-validator.js) records
+// "planner_call_failed" for an error with a code or status. Only the 20
+// provider-failure and http-failure decision digests changed (each planner's
+// fallbackReason, the replanner's reason), no adapter digest did, and the same
+// pass with that one return giving the message again matched every old digest.
+//
 // The suite also shows which path ran. hooks.mjs sends planner-model.js's
 // import of model.js to a counting stand-in (model-tap.mjs) and reports every
 // @langchain module loaded from outside node_modules, so a call that never
