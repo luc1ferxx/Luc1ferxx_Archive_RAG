@@ -338,7 +338,7 @@ describe("useAgentRunActions after a decision fails", () => {
       status: "canceled",
       steps: [],
     });
-    const { result } = renderWithSession();
+    const { result } = renderWithPendingGate();
 
     await act(async () => {
       await result.current.actions.handleAgentApprovalAction({
