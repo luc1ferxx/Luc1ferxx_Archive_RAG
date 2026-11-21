@@ -270,12 +270,17 @@ export const describeAgentSurfaceAnswer = (body = {}, ragReplies = [], graphEven
  * The four planners /chat runs with, built as createAppServices builds them
  * for buildChatResponse (app-services.js): AGENT_PLANNER_ROLLOUT picks the
  * model (llm, the default) or the rules (deterministic, which has no
- * replanner); a removed value or a typo throws. Imported here, not at the top:
- * app-services.js loads chat.js, whose storage reads RAG_DATA_DIRECTORY at
- * first import.
+ * replanner); a removed value or a typo throws, and so does a removed agent
+ * dial (AGENT_SKILL_GRAPH_ROLLOUT=off and the like), checked first as there:
+ * the agent path would refuse it only at the first question, after the
+ * ingest. Imported here, not at the top: app-services.js loads chat.js, whose
+ * storage reads RAG_DATA_DIRECTORY at first import.
  */
 export const createAgentSurfacePlanners = async () => {
   const appServices = await import("../app-services.js");
+  const { assertAgentRuntimeSupported } = await import("../rag/config.js");
+
+  assertAgentRuntimeSupported();
   const dagPlannerAdapter = appServices.createDagPlannerAdapter();
 
   return {
@@ -379,7 +384,7 @@ const PLANNER_NAMES = ["intent", "execution", "dag"];
 // The agent's planners (summarizeAgentPlanners): how often each fell back to
 // the rules, and why. A reason is planner text, so a pipe in it is escaped.
 export const formatAgentPlanners = (planners, plannerRollout) => [
-  `Agent planners (AGENT_PLANNER_ROLLOUT ${plannerRollout}; a planner that fell back planned with the rules, and a custom-Skill graph rejected whole counts as fallen back; dag counts only the rows that planned a graph). Replans considered in ${planners.replans.considered} rows, applied in ${planners.replans.applied}; not applied by reason: ${
+  `Agent planners (AGENT_PLANNER_ROLLOUT ${plannerRollout}; a planner that fell back planned with the rules, and a custom-Skill graph rejected whole counts as fallen back; dag counts only the rows that planned a graph, and gives an invalid graph's reason as its validation codes). Replans considered in ${planners.replans.considered} rows (a node failed, was skipped or came back without evidence), applied in ${planners.replans.applied}; not applied by reason: ${
     planners.replans.notApplied.map(({ reason, rows }) => `${reason} ${rows}`).join(", ") || "none"
   }.`,
   "",
@@ -564,7 +569,8 @@ const main = async () => {
     answerTemperature: ragConfig.getAnswerTemperature(),
   };
   // The planners /chat runs with, read before anything is ingested too: a
-  // removed or mistyped AGENT_PLANNER_ROLLOUT stops the run here.
+  // removed or mistyped AGENT_PLANNER_ROLLOUT, or a removed agent dial, stops
+  // the run here.
   const plannerRollout = surface === "agent" ? ragConfig.getAgentPlannerRollout() : null;
   const planners = plannerRollout ? await createAgentSurfacePlanners() : null;
   const rows = [];

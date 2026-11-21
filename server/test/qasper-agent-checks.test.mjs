@@ -240,25 +240,26 @@ test("each check records the claim judge's summary, and the summary counts check
 
 // Planners ------------------------------------------------------------------
 
-const withPlannerRollout = async (value, callback) => {
-  const previous = process.env.AGENT_PLANNER_ROLLOUT;
+const withEnv = async (name, value, callback) => {
+  const previous = process.env[name];
 
   if (value === undefined) {
-    delete process.env.AGENT_PLANNER_ROLLOUT;
+    delete process.env[name];
   } else {
-    process.env.AGENT_PLANNER_ROLLOUT = value;
+    process.env[name] = value;
   }
 
   try {
     return await callback();
   } finally {
     if (previous === undefined) {
-      delete process.env.AGENT_PLANNER_ROLLOUT;
+      delete process.env[name];
     } else {
-      process.env.AGENT_PLANNER_ROLLOUT = previous;
+      process.env[name] = previous;
     }
   }
 };
+const withPlannerRollout = (value, callback) => withEnv("AGENT_PLANNER_ROLLOUT", value, callback);
 
 test("the agent surface gets the four planners /chat builds, as AGENT_PLANNER_ROLLOUT picks them", async () => {
   // As createAppServices builds them for buildChatResponse.
@@ -301,6 +302,11 @@ test("the agent surface gets the four planners /chat builds, as AGENT_PLANNER_RO
   await withPlannerRollout("shadow", () =>
     assert.rejects(createAgentSurfacePlanners(), { code: "AGENT_PLANNER_ROLLOUT_REMOVED" })
   );
+  // So does a removed agent dial the runner no longer pins: before the
+  // ingest, not at the first question.
+  await withEnv("AGENT_SKILL_GRAPH_ROLLOUT", "off", () =>
+    assert.rejects(createAgentSurfacePlanners(), { code: "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED" })
+  );
 });
 
 test("an agent question runs with the given planners and records whether each fell back, and why", async () => {
@@ -325,7 +331,7 @@ test("an agent question runs with the given planners and records whether each fe
     listDocuments: () => [{ docId: contract.docId, fileName: contract.fileName }],
   };
   // Planners standing in for the model: each refuses, so each falls back to
-  // the rules; the replanner is asked and proposes nothing.
+  // the rules. The replanner is there but not asked: no node fails.
   const refuse = (message) => async () => {
     throw new Error(message);
   };
@@ -335,15 +341,16 @@ test("an agent question runs with the given planners and records whether each fe
     intentPlannerAdapter: { id: "llm", selectIntentPlan: refuse("intent model unavailable") },
     replanAdapter: { createPatch: async () => ({ addNodes: [], removeNodeIds: [] }), id: "llm_replan" },
   };
-  const ask = (question) =>
+  let asked = 0;
+  const ask = (question, dagPlannerAdapter = planners.dagPlannerAdapter) =>
     askAgentSurface({
       accessScope: { authenticated: false, userId: "", workspaceId: "" },
       docId: contract.docId,
-      planners,
+      planners: { ...planners, dagPlannerAdapter },
       question,
       ragService,
       runAgentRag,
-      sessionId: "qasper-agent-planners",
+      sessionId: `qasper-agent-planners-${(asked += 1)}`,
     });
   const fellBack = (fallbackReason) => ({ fallback: true, fallbackReason, status: "fallback" });
 
@@ -353,12 +360,38 @@ test("an agent question runs with the given planners and records whether each fe
   const review = await ask("Review this contract for risks and key terms.");
 
   assert.deepEqual(review.agent.planners, {
-    dag: fellBack("graph model unavailable"),
+    dag: { ...fellBack("graph model unavailable"), fallbackReasonCodes: [] },
     execution: fellBack("plan model unavailable"),
     intent: fellBack("intent model unavailable"),
     replans: [{ decision: "abstain", reasonCode: "replan_not_triggered" }],
   });
   assert.equal(review.abstained, false);
+
+  // A graph the validator refuses falls back too. Its message names the
+  // model's node ids; the row keeps the validator's codes, by which the
+  // summary counts one failure across rows.
+  const invalid = [];
+
+  for (const suffix of ["a1", "b2"]) {
+    const answer = await ask("Review this contract for risks and key terms.", {
+      createExecutionGraph: async () => ({
+        nodes: [{ dependsOn: [`ghost_${suffix}`], inputBindings: {}, nodeId: `risk_${suffix}`, skillId: "risk_review" }],
+      }),
+      id: DAG_PLANNER_IDS.llm,
+    });
+
+    assert.match(answer.agent.planners.dag.fallbackReason, new RegExp(`Node risk_${suffix} depends on unknown node ghost_${suffix}`));
+    assert.deepEqual(answer.agent.planners.dag.fallbackReasonCodes, [
+      "dangling_dependency",
+      "missing_required_input",
+      "missing_required_input",
+    ]);
+    invalid.push({ id: suffix, planners: answer.agent.planners });
+  }
+
+  assert.deepEqual(summarizeAgentPlanners(invalid).dag.fallbackReasons, [
+    { reason: "dangling_dependency, missing_required_input", rows: 2 },
+  ]);
 
   // A question about the document plans no graph.
   const fact = await ask("How long does the services agreement renew for?");
@@ -405,24 +438,51 @@ test("the summary gives each planner's fallback rate and reasons, and the Markdo
     { id: "q3", planners: { dag: fellBack("graph refused", "rejected"), execution: null, intent: fellBack("intent | refused"), replans: [] } },
     // A row without planners (a report from before the field) counts nothing.
     { id: "q4" },
+    // One invalid graph in two rows, its message naming each row's node ids,
+    // is one reason by its codes. A replan that was not triggered (no node
+    // failed: the replanner was not asked) counts nowhere.
+    ...["risk_a1", "risk_b2"].map((nodeId, index) => ({
+      id: `q${index + 5}`,
+      planners: {
+        dag: {
+          ...fellBack(`Invalid AgentRAG execution graph: dangling_dependency: Node ${nodeId} depends on unknown node ghost.`),
+          fallbackReasonCodes: ["missing_required_input", "dangling_dependency", "missing_required_input"],
+        },
+        execution: selected,
+        intent: selected,
+        replans: [{ decision: "abstain", reasonCode: "replan_not_triggered" }],
+      },
+    })),
   ];
   const summary = summarizeAgentPlanners(rows);
 
   assert.deepEqual(summary, {
-    dag: { fallback: 2, fallbackRate: 1, fallbackReasons: [{ reason: "graph refused", rows: 2 }], ran: 2, selected: 0 },
-    execution: { fallback: 1, fallbackRate: 0.5, fallbackReasons: [{ reason: "plan refused", rows: 1 }], ran: 2, selected: 1 },
-    intent: { fallback: 2, fallbackRate: 0.6667, fallbackReasons: [{ reason: "intent | refused", rows: 2 }], ran: 3, selected: 1 },
+    dag: {
+      fallback: 4,
+      fallbackRate: 1,
+      fallbackReasons: [
+        { reason: "dangling_dependency, missing_required_input", rows: 2 },
+        { reason: "graph refused", rows: 2 },
+      ],
+      ran: 4,
+      selected: 0,
+    },
+    execution: { fallback: 1, fallbackRate: 0.25, fallbackReasons: [{ reason: "plan refused", rows: 1 }], ran: 4, selected: 3 },
+    intent: { fallback: 2, fallbackRate: 0.4, fallbackReasons: [{ reason: "intent | refused", rows: 2 }], ran: 5, selected: 3 },
     replans: { applied: 1, considered: 1, notApplied: [{ reason: "replan_limit_reached", rows: 1 }] },
   });
 
   const markdown = formatAgentPlanners(summary, "llm").join("\n");
 
   assert.match(markdown, /^Agent planners \(AGENT_PLANNER_ROLLOUT llm;/);
-  assert.match(markdown, /Replans considered in 1 rows, applied in 1; not applied by reason: replan_limit_reached 1\./);
-  assert.match(markdown, /\n\| intent \| 3 \| 1 \| 2 \| 0\.6667 \|\n\| execution \| 2 \| 1 \| 1 \| 0\.5 \|\n\| dag \| 2 \| 0 \| 2 \| 1 \|\n/);
+  assert.match(
+    markdown,
+    /Replans considered in 1 rows \(a node failed, was skipped or came back without evidence\), applied in 1; not applied by reason: replan_limit_reached 1\./
+  );
+  assert.match(markdown, /\n\| intent \| 5 \| 3 \| 2 \| 0\.4 \|\n\| execution \| 4 \| 3 \| 1 \| 0\.25 \|\n\| dag \| 4 \| 0 \| 4 \| 1 \|\n/);
   // A pipe in a reason does not split the table's cell.
   assert.match(markdown, /\n\| intent \| intent \\\| refused \| 2 \|\n/);
-  assert.match(markdown, /\n\| dag \| graph refused \| 2 \|\n/);
+  assert.match(markdown, /\n\| dag \| dangling_dependency, missing_required_input \| 2 \|\n\| dag \| graph refused \| 2 \|\n/);
   // A planner that never ran has no rate.
   assert.match(formatAgentPlanners(summarizeAgentPlanners([]), "deterministic").join("\n"), /\| dag \| 0 \| 0 \| 0 \| – \|/);
 });

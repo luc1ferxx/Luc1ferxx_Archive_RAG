@@ -232,10 +232,16 @@ export const summarizeAgentChecks = (rows = []) => {
 
 // What a row keeps of one planner's decision (the planner objects of
 // agent-intent-validator.js, agent-execution-plan.js and
-// agent-dag-planner-adapter.js); null when the planner did not run.
+// agent-dag-planner-adapter.js); null when the planner did not run. The graph
+// planner's also carries the validator's codes (fallbackReasonCodes).
 const describePlannerDecision = (planner) =>
   planner && planner.status !== "not_run"
-    ? { fallback: planner.fallback === true, fallbackReason: planner.fallbackReason ?? null, status: planner.status ?? null }
+    ? {
+        fallback: planner.fallback === true,
+        fallbackReason: planner.fallbackReason ?? null,
+        ...(Array.isArray(planner.fallbackReasonCodes) ? { fallbackReasonCodes: planner.fallbackReasonCodes } : {}),
+        status: planner.status ?? null,
+      }
     : null;
 
 /**
@@ -263,13 +269,20 @@ export const describeAgentPlanners = (body = {}, graphEvents = []) => {
 const countReasons = (pairs) =>
   tally(pairs.map(([reason, rowId]) => [reason ?? "none recorded", rowId])).map(({ key, rows }) => ({ reason: key, rows }));
 
+// An invalid graph's message names the node ids the model chose, so one
+// failure would never add up across rows: its codes, sorted and each once,
+// stand for it. The message counts when there are none (a model error).
+const fallbackReasonKey = ({ fallbackReason, fallbackReasonCodes }) =>
+  fallbackReasonCodes?.length > 0 ? [...new Set(fallbackReasonCodes)].sort().join(", ") : fallbackReason;
+
 /**
  * Over the rows carrying describeAgentPlanners, per planner: the rows it ran
  * in, how many used its own plan (selected) and how many fell back to the
  * rules (a graph rejected whole counts as fallen back: nothing ran in its
- * place), the fallback rate (null when it never ran) and the fallback reasons;
- * then the rows that considered a replan, the rows that applied one and the
- * reason codes of the replans not applied.
+ * place), the fallback rate (null when it never ran) and the fallback reasons
+ * (fallbackReasonKey); then the rows that considered a replan (one was
+ * triggered), the rows that applied one and the reason codes of the triggered
+ * replans not applied.
  */
 export const summarizeAgentPlanners = (rows = []) => {
   const planned = rows.filter((row) => row.planners);
@@ -280,12 +293,19 @@ export const summarizeAgentPlanners = (rows = []) => {
     return {
       fallback: fallbacks.length,
       fallbackRate: decisions.length === 0 ? null : Number((fallbacks.length / decisions.length).toFixed(4)),
-      fallbackReasons: countReasons(fallbacks.map(([decision, rowId]) => [decision.fallbackReason, rowId])),
+      fallbackReasons: countReasons(fallbacks.map(([decision, rowId]) => [fallbackReasonKey(decision), rowId])),
       ran: decisions.length,
       selected: decisions.length - fallbacks.length,
     };
   };
-  const replans = planned.flatMap((row) => (row.planners.replans ?? []).map((replan) => [replan, row.id]));
+  // With a replanner every graph records a replan; replan_not_triggered
+  // (REPLAN_REASON_CODES, rag/agent-replanner.js) means no node failed, was
+  // skipped or came back without evidence, and the replanner was not asked.
+  const replans = planned.flatMap((row) =>
+    (row.planners.replans ?? [])
+      .filter((replan) => replan.reasonCode !== "replan_not_triggered")
+      .map((replan) => [replan, row.id])
+  );
   const applied = replans.filter(([replan]) => replan.decision === "applied");
 
   return {
