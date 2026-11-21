@@ -629,12 +629,30 @@ const App = () => {
     [activeDocuments, selectedSource]
   );
   const currentTrace = currentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
+  const currentRunSteps = currentTurn?.answer?.agentRunSteps ?? EMPTY_ARRAY;
   const currentSources = currentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
+  // A denied or failed approval moves the turn's run on while the answer keeps
+  // its trace (useAgentRunActions): a step that waited for the user shows its
+  // run step's status once that step is no longer paused. Every other trace
+  // status is final on the server.
+  const runCenterTrace = useMemo(
+    () =>
+      currentTrace.map((step) => {
+        const runStep =
+          step.status === "needs_input" &&
+          currentRunSteps.find(({ id }) => id === step.id);
+
+        return runStep && runStep.status !== "paused"
+          ? { ...step, status: runStep.status }
+          : step;
+      }),
+    [currentRunSteps, currentTrace]
+  );
   const hasActiveTaskLog = hasActiveTasks(taskLog);
   let visibleTasks = EMPTY_ARRAY;
 
-  if (currentTrace.length > 0) {
-    visibleTasks = currentTrace;
+  if (runCenterTrace.length > 0) {
+    visibleTasks = runCenterTrace;
   }
 
   if (taskLog.length > 0) {

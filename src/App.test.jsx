@@ -52,6 +52,78 @@ const MOCK_PDF_CITATION = {
   excerpt: "Benefits renew in January.",
 };
 
+// A web search answer waiting for approval, and its run after the decision
+// (server/test/fixtures/graph-goldens/langgraph-routes/v1-capability-approval.json,
+// langgraph-execution-plan-graph/web_approval_deny.json).
+const WEB_APPROVAL_GATE = {
+  approvalObjectHash: `sha256:${"a".repeat(64)}`,
+  capabilityId: "web.search",
+  capabilityLabel: "Web Search",
+  id: "approval:web.search:1.0.0",
+  status: "pending",
+};
+const PLAN_STEP = {
+  id: "1-plan",
+  label: "Plan",
+  status: "completed",
+  summary: "Search the web because no document context is selected.",
+  type: "plan",
+};
+const APPROVAL_STEP = {
+  id: "2-capability_approval_gate",
+  label: "Capability Approval",
+  status: "needs_input",
+  summary: "Web Search requires approval before execution.",
+  type: "capability_approval_gate",
+};
+const WEB_STEP = { id: "web_search:primary", label: "Web Search", type: "web_search" };
+const CAPABILITY_STEP = {
+  id: "capability:web.search:approval:web.search:1.0.0",
+  label: "Web Search",
+  type: "capability_call",
+};
+const WAITING_WEB_ANSWER = {
+  agentAnswer: "Approve Web Search?",
+  agentRunId: "run-1",
+  agentRunStatus: "waiting_for_user",
+  agentRunSteps: [
+    PLAN_STEP,
+    { ...APPROVAL_STEP, status: "paused" },
+    { ...WEB_STEP, status: "paused", summary: "" },
+  ],
+  agentTrace: [PLAN_STEP, APPROVAL_STEP],
+  approvalGates: [WEB_APPROVAL_GATE],
+  ragAnswer: "",
+  ragSources: [],
+};
+// A finished answer: its run steps are its trace steps
+// (server/test/fixtures/graph-goldens/langgraph-routes/v1-chat-document-question.json).
+const DOCUMENT_TRACE = [
+  {
+    id: "1-plan",
+    label: "Plan",
+    status: "completed",
+    summary: "Use selected documents and synthesize a grounded answer.",
+    type: "plan",
+  },
+  {
+    id: "4-self_check",
+    label: "Self Check",
+    status: "failed",
+    summary: "Evidence check needs attention: no citation.",
+    type: "self_check",
+  },
+];
+const DOCUMENT_ANSWER = {
+  agentAnswer: "Mock document run answer",
+  agentRunId: "run-2",
+  agentRunStatus: "completed",
+  agentRunSteps: DOCUMENT_TRACE,
+  agentTrace: DOCUMENT_TRACE,
+  ragAnswer: "",
+  ragSources: [],
+};
+
 vi.mock("axios", () => ({
   default: {
     get: vi.fn(),
@@ -129,6 +201,14 @@ vi.mock("./components/ChatComponent", () => ({ default: (props) => (
       Submit web chat
     </button>
     {[
+      ["Submit approval chat", WAITING_WEB_ANSWER],
+      ["Submit document chat", DOCUMENT_ANSWER],
+    ].map(([label, answer]) => (
+      <button key={label} type="button" onClick={() => props.handleResp?.("Mock run question", answer)}>
+        {label}
+      </button>
+    ))}
+    {[
       ["Submit deck chat", MOCK_DECK_CITATION],
       ["Submit pdf chat", MOCK_PDF_CITATION],
     ].map(([label, citation]) => (
@@ -164,6 +244,17 @@ vi.mock("./components/RenderQA", () => ({ default: (props) => (
       <div key={`${turn.question}-${index}`}>
         {turn.answer?.agentAnswer ?? turn.answer?.ragAnswer}
       </div>
+    ))}
+    {["approve", "deny"].map((action) => (
+      <button
+        key={action}
+        type="button"
+        onClick={() =>
+          props.onApprovalAction?.({ action, gate: WEB_APPROVAL_GATE, turnIndex: 0 })
+        }
+      >
+        {`Mock ${action}`}
+      </button>
     ))}
     <button
       type="button"
@@ -648,6 +739,126 @@ describe("App", () => {
 
     expect(trace.getByText("Web Search")).toBeInTheDocument();
     expect(trace.getByText("Web Search (capability call)")).toBeInTheDocument();
+  });
+
+  // With no task log, the Run Center lists the current answer's trace steps.
+  const openRunCenter = async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+    const runCenter = within(document.querySelector(".archive-tasks-view"));
+
+    await runCenter.findByText(/^\d+ active$/);
+
+    return runCenter;
+  };
+  const cardStatus = (runCenter, label) =>
+    runCenter.getByText(label).closest("article").querySelector("header span").textContent;
+
+  const SERPAPI_REASON = "Web search is not configured: SERPAPI_KEY is not set.";
+
+  // The answer keeps its trace after the decision; the turn's run, refreshed
+  // by useAgentRunActions, has moved on.
+  test.each([
+    {
+      action: "deny",
+      answerText: "Approval denied. The capability was not executed.",
+      outcome: "denied",
+      respond: () =>
+        Promise.resolve({
+          data: {
+            run: {
+              approvalGates: [{ ...WEB_APPROVAL_GATE, status: "denied" }],
+              runId: "run-1",
+              status: "completed",
+              steps: [
+                PLAN_STEP,
+                { ...APPROVAL_STEP, decision: "deny", status: "completed" },
+                { ...WEB_STEP, status: "skipped", summary: "Web Search was skipped because approval was denied." },
+                { ...CAPABILITY_STEP, status: "skipped", summary: "Capability call was skipped because approval was denied." },
+              ],
+            },
+          },
+        }),
+    },
+    {
+      action: "approve",
+      answerText: `The approval did not complete: ${SERPAPI_REASON}`,
+      outcome: "failed",
+      respond: () => Promise.reject({ response: { data: { error: SERPAPI_REASON }, status: 409 } }),
+      runAfter: {
+        approvalGates: [{ ...WEB_APPROVAL_GATE, status: "approved" }],
+        runId: "run-1",
+        status: "failed",
+        steps: [
+          PLAN_STEP,
+          { ...APPROVAL_STEP, decision: "approve", status: "completed" },
+          { ...WEB_STEP, status: "skipped", summary: "Web Search was delegated to the approved capability call." },
+          {
+            ...CAPABILITY_STEP,
+            error: { message: SERPAPI_REASON },
+            status: "failed",
+            summary: `Capability call failed: ${SERPAPI_REASON}`,
+          },
+        ],
+      },
+    },
+  ])(
+    "after a $outcome approval the Run Center no longer shows the approval waiting",
+    async ({ action, answerText, respond, runAfter }) => {
+      const defaultGet = axios.get.getMockImplementation();
+
+      axios.get.mockImplementation((url) =>
+        url.endsWith("/agent-runs/run-1") ? Promise.resolve({ data: runAfter }) : defaultGet(url)
+      );
+      axios.post.mockImplementation((url) =>
+        url.endsWith(`/agent-runs/run-1/actions/${action}`) ? respond() : Promise.resolve({ data: {} })
+      );
+      render(<App />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Submit approval chat" }));
+      expect(await screen.findByText("Corpus")).toBeInTheDocument();
+
+      // Waiting, the Run Center shows the answer's trace as before.
+      let runCenter = await openRunCenter();
+
+      expect(runCenter.getByText("1 active")).toBeInTheDocument();
+      expect(cardStatus(runCenter, "Plan")).toBe("Completed");
+      expect(cardStatus(runCenter, "Capability Approval")).toBe("Needs input");
+      expect(runCenter.getByText(APPROVAL_STEP.summary)).toBeInTheDocument();
+      expect(runCenter.queryByText("Web Search")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Chat" }));
+      fireEvent.click(screen.getByRole("button", { name: `Mock ${action}` }));
+      expect(await screen.findByText(answerText)).toBeInTheDocument();
+
+      runCenter = await openRunCenter();
+
+      expect(runCenter.getByText("0 active")).toBeInTheDocument();
+      expect(runCenter.queryByText("Needs input")).toBeNull();
+      // The step reads as its run step: decided.
+      expect(cardStatus(runCenter, "Capability Approval")).toBe("Completed");
+      expect(runCenter.getByText(APPROVAL_STEP.summary)).toBeInTheDocument();
+    }
+  );
+
+  test("the Run Center shows a finished answer whose run matches its trace as the trace has it", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Submit document chat" }));
+    expect(await screen.findByText("Corpus")).toBeInTheDocument();
+
+    const runCenter = await openRunCenter();
+
+    expect(runCenter.getByText("0 active")).toBeInTheDocument();
+    expect(
+      [...document.querySelectorAll(".archive-tasks-view article")].map((card) => [
+        card.querySelector("header strong").textContent,
+        card.querySelector("header span").textContent,
+        card.querySelector("header p").textContent,
+      ])
+    ).toEqual([
+      ["Plan", "Completed", DOCUMENT_TRACE[0].summary],
+      ["Self Check", "Failed", DOCUMENT_TRACE[1].summary],
+    ]);
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {
