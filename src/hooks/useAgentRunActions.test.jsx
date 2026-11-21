@@ -31,6 +31,33 @@ vi.mock("../archiveApi", () => ({
 
 const APPROVAL_OBJECT_HASH = `sha256:${"a".repeat(64)}`;
 
+// The hook on the real chat session, whose conversation holds one turn with
+// this answer, or none (the page after a reload).
+const renderWithSession = (answer) => {
+  const refreshAgentRunRecovery = vi.fn().mockResolvedValue([]);
+  const { result } = renderHook(() => {
+    const session = useChatSession();
+
+    return {
+      actions: useAgentRunActions({
+        ...session,
+        refreshAgentRunRecovery,
+        setSelectedSource: vi.fn(),
+        t: (key) => key,
+      }),
+      session,
+    };
+  });
+
+  if (answer) {
+    act(() => {
+      result.current.session.addConversationTurn("Search the web.", answer);
+    });
+  }
+
+  return { refreshAgentRunRecovery, result };
+};
+
 const createHookDependencies = () => ({
   conversation: [
     {
@@ -238,33 +265,13 @@ describe("useAgentRunActions after a decision fails", () => {
     status: "pending",
   };
 
-  const renderWithSession = () => {
-    const refreshAgentRunRecovery = vi.fn().mockResolvedValue([]);
-    const { result } = renderHook(() => {
-      const session = useChatSession();
-
-      return {
-        actions: useAgentRunActions({
-          ...session,
-          refreshAgentRunRecovery,
-          setSelectedSource: vi.fn(),
-          t: (key) => key,
-        }),
-        session,
-      };
+  const renderWithPendingGate = () =>
+    renderWithSession({
+      agentAnswer: "Approve Web Search?",
+      agentRunId: "run-1",
+      agentRunStatus: "waiting_for_user",
+      approvalGates: [PENDING_GATE],
     });
-
-    act(() => {
-      result.current.session.addConversationTurn("Search the web.", {
-        agentAnswer: "Approve Web Search?",
-        agentRunId: "run-1",
-        agentRunStatus: "waiting_for_user",
-        approvalGates: [PENDING_GATE],
-      });
-    });
-
-    return { refreshAgentRunRecovery, result };
-  };
 
   it("shows the run as the server holds it: no gate to decide, the failed step and its reason", async () => {
     const reason = "Web search is not configured: SERPAPI_KEY is not set.";
@@ -285,7 +292,7 @@ describe("useAgentRunActions after a decision fails", () => {
       status: "failed",
       steps: [failedStep],
     });
-    const { refreshAgentRunRecovery, result } = renderWithSession();
+    const { refreshAgentRunRecovery, result } = renderWithPendingGate();
 
     await act(async () => {
       await result.current.actions.handleAgentApprovalAction({
@@ -362,7 +369,7 @@ describe("useAgentRunActions after a decision fails", () => {
       steps: [],
     });
     fetchAgentRunMock.mockRejectedValueOnce(new Error("Network Error"));
-    const { refreshAgentRunRecovery, result } = renderWithSession();
+    const { refreshAgentRunRecovery, result } = renderWithPendingGate();
 
     for (const action of ["approve", "deny"]) {
       await act(async () => {
@@ -383,5 +390,99 @@ describe("useAgentRunActions after a decision fails", () => {
     expect(messageError).toHaveBeenCalledWith("app.approvalMissing");
     expect(fetchAgentRunMock).toHaveBeenCalledTimes(2);
     expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useAgentRunActions after a retry fails", () => {
+  const reason = "Web search is not configured: SERPAPI_KEY is not set.";
+  const FAILED_STEP = {
+    error: { message: reason },
+    id: "capability:web.search:approval:web.search:1.0.0",
+    kind: "capability_call",
+    label: "Web Search",
+    status: "failed",
+    type: "capability_call",
+  };
+  const FAILED_ANSWER = {
+    agentAnswer: "",
+    agentRunId: "run-1",
+    agentRunStatus: "failed",
+    agentRunSteps: [FAILED_STEP],
+  };
+  // The server's run after the refused retry: the retry added its own failed
+  // step, which the recovery card's Retry names next.
+  const RUN_AFTER_RETRY = {
+    approvalGates: [],
+    runId: "run-1",
+    status: "failed",
+    steps: [
+      FAILED_STEP,
+      { ...FAILED_STEP, id: `${FAILED_STEP.id}:retry:2`, retryOfStepId: FAILED_STEP.id },
+    ],
+  };
+  const RETRIES = {
+    // The recovery card in the sidebar names no turn.
+    "recovery retry": (actions) =>
+      actions.handleAgentRecoveryAction({
+        action: "retry_failed_step",
+        runId: "run-1",
+        stepId: FAILED_STEP.id,
+      }),
+    // Retry in the chat turn's run panel.
+    "step retry": (actions) =>
+      actions.handleAgentStepRetry({ step: FAILED_STEP, turnIndex: 0 }),
+  };
+
+  beforeEach(() => {
+    const refusal = { response: { data: { error: reason }, status: 409 } };
+
+    requestAgentRunRecoveryActionMock.mockRejectedValue(refusal);
+    requestAgentRunStepRetryMock.mockRejectedValue(refusal);
+  });
+
+  it.each(Object.keys(RETRIES))(
+    "a failed %s shows the run's new failed step on the turn and refreshes the recovery list",
+    async (retry) => {
+      fetchAgentRunMock.mockResolvedValue(RUN_AFTER_RETRY);
+      const { refreshAgentRunRecovery, result } = renderWithSession(FAILED_ANSWER);
+
+      await act(() => RETRIES[retry](result.current.actions));
+
+      expect(messageError).toHaveBeenCalledWith(reason);
+      expect(messageSuccess).not.toHaveBeenCalled();
+      expect(fetchAgentRunMock).toHaveBeenCalledWith("run-1");
+      expect(result.current.session.conversation[0].answer.agentRunSteps).toEqual(
+        RUN_AFTER_RETRY.steps
+      );
+      expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it.each(Object.keys(RETRIES))(
+    "a failed %s whose run cannot be read leaves the turn as it was and still refreshes the recovery list",
+    async (retry) => {
+      fetchAgentRunMock.mockRejectedValue(new Error("Network Error"));
+      const { refreshAgentRunRecovery, result } = renderWithSession(FAILED_ANSWER);
+
+      await act(() => RETRIES[retry](result.current.actions));
+
+      expect(messageError).toHaveBeenCalledWith(reason);
+      expect(fetchAgentRunMock).toHaveBeenCalledWith("run-1");
+      expect(result.current.session.conversation[0].answer).toEqual(FAILED_ANSWER);
+      expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("a failed recovery retry for a run no turn holds (the card after a reload) refreshes the recovery list and does not throw", async () => {
+    fetchAgentRunMock.mockResolvedValue(RUN_AFTER_RETRY);
+    const { refreshAgentRunRecovery, result } = renderWithSession();
+
+    await act(() =>
+      expect(RETRIES["recovery retry"](result.current.actions)).resolves.toBeUndefined()
+    );
+
+    expect(messageError).toHaveBeenCalledWith(reason);
+    expect(result.current.session.conversation).toEqual([]);
+    expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(1);
   });
 });

@@ -30,6 +30,28 @@ const buildAgentRunActionAnswer = (currentAnswer = {}, result = {}) => {
   };
 };
 
+// A failed action can still have moved the run (an approved capability ran
+// and failed, a gate was decided elsewhere, a failed retry added a failed
+// step): show the run as the server holds it on the turn that holds it.
+// Unread, the turn stays as it was.
+const showRunAsServerHolds = async (
+  runId,
+  updateTurnByRunId,
+  adjustAnswer = (answer) => answer
+) => {
+  const run = await fetchAgentRun(runId).catch(() => null);
+
+  if (run) {
+    updateTurnByRunId(runId, (currentTurn) => ({
+      ...currentTurn,
+      answer: adjustAnswer(
+        buildAgentRunActionAnswer(currentTurn.answer, { run }),
+        run
+      ),
+    }));
+  }
+};
+
 export const useAgentRunActions = ({
   conversation,
   refreshAgentRunRecovery,
@@ -101,31 +123,19 @@ export const useAgentRunActions = ({
           getBackendMessage(error, t("app.approvalMissing"));
         message.error(backendMessage);
 
-        // A failed decision can still have moved the run (the approved
-        // capability failed, or the gate was decided elsewhere): show the run
-        // as the server holds it. Unread, the turn keeps its usable gate; a
-        // run no longer waiting no longer asks for the approval.
-        const run = await fetchAgentRun(runId).catch(() => null);
-
-        if (run) {
-          updateTurnByRunId(runId, (currentTurn) => {
-            const answer = buildAgentRunActionAnswer(currentTurn.answer, { run });
-
-            return {
-              ...currentTurn,
-              answer:
-                run.status === "waiting_for_user"
-                  ? answer
-                  : {
-                      ...answer,
-                      agentAnswer: t("app.approvalNotCompletedAnswer", {
-                        reason: backendMessage,
-                      }),
-                      clarification: { ...(answer.clarification ?? {}), needed: false },
-                    },
-            };
-          });
-        }
+        // Unread, the turn keeps its usable gate; a run no longer waiting no
+        // longer asks for the approval.
+        await showRunAsServerHolds(runId, updateTurnByRunId, (answer, run) =>
+          run.status === "waiting_for_user"
+            ? answer
+            : {
+                ...answer,
+                agentAnswer: t("app.approvalNotCompletedAnswer", {
+                  reason: backendMessage,
+                }),
+                clarification: { ...(answer.clarification ?? {}), needed: false },
+              }
+        );
       } finally {
         // Whether the decision went through or not, the run may have joined
         // or left the recovery list.
@@ -167,13 +177,16 @@ export const useAgentRunActions = ({
         ) {
           setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
         }
-        await refreshAgentRunRecovery();
         message.success(t("app.retryComplete"));
       } catch (error) {
         const backendMessage =
           getBackendMessage(error, t("app.retryFailed"));
         message.error(backendMessage);
+        await showRunAsServerHolds(runId, updateTurnByRunId);
       } finally {
+        // A failed retry adds a failed step, which the recovery card's Retry
+        // must name next.
+        await refreshAgentRunRecovery();
         setIsLoading(false);
       }
     },
@@ -230,13 +243,15 @@ export const useAgentRunActions = ({
           }
         }
 
-        await refreshAgentRunRecovery();
         message.success(getRecoveryActionSuccessMessage(action, t));
       } catch (error) {
         const backendMessage =
           getBackendMessage(error, t("app.recoverFailed"));
         message.error(backendMessage);
+        await showRunAsServerHolds(resolvedRunId, updateTurnByRunId);
       } finally {
+        // As after a step retry: the card must name the run's new failed step.
+        await refreshAgentRunRecovery();
         setIsLoading(false);
       }
     },
