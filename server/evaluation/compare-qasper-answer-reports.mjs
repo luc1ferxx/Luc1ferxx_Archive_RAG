@@ -23,7 +23,8 @@ export const DEFAULT_COMPARE_ITERATIONS = 10000;
 export const DEFAULT_COMPARE_SEED = 12345;
 
 // Whether a row answered: the agent surface says so (classifyAgentAnswer: a
-// clarification or the grounded abstention is no answer); the rag surface
+// clarification, the grounded abstention or a passed-on RAG abstention is no
+// answer); the rag surface
 // answered unless it abstained.
 export const readAnswered = (row) =>
   typeof row?.answered === "boolean" ? row.answered : !row?.abstained;

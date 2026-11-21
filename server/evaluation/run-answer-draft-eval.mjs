@@ -35,8 +35,8 @@
 //     [--set fixtures|arxiv|all] [--cases 12]   (--cases limits the arxiv set)
 //     [--latest-name latest-answer-drafts]    (report file name, to keep runs apart)
 //
-// "Answered" excludes clarifications and the grounded abstention sentence
-// (agent-answer-outcome.js); fixture answers are checked only when answered.
+// "Answered" excludes clarifications, the grounded abstention sentence and
+// document RAG's own abstention passed on as the answer (agent-answer-outcome.js); fixture answers are checked only when answered.
 
 import "dotenv/config";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -199,7 +199,7 @@ const renderSetMarkdown = ({ name, runs, summary }) =>
     `| Retraction causes | ${Object.entries(summary.retractionCauses).map(([cause, n]) => `${cause}: ${n}`).join(", ") || "none"} |`,
     `| Draft resets (retried model calls) | ${summary.resets} |`,
     `| Final answers that were a clarification | ${summary.clarifications}/${summary.cases} |`,
-    `| Answered (not a clarification or grounded abstention) | ${summary.answered}/${summary.cases} |`,
+    `| Answered (not a clarification, grounded abstention or passed-on RAG abstention) | ${summary.answered}/${summary.cases} |`,
     `| Abstentions by source | ${Object.entries(summary.abstainSources).map(([source, n]) => `${source}: ${n}`).join(", ") || "none"} |`,
     `| Follow-ups run / resolved | ${summary.followUpRuns} / ${summary.followUpResolved} |`,
     `| Answers checked correct / wrong (fixtures only) | ${summary.correctAnswers} / ${summary.wrongAnswers} |`,
