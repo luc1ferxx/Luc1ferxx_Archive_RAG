@@ -366,7 +366,7 @@ Durable agent task 支持一个 task-level `research_task` / dossier 流程。�
 Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Center 可以展示目标、已完成 step、等待用户动作和最终交付状态：
 
 - 公开计划步骤写在 task `items`，沿用通用 task item contract：`id`、`status`、`label`、`summary`、`result`、`error`。
-- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`overBudgetIterations`（超出 `maxIterations` 的轮数，只有已批准的审批会让任务多跑；Run Center 显示为 "x/max runs · N after approval"）、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
+- 汇总元数据写在 `task.result.goalPlan`：`goal`、`status`、`stoppedReason`、`currentStepId`、`counts`、`completedIterations`、`overBudgetIterations`（超出 `maxIterations` 的轮数，只有已批准的审批会让任务多跑；Run Center 显示为 "x/max runs · N after approval"；这个字段出现之前保存的计划没有它，Run Center 按超出 `maxIterations` 的轮数补算，不会显示 "2/1 runs"）、`deliverables`、`goalCompletion`、`researchTask`、`maxIterations`、`requiredUserAction`。
 - 生成逻辑集中在 `server/rag/agent-goal-plan.js`；`agent-tasks.js` 只在 create / run / resume 边界调用它。
 - Goal plan 是展示和恢复控制合同，不作为 citation、claim support 或答案证据。
 
@@ -376,7 +376,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 `task.result.goalCompletion` / `task.result.goalPlan.goalCompletion` 是目标完成自检 contract。它统一检查：task 是否 terminal completed、公开 plan steps 是否全部 completed、working memory 是否还有 unresolved gaps / unsupported claims、已请求 deliverables 是否全部 created、是否仍有 pending approval / user action、research task phases 是否完成，以及 workflow lifecycle contract 是否已记录。这个自检不重新执行 RAG，不把 evidence 写入 task memory；iteration 里只保存 working-memory 计数，供批准产物后仍可验证目标状态。
 
-前端 `src/components/AgentRunCenter.js` 只消费 `/tasks` 返回的公开 task contract。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。
+前端 `src/components/AgentRunCenter.jsx` 只消费 `/tasks` 返回的公开 task contract（没有 task 时，`src/App.jsx` 改给它当前回答的 `agentTrace` 步骤）。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。审批被拒绝或失败后，回答保留原来的 trace，该轮的 run 却已往前走（`useAgentRunActions` 刷新了 `agentRunSteps`）：trace 里等待用户的步骤（`needs_input`）因此显示 run 中同 id step 的状态（仍为 `paused` 时不变），不再算作未完成；trace 的其他状态在服务端已是终态。
 
 ## Prompt 注入防护
 
