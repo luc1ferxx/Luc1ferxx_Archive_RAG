@@ -162,7 +162,7 @@ const App = () => {
     isSuggestionLoading: isArxivSuggestionLoading,
     loadSavedSuggestions: loadSavedArxivSuggestions,
     openSavedSuggestion: openSavedArxivSuggestionForDocument,
-    requestSuggestions: requestArxivSuggestions,
+    requestSuggestions: requestArxivSuggestionsForDocument,
     savedSuggestionsByDocId: savedArxivSuggestionsByDocId,
     suggestion: arxivSuggestion,
   } = useArxivEnrichment({
@@ -279,19 +279,12 @@ const App = () => {
     ]
   );
 
-  const handleWorkspaceUploadSuccess = useCallback(
-    (document) => {
-      handleUploadSuccess(document);
-      void requestArxivSuggestions(document);
-    },
-    [handleUploadSuccess, requestArxivSuggestions]
-  );
   const handleHomeUploadSuccess = useCallback(
     (document) => {
-      handleWorkspaceUploadSuccess(document);
+      handleUploadSuccess(document);
       setActiveHomeSection("drive");
     },
-    [handleWorkspaceUploadSuccess]
+    [handleUploadSuccess]
   );
 
   const submitAnswerFeedback = useCallback(
@@ -389,6 +382,14 @@ const App = () => {
       }
     },
     [openSavedArxivSuggestionForDocument, scrollSidebarSection, t]
+  );
+  // The panel shows its loading state at once, so scroll to it on the click.
+  const requestArxivSuggestions = useCallback(
+    (document) => {
+      scrollSidebarSection(uploadRef);
+      return requestArxivSuggestionsForDocument(document);
+    },
+    [requestArxivSuggestionsForDocument, scrollSidebarSection]
   );
 
   const selectConversationView = useCallback(
@@ -926,13 +927,14 @@ const App = () => {
             onImportArxivSuggestion={importArxivSuggestion}
             onOpenSavedArxivSuggestion={openSavedArxivSuggestion}
             onRecoveryAction={handleAgentRecoveryAction}
+            onRequestArxivSuggestions={requestArxivSuggestions}
             onToggleChatScopeDocument={toggleChatScopeDocument}
             onLoadQualityHistory={loadQualityHistory}
             onLoadQualityLatest={loadLatestQualityReport}
             onRemoveDocument={removeDocument}
             onRunSyntheticQuality={runSyntheticQualityReport}
             onNavigate={handleSidebarNavigate}
-            onUploadSuccess={handleWorkspaceUploadSuccess}
+            onUploadSuccess={handleUploadSuccess}
             qualityHistory={qualityHistory}
             qualityReport={qualityReport}
             qualityRef={qualityRef}

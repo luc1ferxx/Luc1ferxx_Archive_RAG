@@ -29,7 +29,7 @@
 | `DELETE` | `/documents/:docId` | 删除单份文档及其向量索引。 |
 | `POST` | `/documents/clear` | 清空工作区文档。 |
 | `GET` | `/documents/:docId/file` | 流式返回文档原件，支持 range request：PDF 内联显示，Word、PowerPoint、Excel 按附件下载，Content-Type 是文档自己的类型。 |
-| `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的签名 token，并保存可稍后查看的 recommendation snapshot，同时记录 `external_recommendation` task。 |
+| `GET` | `/documents/:docId/arxiv/suggestions` | 基于文档 profile 的本地 keyphrase 排名和 relevance check 返回相关 arXiv 候选和确认导入用的签名 token，并保存可稍后查看的 recommendation snapshot，同时记录 `external_recommendation` task。清理后的主题还剩词时，把它（最多 4 个词）发给 `https://export.arxiv.org/api/query`；Web 界面只在用户点击文档旁的“查找相关 arXiv 论文”（“Find related arXiv papers”）时调用它，上传不会调用，返回的候选默认都不勾选。 |
 | `GET` | `/documents/arxiv/suggestions` | 列出当前访问范围内保存的 arXiv recommendation snapshots。 |
 | `GET` | `/documents/:docId/arxiv/suggestions/saved` | 读取单份文档当前保存的 arXiv recommendation snapshot；没有保存项时返回空候选和原因。 |
 | `POST` | `/documents/:docId/arxiv/import` | 兼容旧同步确认导入；新前端流程优先通过 `/tasks/:taskId/actions/confirm` 触发异步 runner。两条路径都会复检所选候选相关性，并按 arXiv ID / PDF URL / title hash 跳过已索引论文。 |

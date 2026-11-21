@@ -860,7 +860,7 @@ describe("App", () => {
     ).not.toHaveProperty("userId");
   });
 
-  test("suggests arxiv papers after upload and imports after confirmation", async () => {
+  test("asks arxiv only when the user clicks, and imports only the papers picked", async () => {
     let documentFetchCount = 0;
 
     axios.get.mockImplementation((url) => {
@@ -1045,7 +1045,21 @@ describe("App", () => {
     await screen.findByText("benefits-2025.pdf");
     fireEvent.click(screen.getByText("Upload mock"));
 
+    // An upload sends nothing to arXiv: the search is the user's click.
+    const findButton = await screen.findByRole("button", {
+      name: "Find related arXiv papers for rag-notes.pdf",
+    });
+    const suggestionRequests = () =>
+      axios.get.mock.calls.filter(([url]) =>
+        url.includes("/documents/doc-upload/arxiv/suggestions?")
+      );
+    expect(suggestionRequests()).toHaveLength(0);
+    expect(screen.queryByText("arXiv recommendations")).not.toBeInTheDocument();
+
+    fireEvent.click(findButton);
+
     expect(await screen.findByText("arXiv recommendations")).toBeInTheDocument();
+    expect(suggestionRequests()).toHaveLength(1);
     expect(
       await screen.findByText("Retrieval Augmented Generation for Archives")
     ).toBeInTheDocument();
@@ -1078,12 +1092,16 @@ describe("App", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
-    const groundedPaperCheckbox = screen.getByLabelText(
-      "Select Grounded Question Answering with Documents"
+    expect(screen.getByRole("button", { name: /Import 0/i })).toBeDisabled();
+    fireEvent.click(
+      screen.getByLabelText("Select Retrieval Augmented Generation for Archives")
     );
-    expect(groundedPaperCheckbox).toBeChecked();
-    fireEvent.click(groundedPaperCheckbox);
-    expect(groundedPaperCheckbox).not.toBeChecked();
+    fireEvent.click(
+      screen.getByLabelText("Select Hybrid Retrieval for Private Workspaces")
+    );
+    expect(
+      screen.getByLabelText("Select Grounded Question Answering with Documents")
+    ).not.toBeChecked();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Import 2/i })).toBeEnabled()
     );

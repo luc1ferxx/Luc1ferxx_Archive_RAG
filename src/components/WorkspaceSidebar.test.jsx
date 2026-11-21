@@ -5,14 +5,16 @@ import { createTranslator } from "../archiveI18n";
 
 const t = createTranslator("en");
 
-const renderSidebar = () => {
+const POLICY_DOCUMENT = { docId: "doc-1", fileName: "policy.pdf", pageCount: 2 };
+
+const renderSidebar = (props = {}) => {
   const onClearDocuments = vi.fn();
   const onRemoveDocument = vi.fn();
 
   render(
     <WorkspaceSidebar
       activeDocuments={[
-        { docId: "doc-1", fileName: "policy.pdf", pageCount: 2 },
+        POLICY_DOCUMENT,
         { docId: "doc-2", fileName: "memo.pdf", pageCount: 1 },
       ]}
       onClearDocuments={onClearDocuments}
@@ -20,11 +22,53 @@ const renderSidebar = () => {
       onRunSyntheticQuality={vi.fn()}
       recoveryRuns={[]}
       t={t}
+      {...props}
     />
   );
 
   return { onClearDocuments, onRemoveDocument };
 };
+
+// A document's topic goes to arXiv only from this click.
+describe("WorkspaceSidebar finds related arXiv papers on request", () => {
+  test("asks for the clicked document, never for an arXiv import", () => {
+    const onRequestArxivSuggestions = vi.fn();
+
+    renderSidebar({
+      activeDocuments: [
+        POLICY_DOCUMENT,
+        {
+          docId: "doc-arxiv",
+          fileName: "arxiv-2401.00001.pdf",
+          pageCount: 12,
+          profile: { source: { sourceType: "arxiv", arxivId: "2401.00001v1" } },
+        },
+      ],
+      onRequestArxivSuggestions,
+    });
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Find related arXiv papers for arxiv-2401.00001.pdf",
+      })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Find related arXiv papers for policy.pdf" })
+    );
+
+    expect(onRequestArxivSuggestions).toHaveBeenCalledTimes(1);
+    expect(onRequestArxivSuggestions).toHaveBeenCalledWith(POLICY_DOCUMENT);
+  });
+
+  test("is disabled while a search runs", () => {
+    renderSidebar({ isArxivSuggestionLoading: true });
+
+    expect(
+      screen.getByRole("button", { name: "Find related arXiv papers for policy.pdf" })
+    ).toBeDisabled();
+  });
+});
 
 // The server deletes at once and the workbench then resets the conversation,
 // so neither delete may run on one click.
