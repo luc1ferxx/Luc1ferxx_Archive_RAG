@@ -1,4 +1,3 @@
-import { formatTraceCount } from "./AgentTraceDetail";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
 import { buildEvidenceSpineModel } from "./evidenceSpine";
 
@@ -34,12 +33,14 @@ const AgentTraceOverview = ({
   evidenceSummary,
   sourceCount,
   stepCount,
+  t,
 }) => {
   const model = buildEvidenceSpineModel({
     answer,
     evidenceSummary,
     sourceCount,
     stepCount,
+    t,
   });
 
   if (!model.hasContent) {
@@ -49,9 +50,9 @@ const AgentTraceOverview = ({
   return (
     <div className="archive-agent-inspector archive-evidence-spine">
       <div className="archive-agent-inspector-head">
-        <div className="archive-source-section-label">Evidence spine</div>
+        <div className="archive-source-section-label">{t("trace.evidenceSpine")}</div>
         <span className="archive-answer-chip archive-answer-chip-agent">
-          {formatTraceCount(model.selectedSkillCount, "skill")}
+          {t("trace.skillCount", { count: model.selectedSkillCount })}
         </span>
       </div>
 
@@ -80,6 +81,7 @@ const AgentTraceOverview = ({
                 <EvidenceSummaryPanel
                   summary={evidenceSummary}
                   sourceCount={sourceCount}
+                  t={t}
                   variant="spine"
                 />
               ) : null}

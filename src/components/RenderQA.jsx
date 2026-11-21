@@ -1,51 +1,27 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Spin } from "antd";
 import { createTranslator } from "../archiveI18n";
 import { formatDocumentLocation, getLocationUnit } from "../documentLocation";
-import AgentTraceDetail, {
-  formatAgentMode,
-  formatTraceStatus,
-} from "./AgentTraceDetail";
+import AgentTraceDetail, { formatAgentMode } from "./AgentTraceDetail";
 import AgentTraceOverview from "./AgentTraceOverview";
 import EvidenceSummaryPanel from "./EvidenceSummaryPanel";
 import SpotlightCard from "./react-bits/SpotlightCard";
-import { isStepRetrySupported } from "./workbenchFormatters";
+import {
+  formatStatusLabel,
+  formatStepLabel,
+  isStepRetrySupported,
+  toTitleWords,
+  translateCode,
+} from "./workbenchFormatters";
 
-// English unless the app hands in its translator: the citation location is
-// the one label here that follows the locale ("Page 4" / "第 4 页").
+// English unless the app hands in its translator.
 const defaultT = createTranslator("en");
 
-const FEEDBACK_ACTIONS = [
-  {
-    type: "helpful",
-    label: "Helpful",
-  },
-  {
-    type: "citation_error",
-    label: "Citation error",
-  },
-  {
-    type: "incomplete",
-    label: "Incomplete",
-  },
-  {
-    type: "hallucination",
-    label: "Hallucination",
-  },
-];
+// The feedback types the server records, each labelled by answer.feedback.<type>.
+const FEEDBACK_TYPES = ["helpful", "citation_error", "incomplete", "hallucination"];
 
-const formatLookupCount = (count) => {
-  if (!Number.isFinite(count)) {
-    return "Results unknown";
-  }
-
-  return count === 1 ? "1 result" : `${count} results`;
-};
-
-const formatRiskFlag = (flag) =>
-  String(flag ?? "")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+const formatLookupCount = (count, t) =>
+  Number.isFinite(count) ? t("answer.resultCount", { count }) : t("answer.resultsUnknown");
 
 const getApprovalGates = (answer = {}) => {
   const directGates = Array.isArray(answer.approvalGates)
@@ -72,24 +48,18 @@ const getAgentRunSteps = (answer = {}) => {
     return answer.agentRunSteps;
   }
 
-  return Array.isArray(answer.agentTrace)
-    ? answer.agentTrace.map((step) => ({
-        ...step,
-        kind: step.type,
-      }))
-    : [];
+  return Array.isArray(answer.agentTrace) ? answer.agentTrace : [];
 };
 
-const formatStepKind = (kind) =>
-  String(kind ?? "step")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+// A run step's kind by its stepKind.* label, or as the server names it. A
+// trace step has none: its label already names it.
+const formatStepKind = (kind, t) => translateCode("stepKind", kind, t) ?? toTitleWords(kind);
 
-const formatShortId = (value) => {
+const formatShortId = (value, t) => {
   const text = String(value ?? "").trim();
 
   if (!text) {
-    return "none";
+    return t("run.noRunId");
   }
 
   return text.length > 12 ? `${text.slice(0, 6)}...${text.slice(-4)}` : text;
@@ -117,14 +87,14 @@ const isFailedStep = (step = {}) => getStepStatus(step) === "failed";
 
 const isPendingGate = (gate = {}) => (gate.status ?? "pending") === "pending";
 
-const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
+const ApprovalGatePanel = ({ gates, onApprovalAction, t, turnIndex }) => {
   if (!Array.isArray(gates) || gates.length === 0) {
     return null;
   }
 
   return (
-    <div className="archive-approval-panel" aria-label="Pending approvals">
-      <div className="archive-source-section-label">Pending approval</div>
+    <div className="archive-approval-panel" aria-label={t("run.pendingApprovals")}>
+      <div className="archive-source-section-label">{t("run.pendingApproval")}</div>
       {gates.map((gate, gateIndex) => {
         const inputPreview = gate.inputPreview ?? {};
         const previewEntries = Object.entries(inputPreview);
@@ -133,8 +103,8 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
         return (
           <div key={gate.id ?? gate.capabilityId ?? gateIndex} className="archive-approval-item">
             <div className="archive-approval-head">
-              <strong>{gate.capabilityLabel ?? gate.capabilityId ?? "Capability"}</strong>
-              <span>{gate.status ?? "pending"}</span>
+              <strong>{gate.capabilityLabel ?? gate.capabilityId ?? t("run.capability")}</strong>
+              <span>{formatStatusLabel(gate.status, t)}</span>
             </div>
             {gate.reason ? (
               <div className="archive-approval-copy">{gate.reason}</div>
@@ -149,13 +119,13 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
                 ))}
               </div>
             ) : (
-              <div className="archive-approval-copy">Input preview hidden by policy.</div>
+              <div className="archive-approval-copy">{t("run.inputHidden")}</div>
             )}
             {riskFlags.length > 0 ? (
               <div className="archive-approval-risk-list">
                 {riskFlags.map((flag) => (
                   <span key={flag} className="archive-answer-chip is-warning">
-                    {formatRiskFlag(flag)}
+                    {formatStatusLabel(flag, t)}
                   </span>
                 ))}
               </div>
@@ -174,7 +144,7 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
                     });
                   }}
                 >
-                  Approve
+                  {t("run.approve")}
                 </button>
                 <button
                   type="button"
@@ -188,7 +158,7 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
                     });
                   }}
                 >
-                  Deny
+                  {t("run.deny")}
                 </button>
               </div>
             ) : null}
@@ -199,7 +169,7 @@ const ApprovalGatePanel = ({ gates, onApprovalAction, turnIndex }) => {
   );
 };
 
-const AgentRunStepDetails = ({ step, stepIndex }) => {
+const AgentRunStepDetails = ({ step, stepIndex, t }) => {
   const inputText = stringifyDetailValue(step.input);
   const outputText = stringifyDetailValue(step.output);
   const errorText = stringifyDetailValue(step.error);
@@ -210,38 +180,38 @@ const AgentRunStepDetails = ({ step, stepIndex }) => {
     <details className="archive-run-control-step">
       <summary>
         <span>{String(stepIndex + 1).padStart(2, "0")}</span>
-        <strong>{step.label ?? step.type ?? "Step"}</strong>
-        <em>{formatTraceStatus(getStepStatus(step))}</em>
+        <strong>{formatStepLabel(step, t)}</strong>
+        <em>{formatStatusLabel(getStepStatus(step), t)}</em>
       </summary>
       {hasDetails ? (
         <div className="archive-run-control-step-body">
           {inputText ? (
             <div className="archive-run-control-detail">
-              <span>Input</span>
+              <span>{t("run.input")}</span>
               <pre>{inputText}</pre>
             </div>
           ) : null}
           {outputText ? (
             <div className="archive-run-control-detail">
-              <span>Output</span>
+              <span>{t("run.output")}</span>
               <pre>{outputText}</pre>
             </div>
           ) : null}
           {errorText ? (
             <div className="archive-run-control-detail is-error">
-              <span>Error</span>
+              <span>{t("common.error")}</span>
               <pre>{errorText}</pre>
             </div>
           ) : null}
           {detailText ? (
             <div className="archive-run-control-detail">
-              <span>Detail</span>
+              <span>{t("run.detail")}</span>
               <pre>{detailText}</pre>
             </div>
           ) : null}
         </div>
       ) : (
-        <div className="archive-run-control-empty">No persisted step detail.</div>
+        <div className="archive-run-control-empty">{t("run.noStepDetail")}</div>
       )}
     </details>
   );
@@ -256,11 +226,15 @@ const AgentRunControlPanel = ({
   onContinueRun,
   onStepRetry,
   steps = [],
+  t,
   turnIndex,
 }) => {
   const runId = answer.agentRunId;
   const runStatus = answer.agentRunStatus ?? "unknown";
-  const pendingGates = gates.filter(isPendingGate);
+  // A gate is decided only while its run waits for the user: canceling a
+  // waiting run leaves its gate pending (server/rag/agent-runs.js cancelRun).
+  const canDecide = !answer.agentRunStatus || answer.agentRunStatus === "waiting_for_user";
+  const pendingGates = canDecide ? gates.filter(isPendingGate) : [];
   const failedSteps = steps.filter(isFailedStep).filter((step) => step.id);
 
   if (!runId && steps.length === 0 && gates.length === 0) {
@@ -270,13 +244,13 @@ const AgentRunControlPanel = ({
   return (
     <div
       className="archive-run-control-panel"
-      aria-label="Agent run control"
+      aria-label={t("run.control")}
       onClick={(event) => event.stopPropagation()}
     >
       <div className="archive-run-control-head">
         <div>
-          <div className="archive-source-section-label">Agent run</div>
-          <strong>{formatShortId(runId)}</strong>
+          <div className="archive-source-section-label">{t("home.agentRun")}</div>
+          <strong>{formatShortId(runId, t)}</strong>
         </div>
         {!isActive && runId ? (
           <button
@@ -289,26 +263,26 @@ const AgentRunControlPanel = ({
               })
             }
           >
-            Continue run
+            {t("run.continue")}
           </button>
         ) : null}
       </div>
 
       <div className="archive-run-control-metrics">
         <div>
-          <span>Status</span>
-          <strong>{formatTraceStatus(runStatus)}</strong>
+          <span>{t("run.status")}</span>
+          <strong>{formatStatusLabel(runStatus, t)}</strong>
         </div>
         <div>
-          <span>Steps</span>
+          <span>{t("common.steps")}</span>
           <strong>{steps.length}</strong>
         </div>
         <div>
-          <span>Approvals</span>
+          <span>{t("run.approvals")}</span>
           <strong>{pendingGates.length}</strong>
         </div>
         <div>
-          <span>Failed</span>
+          <span>{t("run.failed")}</span>
           <strong>{failedSteps.length}</strong>
         </div>
       </div>
@@ -316,17 +290,18 @@ const AgentRunControlPanel = ({
       <ApprovalGatePanel
         gates={pendingGates}
         onApprovalAction={onApprovalAction}
+        t={t}
         turnIndex={turnIndex}
       />
 
       {failedSteps.length > 0 ? (
         <div className="archive-run-retry-panel">
-          <div className="archive-source-section-label">Failed steps</div>
+          <div className="archive-source-section-label">{t("run.failedSteps")}</div>
           {failedSteps.map((step) => (
             <div key={step.id} className="archive-run-retry-item">
               <div>
-                <strong>{step.label ?? step.type ?? "Step"}</strong>
-                <span>{step.error?.message ?? step.summary ?? "Step failed."}</span>
+                <strong>{formatStepLabel(step, t)}</strong>
+                <span>{step.error?.message ?? step.summary ?? t("run.stepFailed")}</span>
               </div>
               {onStepRetry && runId && isStepRetrySupported(step.type) ? (
                 <button
@@ -341,7 +316,7 @@ const AgentRunControlPanel = ({
                     })
                   }
                 >
-                  Retry
+                  {t("common.retry")}
                 </button>
               ) : null}
             </div>
@@ -351,12 +326,13 @@ const AgentRunControlPanel = ({
 
       {steps.length > 0 ? (
         <div className="archive-run-control-steps">
-          <div className="archive-source-section-label">Step details</div>
+          <div className="archive-source-section-label">{t("run.stepDetails")}</div>
           {steps.map((step, stepIndex) => (
             <AgentRunStepDetails
               key={step.id ?? `${step.label}-${stepIndex}`}
               step={step}
               stepIndex={stepIndex}
+              t={t}
             />
           ))}
         </div>
@@ -365,7 +341,7 @@ const AgentRunControlPanel = ({
   );
 };
 
-const AgentRunRail = ({ steps }) => {
+const AgentRunRail = ({ steps, t }) => {
   const visibleSteps = steps.slice(0, 5);
 
   if (visibleSteps.length === 0) {
@@ -373,9 +349,11 @@ const AgentRunRail = ({ steps }) => {
   }
 
   return (
-    <div className="archive-run-rail" aria-label="Agent run steps">
+    <div className="archive-run-rail" aria-label={t("run.railLabel")}>
       {visibleSteps.map((step, stepIndex) => {
         const stepStatus = step.status ?? "completed";
+        // The rail clips a long label; its title keeps the whole of it.
+        const label = formatStepLabel(step, t);
 
         return (
           <div
@@ -383,7 +361,9 @@ const AgentRunRail = ({ steps }) => {
             className={`archive-run-stage is-${stepStatus}`}
           >
             <span className="archive-run-stage-index">{stepIndex + 1}</span>
-            <span className="archive-run-stage-label">{step.label}</span>
+            <span className="archive-run-stage-label" title={label}>
+              {label}
+            </span>
           </div>
         );
       })}
@@ -391,14 +371,14 @@ const AgentRunRail = ({ steps }) => {
   );
 };
 
-const AgentRunTimeline = ({ steps }) => {
+const AgentRunTimeline = ({ steps, t }) => {
   if (!Array.isArray(steps) || steps.length === 0) {
     return null;
   }
 
   return (
-    <div className="archive-run-timeline" aria-label="Agent run timeline">
-      <div className="archive-source-section-label">Run timeline</div>
+    <div className="archive-run-timeline" aria-label={t("run.timelineLabel")}>
+      <div className="archive-source-section-label">{t("run.timeline")}</div>
       <div className="archive-run-timeline-list">
         {steps.map((step, stepIndex) => {
           const stepStatus = step.status ?? "completed";
@@ -411,12 +391,14 @@ const AgentRunTimeline = ({ steps }) => {
               <span className="archive-run-timeline-dot" />
               <div className="archive-run-timeline-body">
                 <div className="archive-run-timeline-head">
-                  <strong>{step.label ?? step.type ?? "Step"}</strong>
-                  <span>{formatTraceStatus(stepStatus)}</span>
+                  <strong>{formatStepLabel(step, t)}</strong>
+                  <span>{formatStatusLabel(stepStatus, t)}</span>
                 </div>
                 <div className="archive-run-timeline-meta">
-                  <span>{formatStepKind(step.kind ?? step.type)}</span>
-                  {step.attempt > 1 ? <span>Attempt {step.attempt}</span> : null}
+                  {step.kind ? <span>{formatStepKind(step.kind, t)}</span> : null}
+                  {step.attempt > 1 ? (
+                    <span>{t("run.attempt", { number: step.attempt })}</span>
+                  ) : null}
                 </div>
                 {step.summary ? (
                   <div className="archive-run-timeline-copy">{step.summary}</div>
@@ -434,6 +416,8 @@ const RenderQA = (props) => {
   const {
     conversation,
     activeTurnIndex,
+    canUpload = false,
+    hasDocuments = false,
     isLoading,
     selectedSource,
     onSelectSource,
@@ -445,6 +429,15 @@ const RenderQA = (props) => {
     t = defaultT,
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
+  const activeTurnRef = useRef(null);
+
+  // The chat opens on its active turn, and a new turn, made active when it
+  // arrives with its answer, scrolls into view. An answer streams in the
+  // composer, so nothing here moves while the user reads an earlier turn.
+  // jsdom has no scrollIntoView.
+  useEffect(() => {
+    activeTurnRef.current?.scrollIntoView?.({ block: "start" });
+  }, [conversation?.length]);
 
   const updateFeedbackNote = useCallback((turnIndex, note) => {
     setFeedbackNotes((prev) => ({
@@ -478,8 +471,16 @@ const RenderQA = (props) => {
   if (!conversation?.length && !isLoading) {
     return (
       <div className="archive-empty-log">
-        <div className="archive-empty-mark">No conversation yet</div>
-        <div>Upload documents on the left, then ask a question to begin.</div>
+        <div className="archive-empty-mark">{t("chat.emptyTitle")}</div>
+        <div>
+          {t(
+            hasDocuments
+              ? "chat.emptyAsk"
+              : canUpload
+                ? "chat.emptyUpload"
+                : "chat.emptyNoDocuments"
+          )}
+        </div>
       </div>
     );
   }
@@ -500,6 +501,7 @@ const RenderQA = (props) => {
         return (
           <article
             key={index}
+            ref={activeTurnIndex === index ? activeTurnRef : undefined}
             className={`archive-entry ${
               activeTurnIndex === index ? "is-active" : ""
             }`}
@@ -513,10 +515,12 @@ const RenderQA = (props) => {
                 }
               : {})}
           >
-            <div className="archive-entry-eyebrow">Prompt {index + 1}</div>
+            <div className="archive-entry-eyebrow">
+              {t("answer.prompt", { number: index + 1 })}
+            </div>
 
             <div className="archive-question">
-              <div className="archive-question-label">You</div>
+              <div className="archive-question-label">{t("answer.you")}</div>
               <div className="archive-question-text">{each.question}</div>
             </div>
 
@@ -528,13 +532,13 @@ const RenderQA = (props) => {
                   spotlightColor="rgba(15, 159, 122, 0.08)"
                 >
                   <div className="archive-answer-label-wrap">
-                    <div className="archive-answer-label">Agent answer</div>
+                    <div className="archive-answer-label">{t("answer.agent")}</div>
                     <span className="archive-answer-chip archive-answer-chip-agent">
-                      {formatAgentMode(each.answer.agentMode)}
+                      {formatAgentMode(each.answer.agentMode, t)}
                     </span>
                   </div>
 
-                  <AgentRunRail steps={agentRunSteps} />
+                  <AgentRunRail steps={agentRunSteps} t={t} />
 
                   <div className="archive-answer-text archive-agent-answer">
                     {each.answer.agentAnswer}
@@ -549,16 +553,18 @@ const RenderQA = (props) => {
                     onContinueRun={onContinueRun}
                     onStepRetry={onStepRetry}
                     steps={agentRunSteps}
+                    t={t}
                     turnIndex={index}
                   />
 
-                  <AgentRunTimeline steps={agentRunSteps} />
+                  <AgentRunTimeline steps={agentRunSteps} t={t} />
 
                   <AgentTraceOverview
                     answer={each.answer}
                     evidenceSummary={evidenceSummary}
                     sourceCount={ragSourceCount}
                     stepCount={agentTrace.length}
+                    t={t}
                   />
 
                   {agentTrace.length > 0 ? (
@@ -572,13 +578,13 @@ const RenderQA = (props) => {
                             className={`archive-agent-step is-${stepStatus}`}
                           >
                             <div className="archive-agent-step-head">
-                              <span>{step.label}</span>
-                              <span>{formatTraceStatus(stepStatus)}</span>
+                              <span>{formatStepLabel(step, t)}</span>
+                              <span>{formatStatusLabel(stepStatus, t)}</span>
                             </div>
                             <div className="archive-agent-step-copy">
                               {step.summary}
                             </div>
-                            <AgentTraceDetail step={step} />
+                            <AgentTraceDetail step={step} t={t} />
                           </div>
                         );
                       })}
@@ -588,14 +594,18 @@ const RenderQA = (props) => {
                   {researchBrief?.questions?.length > 0 ? (
                     <div className="archive-research-panel">
                       <div className="archive-source-section-label">
-                        Research brief
+                        {t("answer.researchBrief")}
                       </div>
                       <div className="archive-research-meta">
                         <span>
-                          {researchBrief.questions.length} subquestions
+                          {t("answer.subquestionCount", {
+                            count: researchBrief.questions.length,
+                          })}
                         </span>
                         <span>
-                          {researchBrief.citations?.length ?? 0} citations
+                          {t("trace.citationCount", {
+                            count: researchBrief.citations?.length ?? 0,
+                          })}
                         </span>
                       </div>
                       <div className="archive-research-question-list">
@@ -605,7 +615,7 @@ const RenderQA = (props) => {
                             className={`archive-research-question is-${question.status}`}
                           >
                             <span>{question.question}</span>
-                            <span>{question.status}</span>
+                            <span>{formatStatusLabel(question.status, t)}</span>
                           </div>
                         ))}
                       </div>
@@ -620,9 +630,9 @@ const RenderQA = (props) => {
                 spotlightColor="rgba(39, 110, 241, 0.08)"
               >
                 <div className="archive-answer-label-wrap">
-                  <div className="archive-answer-label">Document answer</div>
+                  <div className="archive-answer-label">{t("answer.document")}</div>
                   {each.answer?.ragMemoryApplied ? (
-                    <span className="archive-answer-chip">Memory</span>
+                    <span className="archive-answer-chip">{t("answer.memory")}</span>
                   ) : null}
                 </div>
 
@@ -632,6 +642,7 @@ const RenderQA = (props) => {
                   <EvidenceSummaryPanel
                     summary={evidenceSummary}
                     sourceCount={ragSourceCount}
+                    t={t}
                   />
                 ) : null}
 
@@ -640,7 +651,7 @@ const RenderQA = (props) => {
                     {gapPlan.missingAspects?.length > 0 ? (
                       <div className="archive-gap-block">
                         <div className="archive-source-section-label">
-                          Missing evidence
+                          {t("answer.missingEvidence")}
                         </div>
                         <div className="archive-gap-list">
                           {gapPlan.missingAspects.map((aspect) => (
@@ -655,7 +666,7 @@ const RenderQA = (props) => {
                     {gapPlan.supplementalSearches?.length > 0 ? (
                       <div className="archive-gap-block">
                         <div className="archive-source-section-label">
-                          Extra lookups
+                          {t("answer.extraLookups")}
                         </div>
                         <div className="archive-gap-list">
                           {gapPlan.supplementalSearches.map((lookup) => (
@@ -668,11 +679,11 @@ const RenderQA = (props) => {
                                   {lookup.label}
                                 </div>
                                 <span className="archive-gap-badge">
-                                  {formatLookupCount(lookup.resultCount)}
+                                  {formatLookupCount(lookup.resultCount, t)}
                                 </span>
                               </div>
                               <div className="archive-gap-item-copy">
-                                Search: {lookup.query}
+                                {t("answer.search", { query: lookup.query })}
                               </div>
                             </div>
                           ))}
@@ -684,7 +695,9 @@ const RenderQA = (props) => {
 
                 {each.answer.ragSources?.length > 0 && (
                   <div className="archive-source-list">
-                    <div className="archive-source-section-label">Citations</div>
+                    <div className="archive-source-section-label">
+                      {t("common.citations")}
+                    </div>
 
                     {each.answer.ragSources.map((source, sourceIndex) => (
                       <button
@@ -720,13 +733,17 @@ const RenderQA = (props) => {
                         </div>
                         <div className="archive-source-meta-row">
                           {Number.isFinite(source.rank) ? (
-                            <span>Rank #{source.rank}</span>
+                            <span>{t("common.rankNumber", { rank: source.rank })}</span>
                           ) : null}
                           {Number.isFinite(source.chunkIndex) ? (
-                            <span>Chunk {source.chunkIndex}</span>
+                            <span>
+                              {t("common.chunkNumber", { number: source.chunkIndex })}
+                            </span>
                           ) : null}
                           {Number.isFinite(source.score) ? (
-                            <span>Score {source.score.toFixed(2)}</span>
+                            <span>
+                              {t("answer.score", { score: source.score.toFixed(2) })}
+                            </span>
                           ) : null}
                         </div>
                         <div className="archive-source-copy">{source.excerpt}</div>
@@ -741,27 +758,27 @@ const RenderQA = (props) => {
                 >
                   <input
                     className="archive-feedback-input"
-                    placeholder="Optional feedback note"
+                    placeholder={t("answer.feedbackNote")}
                     value={feedbackNotes[index] ?? ""}
                     onChange={(event) =>
                       updateFeedbackNote(index, event.target.value)
                     }
                   />
                   <div className="archive-feedback-actions">
-                    {FEEDBACK_ACTIONS.map((action) => (
+                    {FEEDBACK_TYPES.map((feedbackType) => (
                       <button
-                        key={action.type}
+                        key={feedbackType}
                         type="button"
                         className="archive-feedback-button"
                         onClick={() =>
                           submitFeedback({
                             turnIndex: index,
-                            feedbackType: action.type,
+                            feedbackType,
                             turn: each,
                           })
                         }
                       >
-                        {action.label}
+                        {t(`answer.feedback.${feedbackType}`)}
                       </button>
                     ))}
                   </div>
@@ -776,9 +793,9 @@ const RenderQA = (props) => {
                 spotlightColor="rgba(105, 120, 240, 0.08)"
               >
                 <div className="archive-answer-label-wrap">
-                  <div className="archive-answer-label">Web answer</div>
+                  <div className="archive-answer-label">{t("answer.web")}</div>
                   {each.answer?.errors?.mcp ? (
-                    <span className="archive-answer-chip is-muted">Fallback</span>
+                    <span className="archive-answer-chip is-muted">{t("answer.fallback")}</span>
                   ) : null}
                 </div>
 
@@ -792,7 +809,7 @@ const RenderQA = (props) => {
       {isLoading && (
         <div className="archive-loading">
           <Spin size="large" />
-          <div className="archive-loading-copy">Generating an answer...</div>
+          <div className="archive-loading-copy">{t("answer.generating")}</div>
         </div>
       )}
     </div>

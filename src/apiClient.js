@@ -1,4 +1,5 @@
 import axios from "axios";
+import { createTranslator, getInitialLocale } from "./archiveI18n";
 import { API_DOMAIN, buildApiRequestConfig } from "./config";
 import { handleUnauthorizedResponse, hasOidcAccessToken } from "./auth/tokenStore";
 import { getActiveWorkspaceId } from "./auth/workspaceSelection";
@@ -68,8 +69,6 @@ const normalizeDownloadError = async (error) => {
   return error;
 };
 
-export const FORBIDDEN_MESSAGE = "You do not have permission to do this.";
-
 const GENERIC_FORBIDDEN_TEXT = /^\s*(forbidden\.?)?\s*$/i;
 
 const getMissingPermissionId = (data) =>
@@ -88,7 +87,8 @@ const getServerErrorText = (data) => {
 };
 
 // The server stays the authority: a 403 gets a clear message that names the
-// missing permission when the server reports it, never anything else.
+// missing permission when the server reports it, never anything else. It is
+// in the app's language, read where the locale switch stores it.
 export const describeForbiddenResponse = (data) => {
   const serverText = getServerErrorText(data);
 
@@ -96,11 +96,10 @@ export const describeForbiddenResponse = (data) => {
     return serverText;
   }
 
-  const permissionId = getMissingPermissionId(data);
+  const permission = getMissingPermissionId(data);
+  const t = createTranslator(getInitialLocale());
 
-  return permissionId
-    ? `${FORBIDDEN_MESSAGE} Missing permission: ${permissionId}.`
-    : FORBIDDEN_MESSAGE;
+  return permission ? t("auth.forbiddenPermission", { permission }) : t("auth.forbidden");
 };
 
 // Keeps the body's shape: `error` stays a string, or an object whose message

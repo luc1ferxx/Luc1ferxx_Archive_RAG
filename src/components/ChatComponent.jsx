@@ -558,9 +558,10 @@ const ChatComponent = (props) => {
                         aria-pressed={chatScopeMode === option.id}
                         className={chatScopeMode === option.id ? "is-active" : ""}
                         onClick={() => handleScopeClick(option)}
-                        title={`${option.label}: ${option.count} document${
-                          option.count === 1 ? "" : "s"
-                        }`}
+                        title={t("chat.scopeOptionTitle", {
+                          count: option.count,
+                          label: option.label,
+                        })}
                       >
                         <span>{option.label}</span>
                         <small>{option.count}</small>
@@ -609,15 +610,15 @@ const ChatComponent = (props) => {
           {isToolsOpen ? (
             <div className="archive-composer-menu">
               <button type="button" onClick={() => onAttach?.()}>
-                <PaperClipOutlined />
+                <PaperClipOutlined aria-hidden="true" />
                 {t("chat.attachDocuments")}
               </button>
               <button type="button" onClick={cycleRetrievalMode}>
-                <AppstoreOutlined />
+                <AppstoreOutlined aria-hidden="true" />
                 {t("chat.retrievalPrefix")}: {retrievalLabelByMode[retrievalMode]}
               </button>
               <button type="button" onClick={chatModeClickHandler}>
-                <SoundOutlined />
+                <SoundOutlined aria-hidden="true" />
                 {isChatModeOn ? t("chat.voiceOn") : t("chat.voiceMode")}
               </button>
               {isChatModeOn ? (
@@ -626,7 +627,7 @@ const ChatComponent = (props) => {
                   className={isRecording ? "is-recording" : ""}
                   onClick={recordingClickHandler}
                 >
-                  <AudioOutlined />
+                  <AudioOutlined aria-hidden="true" />
                   {isRecording ? t("chat.listening") : t("chat.record")}
                 </button>
               ) : null}

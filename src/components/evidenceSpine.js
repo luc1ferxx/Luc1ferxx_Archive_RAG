@@ -1,3 +1,4 @@
+import { createTranslator } from "../archiveI18n";
 import { getAnswerTraceOverview } from "../chatResponseContract";
 import {
   formatDocumentLocation,
@@ -9,36 +10,42 @@ import {
   formatBudgetCounter,
   formatDetailValue,
   formatGapType,
-  formatMaybeVersion,
+  formatMissingAnchors,
+  formatQueryCopy,
   formatSkillMetricCopy,
   formatSkillRef,
+  formatTracePhase,
   getGapCopy,
   getGapTitle,
   isPlainObject,
 } from "./AgentTraceDetail";
+import { formatStatusLabel } from "./workbenchFormatters";
+
+// English unless the caller hands in its translator (the preview does).
+const defaultT = createTranslator("en");
 
 const normalizeArray = (value) => (Array.isArray(value) ? value : []);
 
 const hasNumber = (value) => Number.isFinite(Number(value));
 
-const formatEvidenceScore = (value) =>
-  typeof value === "number" ? value.toFixed(2) : "N/A";
+const formatEvidenceScore = (value, t) =>
+  typeof value === "number" ? value.toFixed(2) : t("common.notAvailable");
 
-export const formatPlannerLabel = (planner = {}) => {
+export const formatPlannerLabel = (planner = {}, t) => {
   if (planner.status === "not_run") {
-    return "Not run";
+    return t("trace.plannerNotRun");
   }
 
   if (planner.fallback) {
-    return `${planner.requestedPlannerId ?? "unknown"} -> ${
-      planner.selectedPlannerId ?? "unknown"
+    return `${planner.requestedPlannerId ?? t("status.unknown")} -> ${
+      planner.selectedPlannerId ?? t("status.unknown")
     }`;
   }
 
-  return planner.selectedPlannerId ?? planner.requestedPlannerId ?? "Unknown";
+  return planner.selectedPlannerId ?? planner.requestedPlannerId ?? t("status.unknown");
 };
 
-export const getEvidenceSummaryDetails = (summary, sourceCount) => {
+export const getEvidenceSummaryDetails = (summary, sourceCount, t) => {
   const hasSummary = isPlainObject(summary);
   const docCoverage =
     hasSummary && isPlainObject(summary.docCoverage) ? summary.docCoverage : {};
@@ -54,102 +61,100 @@ export const getEvidenceSummaryDetails = (summary, sourceCount) => {
     hasEvidence: hasSummary || hasSourceEvidence,
     metrics: [
       {
-        label: "Retrieved",
-        value: hasSummary ? formatDetailValue(summary.retrievedCount) : "N/A",
+        label: t("trace.retrieved"),
+        value: hasSummary
+          ? formatDetailValue(summary.retrievedCount, t)
+          : t("common.notAvailable"),
       },
       {
-        label: "Usable",
-        value: hasSummary ? formatDetailValue(summary.usableCount) : "N/A",
+        label: t("trace.usable"),
+        value: hasSummary
+          ? formatDetailValue(summary.usableCount, t)
+          : t("common.notAvailable"),
       },
       {
-        label: "Docs",
+        label: t("trace.docs"),
         value: formatBudgetCounter(
           docCoverage.coveredDocIds?.length,
           docCoverage.selectedDocIds?.length
         ),
       },
       {
-        label: "Citations",
-        value: hasSourceCount ? formatDetailValue(sourceCount) : null,
+        label: t("common.citations"),
+        value: hasSourceCount ? formatDetailValue(sourceCount, t) : null,
       },
       {
-        label: "Max score",
-        value: hasSummary ? formatEvidenceScore(scoreRange.max) : null,
+        label: t("trace.maxScore"),
+        value: hasSummary ? formatEvidenceScore(scoreRange.max, t) : null,
       },
     ].filter(({ value }) => value !== null && value !== undefined),
     reasons,
     requirements,
-    statusLabel: hasSummary
-      ? summary.confident
-        ? "Confident"
-        : "Limited"
-      : "Source-linked",
+    statusLabel: t(
+      hasSummary
+        ? summary.confident
+          ? "trace.confident"
+          : "trace.limited"
+        : "trace.sourceLinked"
+    ),
   };
 };
 
-const buildSkillItems = (skills = []) =>
+const buildSkillItems = (skills = [], t) =>
   skills.map((skill, index) => ({
     id: skill.skillId ?? skill.id ?? `skill-${index}`,
-    title: formatSkillRef(skill),
-    copy: formatSkillMetricCopy(skill),
-    meta: skill.status ? skill.status.replace(/_/g, " ") : null,
+    title: formatSkillRef(skill, t),
+    copy: formatSkillMetricCopy(skill, t),
+    meta: skill.status ? formatStatusLabel(skill.status, t) : null,
   }));
 
-const buildQueryItems = (queries = []) =>
+const buildQueryItems = (queries = [], t) =>
   queries.map((query, index) => ({
     id: query.queryId ?? query.id ?? `query-${index}`,
-    title: query.label ?? query.queryId ?? query.id ?? `Query ${index + 1}`,
-    copy: [
-      query.query,
-      query.skillId
-        ? `${query.skillId}${formatMaybeVersion(query.skillVersion)}`
-        : null,
-      query.phase ? `phase: ${String(query.phase).replace(/_/g, " ")}` : null,
-      query.primary ? "primary" : null,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    meta: query.phase ? String(query.phase).replace(/_/g, " ") : null,
+    title:
+      query.label ?? query.queryId ?? query.id ?? t("trace.query", { number: index + 1 }),
+    copy: formatQueryCopy(query, t),
+    meta: formatTracePhase(query.phase, t),
   }));
 
-const buildGapItems = (gaps = []) =>
+const buildGapItems = (gaps = [], t) =>
   gaps.map((gap, index) => ({
     id: gap.id ?? `${gap.type ?? "gap"}-${index}`,
-    title: getGapTitle(gap, index),
-    copy: getGapCopy(gap),
-    meta: formatGapType(gap),
+    title: getGapTitle(gap, index, t),
+    copy: getGapCopy(gap, t),
+    meta: formatGapType(gap, t),
   }));
 
-const buildUnsupportedClaimItems = (claims = []) =>
+const buildUnsupportedClaimItems = (claims = [], t) =>
   claims.map((claim, index) => ({
     id: claim.id ?? `unsupported-${index}`,
-    title: claim.text ?? `Claim ${index + 1}`,
-    copy:
-      Array.isArray(claim.missingAnchors) && claim.missingAnchors.length > 0
-        ? `Missing anchors: ${claim.missingAnchors.join(", ")}`
-        : null,
-    meta: "unsupported",
+    title: claim.text ?? t("trace.claim", { number: index + 1 }),
+    copy: formatMissingAnchors(claim.missingAnchors, t),
+    meta: t("trace.tagUnsupported"),
   }));
 
-const buildRemovedClaimItems = (claims = []) =>
+const buildRemovedClaimItems = (claims = [], t) =>
   claims.map((claim, index) => ({
     id: `removed-${index}`,
-    title: String(claim ?? `Claim ${index + 1}`),
+    title: String(claim ?? t("trace.claim", { number: index + 1 })),
     copy: null,
-    meta: "removed",
+    meta: t("trace.tagRemoved"),
   }));
 
-const buildEvidenceQualityItems = (details) => [
+const buildEvidenceQualityItems = (details, t) => [
   ...details.reasons.map((reason, index) => ({
     id: `reason-${index}`,
     title: reason,
-    meta: "reason",
+    meta: t("trace.tagReason"),
   })),
   ...details.requirements.map((requirement, index) => ({
     id: requirement.id ?? `requirement-${index}`,
-    title: requirement.label ?? requirement.query ?? `Requirement ${index + 1}`,
+    title:
+      requirement.label ??
+      requirement.query ??
+      t("trace.requirement", { number: index + 1 }),
     copy: requirement.query,
-    meta: "requirement",
+    meta: t("trace.tagRequirement"),
   })),
 ];
 
@@ -158,6 +163,7 @@ export const buildEvidenceSpineModel = ({
   evidenceSummary,
   sourceCount,
   stepCount,
+  t,
 } = {}) => {
   const {
     allGaps,
@@ -171,88 +177,90 @@ export const buildEvidenceSpineModel = ({
     unsupportedClaims,
   } = getAnswerTraceOverview(answer);
   const hasPlanner = Boolean(executionPlanner.status);
-  const evidenceDetails = getEvidenceSummaryDetails(evidenceSummary, sourceCount);
+  const evidenceDetails = getEvidenceSummaryDetails(evidenceSummary, sourceCount, t);
 
   const stages = [
     {
       id: "selection",
-      label: "Selected skills",
+      label: t("trace.selectedSkills"),
       status: selectedSkills.length > 0 ? "complete" : "muted",
-      meta: hasPlanner ? formatPlannerLabel(executionPlanner) : "Planner not recorded",
+      meta: hasPlanner
+        ? formatPlannerLabel(executionPlanner, t)
+        : t("trace.plannerNotRecorded"),
       groups: [
         {
-          label: "Selected skills",
-          items: buildSkillItems(selectedSkills),
+          label: t("trace.selectedSkills"),
+          items: buildSkillItems(selectedSkills, t),
         },
         {
-          label: "Skill chain",
-          items: buildSkillItems(skillChain),
+          label: t("trace.skillChain"),
+          items: buildSkillItems(skillChain, t),
         },
       ],
     },
     {
       id: "retrieval",
-      label: "Retrieval queries",
+      label: t("trace.retrievalQueries"),
       status: checkedQueries.length > 0 ? "complete" : "muted",
-      meta: `${checkedQueries.length} checked`,
+      meta: t("trace.checkedCount", { count: checkedQueries.length }),
       groups: [
         {
-          label: "Retrieval queries",
-          items: buildQueryItems(checkedQueries),
+          label: t("trace.retrievalQueries"),
+          items: buildQueryItems(checkedQueries, t),
         },
       ],
     },
     {
       id: "quality",
-      label: "Evidence",
+      label: t("trace.evidence"),
       status: evidenceDetails.confident ? "complete" : "warning",
       meta: evidenceDetails.statusLabel,
       groups: [
         {
-          label: "Evidence requirements",
-          items: buildEvidenceQualityItems(evidenceDetails),
+          label: t("trace.evidenceRequirements"),
+          items: buildEvidenceQualityItems(evidenceDetails, t),
         },
       ],
       hasEvidenceSummary: evidenceDetails.hasEvidence,
     },
     {
       id: "gaps",
-      label: "Evidence gaps",
+      label: t("trace.evidenceGaps"),
       status: allGaps.length > 0 ? "warning" : resolvedGaps.length > 0 ? "complete" : "muted",
       meta:
         allGaps.length > 0
-          ? `${allGaps.length} open`
-          : `${resolvedGaps.length} resolved`,
+          ? t("trace.openCount", { count: allGaps.length })
+          : t("trace.resolvedCount", { count: resolvedGaps.length }),
       groups: [
         {
-          label: "Evidence gaps",
-          items: buildGapItems(allGaps),
+          label: t("trace.evidenceGaps"),
+          items: buildGapItems(allGaps, t),
         },
         {
-          label: "Resolved gaps",
-          items: buildGapItems(resolvedGaps),
+          label: t("trace.resolvedGaps"),
+          items: buildGapItems(resolvedGaps, t),
         },
       ],
     },
     {
       id: "review",
-      label: "Answer review",
+      label: t("trace.answerReview"),
       status:
         unsupportedClaims.length > 0 || removedClaims.length > 0
           ? "warning"
           : "complete",
       meta:
         removedClaims.length > 0
-          ? `${removedClaims.length} removed`
-          : "No removals",
+          ? t("trace.removedCount", { count: removedClaims.length })
+          : t("trace.noRemovals"),
       groups: [
         {
-          label: "Unsupported claims",
-          items: buildUnsupportedClaimItems(unsupportedClaims),
+          label: t("trace.unsupportedClaims"),
+          items: buildUnsupportedClaimItems(unsupportedClaims, t),
         },
         {
-          label: "Finalizer removed claims",
-          items: buildRemovedClaimItems(removedClaims),
+          label: t("trace.removedClaims"),
+          items: buildRemovedClaimItems(removedClaims, t),
         },
       ],
     },
@@ -271,29 +279,29 @@ export const buildEvidenceSpineModel = ({
       Number.isFinite(stepCount),
     metrics: [
       {
-        label: "Steps",
-        value: formatDetailValue(stepCount),
+        label: t("common.steps"),
+        value: formatDetailValue(stepCount, t),
       },
       {
-        label: "Planner",
-        value: hasPlanner ? formatPlannerLabel(executionPlanner) : null,
+        label: t("trace.planner"),
+        value: hasPlanner ? formatPlannerLabel(executionPlanner, t) : null,
         title: executionPlanner.fallbackReason ?? undefined,
       },
       {
-        label: "Queries",
-        value: formatDetailValue(checkedQueries.length),
+        label: t("trace.queries"),
+        value: formatDetailValue(checkedQueries.length, t),
       },
       {
-        label: "Follow-ups",
-        value: formatDetailValue(loop.followUpsRun),
+        label: t("trace.followUps"),
+        value: formatDetailValue(loop.followUpsRun, t),
       },
       {
-        label: "Open gaps",
-        value: formatDetailValue(allGaps.length),
+        label: t("trace.openGaps"),
+        value: formatDetailValue(allGaps.length, t),
       },
       {
-        label: "Removed",
-        value: formatDetailValue(removedClaims.length),
+        label: t("trace.removed"),
+        value: formatDetailValue(removedClaims.length, t),
       },
     ].filter(({ value }) => value !== null && value !== undefined),
     stages,
@@ -317,14 +325,14 @@ const getOfficeFileType = (source) => {
 };
 
 /**
- * The evidence object the preview renders for one source. `t` localizes the
- * location ("Page 4", "Slide 3 · Revenue"); without it the labels are English,
- * as they always were. Only a page the PDF viewer can open defaults to page 1,
- * as before: a slide, sheet or section, or a file the browser cannot show,
- * keeps whatever number the citation gave it, or none.
+ * The evidence object the preview renders for one source. `t` localizes its
+ * labels and the location ("Page 4", "Slide 3 · Revenue"); without it they are
+ * English, as they always were. Only a page the PDF viewer can open defaults
+ * to page 1, as before: a slide, sheet or section, or a file the browser
+ * cannot show, keeps whatever number the citation gave it, or none.
  */
-export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
-  const fileName = source.fileName ?? "Untitled source";
+export const buildSourceEvidenceObject = (source = {}, { t = defaultT } = {}) => {
+  const fileName = source.fileName ?? t("preview.untitledSource");
   const fileType =
     getOfficeFileType(source) ??
     fileName.split(".").pop()?.toUpperCase() ??
@@ -347,28 +355,30 @@ export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
       : [
           {
             id: `${source.docId ?? fileName}:${chunkIndex ?? "selected"}`,
-            label: Number.isFinite(chunkIndex) ? `Chunk ${chunkIndex}` : "Selected chunk",
+            label: Number.isFinite(chunkIndex)
+              ? t("common.chunkNumber", { number: chunkIndex })
+              : t("preview.selectedChunk"),
             excerpt,
             pageNumber,
             score: sourceScore,
           },
         ].filter((chunk) => chunk.excerpt);
   const metadataRows = [
-    { label: "Document", value: fileName },
+    { label: t("preview.document"), value: fileName },
     locationUnit
-      ? { label: "Location", value: locationText || null }
-      : { label: "Page", value: pageNumber ? locationText : null },
+      ? { label: t("preview.location"), value: locationText || null }
+      : { label: t("preview.page"), value: pageNumber ? locationText : null },
     {
-      label: "Chunk",
+      label: t("preview.chunk"),
       value: chunkIndex !== null && chunkIndex !== undefined ? String(chunkIndex) : null,
     },
     {
-      label: "Rank",
+      label: t("preview.rank"),
       value: hasNumber(source.rank) ? `#${Number(source.rank)}` : null,
     },
-    { label: "Score", value: sourceScore },
-    { label: "Doc ID", value: source.docId },
-    { label: "Type", value: fileType },
+    { label: t("preview.score"), value: sourceScore },
+    { label: t("preview.docId"), value: source.docId },
+    { label: t("preview.type"), value: fileType },
   ].filter(({ value }) => value !== null && value !== undefined && value !== "");
 
   return {
@@ -384,7 +394,7 @@ export const buildSourceEvidenceObject = (source = {}, { t } = {}) => {
     metadataRows,
     pageNumber,
     pageRange: pageNumber ? String(pageNumber) : hasInlinePreview ? "1" : null,
-    previewDescription: excerpt || "Selected evidence from the answer source.",
+    previewDescription: excerpt || t("preview.selectedEvidence"),
     rank: source.rank,
     score: sourceScore,
     source,

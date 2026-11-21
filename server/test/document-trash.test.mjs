@@ -536,8 +536,9 @@ describe("the purge service", () => {
     assert.equal(await service.deleteExpiredTrash({ cutoff: "2026-10-01T00:00:00.000Z", limit: 10 }), null);
   });
 
-  test("a move into the trash cancels the ingest jobs but redacts nothing", async () => {
+  test("a move into the trash cancels the ingest jobs and deletes the arXiv task but redacts nothing", async () => {
     const canceled = [];
+    const taskDeletes = [];
     const cascade = createDocumentDeletionCascade({
       ingestJobStore: {
         cancelDocumentJobs: async ({ docIds }) => {
@@ -547,13 +548,23 @@ describe("the purge service", () => {
       },
       isRedactionEnabled: () => true,
       logger: silentLogger,
+      recommendationTaskService: {
+        deleteDocumentTasks: async (input) => {
+          taskDeletes.push(input);
+          return input.docIds.length;
+        },
+      },
     });
 
     assert.deepEqual(await cascade.afterDocumentsDeleted({ accessScope: {}, docIds: ["doc-1"], redact: false }), {
       ingestJobs: { canceled: 1 },
+      recommendationTasks: { deleted: 1 },
       redaction: null,
     });
     assert.deepEqual(canceled, ["doc-1"]);
+    assert.deepEqual(taskDeletes, [
+      { accessScope: { userId: "", workspaceId: "" }, docIds: ["doc-1"], provider: "arxiv" },
+    ]);
   });
 });
 

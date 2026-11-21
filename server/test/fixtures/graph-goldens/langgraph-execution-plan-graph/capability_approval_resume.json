@@ -114,7 +114,7 @@
           "retryOfStepId": "",
           "startedAt": "",
           "status": "completed",
-          "summary": "Capability call is approved and ready to resume.",
+          "summary": "Capability call completed.",
           "traceStepId": "",
           "type": "capability_call",
           "updatedAt": "<time>"
@@ -543,7 +543,7 @@
           "retryOfStepId": "",
           "startedAt": "",
           "status": "completed",
-          "summary": "Capability call is approved and ready to resume.",
+          "summary": "Capability call completed.",
           "traceStepId": "",
           "type": "capability_call",
           "updatedAt": "<time>"

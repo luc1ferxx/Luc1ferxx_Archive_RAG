@@ -5,15 +5,16 @@ import {
   requestDocumentClear,
   requestDocumentDelete,
 } from "../archiveApi";
-import {
-  formatDocumentCount,
-  getTotalPages,
-} from "../archiveWorkspace";
+import { createTranslator } from "../archiveI18n";
+import { getTotalPages } from "../archiveWorkspace";
+
+// English unless the app hands in its translator.
+const defaultT = createTranslator("en");
 
 const getBackendMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
 
-export const useWorkspaceDocuments = () => {
+export const useWorkspaceDocuments = ({ t = defaultT } = {}) => {
   const [activeDocuments, setActiveDocuments] = useState([]);
 
   const refreshDocuments = useCallback(async () => {
@@ -38,9 +39,7 @@ export const useWorkspaceDocuments = () => {
           if (error.code === "ERR_NETWORK") {
             console.warn("Persisted documents are unavailable:", error.message);
           } else {
-            message.error(
-              getBackendMessage(error, "Unable to load persisted documents.")
-            );
+            message.error(getBackendMessage(error, t("app.loadDocumentsFailed")));
           }
         }
       }
@@ -51,6 +50,8 @@ export const useWorkspaceDocuments = () => {
     return () => {
       cancelled = true;
     };
+    // Loads once: a language switch is no reason to fetch again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleUploadSuccess = useCallback((document) => {
@@ -74,34 +75,25 @@ export const useWorkspaceDocuments = () => {
         prev.filter((document) => document.docId !== docId)
       );
       await afterSuccess?.();
-      message.success("Document removed.");
+      message.success(t("app.documentRemoved"));
     } catch (error) {
-      message.error(
-        getBackendMessage(error, "Unable to remove the document.")
-      );
+      message.error(getBackendMessage(error, t("app.removeDocumentFailed")));
     }
-  }, []);
+  }, [t]);
 
   const clearDocuments = useCallback(async ({ afterSuccess } = {}) => {
     try {
       await requestDocumentClear();
       setActiveDocuments([]);
       await afterSuccess?.();
-      message.success("All documents cleared.");
+      message.success(t("app.documentsCleared"));
     } catch (error) {
-      message.error(getBackendMessage(error, "Unable to clear documents."));
+      message.error(getBackendMessage(error, t("app.clearDocumentsFailed")));
     }
-  }, []);
+  }, [t]);
 
   const docIds = useMemo(
     () => activeDocuments.map((document) => document.docId),
-    [activeDocuments]
-  );
-  const docLabel = useMemo(
-    () =>
-      activeDocuments.length === 1
-        ? activeDocuments[0].fileName
-        : formatDocumentCount(activeDocuments.length),
     [activeDocuments]
   );
   const totalPages = useMemo(
@@ -113,7 +105,6 @@ export const useWorkspaceDocuments = () => {
     activeDocuments,
     clearDocuments,
     docIds,
-    docLabel,
     handleUploadSuccess,
     refreshDocuments,
     removeDocument,

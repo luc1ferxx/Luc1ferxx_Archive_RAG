@@ -65,7 +65,7 @@ export const validateDocumentFile = (file) => {
 // route nests it) is what the user needs to read: a format the server
 // switched off, a legacy or macro-enabled Office file, a workbook over the
 // cell limit. Without one, the request's own message, as before.
-export const getUploadErrorMessage = (error) => {
+export const getUploadErrorMessage = (error, t) => {
   const serverError = error?.response?.data?.error;
 
   if (typeof serverError === "string" && serverError.trim()) {
@@ -76,7 +76,7 @@ export const getUploadErrorMessage = (error) => {
     return serverError.message;
   }
 
-  return error?.message || "Upload failed";
+  return error?.message || t("uploader.failed");
 };
 
 const buildFileId = (file) =>
@@ -323,7 +323,7 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
         message.error(
           t("uploader.uploadFailed", {
             fileName: info.file.name,
-            message: getUploadErrorMessage(info.file.error),
+            message: getUploadErrorMessage(info.file.error, t),
           })
         );
       }
@@ -334,7 +334,7 @@ const PdfUploader = ({ onUploadSuccess, t = defaultT }) => {
     <Dragger {...attributes}>
       <div className="archive-uploader-row">
         <div className="archive-uploader-icon">
-          <InboxOutlined />
+          <InboxOutlined aria-hidden="true" />
         </div>
 
         <div className="archive-uploader-copy-wrap">

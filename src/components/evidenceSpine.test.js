@@ -69,11 +69,19 @@ describe("buildSourceEvidenceObject", () => {
       pageNumber: 2,
       title: "Budget · 工作表 Revenue",
     });
+    // The labels follow the locale too.
     expect(evidence.metadataRows).toContainEqual({
-      label: "Location",
+      label: "位置",
       value: "工作表 Revenue",
     });
-    expect(evidence.metadataRows.map((row) => row.label)).not.toContain("Page");
+    expect(evidence.metadataRows.map((row) => row.label)).not.toContain("页码");
+    expect(evidence.metadataRows.map((row) => row.label)).toEqual([
+      "文档",
+      "位置",
+      "片段",
+      "文档 ID",
+      "类型",
+    ]);
   });
 
   test("never gives an Office source a page 1 it does not have", () => {

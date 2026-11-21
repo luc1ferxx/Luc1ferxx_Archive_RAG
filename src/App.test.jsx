@@ -112,6 +112,22 @@ vi.mock("./components/ChatComponent", () => ({ default: (props) => (
     >
       Submit mock chat
     </button>
+    <button
+      type="button"
+      onClick={() =>
+        props.handleResp?.("Search the web.", {
+          agentAnswer: "Mock web answer",
+          ragAnswer: "",
+          ragSources: [],
+          agentTrace: [
+            { id: "web_search:primary", label: "Web Search", status: "skipped", type: "web_search" },
+            { id: "capability:web.search", label: "Web Search", status: "failed", type: "capability_call" },
+          ],
+        })
+      }
+    >
+      Submit web chat
+    </button>
     {[
       ["Submit deck chat", MOCK_DECK_CITATION],
       ["Submit pdf chat", MOCK_PDF_CITATION],
@@ -284,6 +300,7 @@ describe("App", () => {
       name: "首页导航",
     });
 
+    expect(within(homeNavigation).getByRole("button", { name: "文件库" })).toBeInTheDocument();
     fireEvent.click(within(homeNavigation).getByRole("button", { name: "技能" }));
     expect(screen.getByRole("region", { name: "文档技能" })).toBeInTheDocument();
     expect(screen.queryByText("Corpus")).not.toBeInTheDocument();
@@ -292,6 +309,7 @@ describe("App", () => {
 
     expect(await screen.findByText("语料")).toBeInTheDocument();
     expect(screen.getByText("范围")).toBeInTheDocument();
+    expect(screen.getByText("选择一条引用或相关文档")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "切换语言到English" })
     ).toBeInTheDocument();
@@ -580,7 +598,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Compare documents" }));
     fireEvent.click(screen.getByLabelText(/benefits-2025\.pdf/i));
+    expect(screen.getByText("1 selected document")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/rag-notes\.pdf/i));
+    expect(screen.getByText("2 selected documents")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stage comparison" }));
 
     expect(screen.getByTestId("chat-docids")).toHaveTextContent(
@@ -604,6 +624,30 @@ describe("App", () => {
 
     expect(await screen.findByText("Corpus")).toBeInTheDocument();
     expect(screen.getByText("Mock answer")).toBeInTheDocument();
+
+    // Counts read "1 doc" and "2 turns", not "1 docs" and "2 turn".
+    fireEvent.click(screen.getByRole("button", { name: "Submit mock chat" }));
+    expect(
+      screen.getByRole("button", { name: "Workspace documents summary" })
+    ).toHaveTextContent(/^1 doc$/);
+    expect(screen.getByText("Working with 1 doc")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Conversation turns summary" })
+    ).toHaveTextContent(/^2 turns$/);
+    expect(screen.getByText("2 recorded turns")).toBeInTheDocument();
+  });
+
+  test("the Trace view tells the approved capability call apart from the step that asked for it", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Submit web chat" }));
+    expect(await screen.findByText("Corpus")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trace" }));
+
+    const trace = within(document.querySelector(".archive-trace-view"));
+
+    expect(trace.getByText("Web Search")).toBeInTheDocument();
+    expect(trace.getByText("Web Search (capability call)")).toBeInTheDocument();
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {
@@ -675,6 +719,7 @@ describe("App", () => {
                   actions: [
                     {
                       safety: {
+                        label: "Document RAG",
                         reasonCodes: ["non_idempotent", "external_write"],
                         stepId: "step-document",
                         stepType: "document_rag",
@@ -714,6 +759,7 @@ describe("App", () => {
                     reasonCodes: ["requires_approval", "non_idempotent"],
                     steps: [
                       {
+                        label: "Web Search",
                         reasonCodes: ["requires_approval", "non_idempotent"],
                         stepId: "step-web",
                         stepType: "web_search",
@@ -766,23 +812,30 @@ describe("App", () => {
     expect(
       await screen.findByText("Recover interrupted document answer")
     ).toBeInTheDocument();
-    expect(screen.getByText("server_startup_recovery")).toBeInTheDocument();
+    const recoveryList = within(document.querySelector(".archive-recovery-list"));
+
+    // Reasons, statuses and risks read as labels, not the server's codes.
+    expect(recoveryList.getByText("Interrupted by a server restart")).toBeInTheDocument();
+    expect(recoveryList.queryByText("server_startup_recovery")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Retry failed step" })
+      recoveryList.getByRole("button", { name: "Retry failed step" })
     ).toBeInTheDocument();
     // No step is ever run on its own, so the panel has no "auto replay"
     // verdict: it shows what a replay would risk. (That "resume from step" has
     // no label of its own any more is in workbenchFormatters.test.js.)
     expect(screen.queryByText(/Auto replay/)).toBeNull();
-    expect(screen.getAllByText("Run status").length).toBeGreaterThan(0);
-    expect(screen.getByText("document_rag")).toBeInTheDocument();
+    expect(recoveryList.getAllByText("Run status").length).toBeGreaterThan(0);
+    expect(recoveryList.getAllByText("Waiting for user").length).toBe(4);
+    expect(recoveryList.getByText("Document RAG")).toBeInTheDocument();
     expect(
-      screen.getAllByText("non_idempotent, external_write").length
-    ).toBeGreaterThan(0);
-    expect(screen.getByText("web_search")).toBeInTheDocument();
+      recoveryList.getByText("Not idempotent, External write")
+    ).toBeInTheDocument();
+    // A run with nothing to retry describes the step it stopped at.
+    expect(recoveryList.getByText("Requires approval")).toBeInTheDocument();
+    expect(recoveryList.getByText("Web Search")).toBeInTheDocument();
     expect(
-      screen.getAllByText("requires_approval, non_idempotent").length
-    ).toBeGreaterThan(0);
+      recoveryList.getByText("Requires approval, Not idempotent")
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[0]);
 

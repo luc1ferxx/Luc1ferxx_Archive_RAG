@@ -663,6 +663,65 @@ describe("RenderQA", () => {
     expect(screen.getByText("Capability call completed.")).toBeInTheDocument();
   });
 
+  test("tells the approved capability call apart from the step that asked for it", () => {
+    const conversation = [
+      {
+        question: "Search the web for the launch date.",
+        answer: {
+          agentAnswer: "Approve Web Search?",
+          agentMode: "web",
+          agentRunId: "run-web",
+          agentRunStatus: "failed",
+          agentRunSteps: [
+            {
+              id: "web_search:primary",
+              kind: "tool_call",
+              label: "Web Search",
+              status: "skipped",
+              summary: "Web Search was delegated to the approved capability call.",
+              type: "web_search",
+            },
+            {
+              error: { message: "Web search is not configured: SERPAPI_KEY is not set." },
+              id: "capability:web.search:gate-1",
+              kind: "capability_call",
+              label: "Web Search",
+              status: "failed",
+              summary: "Capability call failed: Web search is not configured: SERPAPI_KEY is not set.",
+              type: "capability_call",
+            },
+          ],
+          ragAnswer: "",
+          ragSources: [],
+          mcpAnswer: "Web search not used.",
+        },
+      },
+    ];
+    const getStepRows = () =>
+      within(document.querySelector(".archive-run-control-steps"));
+    const { rerender } = render(<RenderQA conversation={conversation} />);
+
+    expect(getStepRows().getByText("Web Search")).toBeInTheDocument();
+    expect(getStepRows().getByText("Web Search (capability call)")).toBeInTheDocument();
+    // The step rail clips a long label; its title keeps the whole of it.
+    expect(
+      document.querySelector('.archive-run-stage-label[title="Web Search (capability call)"]')
+    ).not.toBeNull();
+    expect(getStepRows().getByText("Skipped")).toBeInTheDocument();
+    expect(getStepRows().getByText("Failed")).toBeInTheDocument();
+    const runStatus = within(
+      document.querySelector(".archive-run-control-metrics")
+    ).getByText("Status").parentElement;
+
+    expect(within(runStatus).getByText("Failed")).toBeInTheDocument();
+
+    rerender(<RenderQA conversation={conversation} t={createTranslator("zh")} />);
+
+    expect(getStepRows().getByText("Web Search（能力调用）")).toBeInTheDocument();
+    expect(getStepRows().getByText("已跳过")).toBeInTheDocument();
+    expect(getStepRows().getByText("失败")).toBeInTheDocument();
+  });
+
   test("renders pending capability approval gates without private raw input", () => {
     const handleApprovalAction = vi.fn();
 
@@ -733,7 +792,7 @@ describe("RenderQA", () => {
     expect(
       screen.getAllByText("Search the web for the current launch date.").length
     ).toBeGreaterThan(0);
-    expect(screen.getByText("External Call")).toBeInTheDocument();
+    expect(screen.getByText("External call")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(handleApprovalAction).toHaveBeenCalledWith(
@@ -932,5 +991,61 @@ describe("RenderQA", () => {
     const articles = screen.getAllByRole("article");
     expect(articles[0]).toHaveAttribute("aria-current", "true");
     expect(articles[1]).not.toHaveAttribute("aria-current");
+  });
+
+  test("scrolls the active turn into view when the chat opens and a new turn when it arrives", () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    const turn = (question) => ({
+      question,
+      answer: { ragAnswer: `${question} answer.`, ragSources: [], mcpAnswer: "Web answer." },
+    });
+    const turns = [turn("First question"), turn("Second question"), turn("Third question")];
+
+    // jsdom has no scrollIntoView.
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    try {
+      const { rerender } = render(<RenderQA activeTurnIndex={1} conversation={turns.slice(0, 2)} />);
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toHaveTextContent("Second question");
+
+      rerender(<RenderQA activeTurnIndex={2} conversation={turns} />);
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+      expect(scrollIntoView.mock.contexts[1]).toHaveTextContent("Third question");
+      expect(scrollIntoView).toHaveBeenLastCalledWith({ block: "start" });
+
+      // An approval or a retry rewrites a turn in place: nothing moves.
+      rerender(
+        <RenderQA activeTurnIndex={0} conversation={[turn("First question, approved"), ...turns.slice(1)]} />
+      );
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  test("the empty chat invites a question, or says how documents get there", () => {
+    const { rerender } = render(<RenderQA conversation={[]} hasDocuments />);
+
+    expect(screen.getByText("No conversation yet")).toBeInTheDocument();
+    expect(screen.getByText("Ask a question about your documents to begin.")).toBeInTheDocument();
+
+    rerender(<RenderQA canUpload conversation={[]} />);
+    expect(
+      screen.getByText("Upload documents on the left, then ask a question to begin.")
+    ).toBeInTheDocument();
+
+    // A role that cannot upload is not told to.
+    rerender(<RenderQA conversation={[]} />);
+    expect(screen.getByText("This workspace has no documents yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/Upload documents/)).not.toBeInTheDocument();
+
+    rerender(<RenderQA conversation={[]} hasDocuments t={createTranslator("zh")} />);
+    expect(screen.getByText("还没有对话")).toBeInTheDocument();
+    expect(screen.getByText("提出一个关于文档的问题即可开始。")).toBeInTheDocument();
   });
 });

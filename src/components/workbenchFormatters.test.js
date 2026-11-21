@@ -6,9 +6,11 @@ import {
   isStepRetryAllowed,
   listStepReplaySafetyPolicies,
 } from "../../server/rag/agent-run-step-replay-safety.js";
+import { createTranslator } from "../archiveI18n";
 import {
   formatRecoveryActionLabel,
-  formatReplaySafetyReasonCodes,
+  formatStatusLabel,
+  formatStepLabel,
   getRecoveryActionSuccessMessage,
   isStepRetrySupported,
   listSelfRetryableStepTypes,
@@ -47,21 +49,90 @@ describe("workbench formatters", () => {
   });
 
   test("recovery actions are retry and cancel; resume is not one of them", () => {
-    expect(formatRecoveryActionLabel("retry_failed_step")).toBe("Retry failed step");
-    expect(formatRecoveryActionLabel("cancel")).toBe("Cancel");
+    const en = createTranslator("en");
+    const zh = createTranslator("zh");
+
+    expect(formatRecoveryActionLabel("retry_failed_step", en)).toBe("Retry failed step");
+    expect(formatRecoveryActionLabel("cancel", en)).toBe("Cancel");
     // No dedicated label or message is left for the removed action.
-    expect(formatRecoveryActionLabel("resume_from_step")).toBe("resume from step");
-    expect(getRecoveryActionSuccessMessage("resume_from_step")).toBe(
+    expect(formatRecoveryActionLabel("resume_from_step", en)).toBe("resume from step");
+    expect(getRecoveryActionSuccessMessage("resume_from_step", en)).toBe(
       "Agent run recovery action completed."
     );
-    expect(getRecoveryActionSuccessMessage("cancel")).toBe("Agent run canceled.");
+    expect(getRecoveryActionSuccessMessage("cancel", en)).toBe("Agent run canceled.");
+    expect(formatRecoveryActionLabel("retry_failed_step", zh)).toBe("重试失败的步骤");
+    expect(formatRecoveryActionLabel("cancel", zh)).toBe("取消");
+    expect(getRecoveryActionSuccessMessage("cancel", zh)).toBe("Agent 运行已取消。");
+    expect(getRecoveryActionSuccessMessage("retry_failed_step", zh)).toBe(
+      "Agent 运行的恢复操作已完成。"
+    );
   });
 
-  test("replay safety is shown as the server's reason codes", () => {
+  test("run, task and step statuses, recovery reasons and replay risks read as labels", () => {
+    const en = createTranslator("en");
+    const zh = createTranslator("zh");
+
+    expect(formatStatusLabel("waiting_for_user", en)).toBe("Waiting for user");
+    expect(formatStatusLabel("completed", en)).toBe("Completed");
+    expect(formatStatusLabel("failed_step_ready", en)).toBe("A failed step can be retried");
+    expect(formatStatusLabel("non_idempotent", en)).toBe("Not idempotent");
+    expect(formatStatusLabel("unsupported_step_type", en)).toBe("Unsupported step type");
+    expect(formatStatusLabel("waiting_for_user", zh)).toBe("等待用户处理");
+    expect(formatStatusLabel("non_idempotent", zh)).toBe("非幂等");
+    // A value without a label still reads as words; a missing one is pending.
+    expect(formatStatusLabel("some_new_reason", en)).toBe("Some new reason");
+    expect(formatStatusLabel(undefined, en)).toBe("Pending");
+  });
+
+  // Values the server sends that a Chinese reader saw in English: a skill not
+  // run, a reused graph node, goal checks and deliverables, an arXiv paper's
+  // own state, a clarification reason and every manual-recovery reason
+  // (server/rag/agent-run-recovery.js and the checkpoint reconciliation).
+  test("the server's other statuses and reasons have Chinese labels", () => {
+    const zh = createTranslator("zh");
+
+    for (const status of [
+      "not_run",
+      "reused",
+      "blocked",
+      "waiting_for_approval",
+      "not_requested",
+      "imported",
+      "already_indexed",
+      "downloading",
+      "ingesting",
+      "capability_approval_required",
+      "document_follow_up_limit_reached",
+      "graph_resume_failed",
+      "checkpoint_digest_mismatch",
+      "graph_finalization_requires_recovery",
+      "graph_checkpoint_missing",
+      "graph_checkpoint_version_not_resumable",
+      "graph_outer_plan_not_resumable",
+      "graph_resume_executor_unavailable",
+      "invalid_checkpoint_shape",
+      "duplicate_checkpoint_node_run",
+      "unknown_in_flight_node",
+      "checkpoint_step_mismatch",
+      "completed_step_without_checkpoint",
+      "failed_node_requires_recovery",
+      "failed_step_checkpoint_mismatch",
+      "checkpoint_missing_completed_step",
+    ]) {
+      expect(formatStatusLabel(status, zh), status).not.toMatch(/[A-Za-z]/);
+    }
+  });
+
+  test("a capability call step is told apart from the step whose approval queued it", () => {
+    const en = createTranslator("en");
+
+    expect(formatStepLabel({ label: "Web Search", type: "capability_call" }, en)).toBe(
+      "Web Search (capability call)"
+    );
+    expect(formatStepLabel({ label: "Web Search", type: "web_search" }, en)).toBe("Web Search");
     expect(
-      formatReplaySafetyReasonCodes({ reasonCodes: ["graph_node_step", "external_write"] })
-    ).toBe("graph_node_step, external_write");
-    expect(formatReplaySafetyReasonCodes({})).toBe("No reason codes reported");
-    expect(formatReplaySafetyReasonCodes()).toBe("No reason codes reported");
+      formatStepLabel({ label: "Web Search", type: "capability_call" }, createTranslator("zh"))
+    ).toBe("Web Search（能力调用）");
+    expect(formatStepLabel({ type: "self_check" }, en)).toBe("self_check");
   });
 });

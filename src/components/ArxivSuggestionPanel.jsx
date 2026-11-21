@@ -5,6 +5,10 @@ import {
   DownloadOutlined,
   FileSearchOutlined,
 } from "@ant-design/icons";
+import { createTranslator } from "../archiveI18n";
+
+// English unless the app hands in its translator.
+const defaultT = createTranslator("en");
 
 const EMPTY_PAPERS = [];
 
@@ -28,6 +32,7 @@ const ArxivSuggestionPanel = ({
   onDismiss,
   onImport,
   suggestion,
+  t = defaultT,
 }) => {
   const papers = suggestion?.papers ?? EMPTY_PAPERS;
   const paperIds = useMemo(
@@ -83,11 +88,11 @@ const ArxivSuggestionPanel = ({
     <div className="arxiv-suggestion-panel" aria-live="polite">
       <div className="arxiv-suggestion-head">
         <div className="arxiv-suggestion-title">
-          <FileSearchOutlined />
-          <span>arXiv recommendations</span>
+          <FileSearchOutlined aria-hidden="true" />
+          <span>{t("arxiv.title")}</span>
         </div>
         <Button
-          aria-label="Dismiss arXiv recommendations"
+          aria-label={t("arxiv.dismiss")}
           className="arxiv-suggestion-dismiss"
           icon={<CloseOutlined />}
           onClick={onDismiss}
@@ -97,16 +102,15 @@ const ArxivSuggestionPanel = ({
       </div>
 
       {isLoading ? (
-        <div className="arxiv-suggestion-loading">Checking related papers...</div>
+        <div className="arxiv-suggestion-loading">{t("arxiv.loading")}</div>
       ) : (
         <>
           <div className="arxiv-suggestion-copy">
-            Found {papers.length} papers for {sanitizedTopic}. Choose which
-            ones to import.
+            {t("arxiv.found", { count: papers.length, topic: sanitizedTopic })}
           </div>
           {sanitizedTopic ? (
             <div className="arxiv-query-policy-note">
-              <span>arXiv search uses cleaned topic:</span>
+              <span>{t("arxiv.cleanedTopic")}</span>
               <strong className="arxiv-query-policy-topic">
                 {sanitizedTopic}
               </strong>
@@ -124,7 +128,9 @@ const ArxivSuggestionPanel = ({
                 >
                   <label className="arxiv-paper-checkbox">
                     <input
-                      aria-label={`Select ${paper.title || getPaperLabel(paper)}`}
+                      aria-label={t("arxiv.select", {
+                        title: paper.title || getPaperLabel(paper),
+                      })}
                       checked={isSelected}
                       className="arxiv-paper-checkbox-input"
                       disabled={!paperId || isImporting}
@@ -143,19 +149,19 @@ const ArxivSuggestionPanel = ({
             })}
           </div>
           <div className="arxiv-selection-summary">
-            {selectedCount} of {papers.length} selected
+            {t("arxiv.selectedCount", { selected: selectedCount, total: papers.length })}
           </div>
           <div className="arxiv-suggestion-actions">
             <Button
               className="archive-secondary-button"
               disabled={selectedCount === 0}
-              icon={<DownloadOutlined />}
+              icon={<DownloadOutlined aria-hidden="true" />}
               loading={isImporting}
               onClick={() => void onImport?.(selectedPaperIds)}
               size="small"
               type="primary"
             >
-              Import {selectedCount}
+              {t("arxiv.import", { count: selectedCount })}
             </Button>
             <Button
               className="archive-secondary-button"
@@ -163,7 +169,7 @@ const ArxivSuggestionPanel = ({
               onClick={onDismiss}
               size="small"
             >
-              Not now
+              {t("arxiv.notNow")}
             </Button>
           </div>
         </>

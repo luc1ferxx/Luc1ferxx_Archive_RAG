@@ -1,27 +1,12 @@
-export const formatAgentMode = (mode) => {
-  if (!mode) {
-    return "Agent";
-  }
+import { formatStatusLabel, toTitleWords, translateCode } from "./workbenchFormatters";
 
-  return mode
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" + ");
-};
+// The answer's agent mode by its mode.* label, or as the server names it.
+export const formatAgentMode = (mode, t) =>
+  mode ? translateCode("mode", mode, t) ?? toTitleWords(mode) : t("trace.agent");
 
-export const formatTraceStatus = (status) => {
-  if (!status) {
-    return "completed";
-  }
-
-  return status.replace(/_/g, " ");
-};
-
-export const formatTraceCount = (count, singular, plural = `${singular}s`) => {
-  const safeCount = Number.isFinite(count) ? count : 0;
-
-  return `${safeCount} ${safeCount === 1 ? singular : plural}`;
-};
+// A retrieval phase by its phase.* label, or in words; null without one.
+export const formatTracePhase = (phase, t) =>
+  phase ? translateCode("phase", phase, t) ?? String(phase).replace(/_/g, " ") : null;
 
 export const formatDuration = (value) => {
   const parsed = Number(value);
@@ -48,13 +33,13 @@ const formatDetailLabel = (label) =>
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/^./, (letter) => letter.toUpperCase());
 
-export const formatDetailValue = (value) => {
+export const formatDetailValue = (value, t) => {
   if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
+    return t(value ? "common.yes" : "common.no");
   }
 
   if (typeof value === "number") {
-    return Number.isFinite(value) ? String(value) : "N/A";
+    return Number.isFinite(value) ? String(value) : t("common.notAvailable");
   }
 
   if (typeof value === "string") {
@@ -67,7 +52,7 @@ export const formatDetailValue = (value) => {
     );
 
     return primitiveValues.length > 0
-      ? primitiveValues.map(formatDetailValue).join(", ")
+      ? primitiveValues.map((item) => formatDetailValue(item, t)).join(", ")
       : null;
   }
 
@@ -89,92 +74,110 @@ export const getSkillId = (skill = {}) => skill.skillId ?? skill.id ?? null;
 export const getSkillVersion = (skill = {}) =>
   skill.skillVersion ?? skill.version ?? null;
 
-export const getSkillLabel = (skill = {}) =>
-  skill.label ?? getSkillId(skill) ?? "Unknown skill";
+export const getSkillLabel = (skill = {}, t) =>
+  skill.label ?? getSkillId(skill) ?? t("trace.unknownSkill");
 
-export const formatSkillRef = (skill = {}) => {
-  const label = getSkillLabel(skill);
+export const formatSkillRef = (skill = {}, t) => {
+  const label = getSkillLabel(skill, t);
   const version = formatMaybeVersion(getSkillVersion(skill));
 
   return `${label}${version}`;
 };
 
-export const formatSkillMetricCopy = (skill = {}) => {
+export const formatSkillMetricCopy = (skill = {}, t) => {
   const parts = [
-    skill.status ? formatTraceStatus(skill.status) : null,
+    skill.status ? formatStatusLabel(skill.status, t) : null,
     Number.isFinite(skill.attempts)
-      ? formatTraceCount(skill.attempts, "attempt")
+      ? t("trace.attemptCount", { count: skill.attempts })
       : null,
     Number.isFinite(skill.retryCount) && skill.retryCount > 0
-      ? formatTraceCount(skill.retryCount, "retry", "retries")
+      ? t("trace.retryCount", { count: skill.retryCount })
       : null,
     Number.isFinite(skill.followUpCount) && skill.followUpCount > 0
-      ? formatTraceCount(skill.followUpCount, "follow-up")
+      ? t("trace.followUpCount", { count: skill.followUpCount })
       : null,
     Number.isFinite(skill.citationCount)
-      ? formatTraceCount(skill.citationCount, "citation")
+      ? t("trace.citationCount", { count: skill.citationCount })
       : null,
     formatDuration(skill.totalDurationMs ?? skill.durationMs),
     Number.isFinite(skill.budgetUsed) || Number.isFinite(skill.budgetLimit)
-      ? `budget ${formatBudgetCounter(skill.budgetUsed, skill.budgetLimit)}`
+      ? t("trace.budgetUsed", {
+          value: formatBudgetCounter(skill.budgetUsed, skill.budgetLimit),
+        })
       : null,
   ].filter(Boolean);
 
   return parts.join(" · ");
 };
 
-export const formatGapType = (gap = {}) =>
-  formatTraceStatus(String(gap.type ?? "evidence_gap")).replace(/\b\w/g, (letter) =>
-    letter.toUpperCase()
-  );
+export const formatGapType = (gap = {}, t) => {
+  const type = String(gap.type ?? "evidence_gap");
 
-export const getGapTitle = (gap = {}, index) =>
-  gap.claim ?? gap.message ?? gap.reason ?? `${formatGapType(gap)} ${index + 1}`;
+  return translateCode("gapType", type, t) ?? toTitleWords(type);
+};
 
-export const getGapCopy = (gap = {}) => {
-  const anchors = Array.isArray(gap.missingAnchors) && gap.missingAnchors.length > 0
-    ? `missing anchors: ${gap.missingAnchors.join(", ")}`
+export const getGapTitle = (gap = {}, index, t) =>
+  gap.claim ?? gap.message ?? gap.reason ?? `${formatGapType(gap, t)} ${index + 1}`;
+
+export const formatMissingAnchors = (anchors, t) =>
+  Array.isArray(anchors) && anchors.length > 0
+    ? t("trace.missingAnchors", { anchors: anchors.join(", ") })
     : null;
+
+export const getGapCopy = (gap = {}, t) => {
   const parts = [
-    formatGapType(gap),
+    formatGapType(gap, t),
     gap.skillId
       ? `${gap.skillId}${formatMaybeVersion(gap.skillVersion)}`
       : null,
-    gap.phase ? `phase: ${formatTraceStatus(gap.phase)}` : null,
-    anchors,
+    gap.phase ? t("trace.phase", { phase: formatTracePhase(gap.phase, t) }) : null,
+    formatMissingAnchors(gap.missingAnchors, t),
   ].filter(Boolean);
 
   return parts.join(" · ");
 };
 
+// The query list's line under each query: the query, its skill, its phase.
+export const formatQueryCopy = (query = {}, t) =>
+  [
+    query.query,
+    query.skillId
+      ? `${query.skillId}${formatMaybeVersion(query.skillVersion)}`
+      : null,
+    query.phase ? t("trace.phase", { phase: formatTracePhase(query.phase, t) }) : null,
+    query.primary ? t("trace.primary") : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
 const BUDGET_ITEMS = [
   {
-    label: "arXiv",
+    labelKey: "trace.budgetArxiv",
     usedKey: "arxivPaperFetches",
     limitKey: "maxArxivPaperFetches",
   },
   {
-    label: "Doc RAG",
+    labelKey: "trace.budgetDocRag",
     usedKey: "documentRagCalls",
     limitKey: "maxDocumentRagCalls",
   },
   {
-    label: "Web",
+    labelKey: "trace.budgetWeb",
     usedKey: "webSearchCalls",
     limitKey: "maxWebSearchCalls",
   },
   {
-    label: "Research",
+    labelKey: "trace.budgetResearch",
     usedKey: "researchQuestions",
     limitKey: "maxResearchQuestions",
   },
   {
-    label: "Custom",
+    labelKey: "trace.budgetCustom",
     usedKey: "customSkillCalls",
     limitKey: "maxCustomSkillCalls",
   },
   {
-    label: "Trace",
+    labelKey: "trace.budgetTrace",
     usedKey: "traceSteps",
     limitKey: "maxTraceSteps",
   },
@@ -201,7 +204,7 @@ export const TraceDetailRows = ({ rows }) => {
   );
 };
 
-const TraceBudgetSnapshot = ({ budget }) => {
+const TraceBudgetSnapshot = ({ budget, t }) => {
   if (!isPlainObject(budget)) {
     return null;
   }
@@ -211,18 +214,18 @@ const TraceBudgetSnapshot = ({ budget }) => {
 
   return (
     <div className="archive-agent-detail-section">
-      <div className="archive-agent-detail-caption">Budget</div>
+      <div className="archive-agent-detail-caption">{t("trace.budget")}</div>
       <div className="archive-agent-budget-grid">
         {BUDGET_ITEMS.map((item) => (
           <div key={item.usedKey} className="archive-agent-budget-item">
-            <span>{item.label}</span>
+            <span>{t(item.labelKey)}</span>
             <strong>{formatBudgetCounter(used[item.usedKey], limits[item.limitKey])}</strong>
           </div>
         ))}
         {budget.traceTruncated ? (
           <div className="archive-agent-budget-item is-warning">
-            <span>Trace</span>
-            <strong>Capped</strong>
+            <span>{t("trace.budgetTrace")}</span>
+            <strong>{t("trace.capped")}</strong>
           </div>
         ) : null}
       </div>
@@ -230,12 +233,7 @@ const TraceBudgetSnapshot = ({ budget }) => {
   );
 };
 
-export const TraceActionList = ({
-  label,
-  items,
-  getTitle = (_item, index) => `Item ${index + 1}`,
-  getCopy = () => null,
-}) => {
+export const TraceActionList = ({ label, items, getTitle, getCopy = () => null }) => {
   if (!Array.isArray(items) || items.length === 0) {
     return null;
   }
@@ -258,7 +256,7 @@ export const TraceActionList = ({
   );
 };
 
-export const TraceSkillList = ({ label = "Selected skills", skills }) => {
+export const TraceSkillList = ({ label, skills, t }) => {
   if (!Array.isArray(skills) || skills.length === 0) {
     return null;
   }
@@ -267,80 +265,66 @@ export const TraceSkillList = ({ label = "Selected skills", skills }) => {
     <TraceActionList
       label={label}
       items={skills}
-      getTitle={(skill) => formatSkillRef(skill)}
-      getCopy={(skill) => formatSkillMetricCopy(skill)}
+      getTitle={(skill) => formatSkillRef(skill, t)}
+      getCopy={(skill) => formatSkillMetricCopy(skill, t)}
     />
   );
 };
 
-export const TraceRetrievalQueries = ({
-  label = "Retrieval queries",
-  queries,
-}) => {
+export const TraceRetrievalQueries = ({ queries, t }) => {
   if (!Array.isArray(queries) || queries.length === 0) {
     return null;
   }
 
   return (
     <TraceActionList
-      label={label}
+      label={t("trace.retrievalQueries")}
       items={queries}
       getTitle={(query, index) =>
-        query.label ?? query.queryId ?? query.id ?? `Query ${index + 1}`
+        query.label ?? query.queryId ?? query.id ?? t("trace.query", { number: index + 1 })
       }
-      getCopy={(query) =>
-        [
-          query.query,
-          query.skillId
-            ? `${query.skillId}${formatMaybeVersion(query.skillVersion)}`
-            : null,
-          query.phase ? `phase: ${formatTraceStatus(query.phase)}` : null,
-          query.primary ? "primary" : null,
-        ]
-          .filter(Boolean)
-          .join(" · ")
-      }
+      getCopy={(query) => formatQueryCopy(query, t)}
     />
   );
 };
 
-export const TraceGapList = ({ label = "Evidence gaps", gaps }) => {
+export const TraceGapList = ({ gaps, t }) => {
   if (!Array.isArray(gaps) || gaps.length === 0) {
     return null;
   }
 
   return (
     <TraceActionList
-      label={label}
+      label={t("trace.evidenceGaps")}
       items={gaps}
-      getTitle={getGapTitle}
-      getCopy={getGapCopy}
+      getTitle={(gap, index) => getGapTitle(gap, index, t)}
+      getCopy={(gap) => getGapCopy(gap, t)}
     />
   );
 };
 
-export const TraceRemovedClaims = ({ claims }) => {
+export const TraceRemovedClaims = ({ claims, t }) => {
   if (!Array.isArray(claims) || claims.length === 0) {
     return null;
   }
 
   return (
     <TraceActionList
-      label="Finalizer removed claims"
+      label={t("trace.removedClaims")}
       items={claims}
-      getTitle={(claim, index) => String(claim ?? `Claim ${index + 1}`)}
+      getTitle={(claim, index) => String(claim ?? t("trace.claim", { number: index + 1 }))}
     />
   );
 };
 
-const TraceReasonList = ({ reasons }) => {
+const TraceReasonList = ({ reasons, t }) => {
   if (!Array.isArray(reasons) || reasons.length === 0) {
     return null;
   }
 
   return (
     <div className="archive-agent-detail-section">
-      <div className="archive-agent-detail-caption">Reasons</div>
+      <div className="archive-agent-detail-caption">{t("trace.reasons")}</div>
       <div className="archive-agent-reason-list">
         {reasons.map((reason) => (
           <span key={reason} className="archive-agent-detail-chip">
@@ -365,7 +349,7 @@ const TracePromptText = ({ label, value }) => {
   );
 };
 
-const TraceClaimSupport = ({ claimSupport }) => {
+const TraceClaimSupport = ({ claimSupport, t }) => {
   if (!isPlainObject(claimSupport)) {
     return null;
   }
@@ -376,47 +360,51 @@ const TraceClaimSupport = ({ claimSupport }) => {
 
   return (
     <div className="archive-agent-detail-section">
-      <div className="archive-agent-detail-caption">Claims</div>
+      <div className="archive-agent-detail-caption">{t("trace.claims")}</div>
       <TraceDetailRows
         rows={[
           {
-            label: "Supported",
-            value: formatDetailValue(claimSupport.supportedClaimCount),
+            label: t("trace.supported"),
+            value: formatDetailValue(claimSupport.supportedClaimCount, t),
           },
           {
-            label: "Unsupported",
-            value: formatDetailValue(claimSupport.unsupportedClaimCount),
+            label: t("trace.unsupported"),
+            value: formatDetailValue(claimSupport.unsupportedClaimCount, t),
           },
         ]}
       />
       <TraceActionList
-        label="Unsupported claims"
+        label={t("trace.unsupportedClaims")}
         items={unsupportedClaims}
-        getTitle={(claim, index) => claim.text ?? `Claim ${index + 1}`}
-        getCopy={(claim) =>
-          Array.isArray(claim.missingAnchors) && claim.missingAnchors.length > 0
-            ? `Missing anchors: ${claim.missingAnchors.join(", ")}`
-            : null
-        }
+        getTitle={(claim, index) => claim.text ?? t("trace.claim", { number: index + 1 })}
+        getCopy={(claim) => formatMissingAnchors(claim.missingAnchors, t)}
       />
     </div>
   );
 };
 
-const GenericTraceDetail = ({ detail, exclude = [] }) => {
+// Fields the step's row already shows (its kind, attempt and status) and the
+// ids and hashes only the server reads.
+const HIDDEN_DETAIL_KEY = /^(kind|attempt|traceStatus)$|(Id|Hash)$/;
+
+const isCode = (value) => typeof value === "string" && /^[a-z]+(?:_[a-z]+)+$/.test(value);
+
+// The step's own fields: a known one by its trace.field.* label, any other
+// named as the server names it; a code reads as its status label.
+const GenericTraceDetail = ({ detail, exclude = [], t }) => {
   const excludedKeys = new Set(exclude);
   const rows = Object.entries(detail)
-    .filter(([key]) => !excludedKeys.has(key))
+    .filter(([key]) => !excludedKeys.has(key) && !HIDDEN_DETAIL_KEY.test(key))
     .map(([key, value]) => ({
-      label: formatDetailLabel(key),
-      value: formatDetailValue(value),
+      label: translateCode("trace.field", key, t) ?? formatDetailLabel(key),
+      value: isCode(value) ? formatStatusLabel(value, t) : formatDetailValue(value, t),
     }))
     .filter(({ value }) => value !== null);
 
   return <TraceDetailRows rows={rows} />;
 };
 
-const AgentTraceDetail = ({ step }) => {
+const AgentTraceDetail = ({ step, t }) => {
   const detail = step?.detail;
 
   if (!isPlainObject(detail)) {
@@ -428,24 +416,24 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Mode", value: formatAgentMode(detail.mode) },
+            { label: t("trace.mode"), value: formatAgentMode(detail.mode, t) },
             {
-              label: "Documents",
+              label: t("trace.documents"),
               value: Array.isArray(detail.docIds)
-                ? `${detail.docIds.length} selected`
+                ? t("trace.selectedCount", { count: detail.docIds.length })
                 : null,
             },
           ]}
         />
         <TraceActionList
-          label="Actions"
+          label={t("trace.actions")}
           items={detail.actions}
           getTitle={(action, index) =>
-            action.label ?? action.id ?? `Action ${index + 1}`
+            action.label ?? action.id ?? t("trace.action", { number: index + 1 })
           }
           getCopy={(action) => action.summary}
         />
-        <TraceBudgetSnapshot budget={detail.budget} />
+        <TraceBudgetSnapshot budget={detail.budget} t={t} />
       </div>
     );
   }
@@ -455,23 +443,23 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Intent", value: formatDetailValue(detail.intent) },
-            { label: "Phase", value: formatTraceStatus(detail.phase) },
+            { label: t("trace.intent"), value: formatDetailValue(detail.intent, t) },
+            { label: t("trace.phaseLabel"), value: formatTracePhase(detail.phase, t) },
             {
-              label: "TopK",
-              value: formatDetailValue(detail.retrievalOptions?.topK),
+              label: t("trace.topK"),
+              value: formatDetailValue(detail.retrievalOptions?.topK, t),
             },
             {
-              label: "TopK/doc",
-              value: formatDetailValue(detail.retrievalOptions?.topKPerDoc),
+              label: t("trace.topKPerDoc"),
+              value: formatDetailValue(detail.retrievalOptions?.topKPerDoc, t),
             },
             {
-              label: "Profile",
-              value: formatDetailValue(detail.retrievalOptions?.profile),
+              label: t("trace.profile"),
+              value: formatDetailValue(detail.retrievalOptions?.profile, t),
             },
           ]}
         />
-        <TraceRetrievalQueries queries={detail.retrievalQueries} />
+        <TraceRetrievalQueries queries={detail.retrievalQueries} t={t} />
       </div>
     );
   }
@@ -479,7 +467,7 @@ const AgentTraceDetail = ({ step }) => {
   if (step.type === "skill_chain") {
     return (
       <div className="archive-agent-detail">
-        <TraceSkillList label="Chain order" skills={detail.skills} />
+        <TraceSkillList label={t("trace.chainOrder")} skills={detail.skills} t={t} />
       </div>
     );
   }
@@ -488,9 +476,11 @@ const AgentTraceDetail = ({ step }) => {
     return (
       <div className="archive-agent-detail">
         <TraceActionList
-          label="Questions"
+          label={t("trace.questions")}
           items={detail.questions}
-          getTitle={(question, index) => question.id ?? `Question ${index + 1}`}
+          getTitle={(question, index) =>
+            question.id ?? t("trace.question", { number: index + 1 })
+          }
           getCopy={(question) => question.question}
         />
       </div>
@@ -502,9 +492,9 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Citations", value: formatDetailValue(detail.citations) },
-            { label: "Abstained", value: formatDetailValue(detail.abstained) },
-            { label: "Error", value: formatDetailValue(detail.error) },
+            { label: t("common.citations"), value: formatDetailValue(detail.citations, t) },
+            { label: t("trace.abstained"), value: formatDetailValue(detail.abstained, t) },
+            { label: t("common.error"), value: formatDetailValue(detail.error, t) },
           ]}
         />
       </div>
@@ -528,14 +518,14 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Skill", value: detail.skillId },
-            { label: "Version", value: detail.skillVersion },
-            { label: "Duration", value: formatDuration(detail.durationMs) },
-            { label: "Citations", value: formatDetailValue(detail.citations) },
-            { label: "Abstained", value: formatDetailValue(detail.abstained) },
+            { label: t("trace.skill"), value: detail.skillId },
+            { label: t("trace.version"), value: detail.skillVersion },
+            { label: t("trace.duration"), value: formatDuration(detail.durationMs) },
+            { label: t("common.citations"), value: formatDetailValue(detail.citations, t) },
+            { label: t("trace.abstained"), value: formatDetailValue(detail.abstained, t) },
             {
-              label: "Selected docs",
-              value: formatDetailValue(detail.selectedDocumentCount),
+              label: t("trace.selectedDocs"),
+              value: formatDetailValue(detail.selectedDocumentCount, t),
             },
           ]}
         />
@@ -543,9 +533,10 @@ const AgentTraceDetail = ({ step }) => {
           queries={
             detail.retrievalPlan?.retrievalQueries ?? detail.retrievalQueries
           }
+          t={t}
         />
-        <TraceGapList gaps={detail.gaps} />
-        <TracePromptText label="Skill request" value={prompt} />
+        <TraceGapList gaps={detail.gaps} t={t} />
+        <TracePromptText label={t("trace.skillRequest")} value={prompt} />
       </div>
     );
   }
@@ -555,7 +546,7 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <div className="archive-agent-budget-grid">
           <div className="archive-agent-budget-item">
-            <span>Citations</span>
+            <span>{t("common.citations")}</span>
             <strong>
               {formatBudgetCounter(
                 detail.citationCount,
@@ -564,22 +555,22 @@ const AgentTraceDetail = ({ step }) => {
             </strong>
           </div>
           <div className="archive-agent-budget-item">
-            <span>Docs</span>
+            <span>{t("trace.docs")}</span>
             <strong>
               {formatBudgetCounter(detail.citedDocCount, detail.requiredDocCoverage)}
             </strong>
           </div>
           <div className="archive-agent-budget-item">
-            <span>Retry</span>
-            <strong>{formatDetailValue(detail.retryRecommended)}</strong>
+            <span>{t("common.retry")}</span>
+            <strong>{formatDetailValue(detail.retryRecommended, t)}</strong>
           </div>
           <div className="archive-agent-budget-item">
-            <span>Passed</span>
-            <strong>{formatDetailValue(detail.passed)}</strong>
+            <span>{t("trace.passed")}</span>
+            <strong>{formatDetailValue(detail.passed, t)}</strong>
           </div>
         </div>
-        <TraceClaimSupport claimSupport={detail.claimSupport} />
-        <TraceReasonList reasons={detail.reasons} />
+        <TraceClaimSupport claimSupport={detail.claimSupport} t={t} />
+        <TraceReasonList reasons={detail.reasons} t={t} />
       </div>
     );
   }
@@ -589,15 +580,15 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Skill", value: detail.skillId },
-            { label: "Version", value: detail.skillVersion },
+            { label: t("trace.skill"), value: detail.skillId },
+            { label: t("trace.version"), value: detail.skillVersion },
             {
-              label: "Follow-up",
-              value: formatDetailValue(detail.followUpRecommended),
+              label: t("trace.followUp"),
+              value: formatDetailValue(detail.followUpRecommended, t),
             },
           ]}
         />
-        <TraceGapList gaps={detail.gaps} />
+        <TraceGapList gaps={detail.gaps} t={t} />
       </div>
     );
   }
@@ -610,17 +601,20 @@ const AgentTraceDetail = ({ step }) => {
     );
   }
 
-  if (step.type === "clarification_gate") {
+  if (step.type === "clarification_gate" || step.type === "capability_approval_gate") {
     return (
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Reason", value: formatDetailValue(detail.reason) },
+            {
+              label: t("trace.reason"),
+              value: detail.reason ? formatStatusLabel(detail.reason, t) : null,
+            },
           ]}
         />
-        <TraceGapList gaps={detail.gaps} />
+        <TraceGapList gaps={detail.gaps} t={t} />
         <TracePromptText
-          label="Clarification question"
+          label={t("trace.clarificationQuestion")}
           value={detail.clarificationQuestion}
         />
       </div>
@@ -632,12 +626,12 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Changed", value: formatDetailValue(detail.changed) },
-            { label: "Abstained", value: formatDetailValue(detail.abstained) },
+            { label: t("trace.changed"), value: formatDetailValue(detail.changed, t) },
+            { label: t("trace.abstained"), value: formatDetailValue(detail.abstained, t) },
           ]}
         />
-        <TraceRemovedClaims claims={detail.removedClaims} />
-        <TraceClaimSupport claimSupport={detail.claimSupport} />
+        <TraceRemovedClaims claims={detail.removedClaims} t={t} />
+        <TraceClaimSupport claimSupport={detail.claimSupport} t={t} />
       </div>
     );
   }
@@ -647,8 +641,8 @@ const AgentTraceDetail = ({ step }) => {
       <div className="archive-agent-detail">
         <TraceDetailRows
           rows={[
-            { label: "Tool", value: formatDetailValue(detail.tool) },
-            { label: "Reason", value: formatDetailValue(detail.reason) },
+            { label: t("trace.tool"), value: formatDetailValue(detail.tool, t) },
+            { label: t("trace.reason"), value: formatDetailValue(detail.reason, t) },
           ]}
         />
       </div>
@@ -658,15 +652,15 @@ const AgentTraceDetail = ({ step }) => {
   if (isPlainObject(detail.budget)) {
     return (
       <div className="archive-agent-detail">
-        <GenericTraceDetail detail={detail} exclude={["budget"]} />
-        <TraceBudgetSnapshot budget={detail.budget} />
+        <GenericTraceDetail detail={detail} exclude={["budget"]} t={t} />
+        <TraceBudgetSnapshot budget={detail.budget} t={t} />
       </div>
     );
   }
 
   return (
     <div className="archive-agent-detail">
-      <GenericTraceDetail detail={detail} />
+      <GenericTraceDetail detail={detail} t={t} />
     </div>
   );
 };

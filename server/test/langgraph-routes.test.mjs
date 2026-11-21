@@ -610,7 +610,11 @@ test("the V1 Capability approval pauses the run and resumes it through POST /age
 
   assert.deepStrictEqual(langgraph.calls, [WEB_QUESTION]);
   // The pause, the paused run, the approval answer and the finished run are
-  // what the native outer loop left (the golden).
+  // what the native outer loop left (the golden). It was rewritten once from
+  // LangGraph (UPDATE_GRAPH_GOLDENS=1) when a capability call that has run
+  // started saying so: the completed capability_call step's summary is
+  // "Capability call completed.", no longer the "approved and ready to
+  // resume" it was queued with. Nothing else in it changed.
   assertMatchesGraphGolden("langgraph-routes", "v1-capability-approval", {
     approved: mask(langgraph.approved),
     calls: langgraph.calls,

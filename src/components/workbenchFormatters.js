@@ -1,12 +1,45 @@
-export const formatTaskStatus = (status) =>
-  String(status ?? "pending").replace(/_/g, " ");
+// A code the server sends (a status, an agent mode, a step kind, a phase, a
+// gap type) by its `${group}.${code}` key, or null when it has none.
+export const translateCode = (group, code, t) => {
+  const key = `${group}.${code}`;
+  const label = t(key);
+
+  return label === key ? null : label;
+};
+
+// A code without a key, in words: "document_rag" as "Document Rag".
+export const toTitleWords = (code) =>
+  String(code)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+// A run, task, step or approval status, a recovery or clarification reason or
+// a replay risk as the server sends it, translated (the status.* keys; a
+// recovery reason can be a replay risk, so they share them). A value without
+// a key reads as words.
+export const formatStatusLabel = (status, t) => {
+  const value = String(status ?? "pending");
+  const words = value.replace(/_/g, " ");
+
+  return translateCode("status", value, t) ?? words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+// A capability_call step is labelled with its Capability, like the step whose
+// approval queued it ("Web Search" twice): this tells the call apart.
+export const formatStepLabel = ({ label, type } = {}, t) => {
+  const name = label || type || t("sidebar.step");
+
+  return type === "capability_call"
+    ? t("workbench.capabilityCall", { label: name })
+    : name;
+};
 
 // The two things an operator can do with a run from the recovery panel.
 // (There is no "resume step": the server never runs a step on its own, and it
 // continues an interrupted graph by itself at startup.)
-const RECOVERY_ACTION_LABELS = {
-  cancel: "Cancel",
-  retry_failed_step: "Retry failed step",
+const RECOVERY_ACTION_LABEL_KEYS = {
+  cancel: "common.cancel",
+  retry_failed_step: "sidebar.retryFailedStep",
 };
 
 // The step types the server retries on their own, from its replay matrix
@@ -29,30 +62,10 @@ export const listSelfRetryableStepTypes = () => [...SELF_RETRYABLE_STEP_TYPES].s
 export const isStepRetrySupported = (stepType) =>
   SELF_RETRYABLE_STEP_TYPES.has(String(stepType ?? "").trim().toLowerCase());
 
-export const formatRecoveryActionLabel = (actionType) =>
-  RECOVERY_ACTION_LABELS[actionType] ??
-  String(actionType ?? "Action").replace(/_/g, " ");
+export const formatRecoveryActionLabel = (actionType, t) =>
+  RECOVERY_ACTION_LABEL_KEYS[actionType]
+    ? t(RECOVERY_ACTION_LABEL_KEYS[actionType])
+    : String(actionType ?? t("sidebar.recoveryAction")).replace(/_/g, " ");
 
-export const getRecoveryActionSuccessMessage = (action) => {
-  if (action === "cancel") {
-    return "Agent run canceled.";
-  }
-
-  return "Agent run recovery action completed.";
-};
-
-export const getRecoveryReplaySafetyItems = (recovery) =>
-  Array.isArray(recovery?.replaySafety?.steps)
-    ? recovery.replaySafety.steps
-    : [];
-
-// What replaying a step would risk or lack, as the server's reason codes.
-export const formatReplaySafetyReasonCodes = (safety = {}) => {
-  const reasonCodes = Array.isArray(safety.reasonCodes)
-    ? safety.reasonCodes.filter(Boolean)
-    : [];
-
-  return reasonCodes.length > 0
-    ? reasonCodes.join(", ")
-    : "No reason codes reported";
-};
+export const getRecoveryActionSuccessMessage = (action, t) =>
+  t(action === "cancel" ? "app.runCanceled" : "app.recoveryActionDone");

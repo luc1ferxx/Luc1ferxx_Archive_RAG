@@ -226,7 +226,7 @@
               "retryOfStepId": "",
               "startedAt": "",
               "status": "completed",
-              "summary": "Capability call is approved and ready to resume.",
+              "summary": "Capability call completed.",
               "traceStepId": "",
               "type": "capability_call",
               "updatedAt": "<time>"
@@ -426,7 +426,7 @@
             "retryOfStepId": "",
             "startedAt": "",
             "status": "completed",
-            "summary": "Capability call is approved and ready to resume.",
+            "summary": "Capability call completed.",
             "traceStepId": "",
             "type": "capability_call",
             "updatedAt": "<time>"
@@ -567,7 +567,7 @@
             "id": "capability:web.search:approval:web.search:1.0.0:<approval-hash>",
             "label": "Web Search",
             "status": "completed",
-            "summary": "Capability call is approved and ready to resume.",
+            "summary": "Capability call completed.",
             "type": "capability_call"
           }
         ],
@@ -1054,7 +1054,7 @@
             "retryOfStepId": "",
             "startedAt": "",
             "status": "completed",
-            "summary": "Capability call is approved and ready to resume.",
+            "summary": "Capability call completed.",
             "traceStepId": "",
             "type": "capability_call",
             "updatedAt": "<time>"
@@ -1408,7 +1408,7 @@
           "retryOfStepId": "",
           "startedAt": "",
           "status": "completed",
-          "summary": "Capability call is approved and ready to resume.",
+          "summary": "Capability call completed.",
           "traceStepId": "",
           "type": "capability_call",
           "updatedAt": "<time>"

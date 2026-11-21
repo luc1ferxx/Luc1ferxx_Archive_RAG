@@ -17,6 +17,7 @@ import {
   SafetyCertificateOutlined,
 } from "@ant-design/icons";
 import { formatDocumentUnitCount, getDocumentFormat } from "../documentLocation";
+import { formatStatusLabel } from "./workbenchFormatters";
 
 // By the stored MIME type; a PDF and a document whose type is not known keep
 // the PDF icon they always had.
@@ -229,14 +230,9 @@ const getPendingTaskScopeLabel = (pendingTask, t) => {
   }
 
   if (pendingTask.documentCount > 0) {
-    return t(
-      pendingTask.documentCount === 1
-        ? "home.selectedDocuments"
-        : "home.selectedDocuments_plural",
-      {
-        count: pendingTask.documentCount,
-      }
-    );
+    return t("home.selectedDocuments", {
+      count: pendingTask.documentCount,
+    });
   }
 
   return t("home.currentWorkspaceScope");
@@ -502,7 +498,7 @@ const WorkspaceEntryPanel = ({
         <div className="archive-home-section-head">
           <span>{t("home.compareSetup")}</span>
           <strong>
-            {t("home.selectedDocuments_plural", {
+            {t("home.selectedDocuments", {
               count: selectedCompareDocuments.length,
             })}
           </strong>
@@ -561,9 +557,14 @@ const WorkspaceEntryPanel = ({
                 type="button"
                 onClick={() => onOpenWorkspace?.({ nav: "runs", view: "tasks" })}
               >
-                <span>{run.status ?? "pending"}</span>
+                <span>{formatStatusLabel(run.status, t)}</span>
                 <strong>{run.label ?? run.goal ?? t("home.agentRun")}</strong>
-                <small>{run.summary ?? run.recovery?.reason ?? t("home.traceAvailable")}</small>
+                <small>
+                  {run.summary ??
+                    (run.recovery?.reason
+                      ? formatStatusLabel(run.recovery.reason, t)
+                      : t("home.traceAvailable"))}
+                </small>
               </button>
             ))}
           </div>

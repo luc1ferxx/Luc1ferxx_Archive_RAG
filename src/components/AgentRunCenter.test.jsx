@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
+import { createTranslator } from "../archiveI18n";
 import AgentRunCenter from "./AgentRunCenter";
 
 const APPROVAL_OBJECT_HASH = `sha256:${"a".repeat(64)}`;
@@ -165,6 +166,43 @@ describe("AgentRunCenter", () => {
 
     expect(screen.getByText("1/1 runs · 1 after approval")).toBeInTheDocument();
     expect(screen.queryByText("2/1 runs")).not.toBeInTheDocument();
+  });
+
+  test("shows task, step and approval statuses as labels in the app's language", () => {
+    const tasks = [
+      {
+        id: "agent_goal:labels",
+        type: "agent_goal",
+        status: "waiting_for_user",
+        label: "Agent task",
+        requiredUserAction: "approve_capability",
+        result: {
+          approvalGates: [
+            {
+              approvalObjectHash: APPROVAL_OBJECT_HASH,
+              capabilityId: "web.search",
+              id: "approval:web.search:1.0.0",
+              status: "pending",
+            },
+          ],
+        },
+        items: [
+          { id: "goal", label: "Goal", status: "completed", summary: "Find the date." },
+        ],
+      },
+    ];
+    const { rerender } = render(<AgentRunCenter tasks={tasks} />);
+
+    expect(screen.getByText("Waiting for user")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.queryByText(/waiting.for.user|^completed$|^pending$/)).toBeNull();
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+
+    expect(screen.getByText("等待用户处理")).toBeInTheDocument();
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("待处理")).toBeInTheDocument();
   });
 
   test("forwards approval actions through the task action callback", () => {
@@ -337,4 +375,79 @@ describe("AgentRunCenter", () => {
       ],
     });
   });
+
+  test("counts only unfinished tasks as active", () => {
+    const tasks = [
+      { id: "task-running", label: "Running task", status: "running" },
+      { id: "task-waiting", label: "Waiting task", status: "waiting_for_user" },
+      { id: "task-done", label: "Done task", status: "completed" },
+      { id: "task-failed", label: "Failed task", status: "failed" },
+    ];
+    const { rerender } = render(<AgentRunCenter tasks={tasks} />);
+
+    expect(screen.getByText("2 active")).toBeInTheDocument();
+    // The list still shows every task.
+    expect(screen.getByText("Done task")).toBeInTheDocument();
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+    expect(screen.getByText("2 个未完成")).toBeInTheDocument();
+  });
+
+  test("with no task, says how to start one and counts nothing", () => {
+    render(<AgentRunCenter tasks={[]} />);
+
+    expect(screen.getByText("0 active")).toBeInTheDocument();
+    expect(screen.getByText("Awaiting question")).toBeInTheDocument();
+  });
+
+  // The paper items as server/rag/recommendation-task-builders.js builds them:
+  // the summary is the paper's status code.
+  test("reads a recommendation paper's status code as a label", () => {
+    const paper = (id, status, resultStatus = "") => ({
+      error: null,
+      id,
+      label: `Paper ${id}`,
+      result: { docId: "", fileName: "", status: resultStatus },
+      status,
+      summary: resultStatus || status,
+    });
+    const tasks = [
+      {
+        id: "external_recommendation:arxiv:doc-1",
+        items: [
+          paper("p-1", "waiting_for_user"),
+          paper("p-2", "completed", "already_indexed"),
+          paper("p-3", "completed", "imported"),
+        ],
+        label: "arXiv recommendations",
+        status: "waiting_for_user",
+        type: "external_recommendation",
+      },
+    ];
+    const { container, rerender } = render(<AgentRunCenter tasks={tasks} />);
+    const summaries = () =>
+      [...container.querySelectorAll(".archive-agent-plan-step p")].map((node) => node.textContent);
+
+    // A summary that only repeats the paper's status is left out.
+    expect(summaries()).toEqual(["Already indexed", "Imported"]);
+    expect(container.textContent).not.toMatch(/waiting_for_user|already_indexed|imported/);
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+    expect(summaries()).toEqual(["已在索引中", "已导入"]);
+  });
+
+  test("tells a capability call trace step apart from the step that asked for it", () => {
+    render(
+      <AgentRunCenter
+        tasks={[
+          { id: "web_search:primary", label: "Web Search", status: "skipped", type: "web_search" },
+          { id: "capability:web.search", label: "Web Search", status: "failed", type: "capability_call" },
+        ]}
+      />
+    );
+
+    expect(screen.getByText("Web Search")).toBeInTheDocument();
+    expect(screen.getByText("Web Search (capability call)")).toBeInTheDocument();
+  });
 });
+

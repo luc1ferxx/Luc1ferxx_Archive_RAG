@@ -1,5 +1,6 @@
 import { AGENT_RUN_STATUSES } from "./agent-run-state-machine.js";
 import { isAgentRunRevisionConflictError } from "./agent-run-revision.js";
+import { ARXIV_RECOMMENDATION_PROVIDER } from "./arxiv-recommendation-builder.js";
 import { isDocumentDeleteRedactionEnabled } from "./config.js";
 import {
   buildDocumentReferenceNeedles,
@@ -23,6 +24,13 @@ import {
 // - Always: the document's queued, retry-waiting and dead-lettered ingest
 //   jobs are settled failed with canceled_reason 'document_deleted' and lose
 //   their bytes and stage outputs (ingest-job-store.js cancelDocumentJobs).
+// - Always: the deleting scope's arXiv recommendation task for the document
+//   (external_recommendation:arxiv:<docId>, rag/recommendation-tasks.js) is
+//   deleted, or it would wait for the user to import papers into a document
+//   that is gone. An import still running on it does not bring it back: a
+//   queued import job loses its claim and stops, and a direct import
+//   (POST /documents/:docId/arxiv/import) finds its task gone and writes no
+//   end state (recommendation-tasks.js).
 // - DOCUMENT_DELETE_REDACTION=on: the copies of its text in the deleting
 //   tenant's records (rag/document-deletion-redaction.js):
 //   * settled agent runs (completed, failed, canceled): steps, observations,
@@ -37,10 +45,12 @@ import {
 //   * answer feedback: the citation excerpts (system path, migration 040).
 //
 // The document trash (DOCUMENT_TRASH_RETENTION_HOURS, rag/document-trash.js)
-// splits it: moving a document into the trash cancels its ingest jobs at once
-// (`redact: false`), and the purge runs the whole cascade, the redaction
-// included, in the deleting scope's context once the trash window is over.
-// A restore therefore finds every record that cited the document as it was.
+// splits it: moving a document into the trash cancels its ingest jobs and
+// deletes its recommendation task at once (`redact: false`), and the purge
+// runs the whole cascade, the redaction included, in the deleting scope's
+// context once the trash window is over. A restore therefore finds every
+// record that cited the document as it was; its saved arXiv recommendations
+// (recommendation snapshots) stay, and importing from them records a new task.
 
 const SETTLED_RUN_STATUSES = new Set([
   AGENT_RUN_STATUSES.canceled,
@@ -117,6 +127,7 @@ export const createDocumentDeletionCascade = ({
   isRedactionEnabled = isDocumentDeleteRedactionEnabled,
   logger = console,
   now = () => new Date().toISOString(),
+  recommendationTaskService = null,
   workspaceArtifactStore = null,
 } = {}) => {
   const cancelIngestJobs = async ({ accessScope, docIds }) => {
@@ -127,6 +138,20 @@ export const createDocumentDeletionCascade = ({
     const canceled = await ingestJobStore.cancelDocumentJobs({ accessScope, docIds });
 
     return { canceled: canceled.length };
+  };
+
+  const deleteRecommendationTasks = async ({ accessScope, docIds }) => {
+    if (typeof recommendationTaskService?.deleteDocumentTasks !== "function") {
+      return null;
+    }
+
+    const deleted = await recommendationTaskService.deleteDocumentTasks({
+      accessScope,
+      docIds,
+      provider: ARXIV_RECOMMENDATION_PROVIDER,
+    });
+
+    return { deleted };
   };
 
   const redactRun = async (run, deleted) => {
@@ -300,24 +325,28 @@ export const createDocumentDeletionCascade = ({
   return {
     /**
      * The cascade for documents the caller's delete just removed. Resolves to
-     * what each part did ({ ingestJobs, redaction }); never rejects.
-     * `redact: false` (a move into the trash) cancels the ingest jobs only.
+     * what each part did ({ ingestJobs, recommendationTasks, redaction });
+     * never rejects. `redact: false` (a move into the trash) cancels the
+     * ingest jobs and deletes the recommendation tasks only.
      */
     async afterDocumentsDeleted({ accessScope = {}, docIds = [], redact = true } = {}) {
       const deleted = toDeletedDocIdSet(docIds);
       const ids = [...deleted];
 
       if (ids.length === 0) {
-        return { ingestJobs: null, redaction: null };
+        return { ingestJobs: null, recommendationTasks: null, redaction: null };
       }
 
       const scope = toPlainScope(accessScope);
       const ingestJobs = await runPart("cancelling ingest jobs", ids, () =>
         cancelIngestJobs({ accessScope: scope, docIds: ids })
       );
+      const recommendationTasks = await runPart("deleting recommendation tasks", ids, () =>
+        deleteRecommendationTasks({ accessScope: scope, docIds: ids })
+      );
 
       if (redact === false || !isRedactionEnabled()) {
-        return { ingestJobs, redaction: null };
+        return { ingestJobs, recommendationTasks, redaction: null };
       }
 
       // A clear can name thousands of documents: each pass over a store
@@ -357,6 +386,7 @@ export const createDocumentDeletionCascade = ({
 
       return {
         ingestJobs,
+        recommendationTasks,
         redaction: {
           agentRuns: await runPart("redacting agent runs", ids, () => redactInBatches(redactAgentRuns)),
           artifacts: await runPart("redacting workspace artifacts", ids, () => redactInBatches(redactArtifacts)),

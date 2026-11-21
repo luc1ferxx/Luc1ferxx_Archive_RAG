@@ -147,11 +147,21 @@ describe("WorkspaceArtifactsPanel", () => {
     });
     expect(fetchWorkspaceArtifact).toHaveBeenCalledWith("artifact-report");
 
+    // Counts take their singular for one.
+    expect(within(region).getByText("2 results")).toBeInTheDocument();
+    expect(within(region).getByText("v1.0.0 · 3 docs · 2 citations")).toBeInTheDocument();
+    expect(
+      within(within(region).getByRole("button", { name: "Renewal summary" })).getByText(
+        / · 1 doc · 1 cited$/
+      )
+    ).toBeInTheDocument();
+
     fireEvent.click(within(region).getByRole("button", { name: "Renewal summary" }));
     expect(
       await within(region).findByText("Renewal requires 30 days notice.")
     ).toBeInTheDocument();
     expect(fetchWorkspaceArtifact).toHaveBeenCalledWith("artifact-summary");
+    expect(within(region).getByText("v1.0.0 · 1 doc · 1 citation")).toBeInTheDocument();
   });
 
   test("downloads with the authenticated API and archives before refreshing", async () => {
