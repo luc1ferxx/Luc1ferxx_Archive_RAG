@@ -35,8 +35,8 @@
 | `server/rag/vector-store-pgvector-versions.js` | 索引版本注册表、指针 TTL 缓存、写入目标锁 lockIndexVersionWriteTargets、双写宽限 getEffectiveDualWriteGraceMs、resolveServingQueryEmbeddingSpace |
 | `server/rag/vector-store-pgvector-version-lifecycle.js` | 建版本、校验、激活、回滚、退役；runBuildDocuments 并行建；runIndexVersionRecallProbe 召回探针 |
 | `server/rag/sparse-store.js` | 本地 BM25 searchSparseDocuments（参照实现，Lucene IDF）；评测的 standalone 档走它 |
-| `server/rag/retrievers/global-retriever.js` | searchGlobalCandidatesWithRoutes：开 rerank 时每个查询取 topK×3 个融合候选，不重排；retrieveGlobalContextWithRoutes：单查询的调用方（缺口检索）检索完自己重排 |
-| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序；交叉编码器分数按（租户、传输、模型、分数刻度、查询、段落文字）在进程内缓存，最多 2 万条 |
+| `server/rag/retrievers/global-retriever.js` | retrieveGlobalContextWithRoutes：开 rerank 时先取 topK×3 个候选，融合后再重排 |
+| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序 |
 | `server/rag/query-router.js` | routeQuery：用正则信号判 qa / compare（多文档且置信度 ≥0.5 才走 compare） |
 | `server/rag/query-decomposer.js` | buildEvidenceRequirements / buildRetrievalQueries：按 and、also、以及、分号等拆多部分问题（最多 4 个，RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS） |
 | `server/rag/agent-query-planner.js` | buildAgentRetrievalPlan：agent 路径的检索计划（意图 → topK，INTENT_OPTIONS；模板化子查询在 agent-retrieval-queries.js buildAgentRetrievalQueries） |
@@ -62,14 +62,15 @@
 - embedQueryCached(resolvedQuery)：加查询前缀，按激活版本的空间嵌入
 
 → lookupSemanticCache（开启时；命中直接返回）→ executeQaRag 或 executeComparisonRag → retrieveGlobalContextForQueries（走远程检索层或进程内）。每条子查询：
-- searchGlobalCandidatesWithRoutes → vector-store.js searchDocumentsWithRoutes → searchHybridDocumentsWithRoutes
+- retrieveGlobalContextWithRoutes → vector-store.js searchDocumentsWithRoutes → searchHybridDocumentsWithRoutes
 - adaptQueryVectorForSearch（仅单文档 QA、没有 agent 计划时）
 - 并发跑 searchPgvectorDocuments（doc_id 过滤 + hnsw.iterative_scan）和 searchPgvectorSparseDocuments（默认 BM25 走 <t>_sparse_search 函数）
 - keepNewestDocumentVersion → fuseSearchResultsByRrf（k=60，权重 0.65/0.35）
+- 回到 global-retriever：rerankResultsOrKeepOrder
 
-→ rerankRetrievalStep：mergeRetrievedResults 合并多条子查询的候选，开 rerank 时整步只调一次 rerankResultsOrKeepOrder（按原问题打分）→ rerankMergedResults 定最终顺序 → 交给门控 assessQaConfidence / selectQaContext（属于答案子系统）→ writeQaAnswer → storeSemanticCacheAnswer。
+→ mergeRetrievedResults + rerankMergedResults 合并多条子查询的结果 → 交给门控 assessQaConfidence / selectQaContext（属于答案子系统）→ writeQaAnswer → storeSemanticCacheAnswer。
 
-对比路径走 retrievePerDocumentContextForQueries → searchDocumentsPerDocumentWithRoutes：每篇文档各跑一次 hybrid（Promise.all 并发），开 rerank 时每篇文档合并候选后重排一次。
+对比路径走 retrievePerDocumentContextForQueries → searchDocumentsPerDocumentWithRoutes：每篇文档各跑一次 hybrid（Promise.all 并发）。
 
 ## 设计决策
 
@@ -305,13 +306,13 @@ LLM 改写、HyDE、multi-query 生成：多一次模型调用，结果不可复
 
 **代价**
 
-要多部署一个服务（CPU torch）。min-max 归一后的分数只能在同一次重排调用内比较，所以门控用原始 crossEncoderScore。延迟只记过一个粗略值（本机 MPS 上一次 18 个候选约 0.4 s），没有系统压测
+要多部署一个服务（CPU torch）。min-max 归一后的分数只能在同一个查询内比较，所以门控用原始 crossEncoderScore。延迟只记过一个粗略值（本机 MPS 上一次 18 个候选约 0.4 s），没有系统压测
 
 **证据**
 
 dev：证据进入上下文 0.353→0.417，+0.063 [+0.044, +0.085]，显著；F1 +0.008，不显著；可回答题被拒答 −4.4pp [−7.7, −1.7]，显著（3.14a）。权重 0.6 是在 train 上按事先定的指标选的。启发式重排 −0.007，不显著（3.1）
 
-**代码**：server/rag/document-rag-execution.js rerankRetrievalStep；server/rag/retrievers/global-retriever.js retrieveGlobalContextWithRoutes；server/rag/reranker.js rerankResultsOrKeepOrder / rerankResultsWithScores
+**代码**：server/rag/retrievers/global-retriever.js retrieveGlobalContextWithRoutes；server/rag/reranker.js rerankResultsOrKeepOrder / rerankResultsWithScores
 
 ### D13. 语义答案缓存默认关闭；开启时要同时满足余弦 ≥0.97 和词法守卫 v2；键覆盖租户、文档内容版本、索引版本、prompt 指纹、模型和配置（查询适配器取当前加载文件的指纹）
 
@@ -496,12 +497,12 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 *L3 为什么不用 X / 怎么证明*
 
 - 启发式重排在 QASPER 上 −0.007，不显著
-- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的；默认 topK 改为 10 后每个检索查询取 30 个候选，一个检索步骤合并后只重排一次，留下 10 × 查询数个：单查询 30 选 10，agent 事实题首轮最多 60 选 20；权重和概率门槛没在新值上重测）
+- bge-reranker-v2-m3 从 18 个候选里取 6 个，权重 0.6（在 train 上选的；默认 topK 改为 10 后是 30 选 10，权重和概率门槛没在新值上重测）
 - dev：上下文里的证据 +0.063，显著；F1 +0.008，不显著；可回答题被拒答 −4.4pp，显著
 - 默认关是因为要单独的模型服务；服务挂了，这次查询退回融合顺序并告警
 - 开重排时默认用重排概率做门控（阈值 0.02）：AUC 0.641 vs 0.588，误拒大幅下降，但不可回答题识别从 80% 降到 45%（只有 20 题）
 
-代码：`server/rag/reranker.js rerankResultsOrKeepOrder / rerankResultsWithScores`；`server/rag/document-rag-execution.js rerankRetrievalStep`；`server/rag/retrievers/global-retriever.js retrieveGlobalContextWithRoutes`
+代码：`server/rag/reranker.js rerankResultsOrKeepOrder / rerankResultsWithScores`；`server/rag/retrievers/global-retriever.js retrieveGlobalContextWithRoutes`
 
 > ⚠ 别说"cross-encoder 让答案更准"，F1 不显著。收益来自"更深的候选 + 重排"，它单独选出的第 1 名并不比融合好。延迟只有一个粗略值（本机 MPS 上 18 个候选约 0.4 s），没有系统压测；compose 里的 reranker 镜像也还没真正构建过
 

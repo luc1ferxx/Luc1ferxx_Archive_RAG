@@ -210,12 +210,11 @@ const main = async () => {
 
   if (mockDelayMs === null) {
     assertReadyForRealEndpoint();
+  } else {
+    configureMockProvider({
+      mockDelayMs,
+    });
   }
-
-  // The reranker caches scores per query and passage; configuring or resetting
-  // the provider empties that cache, so every iteration sends a real request.
-  const startColdIteration = () =>
-    mockDelayMs === null ? resetCrossEncoderProvider() : configureMockProvider({ mockDelayMs });
 
   configureRerankMetricsCollector((metric) => {
     metricSamples.push(metric);
@@ -223,7 +222,6 @@ const main = async () => {
 
   try {
     for (let index = 0; index < warmup; index += 1) {
-      startColdIteration();
       await runOneIteration({
         query,
         candidates,
@@ -234,7 +232,6 @@ const main = async () => {
     metricSamples.length = 0;
 
     for (let index = 0; index < iterations; index += 1) {
-      startColdIteration();
       totalLatencySamples.push(
         await runOneIteration({
           query,

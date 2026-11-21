@@ -37,12 +37,8 @@ import {
   buildRetrievalQueries,
 } from "./query-decomposer.js";
 import { routeQuery } from "./query-router.js";
-import { rerankResultsOrKeepOrder } from "./reranker.js";
-import {
-  retrieveGlobalContextWithRoutes,
-  searchGlobalCandidatesWithRoutes,
-} from "./retrievers/global-retriever.js";
-import { searchPerDocumentCandidatesWithRoutes } from "./retrievers/per-doc-retriever.js";
+import { retrieveGlobalContextWithRoutes } from "./retrievers/global-retriever.js";
+import { retrievePerDocumentContextWithRoutes } from "./retrievers/per-doc-retriever.js";
 import { QUERY_ADAPTER_SCOPE_QA } from "./query-adapter.js";
 import {
   isRetrievalRemote,
@@ -177,31 +173,38 @@ export const mergeRetrievedResults = (...resultGroups) => {
   return mergedResults;
 };
 
-// The text a retrieval step reranks against: its primary query (the question),
-// else its first.
-const getStepQueryText = (retrievalQueries) =>
-  (retrievalQueries.find((retrievalQuery) => retrievalQuery.primary) ?? retrievalQueries[0])?.query ?? "";
+const mergePerDocumentResults = (docIds, ...perDocumentResultGroups) => {
+  const mergedResultsByDoc = new Map(docIds.map((docId) => [docId, []]));
+  const resultIndexesByDoc = new Map(docIds.map((docId) => [docId, new Map()]));
 
-// One rerank per retrieval step, or per document on the per-document route:
-// every query's fused candidates merged (mergeRetrievedResults picks the winning
-// copy and joins the provenance) and scored once against the question, where
-// a rerank per query scored the question's candidates again under every query
-// that found them. With reranking off, or when it fails, each query keeps its
-// own fused top-K, as a query reranked on its own would.
-// `searches`: one { results, topK } per query, results tagged with the query.
-const rerankRetrievalStep = async ({ queryText, searches }) => {
-  const keptOrder = mergeRetrievedResults(
-    ...searches.map(({ results, topK }) => results.slice(0, topK))
-  );
+  for (const resultGroup of perDocumentResultGroups) {
+    if (!(resultGroup instanceof Map)) {
+      continue;
+    }
 
-  return isRerankEnabled()
-    ? rerankResultsOrKeepOrder({
-        keptOrder,
-        queryText,
-        results: mergeRetrievedResults(...searches.map(({ results }) => results)),
-        topK: searches.reduce((total, { topK }) => total + topK, 0),
-      })
-    : keptOrder;
+    for (const docId of docIds) {
+      const resultIndexByKey = resultIndexesByDoc.get(docId);
+      const mergedResults = mergedResultsByDoc.get(docId);
+
+      for (const result of resultGroup.get(docId) ?? []) {
+        const resultKey = getResultKey(result);
+        const existingIndex = resultIndexByKey.get(resultKey);
+
+        if (existingIndex !== undefined) {
+          mergedResults[existingIndex] = mergeResultPair(
+            mergedResults[existingIndex],
+            result
+          );
+          continue;
+        }
+
+        resultIndexByKey.set(resultKey, mergedResults.length);
+        mergedResults.push(result);
+      }
+    }
+  }
+
+  return mergedResultsByDoc;
 };
 
 const toComparableScore = (value) => {
@@ -218,15 +221,13 @@ const toComparableRank = (value) => {
 
 // A single request fans out into several retrieval queries, and their results are
 // merged into one candidate pool that -- until here -- kept first-query-wins order
-// (mergeRetrievedResults preserves insertion order), or the order of the step's one
-// rerank over that pool (rerankRetrievalStep). Re-rank the whole pool by one
+// (mergeRetrievedResults preserves insertion order). Re-rank the whole pool by one
 // global order so the final Top-K and every citation rank reflect the merged
 // evidence, not the order the sub-queries happened to run in. `score` (the fusion
-// rank, or the score that one rerank blended, comparable across the pool) stays
-// the primary key -- RRF and rerank are the legitimate candidate rankers -- with
-// the raw admission and route signals as deterministic tiebreakers and
-// getResultKey as a unique total order, so the sort is fully stable and
-// identical across runs.
+// rank, or the rerank-blended score when rerank ran) stays the primary key -- RRF
+// and rerank are the legitimate candidate rankers -- with the raw admission and
+// route signals as deterministic tiebreakers and getResultKey as a unique total
+// order, so the sort is fully stable and identical across runs.
 const compareMergedResults = (left, right) =>
   toComparableScore(right.score) - toComparableScore(left.score) ||
   getAdmissionScore(right) - getAdmissionScore(left) ||
@@ -354,7 +355,7 @@ export const retrieveGlobalContextForQueriesInProcess = async ({
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
           : await embedQueryCached(retrievalQuery.query);
-      const search = await searchGlobalCandidatesWithRoutes({
+      const search = await retrieveGlobalContextWithRoutes({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
@@ -365,7 +366,6 @@ export const retrieveGlobalContextForQueriesInProcess = async ({
       return {
         results: tagResultsWithQuery(search.results, retrievalQuery),
         routes: search.routes,
-        topK: search.topK,
       };
     })
   );
@@ -376,14 +376,13 @@ export const retrieveGlobalContextForQueriesInProcess = async ({
     // sub-queries so that "when does it take effect AND which regions" retrieves
     // evidence for both aspects, and each aspect needs room for its own topK. A
     // per-request cap of topK would collapse the union back to a single aspect (at
-    // topK=1 it would strand every requirement but one). Without rerank each
-    // sub-query keeps at most topK, so topK*queryCount never truncates real
-    // per-requirement evidence -- it only bounds a runaway pool; with rerank the
-    // step's one rerank keeps the topK*queryCount merged candidates that score
-    // best against the question. The value here is the global re-rank that makes
-    // citation rank follow the merged order, not the sub-query order.
+    // topK=1 it would strand every requirement but one). Each sub-query already
+    // returns at most topK, so topK*queryCount never truncates real per-requirement
+    // evidence -- it only bounds a runaway pool -- and the value here is the global
+    // re-rank that makes citation rank follow the merged order, not the sub-query
+    // order.
     results: rerankMergedResults(
-      await rerankRetrievalStep({ queryText: getStepQueryText(retrievalQueries), searches }),
+      mergeRetrievedResults(...searches.map((search) => search.results)),
       (retrievalOptions.topK ?? getRetrievalTopK()) * retrievalQueries.length
     ),
     retrieval: buildRetrievalSummary({
@@ -406,7 +405,7 @@ export const retrievePerDocumentContextForQueriesInProcess = async ({
         retrievalQuery.primary && retrievalQuery.query === primaryQueryText
           ? primaryQueryVector
           : await embedQueryCached(retrievalQuery.query);
-      const search = await searchPerDocumentCandidatesWithRoutes({
+      const search = await retrievePerDocumentContextWithRoutes({
         queryVector,
         queryText: retrievalQuery.query,
         docIds,
@@ -421,7 +420,6 @@ export const retrievePerDocumentContextForQueriesInProcess = async ({
           ])
         ),
         routes: search.routes,
-        topKPerDoc: search.topKPerDoc,
       };
     })
   );
@@ -429,32 +427,22 @@ export const retrievePerDocumentContextForQueriesInProcess = async ({
   // Per document, budget one retrieval depth (topKPerDoc) per requirement for the
   // same reason as the global path: a decomposed comparison retrieves evidence for
   // each aspect within each document, and a per-request cap would drop all but one
-  // aspect's evidence. Without rerank each sub-query keeps at most topKPerDoc per
-  // document, so topKPerDoc*queryCount preserves the union; with rerank each
-  // document's one rerank keeps that many of its merged candidates. The global
-  // re-rank fixes order.
+  // aspect's evidence. Each sub-query returns at most topKPerDoc per document, so
+  // topKPerDoc*queryCount preserves the union while the global re-rank fixes order.
   const finalTopKPerDoc =
     (retrievalOptions.topKPerDoc ?? getComparisonTopKPerDoc()) *
     retrievalQueries.length;
-  const queryText = getStepQueryText(retrievalQueries);
+  const mergedResultsByDocument = mergePerDocumentResults(
+    docIds,
+    ...searches.map((search) => search.resultsByDocument)
+  );
 
   return {
     resultsByDocument: new Map(
-      await Promise.all(
-        [...new Set(docIds)].map(async (docId) => [
-          docId,
-          rerankMergedResults(
-            await rerankRetrievalStep({
-              queryText,
-              searches: searches.map((search) => ({
-                results: search.resultsByDocument.get(docId) ?? [],
-                topK: search.topKPerDoc,
-              })),
-            }),
-            finalTopKPerDoc
-          ),
-        ])
-      )
+      [...mergedResultsByDocument.entries()].map(([docId, results]) => [
+        docId,
+        rerankMergedResults(results, finalTopKPerDoc),
+      ])
     ),
     retrieval: buildRetrievalSummary({
       queryCount: retrievalQueries.length,
