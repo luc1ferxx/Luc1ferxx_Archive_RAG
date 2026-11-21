@@ -148,7 +148,6 @@
                 "retrievalOptions": {
                   "profile": "narrow",
                   "queryCount": 2,
-                  "topK": 4,
                   "topKPerDoc": 2
                 },
                 "retrievalQueries": [

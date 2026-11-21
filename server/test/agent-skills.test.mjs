@@ -887,7 +887,9 @@ test("agent rag sends planned retrieval queries and dynamic topK to document rag
 
   assert.equal(response.status, 200);
   assert.equal(receivedOptions.retrievalPlan.intent, "fact");
-  assert.equal(receivedOptions.retrievalPlan.retrievalOptions.topK, 4);
+  // A fact plan sets no topK, so its retrieval and answer context read
+  // getRetrievalTopK() (RAG_RETRIEVAL_TOP_K, default 10), as the rag surface does.
+  assert.equal("topK" in receivedOptions.retrievalPlan.retrievalOptions, false);
   assert.equal(receivedOptions.retrievalPlan.retrievalOptions.topKPerDoc, 2);
   assert.equal(receivedOptions.retrievalPlan.retrievalQueries[0].query, question);
   assert.notEqual(receivedOptions.retrievalPlan.retrievalQueries[1].query, question);
@@ -912,7 +914,7 @@ test("agent rag sends planned retrieval queries and dynamic topK to document rag
   );
   assert.equal(plannerStep.detail.intent, "fact");
   assert.equal(plannerStep.detail.retrievalQueries.length, 2);
-  assert.equal(plannerStep.detail.retrievalOptions.topK, 4);
+  assert.equal("topK" in plannerStep.detail.retrievalOptions, false);
 
   const documentStep = response.body.agentTrace.find(
     (step) => step.type === "document_rag"

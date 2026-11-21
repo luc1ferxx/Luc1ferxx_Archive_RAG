@@ -406,6 +406,16 @@ for (const [
 }
 
 // --- Direct scenarios ------------------------------------------------------
+//
+// The goldens of the direct scenarios that plan a fact retrieval (the
+// abstention, the dependency outage, the cancellation during a stage, the
+// deadline inside a stage, both bursts and both interleaved plans cancelled
+// during the document stage) were rewritten once from LangGraph
+// (UPDATE_GRAPH_GOLDENS=1) when the fact intent stopped setting its own topK
+// (4) and started reading getRetrievalTopK() (agent-query-planner.js
+// INTENT_OPTIONS): the fact plan's retrievalOptions lost "topK": 4. Nothing
+// else in them changed: the fixture's chat never retrieves, so the plan is
+// only recorded.
 
 const createRunService = () =>
   createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
