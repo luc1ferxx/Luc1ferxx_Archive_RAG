@@ -55,6 +55,26 @@ test("arxiv client builds bounded search URLs", () => {
   assert.equal(normalizeArxivMaxResults("0"), 3);
 });
 
+// A Chinese question's topic has no searchable term. The reason is the
+// caller's (400), so the route answer and an approved import's run record
+// keep it (lib/error-text.js); arXiv is never called.
+test("arxiv client refuses a topic it cannot search as the caller's error", async () => {
+  const service = createArxivService({
+    fetchImpl: async () => {
+      throw new Error("arXiv must not be called.");
+    },
+  });
+
+  await assert.rejects(service.search({ topic: "增强生成" }), {
+    message: "An arXiv topic must contain at least one searchable term.",
+    status: 400,
+  });
+  await assert.rejects(service.search({ topic: "  " }), {
+    message: "An arXiv topic is required.",
+    status: 400,
+  });
+});
+
 test("arxiv service searches and validates PDF downloads", async () => {
   const requests = [];
   const service = createArxivService({

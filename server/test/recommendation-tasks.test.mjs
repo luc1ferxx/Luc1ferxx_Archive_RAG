@@ -224,7 +224,9 @@ test("recommendation task service records failed imports", async () => {
 
   assert.equal(task.status, TASK_STATUSES.failed);
   assert.equal(task.counts.failed, 1);
-  assert.match(task.summary, /network timeout/);
+  // An error not raised for the client (lib/error-text.js) is the fallback.
+  assert.equal(task.summary, "arXiv import failed: Unknown error.");
+  assert.equal(task.error, "Unknown error.");
 });
 
 // The direct import (POST /documents/:docId/arxiv/import) holds no claim, so a

@@ -151,7 +151,7 @@ npm run eval:sparse-scoring -- --corpus evaluation/generated/qasper-train.json -
 - 当前索引版本（pgvector 的 version id 加指针 generation，或 provider）、查询向量空间，以及当前加载的查询适配器文件指纹（没配置为 `no-adapter`，文件不可用为 `unavailable:<code>`；见「结论与局限」末条）；
 - 答案提示词指纹、主备聊天模型；
 - 答案模式（route mode、需求数）；
-- agent 检索计划的形状（去掉会话记忆改写后的问题本身；follow-up 计划不缓存）；
+- agent 检索计划的形状（去掉会话记忆改写后的问题本身；follow-up 计划不缓存；跨语言改写的检索查询不在计划里，它由问题和文档决定，二者已在 key 里）；
 - 长期记忆偏好块；
 - 影响检索和答案的配置（`RAG_*`、`OPENAI_*`、`VECTOR_STORE_*` 等）。不含密钥，也不含缓存、观测、模型调用和入库调优类设置。
 

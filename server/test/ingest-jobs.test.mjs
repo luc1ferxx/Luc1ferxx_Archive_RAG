@@ -455,6 +455,11 @@ test("public job projection and error messages never carry more than a bounded f
     }),
     Object.assign(new Error("401 Incorrect API key provided: sk-proj-****abcd"), { status: 401 }),
     Object.assign(new Error("Rate limit reached"), { status: 429 }),
+    // A model backend's own 422 (rag/openai-client.js) is the provider's text.
+    Object.assign(new Error("Input validation error: POST https://embed.internal.example/v1/embeddings"), {
+      status: 422,
+      upstreamStatus: 422,
+    }),
   ]) {
     assert.equal(toIngestJobErrorMessage(internal), SERVER_ERROR_MESSAGE);
   }

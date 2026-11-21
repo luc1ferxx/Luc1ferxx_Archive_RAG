@@ -271,7 +271,7 @@ test("a run out of tokens skips the next Skill instead of failing", async (t) =>
   });
 
   const response = await withEnv(
-    { ...noEnv, AGENT_SKILL_GRAPH_ROLLOUT: "guarded" },
+    noEnv,
     () =>
       runAgentRag({
         accessScope: DEFAULT_ACCESS_SCOPE,

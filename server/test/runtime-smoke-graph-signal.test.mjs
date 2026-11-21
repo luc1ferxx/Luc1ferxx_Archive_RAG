@@ -172,88 +172,78 @@ test("runtime smoke accepts a reused graph node backed by its completed persiste
 });
 
 test("runtime smoke accepts matching steps persisted by a real guarded agent run", async () => {
-  const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
   const accessScope = { userId: "smoke-step-user", workspaceId: "" };
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
   const requestBinding = (field) => ({ source: "request", field });
 
-  try {
-    const response = await runAgentRag({
-      accessScope,
-      agentRunService,
-      dagPlannerAdapter: {
-        // The planner is stubbed: this test proves actual run-step persistence,
-        // while the scheduled runtime smoke separately proves provider identity.
-        id: "llm_dag",
-        createExecutionGraph: () => ({
-          nodes: [
-            {
-              dependsOn: [],
-              failurePolicy: "continue",
-              inputBindings: {
-                docIds: requestBinding("docIds"),
-                question: requestBinding("question"),
-              },
-              nodeId: "summary",
-              skillId: "summarize_contract",
+  const response = await runAgentRag({
+    accessScope,
+    agentRunService,
+    dagPlannerAdapter: {
+      // The planner is stubbed: this test proves actual run-step persistence,
+      // while the scheduled runtime smoke separately proves provider identity.
+      id: "llm_dag",
+      createExecutionGraph: () => ({
+        nodes: [
+          {
+            dependsOn: [],
+            failurePolicy: "continue",
+            inputBindings: {
+              docIds: requestBinding("docIds"),
+              question: requestBinding("question"),
             },
-            {
-              dependsOn: ["summary"],
-              failurePolicy: "continue",
-              inputBindings: {
-                docIds: requestBinding("docIds"),
-                priorFindings: { source: "node", nodeId: "summary", output: "text" },
-                question: requestBinding("question"),
-              },
-              nodeId: "risk",
-              skillId: "risk_review",
+            nodeId: "summary",
+            skillId: "summarize_contract",
+          },
+          {
+            dependsOn: ["summary"],
+            failurePolicy: "continue",
+            inputBindings: {
+              docIds: requestBinding("docIds"),
+              priorFindings: { source: "node", nodeId: "summary", output: "text" },
+              question: requestBinding("question"),
             },
-          ],
-        }),
-      },
-      docIds: ["contract"],
-      executionPlannerAdapter: {
-        id: "test_execution",
-        createExecutionPlan: () => [
-          { id: "custom_skills", condition: "selected_custom_skills" },
+            nodeId: "risk",
+            skillId: "risk_review",
+          },
         ],
-      },
-      intentPlannerAdapter: {
-        id: "test_intent",
-        selectIntentPlan: async () => ({ selectedIntentId: "summarize_contract" }),
-      },
-      question: "Summarize the contract and assess risks.",
-      ragService: {
-        getDocument: (docId, scope) =>
-          docId === "contract" && scope?.userId === accessScope.userId
-            ? { docId: "contract", fileName: "contract.pdf" }
-            : null,
-        listDocuments: () => [{ docId: "contract", fileName: "contract.pdf" }],
-        chat: async () => ({
-          abstained: false,
-          citations: [{ docId: "contract", excerpt: "Notice is 30 days.", pageNumber: 1 }],
-          text: "The contract requires 30 days notice. [Source 1]",
-        }),
-      },
-      sessionId: "smoke-step-session",
-      userId: accessScope.userId,
-    });
+      }),
+    },
+    docIds: ["contract"],
+    executionPlannerAdapter: {
+      id: "test_execution",
+      createExecutionPlan: () => [
+        { id: "custom_skills", condition: "selected_custom_skills" },
+      ],
+    },
+    intentPlannerAdapter: {
+      id: "test_intent",
+      selectIntentPlan: async () => ({ selectedIntentId: "summarize_contract" }),
+    },
+    question: "Summarize the contract and assess risks.",
+    ragService: {
+      getDocument: (docId, scope) =>
+        docId === "contract" && scope?.userId === accessScope.userId
+          ? { docId: "contract", fileName: "contract.pdf" }
+          : null,
+      listDocuments: () => [{ docId: "contract", fileName: "contract.pdf" }],
+      chat: async () => ({
+        abstained: false,
+        citations: [{ docId: "contract", excerpt: "Notice is 30 days.", pageNumber: 1 }],
+        text: "The contract requires 30 days notice. [Source 1]",
+      }),
+    },
+    sessionId: "smoke-step-session",
+    userId: accessScope.userId,
+  });
 
-    assert.equal(response.status, 200);
-    const signal = await loadGuardedGraphSignal({
-      agentRunService,
-      chat: response.body,
-      userId: accessScope.userId,
-    });
-    assert.deepEqual(signal.skillIds, ["risk_review", "summarize_contract"]);
-  } finally {
-    if (previousMode === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previousMode;
-    }
-  }
+  assert.equal(response.status, 200);
+  const signal = await loadGuardedGraphSignal({
+    agentRunService,
+    chat: response.body,
+    userId: accessScope.userId,
+  });
+  assert.deepEqual(signal.skillIds, ["risk_review", "summarize_contract"]);
 });

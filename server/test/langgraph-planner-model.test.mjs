@@ -51,6 +51,14 @@ import {
 // fallbackReason, the replanner's reason), no adapter digest did, and the same
 // pass with that one return giving the message again matched every old digest.
 //
+// A third time, the same way (2026-11-21), when RequestCancelledError
+// (request-deadline.js) gained `expose: true`, so a run record keeps its
+// message under the one rule for client-visible error text
+// (lib/error-text.js): only the nine digests that hold a thrown
+// cancellation's own keys changed (the eight cancelled/* ones and
+// http-cancelled/dag adapter), and the same suite without that property
+// matched every old digest.
+//
 // The suite also shows which path ran. hooks.mjs sends planner-model.js's
 // import of model.js to a counting stand-in (model-tap.mjs) and reports every
 // @langchain module loaded from outside node_modules, so a call that never

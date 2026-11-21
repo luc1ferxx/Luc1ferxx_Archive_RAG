@@ -12,6 +12,7 @@ import {
 } from "./arxiv-identity.js";
 import { refreshDocumentsIngestedElsewhere } from "./ingest-worker.js";
 import { writeWorkingFile } from "./working-files.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeTrimmedText as normalizeText } from "../lib/normalize-text.js";
 
 const DEFAULT_IMPORT_DELAY_MS = 1000;
@@ -90,7 +91,7 @@ const serializeFailedPaper = ({ error, paper }) => ({
   title: paper.title,
   absUrl: paper.absUrl,
   pdfUrl: paper.pdfUrl,
-  error: error instanceof Error ? error.message : String(error),
+  error: serializeError(error, "The paper could not be downloaded or indexed."),
 });
 
 const buildArxivDocumentSource = ({ importContext = {}, paper = {} } = {}) => {

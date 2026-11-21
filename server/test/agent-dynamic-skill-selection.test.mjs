@@ -79,148 +79,124 @@ const makeRagService = (queries) => ({
   },
 });
 
-// AGENT_SKILL_GRAPH_ROLLOUT selects nothing any more (`guarded` is the one
-// value left; anything else refuses the run). These tests still set it, so a
-// removed value left in a developer's shell does not fail them for a reason
-// that has nothing to do with what they check.
 test("the graph composes compare and risk despite a compare-only intent", async () => {
-  const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
   const queries = [];
   let plannerCapabilities = [];
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
 
-  try {
-    const response = await runAgentRag({
-      accessScope,
-      agentRunService,
-      dagPlannerAdapter: {
-        id: "test_dag",
-        createExecutionGraph: ({ capabilities }) => {
-          plannerCapabilities = capabilities.map((capability) => capability.id);
+  const response = await runAgentRag({
+    accessScope,
+    agentRunService,
+    dagPlannerAdapter: {
+      id: "test_dag",
+      createExecutionGraph: ({ capabilities }) => {
+        plannerCapabilities = capabilities.map((capability) => capability.id);
 
-          return {
-            nodes: [
-              graphNode({ nodeId: "compare", skillId: CUSTOM_SKILL_IDS.compareDocuments }),
-              graphNode({
-                dependsOn: ["compare"],
-                inputBindings: {
-                  docIds: requestField("docIds"),
-                  priorFindings: nodeOutput("compare", "text"),
-                  question: requestField("question"),
-                },
-                nodeId: "risk",
-                skillId: CUSTOM_SKILL_IDS.riskReview,
-              }),
-            ],
-          };
-        },
+        return {
+          nodes: [
+            graphNode({ nodeId: "compare", skillId: CUSTOM_SKILL_IDS.compareDocuments }),
+            graphNode({
+              dependsOn: ["compare"],
+              inputBindings: {
+                docIds: requestField("docIds"),
+                priorFindings: nodeOutput("compare", "text"),
+                question: requestField("question"),
+              },
+              nodeId: "risk",
+              skillId: CUSTOM_SKILL_IDS.riskReview,
+            }),
+          ],
+        };
       },
-      docIds,
-      intentPlannerAdapter: {
-        id: "compare_only_test",
-        selectIntentPlan: async () => ({ selectedIntentId: AGENT_INTENT_IDS.compareDocuments }),
-      },
-      question: "Compare documents A and B and review risks.",
-      ragService: makeRagService(queries),
-      sessionId: "session-dynamic-compare-risk",
-      userId: "alice",
-    });
+    },
+    docIds,
+    intentPlannerAdapter: {
+      id: "compare_only_test",
+      selectIntentPlan: async () => ({ selectedIntentId: AGENT_INTENT_IDS.compareDocuments }),
+    },
+    question: "Compare documents A and B and review risks.",
+    ragService: makeRagService(queries),
+    sessionId: "session-dynamic-compare-risk",
+    userId: "alice",
+  });
 
-    assert.equal(response.status, 200);
-    assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.compareDocuments);
-    assert.equal(plannerCapabilities.includes(CUSTOM_SKILL_IDS.riskReview), true);
-    assert.equal(queries.length, 2);
-    assert.match(response.body.agentAnswer, /30 days notice/);
-    assert.match(response.body.agentAnswer, /termination notice clause/);
-    assert.deepEqual(
-      response.body.agentObservability.selectedSkills.map((skill) => skill.skillId).sort(),
-      [CUSTOM_SKILL_IDS.compareDocuments, CUSTOM_SKILL_IDS.riskReview].sort()
-    );
-    assert.equal(
-      response.body.agentObservability.skills.find((skill) => skill.skillId === CUSTOM_SKILL_IDS.riskReview)?.selected,
-      true
-    );
-    const run = await agentRunService.getRun({
-      accessScope,
-      runId: response.body.agentRunId,
-    });
-    assert.deepEqual(
-      run.plan.selectedSkills.map((skill) => skill.skillId),
-      [CUSTOM_SKILL_IDS.compareDocuments],
-      "The unchosen catalog Skill must not be preselected in the run snapshot."
-    );
-  } finally {
-    if (previousMode === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previousMode;
-    }
-  }
+  assert.equal(response.status, 200);
+  assert.equal(response.body.agentMode, CUSTOM_SKILL_IDS.compareDocuments);
+  assert.equal(plannerCapabilities.includes(CUSTOM_SKILL_IDS.riskReview), true);
+  assert.equal(queries.length, 2);
+  assert.match(response.body.agentAnswer, /30 days notice/);
+  assert.match(response.body.agentAnswer, /termination notice clause/);
+  assert.deepEqual(
+    response.body.agentObservability.selectedSkills.map((skill) => skill.skillId).sort(),
+    [CUSTOM_SKILL_IDS.compareDocuments, CUSTOM_SKILL_IDS.riskReview].sort()
+  );
+  assert.equal(
+    response.body.agentObservability.skills.find((skill) => skill.skillId === CUSTOM_SKILL_IDS.riskReview)?.selected,
+    true
+  );
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: response.body.agentRunId,
+  });
+  assert.deepEqual(
+    run.plan.selectedSkills.map((skill) => skill.skillId),
+    [CUSTOM_SKILL_IDS.compareDocuments],
+    "The unchosen catalog Skill must not be preselected in the run snapshot."
+  );
 });
 
 test("ordinary document QA does not execute the entire catalog when DAG planning fails", async () => {
-  const previousMode = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
   const queries = [];
   const agentRunService = createAgentRunService({
     agentRunStore: createInMemoryAgentRunStore(),
   });
 
-  try {
-    const response = await runAgentRag({
-      accessScope,
-      agentRunService,
-      dagPlannerAdapter: {
-        id: "unavailable_dag",
-        createExecutionGraph: () => { throw new Error("planner unavailable"); },
-      },
-      docIds,
-      executionPlannerAdapter: {
-        id: "forced_custom_then_document",
-        createExecutionPlan: () => [
-          { id: "custom_skills", condition: "selected_custom_skills" },
-          { id: "document_rag", condition: "selected_skill", skillId: "document_rag" },
-        ],
-      },
-      intentPlannerAdapter: {
-        id: "document_test",
-        selectIntentPlan: async () => ({ selectedIntentId: AGENT_INTENT_IDS.document }),
-      },
-      question: "When does Contract A renew?",
-      ragService: makeRagService(queries),
-      sessionId: "session-dynamic-ordinary-qa",
-      userId: "alice",
-    });
+  const response = await runAgentRag({
+    accessScope,
+    agentRunService,
+    dagPlannerAdapter: {
+      id: "unavailable_dag",
+      createExecutionGraph: () => { throw new Error("planner unavailable"); },
+    },
+    docIds,
+    executionPlannerAdapter: {
+      id: "forced_custom_then_document",
+      createExecutionPlan: () => [
+        { id: "custom_skills", condition: "selected_custom_skills" },
+        { id: "document_rag", condition: "selected_skill", skillId: "document_rag" },
+      ],
+    },
+    intentPlannerAdapter: {
+      id: "document_test",
+      selectIntentPlan: async () => ({ selectedIntentId: AGENT_INTENT_IDS.document }),
+    },
+    question: "When does Contract A renew?",
+    ragService: makeRagService(queries),
+    sessionId: "session-dynamic-ordinary-qa",
+    userId: "alice",
+  });
 
-    assert.equal(response.status, 200);
-    assert.equal(queries.some((question) => question.includes("document comparison")), false);
-    assert.equal(queries.some((question) => question.includes("risk review")), false);
-    assert.equal(response.body.agentObservability.selectedSkills.some(
-      (skill) => Object.values(CUSTOM_SKILL_IDS).includes(skill.skillId)
-    ), false);
-    const run = await agentRunService.getRun({
-      accessScope,
-      runId: response.body.agentRunId,
-    });
-    const graphEvent = run.events.find((event) => event.type === "skill_graph_planned");
-    // The rejected graph is recorded and nothing runs in its place: the
-    // intent selected no custom Skill, so there is none to report either.
-    assert.equal(graphEvent?.payload?.executed, false);
-    assert.equal(graphEvent?.payload?.status, "rejected");
-    assert.equal(graphEvent?.payload?.fallback, null);
-    assert.deepEqual(graphEvent?.payload?.nodeRuns, []);
-    assert.equal(
-      response.body.agentTrace.some((step) => step.type === "skill_graph_rejected"),
-      false
-    );
-  } finally {
-    if (previousMode === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previousMode;
-    }
-  }
+  assert.equal(response.status, 200);
+  assert.equal(queries.some((question) => question.includes("document comparison")), false);
+  assert.equal(queries.some((question) => question.includes("risk review")), false);
+  assert.equal(response.body.agentObservability.selectedSkills.some(
+    (skill) => Object.values(CUSTOM_SKILL_IDS).includes(skill.skillId)
+  ), false);
+  const run = await agentRunService.getRun({
+    accessScope,
+    runId: response.body.agentRunId,
+  });
+  const graphEvent = run.events.find((event) => event.type === "skill_graph_planned");
+  // The rejected graph is recorded and nothing runs in its place: the
+  // intent selected no custom Skill, so there is none to report either.
+  assert.equal(graphEvent?.payload?.executed, false);
+  assert.equal(graphEvent?.payload?.status, "rejected");
+  assert.equal(graphEvent?.payload?.fallback, null);
+  assert.deepEqual(graphEvent?.payload?.nodeRuns, []);
+  assert.equal(
+    response.body.agentTrace.some((step) => step.type === "skill_graph_rejected"),
+    false
+  );
 });

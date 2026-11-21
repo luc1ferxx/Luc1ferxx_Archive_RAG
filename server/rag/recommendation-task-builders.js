@@ -1,3 +1,4 @@
+import { serializeError } from "../lib/error-text.js";
 import { serializeExternalQueryPolicy } from "./external-query-policy.js";
 import { buildSafeExternalDocumentSummary } from "./external-context-sanitizer.js";
 import { TASK_STATUSES } from "./tasks.js";
@@ -159,7 +160,7 @@ export const countRemainingRecommendationPapers = (remainingSuggestion = {}) =>
 
 export const buildRecommendationFailureSummary = ({ error, providerLabel }) =>
   `${providerLabel} import failed: ${
-    normalizeRecommendationTaskText(error?.message) || "Unknown error."
+    normalizeRecommendationTaskText(serializeError(error, "Unknown error.")) || "Unknown error."
   }`;
 
 export const mapRecommendationPaperProgressStatus = (status) => {

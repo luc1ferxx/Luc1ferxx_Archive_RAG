@@ -96,6 +96,48 @@ test("job orchestrator resumes waiting tasks and runs the registered runner", as
   assert.equal(completedTask.payload, undefined);
 });
 
+// A failed task's error is public (GET /tasks/:taskId), so it follows
+// lib/error-text.js: a runner's internal error stays in the server log, a
+// refusal raised for the client keeps its message.
+test("a task whose runner throws records the error only when it was raised for the client", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const taskService = createTaskService({ taskStore: createInMemoryTaskStore() });
+  const accessScope = { userId: "alice", workspaceId: "workspace-a" };
+  const runnerErrors = {
+    "task-internal": Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), { code: "ECONNREFUSED" }),
+    "task-refused": Object.assign(new Error("The selection token has expired."), { status: 409 }),
+  };
+  const orchestrator = createJobOrchestrator({
+    runners: {
+      test_runner: {
+        run: ({ task }) => {
+          throw runnerErrors[task.id];
+        },
+      },
+    },
+    schedule: () => {},
+    taskService,
+  });
+
+  const outcomes = [];
+
+  for (const taskId of Object.keys(runnerErrors)) {
+    await taskService.upsertTask({
+      accessScope,
+      task: { id: taskId, runnerId: "test_runner", status: TASK_STATUSES.queued, type: "external_recommendation" },
+    });
+
+    const task = await orchestrator.runTask({ accessScope, taskId });
+
+    outcomes.push([task.status, task.error]);
+  }
+
+  assert.deepEqual(outcomes, [
+    [TASK_STATUSES.failed, "Task failed."],
+    [TASK_STATUSES.failed, "The selection token has expired."],
+  ]);
+});
+
 test("job orchestrator cancels tasks without running a runner", async () => {
   const taskService = createTaskService({
     taskStore: createInMemoryTaskStore(),

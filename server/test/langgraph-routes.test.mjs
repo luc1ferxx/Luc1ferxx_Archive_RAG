@@ -384,6 +384,12 @@ test("POST /chat answers a document question as the native loop's golden records
   }
   assert.equal(langgraph.run.run.status, "completed");
   // The answer and the run are what the native outer loop left (the golden).
+  // This golden and v1-chat-stream-document-question were rewritten once from
+  // LangGraph (UPDATE_GRAPH_GOLDENS=1) when the fact intent stopped setting its
+  // own topK (4) and started reading getRetrievalTopK() (agent-query-planner.js
+  // INTENT_OPTIONS): the fact plan's retrievalOptions lost "topK": 4, also inside
+  // the SSE bytes. Nothing else in them changed: the fixture's chat never
+  // retrieves, so the plan is only recorded.
   assertMatchesGraphGolden("langgraph-routes", "v1-chat-document-question", {
     answer: mask(langgraph.answer),
     run: mask(langgraph.run),

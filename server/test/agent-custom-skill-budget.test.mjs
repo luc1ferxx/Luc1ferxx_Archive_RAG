@@ -433,33 +433,18 @@ test("documents the stage cannot verify for the caller: no Skill runs, and the r
 test("a graph rejected whole is counted by the observability report from the run's stored event", async () => {
   const rag = createRagService({ withDocumentLookup: false });
   const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
-  const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-
-  delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-
-  let response;
-
-  try {
-    response = await runAgentRag({
-      accessScope: ACCESS_SCOPE,
-      agentRunService,
-      docIds: [DOC_ID],
-      question: QUESTION,
-      ragService: rag.service,
-      sessionId: "budget-session",
-      userId: ACCESS_SCOPE.userId,
-      webChatService: async () => {
-        throw new Error("Web search should not run.");
-      },
-    });
-  } finally {
-    if (previous === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previous;
-    }
-  }
-
+  const response = await runAgentRag({
+    accessScope: ACCESS_SCOPE,
+    agentRunService,
+    docIds: [DOC_ID],
+    question: QUESTION,
+    ragService: rag.service,
+    sessionId: "budget-session",
+    userId: ACCESS_SCOPE.userId,
+    webChatService: async () => {
+      throw new Error("Web search should not run.");
+    },
+  });
   const run = await agentRunService.getRun({
     accessScope: ACCESS_SCOPE,
     runId: response.body.agentRunId,
@@ -537,31 +522,22 @@ test("the first of two Skills fails: the second runs on the original question an
 test("the first of two Skills fails on a dependency outage: the second does not run and the run ends with the outage", async () => {
   const rag = createRagService({ outageFirstCall: true });
   const agentRunService = createAgentRunService({ agentRunStore: createInMemoryAgentRunStore() });
-  const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
 
-  delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-
-  try {
-    await assert.rejects(
-      runAgentRag({
-        accessScope: ACCESS_SCOPE,
-        agentRunService,
-        docIds: [DOC_ID],
-        question: QUESTION,
-        ragService: rag.service,
-        sessionId: "budget-session",
-        userId: ACCESS_SCOPE.userId,
-        webChatService: async () => {
-          throw new Error("Web search should not run.");
-        },
-      }),
-      (error) => error.code === "AGENT_DEPENDENCY_UNAVAILABLE" && error.status === 503
-    );
-  } finally {
-    if (previous !== undefined) {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previous;
-    }
-  }
+  await assert.rejects(
+    runAgentRag({
+      accessScope: ACCESS_SCOPE,
+      agentRunService,
+      docIds: [DOC_ID],
+      question: QUESTION,
+      ragService: rag.service,
+      sessionId: "budget-session",
+      userId: ACCESS_SCOPE.userId,
+      webChatService: async () => {
+        throw new Error("Web search should not run.");
+      },
+    }),
+    (error) => error.code === "AGENT_DEPENDENCY_UNAVAILABLE" && error.status === 503
+  );
 
   const { runs } = await agentRunService.listRuns({ accessScope: ACCESS_SCOPE });
   const run = await agentRunService.getRun({ accessScope: ACCESS_SCOPE, runId: runs[0].runId });

@@ -35,11 +35,13 @@ export const normalizeArxivMaxResults = (
   return Math.min(parsedValue, MAX_ARXIV_RESULTS);
 };
 
+// A topic it cannot search is the caller's error (400): a route answer and an
+// approved import's run record keep the reason (lib/error-text.js).
 const buildSearchQuery = (topic) => {
   const normalizedTopic = normalizeText(topic);
 
   if (!normalizedTopic) {
-    throw new Error("An arXiv topic is required.");
+    throw Object.assign(new Error("An arXiv topic is required."), { status: 400 });
   }
 
   if (ARXIV_RAW_QUERY_PATTERN.test(normalizedTopic)) {
@@ -53,7 +55,9 @@ const buildSearchQuery = (topic) => {
     .slice(0, 8);
 
   if (terms.length === 0) {
-    throw new Error("An arXiv topic must contain at least one searchable term.");
+    throw Object.assign(new Error("An arXiv topic must contain at least one searchable term."), {
+      status: 400,
+    });
   }
 
   return terms.map((term) => `all:${term}`).join(" AND ");

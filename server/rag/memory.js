@@ -512,12 +512,15 @@ const shouldRewriteQuestion = ({ query, session }) => {
   return tokenize(query).length <= 5;
 };
 
-const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery) => {
+// One line of at most `maxLength` characters, else `fallbackQuery`; the
+// cross-language rewrite (rag/query-translation.js) reads its reply the same
+// way, with a longer bound.
+export const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery, maxLength = 500) => {
   const normalized = String(rewrittenQuery ?? "")
     .trim()
     .replace(/^(```(?:text)?|```)/gi, "")
     .replace(
-      /^(standalone retrieval question|standalone question|rewritten question|question)\s*:\s*/i,
+      /^(standalone retrieval question|standalone question|rewritten question|translated question|question)\s*:\s*/i,
       ""
     )
     .trim();
@@ -528,7 +531,7 @@ const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery) => {
       .filter(Boolean)
       .pop() ?? "";
 
-  if (!finalQuery || finalQuery.length > 500) {
+  if (!finalQuery || finalQuery.length > maxLength) {
     return fallbackQuery;
   }
 

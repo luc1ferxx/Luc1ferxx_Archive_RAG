@@ -25,6 +25,13 @@ import test from "node:test";
 // LangSmith tracer switched on is refused as an error/done sequence before
 // the run starts.
 //
+// All five stream goldens were rewritten once from LangGraph
+// (UPDATE_GRAPH_GOLDENS=1) when the fact intent stopped setting its own topK
+// (4) and started reading getRetrievalTopK() (agent-query-planner.js
+// INTENT_OPTIONS): the fact plan's retrievalOptions lost "topK": 4, in the
+// frames, the runs and the SSE bytes. Nothing else in them changed: the
+// stand-in rag service never retrieves, so the plan is only recorded.
+//
 // The runner's on-demand import of the plan graph is redirected to a tap, so
 // the suite also proves each stream scheduled the outer plan on LangGraph;
 // the route's import of the stream relay is tapped too, so each stream is

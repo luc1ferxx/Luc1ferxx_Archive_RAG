@@ -755,7 +755,7 @@
       "budgetDelta": {},
       "citationCount": 0,
       "durationMs": "<duration>",
-      "error": "summary failed",
+      "error": "summarize_contract failed.",
       "label": "summarize_contract",
       "phase": "primary",
       "skillId": "summarize_contract",
@@ -967,7 +967,7 @@
       "decision": "",
       "detail": null,
       "error": {
-        "message": "summary failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:summary",
@@ -1198,7 +1198,7 @@
         "skillVersion": "1.0.0"
       },
       "error": {
-        "message": "summary failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:summary",
@@ -1236,7 +1236,7 @@
       "label": "summarize_contract",
       "output": null,
       "status": "failed",
-      "summary": "summarize_contract failed: summary failed",
+      "summary": "summarize_contract failed: Unable to run custom skill.",
       "type": "custom_skill"
     }
   ]

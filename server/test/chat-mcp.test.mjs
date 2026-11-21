@@ -185,18 +185,20 @@ test("without SERPAPI_KEY the search server fails the search and says it is not 
   });
 });
 
-test("a SerpAPI error fails the search with SerpAPI's reason, or says SerpAPI failed", async (t) => {
+test("a SerpAPI error fails the search with the reason of its kind, never SerpAPI's or the network's text", async (t) => {
   useEnvironment(t, { OPENAI_API_KEY: "test-key", SERPAPI_KEY: "serp-test-key" });
   useRealSearchServer(t, SERPAPI_ERROR_PRELOAD);
   useModel(t, async () => "web answer");
 
-  // The preload has SerpAPI answer each search with the query as its body.
-  for (const [body, reason] of [
-    ['{"error":"Your account has run out of searches."}', "Your account has run out of searches."],
+  // The preload has SerpAPI answer each search with the query as its body, or
+  // fail it as a request that got no answer.
+  for (const [query, reason] of [
+    ['{"error":"Your account has run out of searches."}', "SerpAPI answered with an error."],
     ['{"search_metadata":{"status":"Error"}}', "SerpAPI answered with an error."],
     ["<html><body>502 Bad Gateway</body></html>", "SerpAPI answered with an error."],
+    ["error:getaddrinfo ENOTFOUND serpapi.internal.example", "the request to SerpAPI failed."],
   ]) {
-    await assert.rejects(chatMCP(body), { message: `Error performing web search: ${reason}`, status: 409 });
+    await assert.rejects(chatMCP(query), { message: `Error performing web search: ${reason}`, status: 409 });
   }
 });
 

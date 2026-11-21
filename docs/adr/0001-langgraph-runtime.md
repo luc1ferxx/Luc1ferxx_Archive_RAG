@@ -687,7 +687,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 其他值（如 `gaurded`）：同样拒绝，信息里带原值。
 - 行为变化：阶段 8 之前，这个变量拼错的值静默落到 `off`，也就是顺序链。现在拼错即拒绝启动。`server/.env` 里如果显式写了 `off`、`shadow` 或拼错的值，要先改掉。
 - 检查位置和阶段 7 相同（`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom-Skill stage、v3 的入口与 stage、执行器），所以不建 app、直接调 `runAgentRag` 的 eval runner 在环境里有这种取值时也以 `case_error` 失败。
-- `rag/config.js` 的 `getAgentSkillGraphRollout()` 已删除。两个 workflow（`release-evidence.yml`、`planner-real-gate.yml`）和几个评测脚本仍然设置 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，这是唯一还接受的取值，没有改。（这两个 workflow 2026-11-17 已删除。）
+- `rag/config.js` 的 `getAgentSkillGraphRollout()` 已删除。两个 workflow（`release-evidence.yml`、`planner-real-gate.yml`）和几个评测脚本仍然设置 `AGENT_SKILL_GRAPH_ROLLOUT=guarded`，这是唯一还接受的取值，没有改。（这两个 workflow 2026-11-17 已删除；评测脚本和测试里的这些设置 2026-11-20 删除，环境里是已删除的取值时它们曾让那几次运行照常跑。）
 - `evaluation/rollout-readiness-report.js` 的 “custom Skill DAG 处于 guarded” 一项保留，改为直接读这个变量：环境里是别的值时进程根本起不来，这样的环境生成的报告不应该显示就绪。
 - `test/agent-runtime-removed.test.mjs`（19 个测试，原 15 个）对三个变量各跑一遍。
 

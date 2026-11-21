@@ -582,20 +582,6 @@ const createHarness = async ({ effects = SKILL_EFFECTS.readOnly, seedRun = true 
   return { agentRunService, calls, registry, runStage, skills, store };
 };
 
-const withGuardedGraph = async (run) => {
-  const previous = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-  process.env.AGENT_SKILL_GRAPH_ROLLOUT = "guarded";
-  try {
-    return await run();
-  } finally {
-    if (previous === undefined) {
-      delete process.env.AGENT_SKILL_GRAPH_ROLLOUT;
-    } else {
-      process.env.AGENT_SKILL_GRAPH_ROLLOUT = previous;
-    }
-  }
-};
-
 const runFullGraph = (harness) => runAgentRag({
   accessScope,
   // The request creates its own run, under the id the test watches.
@@ -1363,71 +1349,69 @@ test("a startup claim fences an original worker before its next Skill call", asy
 });
 
 test("full agent request loses a claim-before-step race without failing the recovery worker", async () => {
-  await withGuardedGraph(async () => {
-    const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
-    const checkpointSaved = deferred();
-    const releaseOriginal = deferred();
-    const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
-      harness.agentRunService
-    );
-    harness.agentRunService.saveExecutionGraphCheckpoint = async (args) => {
-      const saved = await originalSave(args);
-      if (args.checkpoint.phase === "running" && args.checkpoint.nodeRuns.length === 0) {
-        checkpointSaved.resolve();
-        await releaseOriginal.promise;
-      }
-      return saved;
-    };
+  const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
+  const checkpointSaved = deferred();
+  const releaseOriginal = deferred();
+  const originalSave = harness.agentRunService.saveExecutionGraphCheckpoint.bind(
+    harness.agentRunService
+  );
+  harness.agentRunService.saveExecutionGraphCheckpoint = async (args) => {
+    const saved = await originalSave(args);
+    if (args.checkpoint.phase === "running" && args.checkpoint.nodeRuns.length === 0) {
+      checkpointSaved.resolve();
+      await releaseOriginal.promise;
+    }
+    return saved;
+  };
 
-    const original = runFullGraph(harness);
-    await checkpointSaved.promise;
-    const loaded = await harness.agentRunService.getExecutionGraphCheckpoint({
-      accessScope,
-      runId,
-    });
-    const claim = await harness.agentRunService.claimExecutionGraphResume({
-      accessScope,
-      checkpointDigest: loaded.checkpoint.digest,
-      runId,
-    });
-    assert.equal(claim.claimed, true);
-    await assert.rejects(
-      harness.agentRunService.completeRun({ accessScope, runId }),
-      { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
-    );
-    await assert.rejects(
-      harness.agentRunService.failRun({ accessScope, error: new Error("stale"), runId }),
-      { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
-    );
-
-    releaseOriginal.resolve();
-    await assert.rejects(original, {
-      code: "AGENT_GRAPH_EXECUTION_FENCED",
-      status: 409,
-    });
-    const pending = await harness.agentRunService.getRun({ accessScope, runId });
-    assert.equal(pending.status, "running");
-    assert.equal(pending.events.some((event) => event.type === "run_failed"), false);
-    assert.equal(pending.events.some((event) => event.type === "skill_graph_planned"), false);
-    assert.deepEqual(harness.calls, []);
-    assert.equal(
-      (await harness.agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }))
-        .checkpoint.digest,
-      claim.checkpoint.digest
-    );
-
-    const resumed = await resumeFullGraph(harness, claim.checkpoint);
-    assert.equal(resumed.status, 200);
-    assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "completed");
-    assert.deepEqual(harness.calls.map((call) => call.id), [
-      "compare_documents",
-      "risk_review",
-    ]);
+  const original = runFullGraph(harness);
+  await checkpointSaved.promise;
+  const loaded = await harness.agentRunService.getExecutionGraphCheckpoint({
+    accessScope,
+    runId,
   });
+  const claim = await harness.agentRunService.claimExecutionGraphResume({
+    accessScope,
+    checkpointDigest: loaded.checkpoint.digest,
+    runId,
+  });
+  assert.equal(claim.claimed, true);
+  await assert.rejects(
+    harness.agentRunService.completeRun({ accessScope, runId }),
+    { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
+  );
+  await assert.rejects(
+    harness.agentRunService.failRun({ accessScope, error: new Error("stale"), runId }),
+    { code: "AGENT_GRAPH_EXECUTION_FENCED", status: 409 }
+  );
+
+  releaseOriginal.resolve();
+  await assert.rejects(original, {
+    code: "AGENT_GRAPH_EXECUTION_FENCED",
+    status: 409,
+  });
+  const pending = await harness.agentRunService.getRun({ accessScope, runId });
+  assert.equal(pending.status, "running");
+  assert.equal(pending.events.some((event) => event.type === "run_failed"), false);
+  assert.equal(pending.events.some((event) => event.type === "skill_graph_planned"), false);
+  assert.deepEqual(harness.calls, []);
+  assert.equal(
+    (await harness.agentRunService.getExecutionGraphCheckpoint({ accessScope, runId }))
+      .checkpoint.digest,
+    claim.checkpoint.digest
+  );
+
+  const resumed = await resumeFullGraph(harness, claim.checkpoint);
+  assert.equal(resumed.status, 200);
+  assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "completed");
+  assert.deepEqual(harness.calls.map((call) => call.id), [
+    "compare_documents",
+    "risk_review",
+  ]);
 });
 
 test("claim racing final checkpoint save fences the old request and reuses settled Skills", async () => {
-  await withGuardedGraph(() => withAgentExperienceMemoryEnabled(async () => {
+  await withAgentExperienceMemoryEnabled(async () => {
     const experienceStore = createInMemoryAgentExperienceStore();
     configureAgentExperienceMemoryStore(experienceStore);
     const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
@@ -1478,11 +1462,11 @@ test("claim racing final checkpoint save fences the old request and reuses settl
     assert.equal(resumed.status, 200);
     assert.equal((await harness.agentRunService.getRun({ accessScope, runId })).status, "completed");
     assert.equal(harness.calls.length, 2, "a completed write must not be replayed");
-  }));
+  });
 });
 
 test("terminal graph checkpoint refuses a competing claim without changing experience behavior", async () => {
-  await withGuardedGraph(() => withAgentExperienceMemoryEnabled(async () => {
+  await withAgentExperienceMemoryEnabled(async () => {
     const experienceStore = createInMemoryAgentExperienceStore();
     configureAgentExperienceMemoryStore(experienceStore);
     const harness = await createHarness({ effects: SKILL_EFFECTS.workspaceWrite, seedRun: false });
@@ -1523,7 +1507,7 @@ test("terminal graph checkpoint refuses a competing claim without changing exper
     assert.equal(response.body.agentObservability.experienceMemory.write.status, "skipped");
     assert.equal(response.body.agentObservability.experienceMemory.write.skippedReason, "no_records");
     assert.equal(finished.result.agentObservability, undefined);
-  }));
+  });
 });
 
 test("a missing durable node-start receipt fails closed before a Skill call", async () => {

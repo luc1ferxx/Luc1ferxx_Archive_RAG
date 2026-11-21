@@ -331,6 +331,44 @@ test("QA gate reads a Russian question: an off-topic Russian chunk is not enough
   );
 });
 
+// A cross-language rewrite is a paraphrase (KX round, X3): the QA route lets a
+// candidate a rewrite found clear the lexical floor on its dense score, as a
+// comparison's may, and no other candidate.
+test("QA gate: only a candidate a rewrite found may clear coverage on its dense score", async () => {
+  await withEnv(
+    {
+      RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51",
+      RAG_MIN_RELEVANCE_SCORE: "0.32",
+      RAG_QA_MIN_RERANK_PROBABILITY: undefined,
+    },
+    async () => {
+      const queryText = "航班时长超过多少小时才能乘坐商务舱？";
+      // 3 of the rewrite's 8 terms ("How many hours must a flight exceed to fly business class?").
+      const paraphrase = (queryId) => ({
+        ...makeResult({
+          id: queryId,
+          text: "Business class flights are allowed only for flights longer than eight hours.",
+          score: 0.7,
+          keywordScore: 0.375,
+        }),
+        provenance: { queries: [{ queryId }] },
+      });
+      const fromRewrite = (result) => result.provenance.queries[0].queryId.startsWith("translation-");
+
+      assert.equal(
+        assessQaConfidence({ allowSemanticBypassFor: fromRewrite, queryText, results: [paraphrase("translation-latin")] })
+          .confident,
+        true
+      );
+      assert.equal(
+        assessQaConfidence({ allowSemanticBypassFor: fromRewrite, queryText, results: [paraphrase("primary")] }).confident,
+        false
+      );
+      assert.equal(assessQaConfidence({ queryText, results: [paraphrase("translation-latin")] }).confident, false);
+    }
+  );
+});
+
 test("once the gate answers, the context adds reworded candidates but not neighbouring topics", async () => {
   await withEnv(
     { RAG_MIN_QA_QUERY_TERM_COVERAGE: "0.51", RAG_MIN_RELEVANCE_SCORE: "0.32" },

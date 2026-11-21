@@ -13,6 +13,7 @@ import { CAPABILITY_IDS } from "../capabilities/index.js";
 import { attachRetrievedEvidence } from "../citations.js";
 import { getDocumentFormatForMimeType } from "../document-formats.js";
 import { rebaseEvidenceResults } from "../source-labels.js";
+import { serializeError } from "../../lib/error-text.js";
 import { normalizeTrimmedText as normalizeText } from "../../lib/normalize-text.js";
 import {
   SKILL_EFFECTS,
@@ -734,7 +735,7 @@ const createResearchBriefSkill = () => ({
           abstained: false,
           abstainReason: null,
           resolvedQuery: entry.question,
-          error: error instanceof Error ? error.message : "Research lookup failed.",
+          error: serializeError(error, "Research lookup failed."),
         });
       }
     }

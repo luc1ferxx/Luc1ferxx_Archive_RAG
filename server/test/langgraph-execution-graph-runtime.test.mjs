@@ -126,6 +126,18 @@ const readGolden = (caseName) =>
 
 // A LangGraph result that must equal the native one exactly
 // (UPDATE_GRAPH_GOLDENS=1 rewrites it from this run; see the helper's rules).
+//
+// They were rewritten once from LangGraph (2026-11-21) when the agent's error
+// text started following lib/error-text.js: a node whose Skill failed with an
+// error not raised for the client (a scripted "risk review failed", a Skill
+// input or output contract error) records "Unable to run custom skill." as
+// its step error and in its summary, and "<label> failed." in its Skill run,
+// never the error's message. Only those strings changed: in eight fixtures
+// (the fail_fast and failing-gate cases) and the 240 fail_fast digests of the
+// five-node sweep; budget and skip reasons stay (`expose`). The rewrite ran
+// as one full pass with the mid-test failure switched off locally, and the
+// suite with the old rule (any Error's message) matched every old golden.
+// The read-only native goldens (readGolden) were not rewritten.
 const assertMatchesNativeGolden = (caseName, maskedValue) =>
   assertMatchesGraphGolden(GOLDEN_SUITE, caseName, maskedValue);
 
@@ -1059,8 +1071,9 @@ test("parity: a continue failure skips only its dependants while siblings finish
       { nodeId: "summary", reason: "dependency_failed", status: "skipped" },
     ]
   );
-  // The malformed output failed the output gate, not the Skill call.
-  assert.match(langgraph.observed.steps[0].error.message, /output/i);
+  // The malformed output failed the output gate, not the Skill call. The
+  // gate's message is not the client's (lib/error-text.js); its name says it.
+  assert.equal(langgraph.observed.steps[0].error.name, "SkillOutputContractError");
 });
 
 test("parity: a false condition skips its node and its dependants as dependency_skipped", async () => {

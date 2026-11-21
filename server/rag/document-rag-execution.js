@@ -100,6 +100,34 @@ const mergeResultPair = (existing, incoming) => {
   };
 };
 
+// The id prefix of a retrieval query that searches a cross-language rewrite
+// (chat(), rag/query-translation.js).
+const TRANSLATION_QUERY_ID_PREFIX = "translation-";
+
+// The QA gate's semantic bypass for cross-language rewrites (KX round, X3):
+// a rewrite is a paraphrase in another language, so a candidate whose stored
+// keywordScore was measured against one (mergeProvenance lists the winning
+// copy's query first) may clear the coverage floor on its dense score. Null
+// when nothing was rewritten, so the gate is unchanged then.
+// shortcut: no rival-word check against the rewrite, so a chunk about a
+// neighbouring topic of it ("annual leave" for "parental leave") passes on a
+// dense score nomic gives nearly every chunk; the check was measured (X3' in
+// docs/evaluation.md) and not kept under its rules; add it back once a run
+// with repeatable rewrites shows it costs no answers.
+export const buildTranslationBypass = (retrievalQueries = []) => {
+  const rewriteIds = new Set(
+    retrievalQueries
+      .map((retrievalQuery) => String(retrievalQuery.id))
+      .filter((id) => id.startsWith(TRANSLATION_QUERY_ID_PREFIX))
+  );
+
+  if (rewriteIds.size === 0) {
+    return null;
+  }
+
+  return (result) => rewriteIds.has(String(result?.provenance?.queries?.[0]?.queryId ?? ""));
+};
+
 export const tagResultsWithQuery = (results = [], retrievalQuery = {}) =>
   (Array.isArray(results) ? results : []).map((result) => {
     const provenance = result.provenance ?? { fusion: null, routes: [] };
@@ -555,6 +583,7 @@ const buildAlignmentSummaryTrace = (alignment = {}) => ({
 const buildRetrievalInputs = async ({
   agentRetrievalPlan,
   docIds,
+  queryTranslations = [],
   resolvedQuery,
 }) => {
   const route = routeQuery({
@@ -569,10 +598,23 @@ const buildRetrievalInputs = async ({
     query: resolvedQuery,
     requirements: evidenceRequirements,
   });
-  const plannedRetrievalQueries =
-    agentRetrievalPlan?.retrievalQueries?.length
+  const plannedRetrievalQueries = [
+    ...(agentRetrievalPlan?.retrievalQueries?.length
       ? agentRetrievalPlan.retrievalQueries
-      : retrievalQueries;
+      : retrievalQueries),
+    // The question rewritten for the selected documents in other scripts
+    // (chat(), rag/query-translation.js). The plan itself, and so the semantic
+    // cache key, stays as planned: a rewrite follows from the question and the
+    // documents, which the key already holds.
+    ...queryTranslations
+      .filter((translation) => translation.query)
+      .map(({ query, script }) => ({
+        id: `${TRANSLATION_QUERY_ID_PREFIX}${script}`,
+        label: `Question in ${script} script`,
+        query,
+        primary: false,
+      })),
+  ];
   const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
   const retrievalRemote = isRetrievalRemote();
   const semanticCacheEnabled = isSemanticCacheEnabled();
@@ -732,10 +774,11 @@ const executeComparisonRag = async ({
 
 /**
  * The single-document QA route up to its confidence gate: the candidates
- * assessQaConfidence judges, built exactly as executeDocumentRag builds them
- * when no agent retrieval plan is given. Exported so the abstention-gate
- * analysis can replay the real gate over real candidates under different
- * thresholds without calling a chat model.
+ * assessQaConfidence judges, built as executeDocumentRag builds them when no
+ * agent retrieval plan is given, except that no cross-language rewrite
+ * (rag/query-translation.js) is searched, since that takes a model call.
+ * Exported so the abstention-gate analysis can replay the real gate over real
+ * candidates under different thresholds without calling a chat model.
  */
 export const retrieveQaCandidates = async ({ accessScope = null, docIds, resolvedQuery }) => {
   const inputs = await buildRetrievalInputs({
@@ -789,6 +832,7 @@ const executeQaRag = async ({
       queryAdapterScope,
     });
   const confidence = assessQaConfidence({
+    allowSemanticBypassFor: buildTranslationBypass(plannedRetrievalQueries),
     coverageFromQueryText,
     results: retrievalResults,
     queryText: resolvedQuery,
@@ -928,12 +972,14 @@ export const executeDocumentRag = async ({
   includeRetrievedContexts = false,
   preferenceBlock = "",
   query,
+  queryTranslations = [],
   resolvedQuery,
   selectedDocuments,
 }) => {
   const retrievalInputs = await buildRetrievalInputs({
     agentRetrievalPlan,
     docIds,
+    queryTranslations,
     resolvedQuery,
   });
   const cacheLookup = await lookupSemanticCache({

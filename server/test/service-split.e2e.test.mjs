@@ -747,8 +747,10 @@ test("api -> agent -> retrieval -> model-gateway answers as the monolith does, a
   await assertOutage(withoutGateway, {
     causeCode: "MODEL_GATEWAY_UNAVAILABLE",
     dependency: "model",
+    // A 5xx is not the client's: the step shows its fallback, the run error
+    // the outage (lib/error-text.js).
     stepError: {
-      message: "Model gateway: the gateway is unavailable.",
+      message: "Unable to answer from the document.",
       name: "ModelGatewayError",
     },
   });
@@ -765,7 +767,7 @@ test("api -> agent -> retrieval -> model-gateway answers as the monolith does, a
     causeCode: "SERVICE_UNREACHABLE",
     dependency: "retrieval",
     stepError: {
-      message: "The retrieval service is unreachable.",
+      message: "Unable to answer from the document.",
       name: "ServiceUnavailableError",
     },
   });

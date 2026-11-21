@@ -47,6 +47,9 @@ flowchart LR
 ## QA 路径
 
 1. 结合会话记忆把追问改写成独立检索问题。
+   - 跨语言检索（`server/rag/query-translation.js`，没有开关）：按 Unicode 文字系统（汉字、假名、韩文、西里尔、拉丁、希腊、阿拉伯、希伯来、泰文、天城文，按词数取最多的：和分词一样，一个汉字算一个词，其他文字一串连续字母算一个词，所以夹着英文术语的中文问题仍算汉字；泰文不空格，一个短语只算一个词；假名或韩文至少占汉字加假名或韩文的五分之一时，汉字算日文或韩文，所以中文里引一个日文或韩文词仍算汉字；没有字母就没有文字系统）判断问题的文字，以及每份所选文档入库摘要的文字（摘要为空的文档不算）。所选文档里有与问题不同的文字时，用聊天模型把问题译成这些文档的语言：提示里直接说出目标语言（`SCRIPT_LANGUAGES`，拉丁字母写"a language written in Latin letters (such as English)"，西里尔字母写"(such as Russian)"，韩文写 Korean，依此类推；只说"示例文本的语言"时，qwen2.5:7b 把中文问题改写回中文，见评测记录 ML2），每种文字以第一份该文字文档的摘要为例文，最多 3 种，并行各调一次（`query_translation@v2`）。
+   - 改写结果只当检索查询用：经过与会话改写相同的清洗（取最后一行；长度上限用问题的上限 `CHAT_MAX_QUESTION_CHARS`，不用会话改写的 500 字，因为中文译成英文大约长四倍），而且必须是目标文字（目标不是拉丁字母时，按提示保留下来的拉丁字母名称不算），才作为额外的非主查询 `translation-<文字>` 和计划内的查询一起检索（只走 RAG 的路径和 Agent 的主计划都一样；远程检索层照样收到）；调用失败或结果不可用时只检索原问题。门控照旧按找到该块的那条查询算词覆盖；译文是换了说法的句子，所以赢下合并的副本来自改写查询的候选（`buildTranslationBypass`）在词覆盖不够时，也可以像对比题那样凭向量分（不低于 `getMinRelevanceScore()`）放行，锚点照旧检查（评测记录 X3）；这里没有拿改写做换词否决，所以在 nomic 上（向量分几乎都过 0.32）这类块只剩锚点检查：与改写相邻的话题（问 parental leave、块写 annual leave）也会放行；在混合文字的选择里，改写副本赢下合并的同文字块也一样（`buildTranslationBypass` 里的 shortcut；否决测过一轮 X3′，按规则没有保留）。改写也就是它找到的块过门控的标尺：样例摘要里漏过筛查的注入，可能借此决定该文档哪些块能过门控。门控的 anchor、回答 prompt 和会话记录仍用原问题，回答用用户的语言写；因此问题里用本文字引号括起的词（例如“带薪年假”）仍是 anchor，另一种文字的块里没有它，问题会拒答（`chat()` 里的 shortcut）。
+   - RAG trace 在发起了改写时才多一个 `queryTranslations: [{ script, query }]`（失败时 `query` 为 null），同文字问题的 trace 不变。Agent 的 follow-up 阶段不改写（它的门控按原问题算覆盖，改写帮不上）。只按文字系统判断，所以同为拉丁字母的法文问题配英文文档不会触发。
 2. 对复杂问题拆分 evidence requirements，例如时间、生效范围、适用地区。
 3. 生成 query embedding，并按选中文档检索。
 4. 默认跑两路独立召回：dense 路（pgvector cosine；local / qdrant 为显式 opt-in）与 sparse 路（pgvector 上为 PostgreSQL FTS，默认 Okapi BM25，`RAG_SPARSE_SCORING=bm25`；可选 `ts_rank_cd`，它不是 BM25），用 RRF 融合（weighted 可选，`RAG_HYBRID_ENABLED=false` 只跑 dense）。每个候选记录 route、原始 rank/score、fusion 分数和命中它的 retrieval query；多 query × 多路的结果按 `docId:chunkIndex` 稳定去重。`/chat` 响应附加 `retrieval` 块记录 provider 和两路是否真实产生候选。
@@ -261,7 +264,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/llmops-policy.js` | 集中处理 LLMOps annotation、alert 和 per-event budget verdict；`enforcementMode: "block"` 可在模型调用前按已知 usage/cost estimate 拦截，避免把预算判断散进各个 provider 调用点。 |
 | `server/rag/capabilities/` | 定义 capability registry 和 built-in adapters；capability contract 包含 `id/version/inputSchema/accessScope/approvalPolicy/privacyPolicy/execute()`，当前覆盖 arXiv topic import、web search、workspace document discovery、report export、recommendation import、document compare 和 action capabilities。 |
 | `server/rag/arxiv-selection-token.js` | 把文档级 arXiv 推荐结果编码成 token（不签名），确认时要求它和服务端存下的那份（task 的内部 payload，或本进程的 snapshot）一致（不一致返回 409，提示重新查询），确保确认导入的是服务端从 arXiv 拿到、用户看到的候选；任何读得到 task store 的进程都能校验，split 部署的 api 层检索、agent 层确认也成立。 |
-| `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK 和实际检索 queries。 |
+| `server/rag/agent-query-planner.js` | 为 document/custom skill 生成 retrieval plan、动态 topK（fact 意图不带，读 `RAG_RETRIEVAL_TOP_K`）和实际检索 queries。 |
 | `server/rag/agent-retrieval-queries.js` | 检索查询模板（按意图和阶段）。会话记忆改写了问题时，`chat()` 用同一套模板按改写后的问题重建主计划的查询，意图和 topK 不变；follow-up 计划不重建。 |
 | `server/rag/agent-document-loop.js` | Document RAG、self-check、gap analysis、follow-up retrieval、claim/gap 更新。 |
 | `server/rag/agent-run-context.js` | Trace append、budget snapshot、agent trace 记录、clarification 响应 orchestration。 |
@@ -287,7 +290,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 
 这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到 approval gate `inputPreview`。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
 
-需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。Web 搜索失败（没配 `SERPAPI_KEY`，或 SerpAPI 报错：key 无效、额度用完、连不上）时不作答：`mcp-server.js` 回 `isError`，`chat-mcp.js` 不重试、不调模型，直接以 409 和原因抛出，step 和 run 以失败结束，批准请求回 `{ error: 原因 }`（SerpAPI 的回复体里没有原因时是 `Error performing web search: SerpAPI answered with an error.`），后台任务以同一原因失败。界面上原因只出现在聊天页的错误提示里：这一轮的审批门不会更新，后台任务的原因只记在任务的 `error` 字段，任务卡片不显示。
+需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。Web 搜索失败（没配 `SERPAPI_KEY`，或 SerpAPI 报错：key 无效、额度用完、连不上）时不作答：`mcp-server.js` 回 `isError`，`chat-mcp.js` 不重试、不调模型，直接以 409 和原因抛出，step 和 run 以失败结束，批准请求回 `{ error: 原因 }`，后台任务以同一原因失败。原因按失败种类给固定文本：没配 key 是 `Web search is not configured: SERPAPI_KEY is not set.`，SerpAPI 回了非 200 是 `Error performing web search: SerpAPI answered with an error.`，请求没拿到回复（网络错误、超时）是 `Error performing web search: the request to SerpAPI failed.`；SerpAPI 回复体的原文和网络错误信息只写进服务端日志（`mcp-server.js` 的 stderr），不给客户端。界面上原因只出现在聊天页的错误提示里：这一轮的审批门不会更新，后台任务的原因只记在任务的 `error` 字段，任务卡片不显示。
 
 Agent task 的最终产物也复用同一套 capability registry。`server/rag/agent-goal-deliverables.js` 只根据公开目标、最终回答和 docIds 生成产物规格，例如 markdown report、document organization、saved summary 和 follow-up task；`agent-tasks.js` 在回答完成后把 task 暂停为 `requiredUserAction: "approve_deliverables"`，用户批准后才执行这些 capability。Artifact deliverable 只有在真实存储成功并返回 compact artifact ref 后才算 created；写入失败会保持任务未完成。这样目标交付不会绕过 action capability 的审批边界，也不会把产物结果误当成 RAG citation。
 
@@ -338,9 +341,9 @@ Route resolution 会消费 workspace policy，例如 blocked/allowed model ids�
 
 每个发给聊天模型的 prompt 都有一个身份：`id`（这个 prompt 做什么）、`version`（使用的模板版本）和 `fingerprint`（模板原文 SHA-256 的前 12 位）。
 
-- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 10 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
+- **定义位置**：`server/rag/prompt-registry.js` 提供 `definePrompt` 和 11 个 prompt id；各模块在自己的模板旁边定义描述符，`server/rag/prompt-catalog.js` 把它们汇总起来。
 - **fingerprint 怎么算**：模板类 prompt 对未渲染的模板原文算；函数拼出来的 prompt（意图/执行/DAG 规划器、重规划器、claim 评审）对函数在空输入下的输出算，即指令文本加输入字段名，不含请求数据。
-- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 16 个模板变体，当前配置下生效 9 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
+- **版本**：`RAG_PROMPT_VERSION` 选择答案、改写和 Web 回答的模板变体，其余 prompt 只有一个版本。目前共 17 个模板变体，当前配置下生效 10 个（两个对比 prompt 按 `RAG_NEAR_DUPLICATE_GUARD_ENABLED` 二选一）。
 - **记录位置**：
   - 模型调用把描述符作为 `promptTemplate` 传给 `completeTextWithMetadata`，它进入 LLMOps 事件和模型 span（`llmops.prompt_template.id` / `.version` / `.fingerprint`），不进入请求。
   - 每次运行在 `agentObservability.promptTemplates` 里列出用过的模板和调用次数、token 数。
@@ -470,6 +473,8 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
 
 规划器回退的原因（`/chat` 里 intent / execution planner 的 `fallbackReason`，run 记录里 DAG 规划器的 `fallbackReason` 和 replanner 的 `reason`）保留规划器自己的解析、校验错误信息；模型调用失败（错误带 `code` 或 `status`：超时、HTTP 或网关错误、熔断）只记 `planner_call_failed`，不带上游错误信息，因为它可能带上游回复或模型端点；服务端日志对每种失败只记一次错误名和错误代码。
+
+其他所有客户端看得到的错误文本（2026-11-21 起）走同一条规则，即 `server/lib/error-text.js` 的 `serializeError`，路由的 `{ error }` 应答也用它（`routes/helpers.js` 转出）：`/chat` 和 `/chat/stream` 的 `errors.rag`、`errors.mcp`、`ragAnswer`、`mcpAnswer`，trace 和 run step 的摘要与错误记录，`agentSkills` 里的错误，`run.error`，恢复事件，任务记录，目标交付物，research 子问题，经验记忆的错误，arXiv 逐篇和导入任务的错误，推荐任务，以及归档 MCP 工具。只有为客户端抛出的错误保留原文：状态码 4xx 或 `expose: true`，并且不是上游模型的回复（带 `upstreamStatus`）；其他错误（没有状态码的数据库或文件系统错误，可能带主机名、路径或 SQL；5xx；上游回复，可能带端点、模型名或请求内容；不是 Error 的值）一律换成调用处原有的兜底文本，原错误用 `console.error` 记进服务端日志，同一个错误对象只记一次。写给用户看、状态码不是 4xx 的应用错误带 `expose: true`：预算拒绝和被跳过的图节点（`skills/registry.js` 的 `buildSkippedSkillResult`）、图被整张拒绝时没有运行的 Skill（`agent-custom-skill-stage.js`）、请求截止或客户端离开（`RequestCancelledError`）、依赖故障（`DependencyOutageError`）；arXiv 主题里没有可搜索的词时是 400（`arxiv-client.js`）。已经是文本或 `{ message, name }` 记录的错误在生成处已经过了这条规则，run 记录原样保存。`answerUnhandledError`（只认 `expose`）和 `toIngestJobErrorMessage`（只认 `expose` 和 413/415/422，上游回复一律不认）比这条规则更严，没有并进来。
 
 前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
 

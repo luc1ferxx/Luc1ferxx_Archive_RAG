@@ -13,7 +13,6 @@ const ANALYSIS_SIGNAL_PATTERN =
 const INTENT_OPTIONS = {
   fact: {
     profile: "narrow",
-    topK: 4,
     topKPerDoc: 2,
   },
   timeline: {

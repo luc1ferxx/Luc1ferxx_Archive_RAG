@@ -337,6 +337,9 @@ test("the wire codec keeps undefined properties, special numbers, Maps and $ key
 test("chat() through the retrieval tier answers exactly like the in-process path (QA, comparison, abstention)", async () => {
   const questions = [
     { docIds: ["leave-policy"], expectAbstained: false, question: "How many paid annual leave days do employees get?" },
+    // Answered only through its English rewrite (rag/query-translation.js),
+    // which the tier must search too.
+    { docIds: ["leave-policy"], expectAbstained: false, question: "员工每年有多少天带薪年假？" },
     { docIds: ["leave-policy", "travel-policy"], expectAbstained: true, question: "Compare the leave policy and the travel policy." },
     // Abstains with a gap plan whose supplemental searches run too.
     {

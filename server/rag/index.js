@@ -66,6 +66,7 @@ import {
 } from "./memory.js";
 import { runDocumentDeletionCascade } from "./document-deletion-cascade.js";
 import { recordRagTrace } from "./observability.js";
+import { translateQueryForDocuments } from "./query-translation.js";
 import { invalidateSemanticCacheDocuments } from "./semantic-cache.js";
 import { createNoExtractableTextError } from "./document-format-errors.js";
 import {
@@ -1626,6 +1627,23 @@ const chat = async (docIds, query, options = {}) => {
           });
     resolvedQuery = memoryResolution.resolvedQuery;
 
+    // The question rewritten into the language of each selected document in
+    // another script (rag/query-translation.js), searched next to the planned
+    // queries; resolvedQuery stays what the gate and the answer read.
+    // shortcut: the follow-up phase gets no rewrite, since its gate measures
+    // coverage against the question text (coverageFromQueryText), which a
+    // rewrite does not raise; give it one when follow-ups over documents in
+    // another script need it.
+    // shortcut: the gate's anchors still come from resolvedQuery, so a phrase
+    // quoted in the question's script ("员工有多少天“带薪年假”？") must appear in
+    // chunks of the documents' script too and the question abstains; drop
+    // anchors in a script no selected document uses once users quote across
+    // scripts.
+    const queryTranslations =
+      agentRetrievalPlan?.phase === "follow_up"
+        ? []
+        : await translateQueryForDocuments({ documents: selectedDocuments, query: resolvedQuery });
+
     // The planner built the plan's queries around the words the user typed;
     // when memory rewrote them, retrieval searches with the rewrite, as the QA
     // gate and the answer prompt read it ("And how quickly?" alone finds
@@ -1699,6 +1717,7 @@ const chat = async (docIds, query, options = {}) => {
       includeRetrievedContexts,
       preferenceBlock: longMemoryContext.answerBlock,
       query,
+      queryTranslations,
       resolvedQuery,
       selectedDocuments,
     });
@@ -1706,7 +1725,11 @@ const chat = async (docIds, query, options = {}) => {
 
     return recordResponseTrace({
       response: execution.response,
-      traceFields: execution.traceFields,
+      // Only when a rewrite was asked for, so other traces keep their shape.
+      traceFields:
+        queryTranslations.length > 0
+          ? { ...execution.traceFields, queryTranslations }
+          : execution.traceFields,
     });
   } catch (error) {
     await recordRagTrace(

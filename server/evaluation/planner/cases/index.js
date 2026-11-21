@@ -16,7 +16,6 @@ import {
   buildScopedRagService,
   buildSource,
   createEvalTelemetry,
-  withEnvironmentOverrides,
 } from "../../agent-eval-harness.js";
 import {
   AGENT_EXECUTION_STEP_IDS,
@@ -577,25 +576,22 @@ const createDynamicSkillGraphCase = ({ plannerAdapter = llmPlannerAdapter } = {}
         reason: "Pin the narrower compare intent to test atomic DAG composition.",
       }),
     };
-    const response = await withEnvironmentOverrides(
-      { AGENT_SKILL_GRAPH_ROLLOUT: "guarded" },
-      () => runAgentRag({
-        accessScope: DEFAULT_ACCESS_SCOPE,
-        agentRunService,
-        dagPlannerAdapter,
-        docIds,
-        executionPlannerAdapter: plannerAdapter,
-        intentPlannerAdapter: compareOnlyIntentAdapter,
-        question:
-          "Compare the two selected agreements and identify risks caused by their differences.",
-        ragService,
-        sessionId: "planner-dynamic-graph-eval",
-        userId: DEFAULT_ACCESS_SCOPE.userId,
-        webChatService: async () => {
-          throw new Error("Web search must not run for selected-document comparison.");
-        },
-      })
-    );
+    const response = await runAgentRag({
+      accessScope: DEFAULT_ACCESS_SCOPE,
+      agentRunService,
+      dagPlannerAdapter,
+      docIds,
+      executionPlannerAdapter: plannerAdapter,
+      intentPlannerAdapter: compareOnlyIntentAdapter,
+      question:
+        "Compare the two selected agreements and identify risks caused by their differences.",
+      ragService,
+      sessionId: "planner-dynamic-graph-eval",
+      userId: DEFAULT_ACCESS_SCOPE.userId,
+      webChatService: async () => {
+        throw new Error("Web search must not run for selected-document comparison.");
+      },
+    });
     const body = getChatResponseBody(response);
     const run = await agentRunService.getRun({
       accessScope: DEFAULT_ACCESS_SCOPE,

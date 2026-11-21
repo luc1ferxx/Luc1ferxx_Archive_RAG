@@ -505,7 +505,6 @@ const buildProductionSkillGraphEvents = async () => {
   };
   const response = await withEnvironmentOverrides(
     {
-      AGENT_SKILL_GRAPH_ROLLOUT: "guarded",
       RAG_AGENT_EXPERIENCE_MEMORY_ENABLED: "false",
       RAG_LONG_MEMORY_ENABLED: "false",
     },

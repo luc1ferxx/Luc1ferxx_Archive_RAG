@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildAgentExperienceMemoryObservability,
+  createAgentExperienceMemoryWriteErrorResult,
   createInMemoryAgentExperienceStore,
   configureAgentExperienceMemoryStore,
   getAgentExperienceMemoryContext,
@@ -12,6 +13,19 @@ import { createAgentIntentPlanResult } from "../rag/agent-intent-planner.js";
 import { AGENT_INTENT_IDS } from "../rag/agent-intent-planner.js";
 import { CUSTOM_SKILL_IDS } from "../rag/skills/registry.js";
 import { withAgentExperienceMemoryEnabled } from "./agent-experience-memory-test-helpers.mjs";
+
+// The write's error goes out in the /chat answer (agentObservability), so it
+// follows lib/error-text.js: the store's error stays in the server log.
+test("a failed experience write reports write_failed, never the store's error", (t) => {
+  t.mock.method(console, "error", () => {});
+
+  const result = createAgentExperienceMemoryWriteErrorResult(
+    new Error("connect ECONNREFUSED db.internal.example:5432")
+  );
+
+  assert.equal(result.error, "write_failed");
+  assert.equal(result.status, "error");
+});
 
 test("agent experience memory records successful skill-chain runs as planning-only hints", async () => {
   await withAgentExperienceMemoryEnabled(async () => {

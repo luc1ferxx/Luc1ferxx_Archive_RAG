@@ -6,6 +6,7 @@ import {
 import { buildStepReplaySafetyAssessment } from "./agent-run-step-replay-safety.js";
 import { recordRagTrace } from "./observability.js";
 import { runAsDatabaseSystem, runWithDatabaseTenant } from "./postgres-tenant.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import {
   reconcileExecutionGraphCheckpoint,
@@ -121,9 +122,6 @@ export const explainInterruptedRun = ({ run = {} } = {}) => {
     safety,
   };
 };
-
-const serializeError = (error, fallbackMessage) =>
-  error instanceof Error ? error.message : fallbackMessage;
 
 const buildRecoveryPatch = ({
   mode,

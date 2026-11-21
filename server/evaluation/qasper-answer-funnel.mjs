@@ -89,8 +89,10 @@ const isCommitField = (difference) => difference.field.startsWith("git.");
  * listed), or when an answerable question has no retrieval row.
  */
 export const buildQasperAnswerFunnel = (answerReport, retrievalReport, { highF1 = DEFAULT_HIGH_F1 } = {}) => {
-  // The agent surface retrieves with its planner's own plan (another top-K per
-  // intent), which a retrieval report of the default route does not describe.
+  // The agent surface retrieves with its planner's own plan (template
+  // sub-queries beside the question, no query adapter, its own top-K for
+  // timeline, comparison and analysis), which a retrieval report of the default
+  // route does not describe.
   if ((answerReport.config?.surface ?? "rag") !== "rag") {
     throw new Error(
       `The funnel reads rag-surface answer reports only; this one is ${JSON.stringify(answerReport.config.surface)}, whose retrieval the retrieval report does not describe.`

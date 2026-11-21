@@ -11,6 +11,7 @@ import {
   formatRecoveryObservabilityReportMarkdown,
   writeRecoveryObservabilityEvaluationReport,
 } from "../evaluation/recovery-observability-eval.js";
+import { withEnvironmentOverrides } from "../evaluation/agent-eval-harness.js";
 
 const findCase = (report, id) =>
   report.cases.find((caseResult) => caseResult.id === id);
@@ -109,7 +110,6 @@ test("recovery observability eval builds a deterministic passing report", () => 
 });
 
 test("recovery observability eval production events pass the report contract", async () => {
-  const originalSkillGraphRollout = process.env.AGENT_SKILL_GRAPH_ROLLOUT;
   const events = await buildRecoveryObservabilityProductionEvents();
   const report = buildRecoveryObservabilityEvaluationReport({
     createdAt: "2026-06-19T00:00:00.000Z",
@@ -175,8 +175,16 @@ test("recovery observability eval production events pass the report contract", a
     events.filter((event) => event.type === "auto_recovery_completed").length,
     1
   );
-  // The guarded run pins the dial for its own duration only.
-  assert.equal(process.env.AGENT_SKILL_GRAPH_ROLLOUT, originalSkillGraphRollout);
+});
+
+// The replan scenario's request pinned AGENT_SKILL_GRAPH_ROLLOUT to guarded
+// until 2026-11-20, so a removed value in the environment did not stop it.
+test("recovery observability eval production events refuse a removed AGENT_SKILL_GRAPH_ROLLOUT value, as /chat does", async () => {
+  await withEnvironmentOverrides({ AGENT_SKILL_GRAPH_ROLLOUT: "off" }, () =>
+    assert.rejects(buildRecoveryObservabilityProductionEvents(), {
+      code: "AGENT_SKILL_GRAPH_ROLLOUT_REMOVED",
+    })
+  );
 });
 
 test("recovery observability eval fails when graph resume proof or claim is missing", () => {

@@ -1,8 +1,8 @@
 import { consumeBudget } from "./agent-budget.js";
-import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { serializeError } from "../lib/error-text.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import { buildStepError } from "./agent-step-io.js";
-import { buildFailedSkillResult } from "./skills/registry.js";
+import { buildSkippedSkillResult } from "./skills/registry.js";
 
 const noop = () => {};
 const WEB_SEARCH_PRIMARY_STEP_ID = "web_search:primary";
@@ -36,7 +36,7 @@ export const runWebSearchSkill = async ({
   if (!webBudget.ok) {
     recordSkippedSkill({
       skill: webSearchSkill,
-      result: buildFailedSkillResult(webSearchSkill, new Error(webBudget.reason)),
+      result: buildSkippedSkillResult(webSearchSkill, webBudget.reason),
       phase: plannedWebSearchSkill ? "primary" : "fallback",
       budget: webBudget,
     });

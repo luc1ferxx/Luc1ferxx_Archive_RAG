@@ -4,13 +4,7 @@ import {
   buildAgentResponse,
   buildClarificationResponse,
   buildEvidenceClarification,
-  serializeAgentError,
 } from "../rag/agent-response-builder.js";
-
-test("agent response builder serializes Error instances and fallback values", () => {
-  assert.equal(serializeAgentError(new Error("boom"), "fallback"), "boom");
-  assert.equal(serializeAgentError("not an error", "fallback"), "fallback");
-});
 
 test("agent response builder creates document evidence clarification payload", () => {
   const clarification = buildEvidenceClarification({
@@ -118,7 +112,16 @@ test("agent response builder uses finalizer text for finalized document answer",
   );
 });
 
-test("agent response builder reports failed document and web execution as 502", () => {
+test("agent response builder reports failed document and web execution as 502", (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
+  // The model backend's own answer: its text names the endpoint and the key.
+  const upstreamError = Object.assign(
+    new Error("Incorrect API key sk-live-0123456789abcdef for https://llm.internal.example/v1/chat/completions"),
+    { status: 401, upstreamStatus: 401 }
+  );
+  // chat-mcp.js fails a search with its reason as a 409.
+  const webReason = "Web search is not configured: SERPAPI_KEY is not set.";
   const response = buildAgentResponse({
     agentMode: "document_web",
     baseAgentAnswer: "The agent could not complete the request.",
@@ -130,7 +133,7 @@ test("agent response builder reports failed document and web execution as 502", 
     question: "Question?",
     ragResult: {
       ok: false,
-      error: new Error("RAG failed"),
+      error: upstreamError,
     },
     ragSources: [],
     skippedWebBecauseBudget: false,
@@ -140,13 +143,15 @@ test("agent response builder reports failed document and web execution as 502", 
     workingMemory: {},
     webResult: {
       ok: false,
-      error: new Error("Web failed"),
+      error: Object.assign(new Error(webReason), { status: 409 }),
     },
   });
 
   assert.equal(response.status, 502);
-  assert.equal(response.body.ragAnswer, "RAG unavailable: RAG failed");
-  assert.equal(response.body.mcpAnswer, "Web search unavailable: Web failed");
-  assert.equal(response.body.errors.rag, "RAG failed");
-  assert.equal(response.body.errors.mcp, "Web failed");
+  assert.equal(response.body.ragAnswer, "RAG unavailable: Unable to answer from the document.");
+  assert.equal(response.body.mcpAnswer, `Web search unavailable: ${webReason}`);
+  assert.equal(response.body.errors.rag, "Unable to answer from the document.");
+  assert.equal(response.body.errors.mcp, webReason);
+  assert.doesNotMatch(JSON.stringify(response.body), /sk-live|llm\.internal/);
+  assert.deepEqual(logged, [["Unable to answer from the document.", upstreamError]]);
 });

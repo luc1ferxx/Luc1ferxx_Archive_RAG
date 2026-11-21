@@ -1,3 +1,4 @@
+import { serializeError } from "../lib/error-text.js";
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 import { projectGroundedRankedContent } from "./grounded-answer-projection.js";
 
@@ -73,14 +74,6 @@ const buildPublicResearchBrief = (
         )
       : publicResearchBrief.findings,
   };
-};
-
-export const serializeAgentError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return fallbackMessage;
 };
 
 export const buildEvidenceClarification = ({ reason, check, gaps = [] } = {}) => ({
@@ -178,10 +171,10 @@ export const buildAgentResponse = ({
   );
   const agentAnswer = finalizer?.text ?? baseAgentAnswer;
   const ragError = ragResult?.ok === false
-    ? serializeAgentError(ragResult.error, "Unable to answer from the document.")
+    ? serializeError(ragResult.error, "Unable to answer from the document.")
     : null;
   const webError = webResult?.ok === false
-    ? serializeAgentError(webResult.error, "Unable to answer from web search.")
+    ? serializeError(webResult.error, "Unable to answer from web search.")
     : null;
   const rawRagAnswer = customSkillGraphExecuted && primaryCustomResult
     ? baseAgentAnswer

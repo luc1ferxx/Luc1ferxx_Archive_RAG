@@ -383,7 +383,7 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 - rerank 默认关；打开后取 topK×3 个候选，交叉编码器重排
 - 多部分问题拆子查询（最多 4 个），各自检索后合并去重、全局重排
 - 对比路径每篇文档各自跑 hybrid，每篇 3 条
-- /chat 走 agent 时用 agent-query-planner 的计划（fact 意图 topK 4，另加一条模板子查询）；MCP archive_ask 用默认的 10（2026-10-29 前是 6，见 CURRENT-TRUTH 3.37）
+- /chat 走 agent 时用 agent-query-planner 的计划（fact 意图不带 topK，读默认的 10，原来自带 4；另加一条模板子查询）；MCP archive_ask 也用默认的 10（2026-10-29 前是 6，见 CURRENT-TRUTH 3.37）
 
 代码：`server/rag/vector-store.js searchHybridDocumentsWithRoutes`；`server/rag/config.js getRetrievalTopK / getSparseRetrievalTopK / getRrfK / getComparisonTopKPerDoc`；`server/rag/agent-query-planner.js INTENT_OPTIONS`
 
@@ -625,7 +625,7 @@ dev hybrid 证据进入候选 0.6918→0.7381，+0.0463 [+0.0244, +0.0694]；答
 - 检索效果数字（QASPER 检索和答案、前缀、查询适配器、句子切块、版面解析、语义缓存）都是在 standalone 本地 store 上测的：精确余弦 + 内存 BM25，统计跨整个语料。生产默认的 pgvector 路只有 eval:sparse-scoring 单独测过召回
 - 只测过一个 embedding 模型（nomic-embed-text）和一个 7B chat 模型（qwen2.5:7b），没有 GPT 级模型和生产流量
 - hybrid 只显著好于单用 BM25，和纯稠密没有显著差异；自建 48 条用例上的差异都不显著
-- QASPER 答案数字测的是 MCP/RAG 路径。/chat 的 agent 路径有自己的检索计划（fact 意图 topK 4，另加模板子查询），查询适配器在那里也不生效；这条路径的检索召回没有单独评测（--surface agent 只测过答题率）
+- QASPER 答案数字测的是 MCP/RAG 路径。/chat 的 agent 路径有自己的检索计划（fact 意图读默认 topK 10，原来自带 4；另加模板子查询），查询适配器在那里也不生效；这条路径的检索召回没有单独评测（--surface agent 只测过答题率）
 - RRF 权重 0.65/0.35 和 k=60 是默认值，没找到调参证据；查询分解和 agent 模板子查询的收益无实测
 - 默认改用 BM25 是产品决定，数据只说明没有显著差异
 - 中文：全文检索配置是 'simple'，没有词干、没有分词，中文按单字切；没有中文检索评测集

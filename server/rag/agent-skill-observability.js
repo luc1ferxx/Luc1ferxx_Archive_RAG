@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { serializeError } from "../lib/error-text.js";
 import { getBudgetSnapshot } from "./agent-budget.js";
 import { executeAgentSkill } from "./skills/registry.js";
 import {
@@ -8,14 +9,6 @@ import {
   setSpanAttributes,
   withSpan,
 } from "./tracing.js";
-
-const serializeError = (error, fallbackMessage) => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return fallbackMessage;
-};
 
 const roundDurationMs = (durationMs) =>
   Number.isFinite(durationMs) ? Number(durationMs.toFixed(2)) : 0;

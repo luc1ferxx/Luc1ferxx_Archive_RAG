@@ -9,6 +9,7 @@ import {
 } from "./answer-writer.js";
 import { getActiveRewritePromptDescriptor, listRewritePromptDescriptors } from "./memory.js";
 import { hashPromptSet } from "./prompt-registry.js";
+import { getQueryTranslationPromptDescriptor } from "./query-translation.js";
 import { getClaimJudgePromptDescriptor } from "./self-check/claim-judge.js";
 
 // Every prompt template a production code path can send to a chat model. The
@@ -22,6 +23,7 @@ const getSingleTemplatePrompts = () => [
   getDagPlannerPromptDescriptor(),
   getReplannerPromptDescriptor(),
   getClaimJudgePromptDescriptor(),
+  getQueryTranslationPromptDescriptor(),
 ];
 
 const byKey = (left, right) =>

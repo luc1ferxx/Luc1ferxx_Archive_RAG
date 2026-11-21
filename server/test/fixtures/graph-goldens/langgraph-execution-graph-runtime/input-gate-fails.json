@@ -159,7 +159,7 @@
       "budgetDelta": {},
       "citationCount": 0,
       "durationMs": "<duration>",
-      "error": "Skill input contract failed: scoped docIds must contain at least one document.",
+      "error": "risk_review failed.",
       "label": "risk_review",
       "phase": "primary",
       "skillId": "risk_review",
@@ -191,7 +191,7 @@
       "decision": "",
       "detail": null,
       "error": {
-        "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+        "message": "Unable to run custom skill.",
         "name": "SkillInputContractError"
       },
       "id": "custom_skill:risk",
@@ -249,7 +249,7 @@
         "skillVersion": "1.0.0"
       },
       "error": {
-        "message": "Skill input contract failed: scoped docIds must contain at least one document.",
+        "message": "Unable to run custom skill.",
         "name": "SkillInputContractError"
       },
       "id": "custom_skill:risk",
@@ -283,7 +283,7 @@
       "label": "risk_review",
       "output": null,
       "status": "failed",
-      "summary": "risk_review failed: Skill input contract failed: scoped docIds must contain at least one document.",
+      "summary": "risk_review failed: Unable to run custom skill.",
       "type": "custom_skill"
     }
   ]

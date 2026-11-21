@@ -1,5 +1,5 @@
 import { consumeBudget } from "./agent-budget.js";
-import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { serializeError } from "../lib/error-text.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
 import {
   buildStepError,
@@ -10,7 +10,7 @@ import {
   buildWorkspaceActionSkillInput,
 } from "./skills/built-ins.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
-import { buildFailedSkillResult } from "./skills/registry.js";
+import { buildSkippedSkillResult } from "./skills/registry.js";
 import { normalizeText } from "../lib/normalize-text.js";
 
 const noop = () => {};
@@ -55,10 +55,7 @@ export const runArxivImportSkill = async ({
   if (!arxivBudget.ok) {
     recordSkippedSkill({
       skill: arxivImportSkill,
-      result: buildFailedSkillResult(
-        arxivImportSkill,
-        new Error(arxivBudget.reason)
-      ),
+      result: buildSkippedSkillResult(arxivImportSkill, arxivBudget.reason),
       phase: "primary",
       budget: arxivBudget,
     });

@@ -700,7 +700,13 @@ test("an import that failed can be confirmed again from the offer it came from",
     });
 
   await confirm();
-  assert.equal((await orchestrator.runTask({ taskId: RACE_TASK_ID })).status, TASK_STATUSES.failed);
+
+  const failed = await orchestrator.runTask({ taskId: RACE_TASK_ID });
+
+  assert.equal(failed.status, TASK_STATUSES.failed);
+  // The task is public: the disk error stays in the server log (lib/error-text.js).
+  assert.equal(failed.error, "Unknown error.");
+  assert.doesNotMatch(JSON.stringify(failed), /disk full/);
 
   failImport = false;
   assert.equal((await confirm()).status, TASK_STATUSES.queued);

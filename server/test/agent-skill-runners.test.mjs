@@ -136,7 +136,8 @@ test("skill runners return inventory fallback answer and failed trace", async ()
     recordSkillResult: tracker.recordSkillResult,
   });
 
-  assert.equal(answer, "Workspace inventory unavailable: Registry unavailable");
+  // An error not raised for the client is its fallback text (lib/error-text.js).
+  assert.equal(answer, "Workspace inventory unavailable: Unable to list indexed documents.");
   assert.equal(trace[0].type, "inventory");
   assert.equal(trace[0].status, "failed");
   assert.match(trace[0].summary, /Workspace inventory failed/i);
@@ -145,7 +146,9 @@ test("skill runners return inventory fallback answer and failed trace", async ()
 // A gated Capability never answers inside the outer plan: the approved
 // capability_call step runs it (with its own artifact idempotency key). A
 // registry that returns anyway fails the Skill instead of answering.
-test("a workspace action whose gated Capability returns without pausing fails with the invariant error", async () => {
+test("a workspace action whose gated Capability returns without pausing fails with the invariant error", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args));
   const budgetState = createAgentBudget();
   const trace = [];
   const tracker = createAgentSkillTracker({
@@ -183,9 +186,12 @@ test("a workspace action whose gated Capability returns without pausing fails wi
     workspaceActionSkill,
   });
 
-  assert.equal(
-    answer,
-    "Workspace action unavailable: summary.create requires approval and runs only from the approved capability_call step."
+  // The invariant error goes to the server log; the answer carries the
+  // fallback (lib/error-text.js).
+  assert.equal(answer, "Workspace action unavailable: Unable to execute workspace action.");
+  assert.deepEqual(
+    logged.map(([, error]) => error.message),
+    ["summary.create requires approval and runs only from the approved capability_call step."]
   );
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].capabilityId, "summary.create");
@@ -227,6 +233,6 @@ test("a failed workspace action answers with its failure and records a failed tr
     workspaceActionSkill,
   });
 
-  assert.equal(answer, "Workspace action unavailable: registry unavailable");
+  assert.equal(answer, "Workspace action unavailable: Unable to execute workspace action.");
   assert.equal(trace[0].status, "failed");
 });

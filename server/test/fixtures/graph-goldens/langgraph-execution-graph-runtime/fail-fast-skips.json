@@ -374,7 +374,7 @@
       "budgetDelta": {},
       "citationCount": 0,
       "durationMs": "<duration>",
-      "error": "risk review failed",
+      "error": "risk_review failed.",
       "label": "risk_review",
       "phase": "primary",
       "skillId": "risk_review",
@@ -419,7 +419,7 @@
       "decision": "",
       "detail": null,
       "error": {
-        "message": "risk review failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:risk",
@@ -481,7 +481,7 @@
         "skillVersion": "1.0.0"
       },
       "error": {
-        "message": "risk review failed",
+        "message": "Unable to run custom skill.",
         "name": "Error"
       },
       "id": "custom_skill:risk",
@@ -519,7 +519,7 @@
       "label": "risk_review",
       "output": null,
       "status": "failed",
-      "summary": "risk_review failed: risk review failed",
+      "summary": "risk_review failed: Unable to run custom skill.",
       "type": "custom_skill"
     }
   ]

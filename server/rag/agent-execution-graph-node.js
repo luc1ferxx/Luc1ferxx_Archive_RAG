@@ -9,10 +9,10 @@ import {
 import { EXECUTION_GRAPH_FAILURE_POLICIES } from "./agent-execution-graph.js";
 import { isAgentRunInterrupt } from "./agent-interrupts.js";
 import { toDependencyOutageError } from "./dependency-outage.js";
-import { serializeAgentError as serializeError } from "./agent-response-builder.js";
+import { serializeError } from "../lib/error-text.js";
 import { throwIfRequestCancelled } from "./request-deadline.js";
 import { runLifecycleStep } from "./agent-step-lifecycle-runner.js";
-import { buildFailedSkillResult } from "./skills/registry.js";
+import { buildFailedSkillResult, buildSkippedSkillResult } from "./skills/registry.js";
 import {
   EXECUTION_REQUEST_FIELD_TYPES,
   createSkillInputContractError,
@@ -633,9 +633,9 @@ export const createExecutionGraphRunControl = () =>
  * primary result. No lifecycle step, no checkpoint write.
  */
 export const recordExecutionGraphNodeSkip = ({ budget = null, context, reason, state }) => {
-  const result = buildFailedSkillResult(
+  const result = buildSkippedSkillResult(
     state.skill,
-    new Error(budget?.reason ?? `Node ${state.node.nodeId} skipped: ${reason}.`)
+    budget?.reason ?? `Node ${state.node.nodeId} skipped: ${reason}.`
   );
 
   settleSkip(state, reason);

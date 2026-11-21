@@ -235,6 +235,48 @@ test("arxiv importer imports provided papers without running search", async () =
   }
 });
 
+// A failed paper's error is the user's to read (the import answer lists it), so
+// it follows lib/error-text.js: a file system error naming a path stays in the
+// server log; a refusal raised for the client keeps its message.
+test("a failed paper shows its error only when it was raised for the client", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const tempDirectory = await mkdtemp(path.join(os.tmpdir(), "arxiv-importer-"));
+  const tooLarge = "The document is too large to read: it has more than 2000 pages.";
+  const ingestErrors = {
+    "2401.00001v1": new Error("EACCES: permission denied, open '/srv/archive/uploads/2401.00001v1.pdf'"),
+    "2401.00002v1": Object.assign(new Error(tooLarge), { status: 413 }),
+  };
+
+  try {
+    const result = await importArxivPapers({
+      accessScope: { userId: "alice", workspaceId: "workspace-a" },
+      arxivService: { downloadPdf: async () => Buffer.from("%PDF-1.7 fake") },
+      delayMs: 0,
+      papers: Object.keys(ingestErrors).map((arxivId) =>
+        createPaper({ arxivId, pdfUrl: `https://arxiv.org/pdf/${arxivId}`, title: `Paper ${arxivId}` })
+      ),
+      ragService: {
+        ingestDocument: async ({ source }) => {
+          throw ingestErrors[source.arxivId];
+        },
+        listDocuments: () => [],
+      },
+      tempDirectory,
+      topic: "retrieval augmented generation",
+    });
+
+    assert.deepEqual(
+      result.failedPapers.map(({ arxivId, error }) => [arxivId, error]),
+      [
+        ["2401.00001v1", "The paper could not be downloaded or indexed."],
+        ["2401.00002v1", tooLarge],
+      ]
+    );
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+});
+
 test("arxiv importer skips papers already indexed in scope", async () => {
   const paper = createPaper();
   const fileName = buildArxivPdfFileName(paper);

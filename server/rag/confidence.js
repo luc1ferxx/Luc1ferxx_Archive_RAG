@@ -133,7 +133,10 @@ export const findQueryTermSubstitution = (queryText, evidenceText) => {
 // measured landed at exactly 0.50 and was rejected before the model was ever
 // called.
 //
-// The bypass is deliberately limited to comparison, because in single-document QA
+// The bypass is deliberately limited to comparison (and, in single-document QA,
+// to candidates a cross-language rewrite found: a translation is a paraphrase by
+// construction; see buildTranslationBypass in document-rag-execution.js), because
+// in single-document QA
 // low coverage carries real information: it marks a chunk that addresses only part
 // of a multi-aspect question, which is what drives the gap-suggestion machinery
 // ("when does this take effect AND which regions"). Relaxing it there made a
@@ -174,8 +177,12 @@ const hasEnoughQueryCoverage = (
     return true;
   }
 
+  // A predicate decides per candidate (the QA gate's cross-language rewrites).
+  const bypass =
+    typeof allowSemanticBypass === "function" ? allowSemanticBypass(result) : allowSemanticBypass;
+
   return (
-    allowSemanticBypass &&
+    Boolean(bypass) &&
     typeof result?.vectorScore === "number" &&
     result.vectorScore >= getMinRelevanceScore()
   );
@@ -483,10 +490,15 @@ const selectByRerankProbability = ({ minProbability, queryText, results }) => {
 
 // coverageFromQueryText: measure coverage against queryText itself (see
 // buildQaCoverageReader); only the agent's follow-up retrieval sets it.
+// allowSemanticBypassFor: candidates that may clear the lexical gate on
+// semantic similarity alone, as comparisons do (hasEnoughQueryCoverage); the
+// QA route passes the ones a cross-language rewrite found, since a translation
+// is a paraphrase whose words seldom match the chunk's (KX round, X3).
 export const assessQaConfidence = ({
   results,
   queryText = "",
   coverageFromQueryText = false,
+  allowSemanticBypassFor = null,
 }) => {
   const minCoverage = getMinQaQueryTermCoverage();
   const minRerankProbability = getQaMinRerankProbability();
@@ -510,6 +522,7 @@ export const assessQaConfidence = ({
   const selection = rerankGate
     ? selectByRerankProbability({ minProbability: minRerankProbability, queryText, results })
     : selectUsableResults({
+        ...(allowSemanticBypassFor ? { allowSemanticBypass: allowSemanticBypassFor } : {}),
         coverageOf,
         minCoverage,
         results,
@@ -543,7 +556,8 @@ export const assessQaConfidence = ({
     usableResults: selection.usableResults,
     anchorGroups: selection.anchorGroups,
     missingAnchorGroups: [],
-    // Admitted below the coverage floor, which only the rerank gate does.
+    // Admitted below the coverage floor: by the rerank gate, or on the dense
+    // score of a candidate a cross-language rewrite found.
     partialCoverageResultCount: selection.usableResults.filter((result) => {
       const coverage = coverageOf ? coverageOf(result) : result?.keywordScore;
 
@@ -599,7 +613,8 @@ export const assessComparisonConfidence = ({
     const selection = selectUsableResults({
       results,
       queryText,
-      // Only comparison opts in: see hasEnoughQueryCoverage for why the same
+      // Comparison opts in for every candidate (QA only for those a
+      // cross-language rewrite found): see hasEnoughQueryCoverage for why the same
       // lexical measure means something different here than in single-document QA.
       allowSemanticBypass: true,
     });

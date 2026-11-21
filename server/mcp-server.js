@@ -41,16 +41,6 @@ const formatSearchResults = (query, results, limit) => {
   };
 };
 
-// serpapi rejects an answer other than 200 (a bad key, no searches left) with
-// its body, usually {"error": "..."}, not an Error.
-const readSerpApiError = (body) => {
-  try {
-    return JSON.parse(body).error || "SerpAPI answered with an error.";
-  } catch {
-    return "SerpAPI answered with an error.";
-  }
-};
-
 server.registerTool(
   "search_web",
   {
@@ -98,12 +88,19 @@ server.registerTool(
         ],
       };
     } catch (error) {
+      // The reason is the user's (chat-mcp.js fails the step with it), so it
+      // names the kind of failure only: serpapi rejects an answer other than
+      // 200 (a bad key, no searches left) with SerpAPI's body, anything else
+      // (a network error naming hosts, a timeout) with an Error. The cause
+      // goes to this process's stderr, which is the server's.
+      console.error("SerpAPI search failed.", error);
+
       return {
         content: [
           {
             type: "text",
             text: `Error performing web search: ${
-              error instanceof Error ? error.message : readSerpApiError(error)
+              error instanceof Error ? "the request to SerpAPI failed." : "SerpAPI answered with an error."
             }`,
           },
         ],

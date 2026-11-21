@@ -7,6 +7,7 @@ import {
   listLongMemories,
   rememberLongMemory,
 } from "./long-memory.js";
+import { serializeError } from "../lib/error-text.js";
 import { AGENT_INTENT_IDS } from "./agent-intent-planner.js";
 import { SKILL_CHAIN_MODE } from "./agent-planner.js";
 import { CUSTOM_SKILL_IDS } from "./skills/registry.js";
@@ -215,7 +216,7 @@ export const buildAgentExperienceMemoryObservability = (context = {}) => {
 export const createAgentExperienceMemoryWriteErrorResult = (error) =>
   createWriteResult({
     enabled: getAgentExperienceMemoryConfigStatus().enabled,
-    error: error instanceof Error ? error.message : "write_failed",
+    error: serializeError(error, "write_failed"),
     status: WRITE_STATUSES.error,
     writeAttempted: true,
   });

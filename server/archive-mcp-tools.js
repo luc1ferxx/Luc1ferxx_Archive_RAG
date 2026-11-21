@@ -4,6 +4,7 @@
 // without OpenAI, a vector store, or PostgreSQL. The MCP wiring file owns the
 // side effects; this file owns the shapes.
 
+import { serializeError } from "./lib/error-text.js";
 import {
   getApiAuthTokens,
   isApiAuthEnabled,
@@ -161,16 +162,23 @@ export const formatAskResult = (response = {}) => {
 /**
  * Errors are reported in the same shape as an abstention rather than thrown, so
  * a failing archive degrades into "I have no evidence" instead of leaving the
- * calling model to invent an answer.
+ * calling model to invent an answer. The reason is lib/error-text.js's: an
+ * error raised for the caller keeps its message, anything else is the
+ * fallback, and the error goes to stderr.
  */
-export const formatToolError = (error) => ({
-  abstained: true,
-  abstainReason: normalizeText(error?.message) || "The archive request failed.",
-  answer: "",
-  citations: [],
-  evidence: [],
-  error: normalizeText(error?.message) || "The archive request failed.",
-});
+export const formatToolError = (error) => {
+  const reason =
+    normalizeText(serializeError(error, "The archive request failed.")) || "The archive request failed.";
+
+  return {
+    abstained: true,
+    abstainReason: reason,
+    answer: "",
+    citations: [],
+    evidence: [],
+    error: reason,
+  };
+};
 
 export const formatDocumentList = (documents) =>
   toArray(documents).map((document = {}) => ({

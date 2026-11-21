@@ -110,7 +110,8 @@ test("agent run step lifecycle records failed steps without changing run status"
 
   assert.equal(run.status, AGENT_RUN_STATUSES.running);
   assert.equal(step.status, AGENT_RUN_STEP_STATUSES.failed);
-  assert.equal(step.error.message, "RAG failed.");
+  // An Error not raised for the client is the fallback (lib/error-text.js).
+  assert.equal(step.error.message, "Step failed.");
   assert.equal(step.error.name, "Error");
   assert.deepEqual(step.output, {
     citationCount: 0,
@@ -392,7 +393,7 @@ test("recordRunStep preserves omitted input output and error then allows explici
     partialText: "Draft answer.",
   });
   assert.deepEqual(step.error, {
-    message: "RAG failed.",
+    message: "Step failed.",
     name: "Error",
   });
 

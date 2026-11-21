@@ -115,6 +115,12 @@ export const buildFailedSkillResult = (skill, error) => ({
   traceDetail: null,
 });
 
+// A Skill that did not run (its budget refused it, its graph node was
+// skipped). The reason is written for the user: `expose` keeps it in the
+// agent's payloads (lib/error-text.js).
+export const buildSkippedSkillResult = (skill, reason) =>
+  buildFailedSkillResult(skill, Object.assign(new Error(reason), { expose: true }));
+
 // A Skill never starts for a request that is already cancelled, and a Skill
 // that fails because its request was cancelled (an aborted model or retrieval
 // call, or one cut by the deadline) does not become a failed Skill result the

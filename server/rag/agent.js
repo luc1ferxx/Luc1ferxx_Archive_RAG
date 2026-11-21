@@ -38,6 +38,7 @@ import {
   attachApprovalGateStepIds,
   buildAgentRunStepsFromTrace,
 } from "./agent-run-steps.js";
+import { serializeError } from "../lib/error-text.js";
 import { normalizeText } from "../lib/normalize-text.js";
 import { listAuthorizedAtomicCustomSkills } from "./skills/authorized-catalog.js";
 import { runCustomSkillStage } from "./agent-custom-skill-stage.js";
@@ -279,10 +280,8 @@ const loadAgentExperienceMemorySafely = async ({
       userId,
     });
   } catch (error) {
-    console.error("Failed to load agent experience memory.", error);
-
     return createAgentExperienceMemoryUnavailableContext({
-      error: error instanceof Error ? error.message : "load_failed",
+      error: serializeError(error, "load_failed"),
       reason: "load_failed",
       status: "error",
     });
@@ -303,7 +302,6 @@ const recordAgentExperienceSafely = async ({
       userId,
     });
   } catch (error) {
-    console.error("Failed to record agent experience memory.", error);
     return createAgentExperienceMemoryWriteErrorResult(error);
   }
 };
