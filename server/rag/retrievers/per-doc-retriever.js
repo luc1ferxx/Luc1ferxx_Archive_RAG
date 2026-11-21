@@ -6,7 +6,9 @@ import {
 import { rerankResultsOrKeepOrder } from "../reranker.js";
 import { searchDocumentsPerDocumentWithRoutes } from "../vector-store.js";
 
-export const retrievePerDocumentContextWithRoutes = async ({
+// One query's fused candidates per document, before any rerank, as
+// searchGlobalCandidatesWithRoutes (global-retriever.js) for the global route.
+export const searchPerDocumentCandidatesWithRoutes = async ({
   queryVector,
   queryText,
   docIds,
@@ -25,14 +27,20 @@ export const retrievePerDocumentContextWithRoutes = async ({
     docIds,
     topKPerDoc: candidateKPerDoc,
   });
+
+  return { resultsByDocument: search.resultsByDocument, routes: search.routes, topKPerDoc };
+};
+
+export const retrievePerDocumentContextWithRoutes = async (args) => {
+  const search = await searchPerDocumentCandidatesWithRoutes(args);
   const resultsByDocument = new Map(
     await Promise.all(
       [...search.resultsByDocument.entries()].map(async ([docId, results]) => [
         docId,
         await rerankResultsOrKeepOrder({
-          queryText,
+          queryText: args.queryText,
           results,
-          topK: topKPerDoc,
+          topK: search.topKPerDoc,
         }),
       ])
     )

@@ -8,8 +8,9 @@ import { getMetricsRegistry, isMetricsEnabled, secondsSince } from "./metrics.js
 //     `hybrid` is both plus fusion, `rerank` the reordering after it (only
 //     while reranking is on). Each records its latency and how many
 //     candidates it returned.
-//   - rerank degradations: a reranker that failed, so the query kept the fused
-//     order (rerankResultsOrKeepOrder).
+//   - rerank degradations: a rerank call that failed, so its candidates kept
+//     the fused order (rerankResultsOrKeepOrder); one call per retrieval step,
+//     per document on the per-document route, or per one-query search.
 //   - the semantic answer cache's hits, misses and bypasses, read on scrape
 //     from its own running counters while RAG_SEMANTIC_CACHE is on.
 
@@ -37,7 +38,7 @@ const routeCandidates = registry.histogram({
   name: "archive_rag_retrieval_route_candidates",
 });
 const rerankDegradations = registry.counter({
-  help: "Queries whose reranker failed, so they kept the fused retrieval order.",
+  help: "Rerank calls that failed, so their candidates kept the fused retrieval order.",
   name: "archive_rag_retrieval_rerank_degradations_total",
 });
 const cacheLookups = registry.counter({
