@@ -374,7 +374,10 @@ describe("AuthProvider", () => {
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
-  test("Sign out with no end-session endpoint loads the app again, so nothing of the session stays on screen", async () => {
+  test.each([
+    [{}, "http://localhost:3000/"],
+    [{ VITE_OIDC_POST_LOGOUT_REDIRECT_URI: "http://localhost:3000/signed-out" }, "http://localhost:3000/signed-out"],
+  ])("Sign out with no end-session endpoint goes to the post-logout address (env %o), so nothing of the session stays on screen", async (env, landing) => {
     savePendingLogin({
       codeVerifier: "verifier-1",
       createdAt: Date.now(),
@@ -391,7 +394,7 @@ describe("AuthProvider", () => {
     );
 
     renderAuth({
-      env: {},
+      env,
       fetchImpl,
       loadMe: async () => ({ permissions: [], roles: [], userId: "alice", workspaceId: "w1" }),
       loadServerConfig: async () => oidcConfig,
@@ -402,7 +405,7 @@ describe("AuthProvider", () => {
 
     expect(getAccessToken()).toBe("");
     expect(location.assign).toHaveBeenCalledTimes(1);
-    expect(location.assign).toHaveBeenCalledWith("http://localhost:3000/");
+    expect(location.assign).toHaveBeenCalledWith(landing);
   });
 
   test("a failed timed refresh signs out and starts a new login, as an unrecoverable 401 does", async () => {

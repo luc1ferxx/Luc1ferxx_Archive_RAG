@@ -201,6 +201,7 @@ test("refresh tokens rotate, and reusing a rotated one revokes the family", asyn
 test("the login form lists users when no login_hint is given, escaped", async () => {
   const provider = await startDevOidcProvider({
     port: 0,
+    redirectUris: [REDIRECT_URI, "http://[::1]:3000/", "myapp://cb"],
     users: [{ claims: {}, name: "<script>x</script>", sub: "eve" }],
   });
 
@@ -217,6 +218,14 @@ test("the login form lists users when no login_hint is given, escaped", async ()
       response.headers.get("content-security-policy"),
       /form-action 'self' http:\/\/localhost:3000(;|$)/u
     );
+
+    // A host-source cannot name an IPv6 literal (Chrome drops it), and a
+    // custom scheme's origin is "null": the scheme stands for both.
+    for (const [redirectUri, source] of [["http://[::1]:3000/", "http:"], ["myapp://cb", "myapp:"]]) {
+      const { response: form } = await authorize(provider, { login_hint: undefined, redirect_uri: redirectUri });
+      assert.equal(form.status, 200);
+      assert.match(form.headers.get("content-security-policy"), new RegExp(`form-action 'self' ${source}(;|$)`, "u"));
+    }
   } finally {
     await provider.stop();
   }
