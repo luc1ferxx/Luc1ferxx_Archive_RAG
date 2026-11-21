@@ -10,6 +10,7 @@
 // rate and scored the abstention sentence as a wrong answer. Nor is the
 // document RAG's own abstention when the agent passes it on as the answer.
 
+import { normalizeText } from "../lib/normalize-text.js";
 import { GROUNDED_ABSTENTION_TEXT } from "../rag/agent-finalizer.js";
 import { attachRetrievedEvidence } from "../rag/citations.js";
 import { CHECKABLE_CITATION_FIELDS } from "../rag/self-check/patterns.js";
@@ -40,14 +41,16 @@ export const classifyAgentAnswer = (body = {}) => {
     return { abstainSource: AGENT_ABSTAIN_SOURCES.groundedAbstention, answered: false };
   }
 
-  // The document RAG's own abstention passed on as the answer: the QA gate's
-  // gap-plan message ("I found material related to …, but I still cannot
-  // confirm … reliably.", or its Chinese form), which the agent returns as is
-  // when no follow-up or web search comes after it. The body marks it in any
-  // language: ragAbstained, with the answer being ragAbstainReason. Read as an
-  // answer, it put 1 (L1) and 3 (T1) refusals among the answered QASPER
-  // questions (docs/evaluation.md, KX round).
-  if (body?.ragAbstained === true && text === String(body?.ragAbstainReason ?? "").trim()) {
+  // Any document RAG abstention passed on unchanged as the answer -- the QA
+  // gate's gap-plan message ("I found material related to …, but I still
+  // cannot confirm … reliably.", or its Chinese form), a comparison-gate
+  // refusal with no sources, the output-limit sentence -- which the agent
+  // returns as is when no follow-up or web search comes after it. The body
+  // marks it in any language: ragAbstained, with the answer being
+  // ragAbstainReason (whitespace aside: a retried step normalizes its answer).
+  // Read as answers, gap-plan messages put 1 (L1) and 3 (T1) refusals among
+  // the answered QASPER questions (docs/evaluation.md, KX round).
+  if (body?.ragAbstained === true && normalizeText(text) === normalizeText(body?.ragAbstainReason)) {
     return { abstainSource: AGENT_ABSTAIN_SOURCES.ragAbstention, answered: false };
   }
 

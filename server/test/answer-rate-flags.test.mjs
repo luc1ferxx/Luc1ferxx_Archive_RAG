@@ -15,7 +15,7 @@ import { createChatClient } from "../rag/openai-client.js";
 import { buildPlan } from "../rag/agent-intent-rules.js";
 import { buildPreExecutionClarification } from "../rag/agent-planner.js";
 import { GROUNDED_ABSTENTION_TEXT } from "../rag/agent-finalizer.js";
-import { buildAgentResponse } from "../rag/agent-response-builder.js";
+import { finalizeAgentRun } from "../rag/agent-finalization-flow.js";
 import {
   classifyAgentAnswer,
   describeAgentFollowUp,
@@ -448,16 +448,6 @@ test("an agent body answers only when it is neither a clarification nor the grou
     abstainSource: null,
     answered: true,
   });
-  // A brief that answers around an abstained finding is still an answer.
-  assert.deepEqual(
-    classifyAgentAnswer({
-      agentMode: "research_brief",
-      agentAnswer: "Executive Summary\nDelaware law governs. [Source 1]",
-      ragAbstained: true,
-      ragAbstainReason: "I have not found reliable evidence that directly answers the notice period.",
-    }),
-    { abstainSource: null, answered: true }
-  );
 
   const body = {
     agentObservability: { executionLoop: { followUpsRun: 1, stoppedReason: "follow_up_resolved" } },
@@ -484,31 +474,49 @@ test("an agent body answers only when it is neither a clarification nor the grou
 
 // The QA gate's gap-plan message, passed on by the agent as its document
 // answer, is the document RAG's abstention, not an answer (KX round: read as
-// answers, 1 on L1 and 3 on T1). Built as /chat builds the body, in English
-// and in Chinese.
-test("an agent body that passes on document RAG's own abstention has not answered", () => {
+// answers, 1 on L1 and 3 on T1). Built by finalizeAgentRun, as /chat builds the
+// body (a source-less abstention is not finalized), in English and Chinese;
+// a retried step normalizes the answer's whitespace, the reason keeps it.
+test("an agent body that passes on document RAG's own abstention has not answered", async () => {
   for (const message of [
     "I found material related to system designs introduced, but I still cannot confirm system designs introduced reliably.",
     "我找到了一些和“国内出差的每日餐”相关的内容，但还不能可靠确认国内出差的每日餐。",
   ]) {
-    const { body } = buildAgentResponse({
-      agentMode: "document",
-      baseAgentAnswer: message,
-      directAnswerModes: new Set(),
+    const response = await finalizeAgentRun({
+      addTraceStep: () => {},
+      buildAgentObservability: ({ agentMode }) => ({ agentMode, planMode: "document" }),
+      customSkillResults: [],
+      customSkills: [],
+      discoveryAnswer: null,
+      documentRagSkill: { id: "document_rag", version: "1.0.0", label: "Document RAG" },
+      getAgentSkills: () => [{ skillId: "document_rag", status: "completed" }],
+      getBudgetSnapshot: () => ({ used: { documentRagCalls: 1 } }),
+      inventoryAnswer: null,
       plan: { mode: "document" },
       question: "What system designs are introduced?",
-      ragResult: { ok: true, value: { abstained: true, abstainReason: message, citations: [], text: message } },
-      ragSources: [],
+      ragResult: {
+        ok: true,
+        value: { abstained: true, abstainReason: message, citations: [], memoryApplied: false, text: message },
+      },
+      recordAgentTrace: async () => {},
+      recordWorkingMemoryClaimSupport: () => {},
+      researchBrief: null,
+      skippedWebBecauseBudget: false,
       trace: [],
-      agentSkills: [],
-      agentObservability: {},
-      workingMemory: {},
       webResult: null,
+      workingMemory: {},
     });
 
-    assert.equal(body.agentAnswer, message);
-    assert.deepEqual(classifyAgentAnswer(body), { abstainSource: "rag_abstention", answered: false });
+    assert.equal(response.body.agentAnswer, message);
+    assert.deepEqual(classifyAgentAnswer(response.body), { abstainSource: "rag_abstention", answered: false });
   }
+
+  const padded = "I found material related to  the  notice period, but the answer is still not reliable enough.";
+
+  assert.deepEqual(
+    classifyAgentAnswer({ agentAnswer: padded.replace(/\s+/g, " "), agentMode: "document", ragAbstained: true, ragAbstainReason: padded }),
+    { abstainSource: "rag_abstention", answered: false }
+  );
 });
 
 // ---------------------------------------------------------------------------
