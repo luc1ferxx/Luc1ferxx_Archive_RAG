@@ -11,7 +11,6 @@ import {
   SearchOutlined,
 } from "@ant-design/icons";
 import {
-  formatDocumentCount,
   formatPageCount,
   getDocumentSource,
   isArxivDocument,
@@ -204,7 +203,7 @@ const RecoveryQueuePanel = ({
                     })
                   }
                 >
-                  {formatRecoveryActionLabel(action.type)}
+                  {formatRecoveryActionLabel(action.type, t)}
                 </button>
               ))}
             </div>
@@ -249,7 +248,6 @@ const WorkspaceSidebar = ({
   recoveryRuns,
   savedArxivSuggestionsByDocId = {},
   selectedChatDocIds = [],
-  locale = "en",
   t = defaultT,
   totalPages,
   uploadRef,
@@ -299,7 +297,7 @@ const WorkspaceSidebar = ({
     <SidebarSection
       caption={t("sidebar.pagesCaption", {
         count: totalPages,
-        documents: formatDocumentCount(activeDocuments.length),
+        documents: t("common.documentCount", { count: activeDocuments.length }),
       })}
       className="archive-upload-section"
       sectionRef={uploadRef}
@@ -308,7 +306,7 @@ const WorkspaceSidebar = ({
       <div className="archive-sidebar-stats">
         <SidebarMetric
           label={t("sidebar.sources")}
-          value={formatDocumentCount(activeDocuments.length)}
+          value={t("common.documentCount", { count: activeDocuments.length })}
         />
         <SidebarMetric label={t("home.stat.pages")} value={totalPages} />
         <SidebarMetric label={t("sidebar.turns")} value={conversationCount} />
@@ -326,11 +324,12 @@ const WorkspaceSidebar = ({
         onDismiss={onDismissArxivSuggestion}
         onImport={onImportArxivSuggestion}
         suggestion={arxivSuggestion}
+        t={t}
       />
     </SidebarSection>
 
     <SidebarSection
-      caption={formatDocumentCount(activeDocuments.length)}
+      caption={t("common.documentCount", { count: activeDocuments.length })}
       className="archive-doc-section"
       sectionRef={documentListRef}
       title={t("sidebar.scope")}
@@ -502,7 +501,6 @@ const WorkspaceSidebar = ({
         canRunSynthetic={canAdmin}
         qualityHistory={qualityHistory}
         qualityReport={qualityReport}
-        locale={locale}
         t={t}
       />
     </SidebarSection>

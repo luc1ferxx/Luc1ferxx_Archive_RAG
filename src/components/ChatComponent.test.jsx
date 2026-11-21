@@ -324,4 +324,26 @@ describe("ChatComponent", () => {
     renderChat();
     expect(speechConstructCount.value).toBe(before);
   });
+
+  test("titles each scope button with its document count, in the app's language", () => {
+    const chatScopeOptions = [
+      { count: 1, id: "uploaded", label: "Uploaded" },
+      { count: 3, id: "all", label: "All" },
+    ];
+    const { rerender } = renderChat({ chatScopeOptions, t: createTranslator("en") });
+
+    expect(screen.getByTitle("Uploaded: 1 document")).toBeInTheDocument();
+    expect(screen.getByTitle("All: 3 documents")).toBeInTheDocument();
+
+    rerender(
+      <ChatComponent
+        chatScopeOptions={[{ count: 3, id: "all", label: "全部" }]}
+        docIds={["doc-1"]}
+        handleResp={handleResp}
+        setIsLoading={setIsLoading}
+        t={createTranslator("zh")}
+      />
+    );
+    expect(screen.getByTitle("全部：3 个文档")).toBeInTheDocument();
+  });
 });

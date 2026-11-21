@@ -49,14 +49,23 @@ describe("workbench formatters", () => {
   });
 
   test("recovery actions are retry and cancel; resume is not one of them", () => {
-    expect(formatRecoveryActionLabel("retry_failed_step")).toBe("Retry failed step");
-    expect(formatRecoveryActionLabel("cancel")).toBe("Cancel");
+    const en = createTranslator("en");
+    const zh = createTranslator("zh");
+
+    expect(formatRecoveryActionLabel("retry_failed_step", en)).toBe("Retry failed step");
+    expect(formatRecoveryActionLabel("cancel", en)).toBe("Cancel");
     // No dedicated label or message is left for the removed action.
-    expect(formatRecoveryActionLabel("resume_from_step")).toBe("resume from step");
-    expect(getRecoveryActionSuccessMessage("resume_from_step")).toBe(
+    expect(formatRecoveryActionLabel("resume_from_step", en)).toBe("resume from step");
+    expect(getRecoveryActionSuccessMessage("resume_from_step", en)).toBe(
       "Agent run recovery action completed."
     );
-    expect(getRecoveryActionSuccessMessage("cancel")).toBe("Agent run canceled.");
+    expect(getRecoveryActionSuccessMessage("cancel", en)).toBe("Agent run canceled.");
+    expect(formatRecoveryActionLabel("retry_failed_step", zh)).toBe("重试失败的步骤");
+    expect(formatRecoveryActionLabel("cancel", zh)).toBe("取消");
+    expect(getRecoveryActionSuccessMessage("cancel", zh)).toBe("Agent 运行已取消。");
+    expect(getRecoveryActionSuccessMessage("retry_failed_step", zh)).toBe(
+      "Agent 运行的恢复操作已完成。"
+    );
   });
 
   test("run, task and step statuses, recovery reasons and replay risks read as labels", () => {

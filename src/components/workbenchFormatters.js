@@ -28,9 +28,9 @@ export const formatStepLabel = ({ label, type } = {}, t) => {
 // The two things an operator can do with a run from the recovery panel.
 // (There is no "resume step": the server never runs a step on its own, and it
 // continues an interrupted graph by itself at startup.)
-const RECOVERY_ACTION_LABELS = {
-  cancel: "Cancel",
-  retry_failed_step: "Retry failed step",
+const RECOVERY_ACTION_LABEL_KEYS = {
+  cancel: "common.cancel",
+  retry_failed_step: "sidebar.retryFailedStep",
 };
 
 // The step types the server retries on their own, from its replay matrix
@@ -53,14 +53,10 @@ export const listSelfRetryableStepTypes = () => [...SELF_RETRYABLE_STEP_TYPES].s
 export const isStepRetrySupported = (stepType) =>
   SELF_RETRYABLE_STEP_TYPES.has(String(stepType ?? "").trim().toLowerCase());
 
-export const formatRecoveryActionLabel = (actionType) =>
-  RECOVERY_ACTION_LABELS[actionType] ??
-  String(actionType ?? "Action").replace(/_/g, " ");
+export const formatRecoveryActionLabel = (actionType, t) =>
+  RECOVERY_ACTION_LABEL_KEYS[actionType]
+    ? t(RECOVERY_ACTION_LABEL_KEYS[actionType])
+    : String(actionType ?? t("sidebar.recoveryAction")).replace(/_/g, " ");
 
-export const getRecoveryActionSuccessMessage = (action) => {
-  if (action === "cancel") {
-    return "Agent run canceled.";
-  }
-
-  return "Agent run recovery action completed.";
-};
+export const getRecoveryActionSuccessMessage = (action, t) =>
+  t(action === "cancel" ? "app.runCanceled" : "app.recoveryActionDone");

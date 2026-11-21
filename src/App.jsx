@@ -109,7 +109,7 @@ const App = () => {
     refreshDocuments,
     removeDocument: removeWorkspaceDocument,
     totalPages,
-  } = useWorkspaceDocuments();
+  } = useWorkspaceDocuments({ t });
   const {
     clearTasks,
     isTaskLogLoading,
@@ -168,6 +168,7 @@ const App = () => {
   } = useArxivEnrichment({
     onImportComplete: refreshDocuments,
     onTaskChange: refreshTaskLog,
+    t,
   });
   const {
     previewStatus,
@@ -955,7 +956,6 @@ const App = () => {
             recoveryRuns={recoveryRuns}
             savedArxivSuggestionsByDocId={savedArxivSuggestionsByDocId}
             selectedChatDocIds={selectedChatDocIds}
-            locale={locale}
             t={t}
             totalPages={totalPages}
             uploadRef={uploadRef}

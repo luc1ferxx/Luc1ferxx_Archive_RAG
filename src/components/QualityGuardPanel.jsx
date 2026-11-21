@@ -6,15 +6,19 @@ import {
 import { Button } from "antd";
 import { createTranslator } from "../archiveI18n";
 
-const formatQualityPercent = (value) =>
-  typeof value === "number" ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%` : "N/A";
+const formatQualityPercent = (value, t) =>
+  typeof value === "number"
+    ? `${value.toFixed(value % 1 === 0 ? 0 : 1)}%`
+    : t("common.notAvailable");
 
-const formatQualityNumber = (value) =>
-  typeof value === "number" ? value.toFixed(value % 1 === 0 ? 0 : 1) : "N/A";
+const formatQualityNumber = (value, t) =>
+  typeof value === "number"
+    ? value.toFixed(value % 1 === 0 ? 0 : 1)
+    : t("common.notAvailable");
 
-const formatQualityDelta = (value, scale = 1) => {
+const formatQualityDelta = (value, t, scale = 1) => {
   if (typeof value !== "number") {
-    return "N/A";
+    return t("common.notAvailable");
   }
 
   const scaledValue = value * scale;
@@ -28,24 +32,26 @@ const formatQualityGateDelta = (check, t = defaultT) => {
   }
 
   if (check.metric === "failedCaseCount" || check.metric === "averageCitationCount") {
-    return formatQualityDelta(check.delta);
+    return formatQualityDelta(check.delta, t);
   }
 
   if (typeof check.delta !== "number") {
     const value =
       check.currentValue ?? check.value ?? check.actual ?? check.threshold ?? null;
 
-    return value === null || value === undefined
-      ? check.status ?? "reported"
-      : String(value);
+    if (value !== null && value !== undefined) {
+      return String(value);
+    }
+
+    return check.status ? formatQualityGateStatus(check.status, t) : t("quality.reported");
   }
 
-  return `${formatQualityDelta(check.delta, 100)} pts`;
+  return t("quality.points", { value: formatQualityDelta(check.delta, t, 100) });
 };
 
-const formatQualityDate = (value, locale = "en") => {
+const formatQualityDate = (value, t) => {
   if (!value) {
-    return locale === "zh" ? "无日期" : "No date";
+    return t("common.noDate");
   }
 
   try {
@@ -98,10 +104,10 @@ const getQualityVerificationState = (payload) => {
   };
 };
 
-const formatRecoveryPercent = (value) =>
-  typeof value === "number" ? formatQualityPercent(value * 100) : "N/A";
+const formatRecoveryPercent = (value, t) =>
+  typeof value === "number" ? formatQualityPercent(value * 100, t) : t("common.notAvailable");
 
-const QualityGateCard = ({ gate, label = "Quality gate", t = defaultT }) => {
+const QualityGateCard = ({ gate, label, t }) => {
   if (!gate) {
     return (
       <div className="quality-gate quality-gate-unknown">
@@ -132,7 +138,7 @@ const QualityGateCard = ({ gate, label = "Quality gate", t = defaultT }) => {
   );
 };
 
-const RecoveryGateCard = ({ gate, t = defaultT }) => {
+const RecoveryGateCard = ({ gate, t }) => {
   if (!gate) {
     return null;
   }
@@ -151,17 +157,17 @@ const RecoveryGateCard = ({ gate, t = defaultT }) => {
       <div className="quality-gate-metrics">
         <div>
           <span>{t("quality.replayFailures")}</span>
-          <strong>{formatQualityNumber(recovery.stepReplayFailureCount)}</strong>
+          <strong>{formatQualityNumber(recovery.stepReplayFailureCount, t)}</strong>
         </div>
         <div>
           <span>{t("quality.manualFailures")}</span>
           <strong>
-            {formatQualityNumber(recovery.manualRecoveryActionFailureCount)}
+            {formatQualityNumber(recovery.manualRecoveryActionFailureCount, t)}
           </strong>
         </div>
         <div>
           <span>{t("quality.autoReplay")}</span>
-          <strong>{formatRecoveryPercent(recovery.autoReplaySuccessRate)}</strong>
+          <strong>{formatRecoveryPercent(recovery.autoReplaySuccessRate, t)}</strong>
         </div>
       </div>
     </div>
@@ -176,7 +182,6 @@ const QualityGuardPanel = ({
   onRunSynthetic,
   qualityHistory,
   qualityReport,
-  locale = "en",
   t = defaultT,
 }) => {
   const metrics = qualityReport?.summary?.metrics ?? {};
@@ -263,7 +268,7 @@ const QualityGuardPanel = ({
               <strong>
                 {typeof metrics.overallPassPercent === "number"
                   ? Math.round(metrics.overallPassPercent)
-                  : "N/A"}
+                  : t("common.notAvailable")}
               </strong>
               <span>/100</span>
             </div>
@@ -288,15 +293,15 @@ const QualityGuardPanel = ({
           <div className="quality-metrics">
             <div className="quality-metric">
               <span>{t("quality.pass")}</span>
-              <strong>{formatQualityPercent(metrics.overallPassPercent)}</strong>
+              <strong>{formatQualityPercent(metrics.overallPassPercent, t)}</strong>
             </div>
             <div className="quality-metric">
               <span>{t("quality.pageHit")}</span>
-              <strong>{formatQualityPercent(metrics.qaPageHitPercent)}</strong>
+              <strong>{formatQualityPercent(metrics.qaPageHitPercent, t)}</strong>
             </div>
             <div className="quality-metric">
               <span>{t("quality.citations")}</span>
-              <strong>{formatQualityNumber(metrics.averageCitationCount)}</strong>
+              <strong>{formatQualityNumber(metrics.averageCitationCount, t)}</strong>
             </div>
           </div>
 
@@ -355,10 +360,10 @@ const QualityGuardPanel = ({
           {recentRuns.slice(0, 3).map((run) => (
             <div key={`${run.runId}-${run.fileName}`} className="quality-run-item">
               <span>
-                <strong>{formatQualityPercent(run.metrics?.overallPassPercent)}</strong>
-                {run.status}
+                <strong>{formatQualityPercent(run.metrics?.overallPassPercent, t)}</strong>
+                {run.status ? formatQualityGateStatus(run.status, t) : null}
               </span>
-              <span>{formatQualityDate(run.createdAt, locale)}</span>
+              <span>{formatQualityDate(run.createdAt, t)}</span>
             </div>
           ))}
         </div>

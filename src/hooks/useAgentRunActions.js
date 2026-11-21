@@ -217,7 +217,7 @@ export const useAgentRunActions = ({
         }
 
         await refreshAgentRunRecovery();
-        message.success(getRecoveryActionSuccessMessage(action));
+        message.success(getRecoveryActionSuccessMessage(action, t));
       } catch (error) {
         const backendMessage =
           getBackendMessage(error, t("app.recoverFailed"));

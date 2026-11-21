@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { message } from "antd";
 import {
   fetchDocumentArxivSuggestions,
@@ -7,14 +7,15 @@ import {
   requestDocumentArxivImport,
   requestTaskAction,
 } from "../archiveApi";
+import { createTranslator } from "../archiveI18n";
 
 const DEFAULT_SUGGESTION_LIMIT = 3;
 
+// English unless the app hands in its translator.
+const defaultT = createTranslator("en");
+
 const getBackendMessage = (error, fallbackMessage) =>
   error.response?.data?.error ?? fallbackMessage;
-
-const formatArxivPaperCount = (count) =>
-  `${count} arXiv paper${count === 1 ? "" : "s"}`;
 
 const getSuggestionDocId = (suggestion) => suggestion?.document?.docId ?? "";
 
@@ -29,11 +30,20 @@ const buildSavedSuggestionMap = (suggestions = []) =>
       .filter(([docId]) => docId)
   );
 
-export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
+export const useArxivEnrichment = ({
+  onImportComplete,
+  onTaskChange,
+  t = defaultT,
+} = {}) => {
   const [suggestion, setSuggestion] = useState(null);
   const [savedSuggestionsByDocId, setSavedSuggestionsByDocId] = useState({});
   const [isSuggestionLoading, setIsSuggestionLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  // Read when a toast shows: the loaders stay the same functions across a
+  // language switch, so the app's effects that call them do not refetch.
+  const tRef = useRef(t);
+
+  tRef.current = t;
 
   const clearSuggestion = useCallback(() => {
     setSuggestion(null);
@@ -85,9 +95,7 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
       );
       return savedSuggestions;
     } catch (error) {
-      message.warning(
-        getBackendMessage(error, "Unable to load saved arXiv recommendations.")
-      );
+      message.warning(getBackendMessage(error, tRef.current("arxiv.loadSavedFailed")));
       return [];
     }
   }, []);
@@ -111,12 +119,10 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
           return true;
         }
 
-        message.info("No saved arXiv recommendations for this document.");
+        message.info(tRef.current("arxiv.noSaved"));
         return false;
       } catch (error) {
-        message.warning(
-          getBackendMessage(error, "Unable to load saved arXiv recommendations.")
-        );
+        message.warning(getBackendMessage(error, tRef.current("arxiv.loadSavedFailed")));
         return false;
       }
     },
@@ -146,9 +152,7 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
 
       return nextSuggestion;
     } catch (error) {
-      message.warning(
-        getBackendMessage(error, "Unable to check arXiv suggestions.")
-      );
+      message.warning(getBackendMessage(error, tRef.current("arxiv.checkFailed")));
     } finally {
       setIsSuggestionLoading(false);
     }
@@ -163,7 +167,7 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
     }
 
     if (Array.isArray(selectedArxivIds) && selectedArxivIds.length === 0) {
-      message.info("Select at least one arXiv paper to import.");
+      message.info(tRef.current("arxiv.selectAtLeastOne"));
       return;
     }
 
@@ -181,7 +185,7 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
         await onTaskChange?.();
         await loadSavedSuggestions();
         setSuggestion(null);
-        message.success("arXiv import queued. Track progress in Tasks.");
+        message.success(tRef.current("arxiv.importQueued"));
         return;
       }
 
@@ -200,24 +204,26 @@ export const useArxivEnrichment = ({ onImportComplete, onTaskChange } = {}) => {
 
       const importedCount = result.importedCount ?? 0;
       const skippedCount = result.skippedCount ?? 0;
+      const t = tRef.current;
 
       if (importedCount > 0 && skippedCount > 0) {
         message.success(
-          `Imported ${formatArxivPaperCount(
-            importedCount
-          )}; ${formatArxivPaperCount(skippedCount)} already indexed.`
+          t("arxiv.importedSkipped", {
+            imported: t("arxiv.paperCount", { count: importedCount }),
+            skipped: t("arxiv.paperCount", { count: skippedCount }),
+          })
         );
       } else if (importedCount > 0) {
-        message.success(`Imported ${formatArxivPaperCount(importedCount)}.`);
+        message.success(
+          t("arxiv.imported", { papers: t("arxiv.paperCount", { count: importedCount }) })
+        );
       } else if (completedCount > 0) {
-        message.info("Suggested arXiv papers were already indexed.");
+        message.info(t("arxiv.alreadyIndexed"));
       } else {
-        message.info("No arXiv papers were imported.");
+        message.info(t("arxiv.noneImported"));
       }
     } catch (error) {
-      message.error(
-        getBackendMessage(error, "Unable to import arXiv papers.")
-      );
+      message.error(getBackendMessage(error, tRef.current("arxiv.importFailed")));
     } finally {
       setIsImporting(false);
     }

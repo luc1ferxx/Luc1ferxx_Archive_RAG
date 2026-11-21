@@ -1,12 +1,22 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { message } from "antd";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { TRANSLATIONS, createTranslator } from "./archiveI18n";
 import AgentRunCenter from "./components/AgentRunCenter";
 import PdfPreview from "./components/PdfPreview";
 import RenderQA from "./components/RenderQA";
+import WorkspaceSidebar from "./components/WorkspaceSidebar";
+import { useArxivEnrichment } from "./hooks/useArxivEnrichment";
+import { useWorkspaceDocuments } from "./hooks/useWorkspaceDocuments";
 
 const api = vi.hoisted(() => ({
+  fetchDocumentArxivSuggestions: vi.fn(),
   fetchDocumentFile: vi.fn(),
+  fetchDocuments: vi.fn(),
+  fetchSavedArxivSuggestions: vi.fn(),
+  requestDocumentArxivImport: vi.fn(),
+  requestDocumentClear: vi.fn(),
+  requestDocumentDelete: vi.fn(),
 }));
 
 vi.mock("./archiveApi", () => api);
@@ -433,5 +443,133 @@ describe("the workbench in Chinese", () => {
     expect(screen.getByRole("button", { name: "批准交付物" })).toBeInTheDocument();
     // antd spaces out a two-character Chinese button label.
     expect(screen.getByRole("button", { name: "继 续" })).toBeInTheDocument();
+  });
+
+  test("the sidebar reads in Chinese: corpus, scope, arXiv panel, quality and recovery", () => {
+    const data = {
+      activeDocuments: [
+        { docId: "d-12345678", fileName: "合同.pdf", pageCount: 3 },
+        {
+          docId: "x-87654321",
+          fileName: "论文.pdf",
+          pageCount: 9,
+          profile: { source: { arxivId: "2401.00001v1", sourceType: "arxiv" } },
+        },
+      ],
+      arxivSuggestion: {
+        document: { docId: "d-12345678" },
+        papers: [
+          { arxivId: "2401.00002v1", title: "检索增强生成" },
+          { arxivId: "2401.00003v1", title: "文档问答" },
+        ],
+        selectionToken: "tok",
+        topic: "检索",
+      },
+      qualityHistory: {
+        qualityGate: {
+          checks: [{ delta: -0.05, metric: "overallPassPercent", status: "warn" }],
+          status: "warn",
+          summary: "门控摘要。",
+        },
+        recoveryGate: { recovery: {}, status: "pass" },
+        runs: [{ fileName: "f", metrics: { overallPassPercent: 90 }, runId: "q-1", status: "pass" }],
+      },
+      qualityReport: {
+        failedCases: [],
+        recommendations: [],
+        status: "warn",
+        summary: { metrics: { overallPassPercent: 80, qaPageHitPercent: 75 }, runId: "q-1" },
+      },
+      recoveryRuns: [
+        {
+          goal: "整理合同",
+          recovery: {
+            actions: [
+              {
+                safety: {
+                  label: "网页搜索",
+                  reasonCodes: ["non_idempotent"],
+                  stepType: "capability_call",
+                },
+                stepId: "s-1",
+                type: "retry_failed_step",
+              },
+              { type: "cancel" },
+            ],
+            reason: "failed_step_ready",
+            requestedMode: "manual",
+          },
+          runId: "r-1",
+          status: "failed",
+        },
+      ],
+      savedArxivSuggestionsByDocId: { "d-12345678": { papers: [{}, {}] } },
+    };
+    const { container, rerender } = render(
+      <WorkspaceSidebar
+        {...data}
+        activeNavItem="drive"
+        conversationCount={2}
+        onClearDocuments={vi.fn()}
+        onRemoveDocument={vi.fn()}
+        t={zh}
+        totalPages={12}
+      />
+    );
+
+    expect(findEnglish(container, data)).toEqual([]);
+    expect(screen.getByText("文件库")).toBeInTheDocument();
+    expect(screen.getByText("2 个文档 · 12 页")).toBeInTheDocument();
+    expect(screen.getByText("为“检索”找到 2 篇论文，请选择要导入的论文。")).toBeInTheDocument();
+    expect(screen.getByText("已选 0/2 篇")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试失败的步骤" })).toBeInTheDocument();
+    expect(screen.getByText("-5 个百分点")).toBeInTheDocument();
+    expect(screen.getByText("无日期")).toBeInTheDocument();
+
+    rerender(
+      <WorkspaceSidebar
+        {...data}
+        conversationCount={2}
+        isArxivSuggestionLoading
+        onClearDocuments={vi.fn()}
+        onRemoveDocument={vi.fn()}
+        t={zh}
+        totalPages={12}
+      />
+    );
+    expect(screen.getByText("正在查找相关论文…")).toBeInTheDocument();
+  });
+
+  test("the arXiv and document toasts read in Chinese", async () => {
+    const success = vi.spyOn(message, "success").mockImplementation(() => {});
+    const error = vi.spyOn(message, "error").mockImplementation(() => {});
+    const suggestion = {
+      document: { docId: "d-1" },
+      papers: [{ arxivId: "2401.00002v1", title: "检索增强生成" }],
+      selectionToken: "tok",
+    };
+
+    api.fetchDocumentArxivSuggestions.mockResolvedValue(suggestion);
+    api.fetchSavedArxivSuggestions.mockResolvedValue({ suggestions: [] });
+    api.requestDocumentArxivImport.mockResolvedValue({ importedCount: 1, skippedCount: 2 });
+    api.fetchDocuments.mockResolvedValue([]);
+    api.requestDocumentDelete.mockResolvedValue({});
+    api.requestDocumentClear.mockRejectedValue(new Error("offline"));
+
+    const arxiv = renderHook(() => useArxivEnrichment({ t: zh }));
+
+    await act(() => arxiv.result.current.requestSuggestions({ docId: "d-1" }));
+    await act(() => arxiv.result.current.importSuggestion(["2401.00002v1"]));
+    expect(success).toHaveBeenCalledWith(
+      "已导入 1 篇 arXiv 论文；另有 2 篇 arXiv 论文已在索引中。"
+    );
+
+    const documents = renderHook(() => useWorkspaceDocuments({ t: zh }));
+
+    await waitFor(() => expect(api.fetchDocuments).toHaveBeenCalled());
+    await act(() => documents.result.current.removeDocument("d-1"));
+    await act(() => documents.result.current.clearDocuments());
+    expect(success).toHaveBeenCalledWith("文档已移除。");
+    expect(error).toHaveBeenCalledWith("无法清空文档。");
   });
 });

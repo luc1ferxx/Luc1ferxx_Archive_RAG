@@ -116,11 +116,14 @@ describe("getUploadErrorMessage", () => {
   });
 
   it("falls back to the request's message, then a generic one", () => {
-    expect(getUploadErrorMessage(new Error("Network Error"))).toBe("Network Error");
-    expect(getUploadErrorMessage({ response: { data: { error: "  " } } })).toBe(
+    const t = createTranslator("en");
+
+    expect(getUploadErrorMessage(new Error("Network Error"), t)).toBe("Network Error");
+    expect(getUploadErrorMessage({ response: { data: { error: "  " } } }, t)).toBe(
       "Upload failed"
     );
-    expect(getUploadErrorMessage(undefined)).toBe("Upload failed");
+    expect(getUploadErrorMessage(undefined, t)).toBe("Upload failed");
+    expect(getUploadErrorMessage(undefined, createTranslator("zh"))).toBe("上传失败");
   });
 });
 

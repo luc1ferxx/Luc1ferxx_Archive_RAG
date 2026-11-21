@@ -558,9 +558,10 @@ const ChatComponent = (props) => {
                         aria-pressed={chatScopeMode === option.id}
                         className={chatScopeMode === option.id ? "is-active" : ""}
                         onClick={() => handleScopeClick(option)}
-                        title={`${option.label}: ${option.count} document${
-                          option.count === 1 ? "" : "s"
-                        }`}
+                        title={t("chat.scopeOptionTitle", {
+                          count: option.count,
+                          label: option.label,
+                        })}
                       >
                         <span>{option.label}</span>
                         <small>{option.count}</small>

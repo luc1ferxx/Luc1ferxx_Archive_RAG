@@ -284,6 +284,7 @@ describe("App", () => {
       name: "首页导航",
     });
 
+    expect(within(homeNavigation).getByRole("button", { name: "文件库" })).toBeInTheDocument();
     fireEvent.click(within(homeNavigation).getByRole("button", { name: "技能" }));
     expect(screen.getByRole("region", { name: "文档技能" })).toBeInTheDocument();
     expect(screen.queryByText("Corpus")).not.toBeInTheDocument();

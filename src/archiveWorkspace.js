@@ -5,9 +5,6 @@ export const formatPageCount = (pageCount) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : "?";
 };
 
-export const formatDocumentCount = (count) =>
-  count === 1 ? "1 document" : `${count} documents`;
-
 export const getDocumentTags = (document) =>
   document?.tags ?? document?.profile?.tags ?? [];
 
