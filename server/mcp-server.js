@@ -41,6 +41,16 @@ const formatSearchResults = (query, results, limit) => {
   };
 };
 
+// serpapi rejects an answer other than 200 (a bad key, no searches left) with
+// its body, usually {"error": "..."}, not an Error.
+const readSerpApiError = (body) => {
+  try {
+    return JSON.parse(body).error || "SerpAPI answered with an error.";
+  } catch {
+    return "SerpAPI answered with an error.";
+  }
+};
+
 server.registerTool(
   "search_web",
   {
@@ -54,21 +64,18 @@ server.registerTool(
         .describe("Number of results to return (default: 5)"),
     },
   },
+  // An isError result's text is the reason the web search step fails with
+  // (chat-mcp.js); the model never answers it.
   async ({ query, num = 5 }) => {
     if (!SERPAPI_KEY) {
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                error: "SERPAPI_KEY is not configured.",
-              },
-              null,
-              2
-            ),
+            text: "Web search is not configured: SERPAPI_KEY is not set.",
           },
         ],
+        isError: true,
       };
     }
 
@@ -95,15 +102,12 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                error: `Error performing web search: ${error.message}`,
-              },
-              null,
-              2
-            ),
+            text: `Error performing web search: ${
+              error instanceof Error ? error.message : readSerpApiError(error)
+            }`,
           },
         ],
+        isError: true,
       };
     }
   }

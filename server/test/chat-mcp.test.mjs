@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -10,7 +11,10 @@ import { configureOpenAIProvider, resetOpenAIProvider } from "../rag/openai.js";
 
 // The web answer path (chat-mcp.js) shares one MCP client between every
 // search. Here each connection it opens reaches an in-memory search_web server
-// instead of `node mcp-server.js`, and the model is a stand-in.
+// instead of `node mcp-server.js` (useRealSearchServer starts the real one),
+// and the model is a stand-in.
+
+const SERPAPI_ERROR_PRELOAD = new URL("./chat-mcp/serpapi-error-answer.mjs", import.meta.url).href;
 
 const createDeferred = () => {
   let resolve;
@@ -58,6 +62,26 @@ const useSearchServer = (t, search) => {
   t.after(() => configureChatMcpTransport(null));
 
   return connections;
+};
+
+// The child chatMCP starts (`node mcp-server.js`), with `preload` loaded first.
+const useRealSearchServer = (t, preload = null) => {
+  const transports = [];
+
+  configureChatMcpTransport((parameters) => {
+    const transport = new StdioClientTransport({
+      ...parameters,
+      args: preload ? ["--import", preload, ...parameters.args] : parameters.args,
+      stderr: "ignore",
+    });
+
+    transports.push(transport);
+    return transport;
+  });
+  t.after(async () => {
+    configureChatMcpTransport(null);
+    await Promise.all(transports.map((transport) => transport.close()));
+  });
 };
 
 const useModel = (t, completeText) => {
@@ -121,6 +145,59 @@ test("a search in flight when its connection closes is sent again on a new one",
 
   assert.deepEqual(await search, { text: "web answer" });
   assert.equal(connections.length, 2);
+});
+
+test("a failed search fails once with its reason and the model never answers it", async (t) => {
+  let modelCalls = 0;
+  let searches = 0;
+
+  useEnvironment(t, { OPENAI_API_KEY: "test-key" });
+  // A thrown error reaches the client as an isError result (McpServer), the
+  // result mcp-server.js returns for a missing SERPAPI_KEY or a SerpAPI error.
+  useSearchServer(t, async () => {
+    searches += 1;
+    throw new Error("Web search is not configured: SERPAPI_KEY is not set.");
+  });
+  useModel(t, async () => {
+    modelCalls += 1;
+    return "web answer";
+  });
+
+  await assert.rejects(chatMCP("anything"), {
+    message: "Web search is not configured: SERPAPI_KEY is not set.",
+    status: 409,
+  });
+  assert.equal(searches, 1);
+  assert.equal(modelCalls, 0);
+});
+
+// The real search server's failures. chatMCP answers only through the model,
+// so a rejection means the model was never asked.
+test("without SERPAPI_KEY the search server fails the search and says it is not configured", async (t) => {
+  // Empty reaches mcp-server.js as unset does.
+  useEnvironment(t, { OPENAI_API_KEY: "test-key", SERPAPI_KEY: "" });
+  useRealSearchServer(t);
+  useModel(t, async () => "web answer");
+
+  await assert.rejects(chatMCP("anything"), {
+    message: "Web search is not configured: SERPAPI_KEY is not set.",
+    status: 409,
+  });
+});
+
+test("a SerpAPI error fails the search with SerpAPI's reason, or says SerpAPI failed", async (t) => {
+  useEnvironment(t, { OPENAI_API_KEY: "test-key", SERPAPI_KEY: "serp-test-key" });
+  useRealSearchServer(t, SERPAPI_ERROR_PRELOAD);
+  useModel(t, async () => "web answer");
+
+  // The preload has SerpAPI answer each search with the query as its body.
+  for (const [body, reason] of [
+    ['{"error":"Your account has run out of searches."}', "Your account has run out of searches."],
+    ['{"search_metadata":{"status":"Error"}}', "SerpAPI answered with an error."],
+    ["<html><body>502 Bad Gateway</body></html>", "SerpAPI answered with an error."],
+  ]) {
+    await assert.rejects(chatMCP(body), { message: `Error performing web search: ${reason}`, status: 409 });
+  }
 });
 
 test("the search server's child gets SERPAPI_KEY and no other secret of this process", async (t) => {

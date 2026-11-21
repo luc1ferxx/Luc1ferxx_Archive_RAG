@@ -562,7 +562,7 @@ routes/chat.js handleChatRequest
 
 **7.13 evaluateDocumentEvidence 里 requiredDocCoverage 为什么是 min(docIds 数, 2)？有什么副作用？**
 
-说出代码位置 server/rag/self-check/evaluate.js；推测副作用：多文档范围内问单文档事实题，可能被判 document_coverage 缺口触发补检索或澄清；明确说这是读代码看到、没测过影响
+说出代码位置 server/rag/self-check/evaluate.js；副作用在浏览器冒烟测试（假模型）里出现过：前端默认范围是全部已上传文档，单文档事实题引了一份文档的正确答案被判 "Citations cover 1 of 2 required documents"，补检索后停在澄清；2026-11-20 起文档循环按检索计划意图传 maxRequiredDocCoverage，只有 comparison 要两份，其余一份；最终自检（skill_chain/custom/research）仍是 min(docIds 数, 2)；对答题率的影响没测
 
 **7.14 给你一个反直觉的结论：哪次你的直觉被数据推翻了？**
 

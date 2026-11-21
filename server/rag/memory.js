@@ -214,9 +214,9 @@ const normalizeSessionId = (sessionId) => String(sessionId ?? "").trim();
 // DELETE route) or, when a caller passes none or one without a user and
 // workspace, the active database tenant. The key is derived only when the
 // scope is authenticated or API auth is on (a task's stored scope carries no
-// `authenticated` flag), so with auth off a session keeps its raw id: the
-// local frontend sends a userId with every chat but not with the session
-// DELETE, and both must name the same session. The rule lives in
+// `authenticated` flag), so with auth off a session keeps its raw id: a client
+// may name a user on a chat and not on the session DELETE, and both must name
+// the same session. The rule lives in
 // rag/conversation-memory-tenant.js, shared with LONG_MEMORY_SCOPE=workspace.
 const TENANT_SESSION_KEY_PREFIX = "tenant:";
 

@@ -198,8 +198,8 @@ test("with auth off the raw session id stays the key, whatever user id the clien
     runWithDatabaseTenant(localScope, () => resolveSessionMemoryKey(SESSION_ID)),
     SESSION_ID
   );
-  // The local frontend sends a userId with every chat but not with the
-  // session DELETE; both still name the same session.
+  // A client may name a user on a chat and not on the session DELETE; both
+  // still name the same session.
   assert.equal(await clearSessionMemory(SESSION_ID, { authenticated: false }), true);
   assert.equal(store.sessions.size, 0);
 });

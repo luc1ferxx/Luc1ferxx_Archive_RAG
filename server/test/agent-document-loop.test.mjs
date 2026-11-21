@@ -264,3 +264,72 @@ test("an unsupported follow-up answer still ends in a clarification", async () =
   );
   assert.equal(harness.executionLoop.stoppedReason, "follow_up_unresolved");
 });
+
+const policyCitations = [
+  {
+    docId: "doc-1",
+    fileName: "policy.pdf",
+    pageNumber: 2,
+    excerpt: "Remote work requires manager approval before the first remote day.",
+  },
+];
+const oneDocumentAnswer = {
+  text: "Remote work requires manager approval before the first remote day. [Source 1]",
+  citations: policyCitations,
+  abstained: false,
+};
+
+test("a fact question over two documents passes on one cited document, in the primary and the follow-up check", async () => {
+  const docIds = ["doc-1", "doc-2"];
+  const harness = createLoopHarness({ docIds, ragResponses: [oneDocumentAnswer] });
+  const result = await runDocumentRagLoop(harness.args);
+  const [selfCheck] = harness.trace.filter((step) => step.type === "self_check");
+
+  assert.equal(harness.args.retrievalPlan.intent, "fact");
+  assert.equal(result.documentEvidenceClarification, null);
+  assert.equal(harness.askedQuestions.length, 1);
+  assert.equal(selfCheck.detail.passed, true);
+  assert.equal(selfCheck.detail.requiredDocCoverage, 1);
+
+  const followUpHarness = createLoopHarness({
+    docIds,
+    ragResponses: [
+      {
+        text: "Remote work requires manager approval. [Source 1] The satellite stipend is 500 dollars. [Source 1]",
+        citations: policyCitations,
+        abstained: false,
+      },
+      oneDocumentAnswer,
+    ],
+  });
+  const followUpResult = await runDocumentRagLoop(followUpHarness.args);
+
+  assert.equal(followUpResult.documentEvidenceClarification, null);
+  assert.equal(followUpHarness.askedQuestions.length, 2);
+  assert.equal(followUpHarness.executionLoop.stoppedReason, "follow_up_resolved");
+});
+
+test("a comparison answer that cites one document still gets the follow-up", async () => {
+  const harness = createLoopHarness({
+    docIds: ["doc-1", "doc-2"],
+    question: "What is the difference between the two remote work policies?",
+    ragResponses: [oneDocumentAnswer, oneDocumentAnswer],
+  });
+  const result = await runDocumentRagLoop(harness.args);
+  const [primaryCheck, followUpCheck] = harness.trace.filter(
+    (step) => step.type === "self_check"
+  );
+
+  assert.equal(harness.args.retrievalPlan.intent, "comparison");
+  assert.deepEqual(primaryCheck.detail.reasons, [
+    "Citations cover 1 of 2 required documents.",
+  ]);
+  assert.equal(harness.askedQuestions.length, 2);
+  assert.deepEqual(followUpCheck.detail.reasons, [
+    "Citations cover 1 of 2 required documents.",
+  ]);
+  assert.equal(
+    result.documentEvidenceClarification.reason,
+    "document_evidence_unresolved_after_follow_up"
+  );
+});

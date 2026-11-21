@@ -194,7 +194,7 @@ describe("OIDC bearer token", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      archiveApi.streamChat({ docIds: ["doc-1"], question: "q", sessionId: "s", userId: "u" })
+      archiveApi.streamChat({ docIds: ["doc-1"], question: "q", sessionId: "s" })
     ).rejects.toMatchObject({ status: 401 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.map(([, init]) => init.headers["x-workspace-id"])).toEqual(["ws-a", "ws-a"]);
@@ -231,7 +231,7 @@ describe("OIDC bearer token", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      archiveApi.streamChat({ docIds: ["doc-1"], question: "q", sessionId: "s", userId: "u" })
+      archiveApi.streamChat({ docIds: ["doc-1"], question: "q", sessionId: "s" })
     ).rejects.toMatchObject({ status: 401 });
     expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer expired-access");
     expect(onReauthRequired).toHaveBeenCalledTimes(1);

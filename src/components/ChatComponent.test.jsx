@@ -59,7 +59,6 @@ describe("ChatComponent", () => {
         docIds={["doc-1"]}
         docLabel="1 document"
         sessionId="session-1"
-        userId="user-1"
         handleResp={handleResp}
         isLoading={false}
         setIsLoading={setIsLoading}

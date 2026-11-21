@@ -29,7 +29,6 @@ const ChatComponent = (props) => {
     chatScopeOptions = [],
     draftQuestion = "",
     sessionId,
-    userId,
     handleResp,
     inputId,
     isLoading,
@@ -200,7 +199,6 @@ const ChatComponent = (props) => {
           docIds,
           question: trimmedQuestion,
           sessionId,
-          userId,
           signal: controller.signal,
           onEvent: onStreamEvent,
         });
@@ -257,7 +255,6 @@ const ChatComponent = (props) => {
       setIsLoading,
       talk,
       t,
-      userId,
     ]
   );
 

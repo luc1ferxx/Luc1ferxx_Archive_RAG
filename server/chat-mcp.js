@@ -188,6 +188,15 @@ const chatMCP = async (query) => {
     )
   );
 
+  // A failed search (no SERPAPI_KEY, a SerpAPI error) fails the step with its
+  // reason, once (withRetry saw a result, not a throw), and is never answered.
+  // 409 as the step handlers' fail(): the route shows a 4xx's message only.
+  if (toolResult.isError) {
+    throw Object.assign(new Error(toolResult.content?.[0]?.text || "Web search failed."), {
+      status: 409,
+    });
+  }
+
   const searchResults =
     toolResult.content && toolResult.content.length > 0
       ? toolResult.content[0].text
