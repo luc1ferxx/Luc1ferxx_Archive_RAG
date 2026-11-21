@@ -211,6 +211,17 @@ const normalizePaginationParams = ({ limit, offset } = {}) => {
   return { limit: normalizedLimit, offset: normalizedOffset };
 };
 
+// An upsert's optional condition, the same in both stores and checked in the
+// same step as the write: `expected` is the task as the caller read it
+// ({ status, updatedAt }), or null when it read none. A stored task that no
+// longer matches is left as it is and the upsert returns null; a missing one
+// is written either way. Without `expected` the upsert always writes.
+const matchesExpectedTask = (task, expected) =>
+  expected === undefined ||
+  (expected !== null &&
+    task.status === expected.status &&
+    task.updatedAt === expected.updatedAt);
+
 export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() } = {}) => {
   const tasks = new Map();
 
@@ -621,7 +632,7 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
       });
     },
 
-    upsert({ accessScope = {}, task } = {}) {
+    upsert({ accessScope = {}, expected, task } = {}) {
       const normalizedTask = normalizeTask(task);
 
       if (!normalizedTask) {
@@ -634,6 +645,11 @@ export const createInMemoryTaskStore = ({ now = () => new Date().toISOString() }
         accessScope: normalizedAccessScope,
         taskId: normalizedTask.id,
       });
+
+      if (existingTask && !matchesExpectedTask(existingTask, expected)) {
+        return null;
+      }
+
       const timestamp = now();
       const storedTask = {
         ...normalizedTask,
@@ -856,9 +872,11 @@ export const createTaskService = ({
     };
   },
 
-  async upsertTask({ accessScope = {}, task } = {}) {
+  // Null when `expected` refused the write (matchesExpectedTask).
+  async upsertTask({ accessScope = {}, expected, task } = {}) {
     const storedTask = await taskStore.upsert({
       accessScope,
+      expected,
       task,
     });
 

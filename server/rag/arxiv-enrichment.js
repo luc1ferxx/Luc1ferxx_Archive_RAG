@@ -129,6 +129,62 @@ export const createArxivEnrichmentService = ({
     }
   };
 
+  // A search's result: the document's task, then its snapshot. The search
+  // read the task (`searchedTask`) before it called arXiv, which can take
+  // seconds, so what it publishes is checked now. The task store refuses the
+  // task once it is no longer the one read (an import confirmed meanwhile,
+  // queued, running or already ended, is never overwritten), and nothing is
+  // published for a document the caller's scope no longer has.
+  const publishSuggestion = async ({ accessScope, docId, searchedTask, suggestion }) => {
+    getScopedDocument({ accessScope, docId, ragService });
+
+    let task;
+
+    try {
+      task = await recommendationTaskService?.recordSuggestionResult?.({
+        accessScope,
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
+        searchedTask,
+        suggestion,
+      });
+    } catch {
+      // A failing task store does not fail the search: it answers without
+      // its task, as it always has.
+      task = undefined;
+    }
+
+    if (task === null) {
+      const error = new Error(
+        "This document's arXiv recommendations changed during the search: an import was confirmed or another search finished first."
+      );
+      error.status = 409;
+      throw error;
+    }
+
+    // A delete that landed while the task was written ran its cascade before
+    // the write, so the task goes here. One after this check finds the task
+    // in its own cascade, and the snapshot below is saved in this same tick.
+    try {
+      getScopedDocument({ accessScope, docId, ragService });
+    } catch (error) {
+      await recordRecommendationTask("deleteDocumentTasks", {
+        accessScope,
+        docIds: [docId],
+        provider: ARXIV_RECOMMENDATION_PROVIDER,
+      });
+      throw error;
+    }
+
+    return {
+      ...recommendationSnapshotService.save({
+        accessScope,
+        suggestion,
+      }),
+      task: task ?? null,
+    };
+  };
+
   const suggestForDocument = async ({
     accessScope = {},
     docId,
@@ -157,8 +213,10 @@ export const createArxivEnrichmentService = ({
     }
 
     if (!isExternalQueryPolicyAllowed(queryPolicy)) {
-      const savedSuggestion = recommendationSnapshotService.save({
+      return publishSuggestion({
         accessScope,
+        docId,
+        searchedTask: currentTask,
         suggestion: buildBlockedArxivSuggestion({
           document,
           queryPolicy,
@@ -166,18 +224,6 @@ export const createArxivEnrichmentService = ({
           topic,
         }),
       });
-
-      const task = await recordRecommendationTask("recordSuggestionResult", {
-        accessScope,
-        provider: ARXIV_RECOMMENDATION_PROVIDER,
-        runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
-        suggestion: savedSuggestion,
-      });
-
-      return {
-        ...savedSuggestion,
-        task,
-      };
     }
 
     const searchedPapers = await arxivService.search({
@@ -190,33 +236,21 @@ export const createArxivEnrichmentService = ({
       topic,
     });
 
-    const suggestion = buildArxivRecommendationSuggestion({
+    return publishSuggestion({
+      accessScope,
       docId,
-      document,
-      papers,
-      queryPolicy,
-      requestedMaxResults,
-      searchedPaperCount: searchedPapers.length,
-      selectionTokenService,
-      topic,
+      searchedTask: currentTask,
+      suggestion: buildArxivRecommendationSuggestion({
+        docId,
+        document,
+        papers,
+        queryPolicy,
+        requestedMaxResults,
+        searchedPaperCount: searchedPapers.length,
+        selectionTokenService,
+        topic,
+      }),
     });
-
-    const savedSuggestion = recommendationSnapshotService.save({
-      accessScope,
-      suggestion,
-    });
-
-    const task = await recordRecommendationTask("recordSuggestionResult", {
-      accessScope,
-      provider: ARXIV_RECOMMENDATION_PROVIDER,
-      runnerId: ARXIV_RECOMMENDATION_IMPORT_RUNNER_ID,
-      suggestion: savedSuggestion,
-    });
-
-    return {
-      ...savedSuggestion,
-      task,
-    };
   };
 
   const prepareImportForDocument = ({

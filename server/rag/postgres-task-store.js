@@ -1136,7 +1136,10 @@ export const createPostgresTaskStore = ({
       return task;
     },
 
-    async upsert({ accessScope = {}, task } = {}) {
+    // `expected` as in the in-memory store (tasks.js matchesExpectedTask): the
+    // conflict's update runs only while the row still has the status and
+    // updated_at the caller read, in this one statement.
+    async upsert({ accessScope = {}, expected, task } = {}) {
       await initialize();
 
       const normalizedTask = normalizeTask(task);
@@ -1218,6 +1221,11 @@ export const createPostgresTaskStore = ({
               NULLIF($20::text, '')::timestamptz,
               $21::timestamptz
             )
+          WHERE NOT $22::boolean
+            OR (
+              ${tasksTable}.status = $23
+              AND ${tasksTable}.updated_at = $24::timestamptz
+            )
           RETURNING ${taskSelectColumns}
         `,
         [
@@ -1242,9 +1250,16 @@ export const createPostgresTaskStore = ({
           normalizedTask.createdAt,
           normalizedTask.updatedAt,
           timestamp,
+          expected !== undefined,
+          expected?.status ?? null,
+          expected?.updatedAt || null,
         ]
       );
       const storedTask = result.rows[0] ? mapRowToTask(result.rows[0]) : null;
+
+      if (!storedTask) {
+        return null;
+      }
 
       await recordEvent({
         accessScope: scope,
