@@ -512,7 +512,9 @@ const shouldRewriteQuestion = ({ query, session }) => {
   return tokenize(query).length <= 5;
 };
 
-const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery) => {
+// One line of at most 500 characters, else `fallbackQuery`; the cross-language
+// rewrite (rag/query-translation.js) reads its reply the same way.
+export const sanitizeRewriteQueryText = (rewrittenQuery, fallbackQuery) => {
   const normalized = String(rewrittenQuery ?? "")
     .trim()
     .replace(/^(```(?:text)?|```)/gi, "")

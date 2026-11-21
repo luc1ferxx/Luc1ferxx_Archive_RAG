@@ -555,6 +555,7 @@ const buildAlignmentSummaryTrace = (alignment = {}) => ({
 const buildRetrievalInputs = async ({
   agentRetrievalPlan,
   docIds,
+  queryTranslations = [],
   resolvedQuery,
 }) => {
   const route = routeQuery({
@@ -569,10 +570,23 @@ const buildRetrievalInputs = async ({
     query: resolvedQuery,
     requirements: evidenceRequirements,
   });
-  const plannedRetrievalQueries =
-    agentRetrievalPlan?.retrievalQueries?.length
+  const plannedRetrievalQueries = [
+    ...(agentRetrievalPlan?.retrievalQueries?.length
       ? agentRetrievalPlan.retrievalQueries
-      : retrievalQueries;
+      : retrievalQueries),
+    // The question rewritten for the selected documents in other scripts
+    // (chat(), rag/query-translation.js). The plan itself, and so the semantic
+    // cache key, stays as planned: a rewrite follows from the question and the
+    // documents, which the key already holds.
+    ...queryTranslations
+      .filter((translation) => translation.query)
+      .map(({ query, script }) => ({
+        id: `translation-${script}`,
+        label: `Question in ${script} script`,
+        query,
+        primary: false,
+      })),
+  ];
   const retrievalOptions = agentRetrievalPlan?.retrievalOptions ?? {};
   const retrievalRemote = isRetrievalRemote();
   const semanticCacheEnabled = isSemanticCacheEnabled();
@@ -928,12 +942,14 @@ export const executeDocumentRag = async ({
   includeRetrievedContexts = false,
   preferenceBlock = "",
   query,
+  queryTranslations = [],
   resolvedQuery,
   selectedDocuments,
 }) => {
   const retrievalInputs = await buildRetrievalInputs({
     agentRetrievalPlan,
     docIds,
+    queryTranslations,
     resolvedQuery,
   });
   const cacheLookup = await lookupSemanticCache({
