@@ -1,5 +1,6 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import { vi } from "vitest";
+import RenderQA from "../components/RenderQA";
 import { useAgentRunActions } from "./useAgentRunActions";
 import { useChatSession } from "./useChatSession";
 
@@ -7,6 +8,7 @@ const messageError = vi.fn();
 const messageInfo = vi.fn();
 const messageSuccess = vi.fn();
 
+let fetchAgentRunMock;
 let requestAgentRunActionMock;
 let requestAgentRunRecoveryActionMock;
 let requestAgentRunStepRetryMock;
@@ -20,6 +22,7 @@ vi.mock("antd", () => ({
 }));
 
 vi.mock("../archiveApi", () => ({
+  fetchAgentRun: (...args) => fetchAgentRunMock(...args),
   requestAgentRunAction: (...args) => requestAgentRunActionMock(...args),
   requestAgentRunRecoveryAction: (...args) =>
     requestAgentRunRecoveryActionMock(...args),
@@ -45,6 +48,7 @@ const createHookDependencies = () => ({
 });
 
 beforeEach(() => {
+  fetchAgentRunMock = vi.fn();
   requestAgentRunActionMock = vi.fn();
   requestAgentRunRecoveryActionMock = vi.fn();
   requestAgentRunStepRetryMock = vi.fn();
@@ -223,5 +227,121 @@ describe("useAgentRunActions with the chat session", () => {
     expect(result.current.session.conversation).toEqual([newTurn]);
     expect(setSelectedSource).not.toHaveBeenCalled();
     expect(messageSuccess).toHaveBeenCalledWith("app.approvalRecorded");
+  });
+});
+
+describe("useAgentRunActions after a decision fails", () => {
+  const PENDING_GATE = {
+    approvalObjectHash: APPROVAL_OBJECT_HASH,
+    capabilityLabel: "Web Search",
+    id: "approval:web.search:1.0.0",
+    status: "pending",
+  };
+
+  const renderWithSession = () => {
+    const refreshAgentRunRecovery = vi.fn().mockResolvedValue([]);
+    const { result } = renderHook(() => {
+      const session = useChatSession();
+
+      return {
+        actions: useAgentRunActions({
+          ...session,
+          refreshAgentRunRecovery,
+          setSelectedSource: vi.fn(),
+          t: (key) => key,
+        }),
+        session,
+      };
+    });
+
+    act(() => {
+      result.current.session.addConversationTurn("Search the web.", {
+        agentAnswer: "Approve Web Search?",
+        agentRunId: "run-1",
+        agentRunStatus: "waiting_for_user",
+        approvalGates: [PENDING_GATE],
+      });
+    });
+
+    return { refreshAgentRunRecovery, result };
+  };
+
+  it("shows the run as the server holds it: no gate to decide, the failed step and its reason", async () => {
+    const reason = "Web search is not configured: SERPAPI_KEY is not set.";
+    const failedStep = {
+      error: { message: reason },
+      id: "capability:web.search:approval:web.search:1.0.0",
+      kind: "capability_call",
+      label: "Web Search",
+      status: "failed",
+      type: "capability_call",
+    };
+    requestAgentRunActionMock.mockRejectedValue({
+      response: { data: { error: reason }, status: 409 },
+    });
+    fetchAgentRunMock.mockResolvedValue({
+      approvalGates: [{ ...PENDING_GATE, status: "approved" }],
+      runId: "run-1",
+      status: "failed",
+      steps: [failedStep],
+    });
+    const { refreshAgentRunRecovery, result } = renderWithSession();
+
+    await act(async () => {
+      await result.current.actions.handleAgentApprovalAction({
+        action: "approve",
+        gate: PENDING_GATE,
+        turnIndex: 0,
+      });
+    });
+
+    expect(messageError).toHaveBeenCalledWith(reason);
+    expect(fetchAgentRunMock).toHaveBeenCalledWith("run-1");
+    // The failed run joins the recovery list without a reload.
+    expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(1);
+
+    render(
+      <RenderQA
+        conversation={result.current.session.conversation}
+        onApprovalAction={vi.fn()}
+        onStepRetry={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("keeps the gate usable while the run still waits, or cannot be read", async () => {
+    requestAgentRunActionMock.mockRejectedValue(new Error("Network Error"));
+    fetchAgentRunMock.mockResolvedValueOnce({
+      approvalGates: [PENDING_GATE],
+      runId: "run-1",
+      status: "waiting_for_user",
+      steps: [],
+    });
+    fetchAgentRunMock.mockRejectedValueOnce(new Error("Network Error"));
+    const { refreshAgentRunRecovery, result } = renderWithSession();
+
+    for (const action of ["approve", "deny"]) {
+      await act(async () => {
+        await result.current.actions.handleAgentApprovalAction({
+          action,
+          gate: PENDING_GATE,
+          turnIndex: 0,
+        });
+      });
+
+      const { answer } = result.current.session.conversation[0];
+
+      expect(answer.agentRunStatus).toBe("waiting_for_user");
+      expect(answer.approvalGates).toEqual([PENDING_GATE]);
+    }
+
+    expect(messageError).toHaveBeenCalledWith("app.approvalMissing");
+    expect(fetchAgentRunMock).toHaveBeenCalledTimes(2);
+    expect(refreshAgentRunRecovery).toHaveBeenCalledTimes(2);
   });
 });

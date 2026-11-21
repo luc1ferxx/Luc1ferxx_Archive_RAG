@@ -1,5 +1,5 @@
 import { beforeEach, vi } from "vitest";
-import { fetchDocumentFile } from "./archiveApi";
+import { fetchAgentRun, fetchDocumentFile } from "./archiveApi";
 
 const apiClientMocks = vi.hoisted(() => ({
   apiDelete: vi.fn(),
@@ -39,5 +39,15 @@ describe("fetchDocumentFile", () => {
       "A document ID is required"
     );
     expect(apiClientMocks.apiDownload).not.toHaveBeenCalled();
+  });
+});
+
+describe("fetchAgentRun", () => {
+  test("reads one run by its encoded id", async () => {
+    const run = { runId: "run/1", status: "failed" };
+    apiClientMocks.apiGet.mockResolvedValue(run);
+
+    await expect(fetchAgentRun("run/1")).resolves.toBe(run);
+    expect(apiClientMocks.apiGet).toHaveBeenCalledWith("/agent-runs/run%2F1");
   });
 });

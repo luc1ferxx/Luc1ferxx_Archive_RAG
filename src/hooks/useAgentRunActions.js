@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { message } from "antd";
 import {
+  fetchAgentRun,
   requestAgentRunAction,
   requestAgentRunRecoveryAction,
   requestAgentRunStepRetry,
@@ -73,7 +74,6 @@ export const useAgentRunActions = ({
           ) {
             setSelectedSource(nextAnswer?.ragSources?.[0] ?? null);
           }
-          await refreshAgentRunRecovery();
           message.success(t("app.approvalRecorded"));
           return;
         }
@@ -95,13 +95,27 @@ export const useAgentRunActions = ({
             },
           },
         }));
-        await refreshAgentRunRecovery();
         message.info(t("app.approvalDenied"));
       } catch (error) {
         const backendMessage =
           getBackendMessage(error, t("app.approvalMissing"));
         message.error(backendMessage);
+
+        // A failed decision can still have moved the run (the approved
+        // capability failed, or the gate was decided elsewhere): show the run
+        // as the server holds it. Unread, the turn keeps its usable gate.
+        const run = await fetchAgentRun(runId).catch(() => null);
+
+        if (run) {
+          updateTurnByRunId(runId, (currentTurn) => ({
+            ...currentTurn,
+            answer: buildAgentRunActionAnswer(currentTurn.answer, { run }),
+          }));
+        }
       } finally {
+        // Whether the decision went through or not, the run may have joined
+        // or left the recovery list.
+        await refreshAgentRunRecovery();
         setIsLoading(false);
       }
     },

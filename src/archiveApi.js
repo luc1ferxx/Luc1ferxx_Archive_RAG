@@ -87,6 +87,9 @@ export const requestTaskAction = async (taskId, action, payload = {}) => {
   );
 };
 
+export const fetchAgentRun = async (runId) =>
+  apiGet(`/agent-runs/${encodeURIComponent(runId)}`);
+
 export const requestAgentRunAction = async (runId, action, payload = {}) => {
   return apiPost(
     `/agent-runs/${encodeURIComponent(runId)}/actions/${encodeURIComponent(
