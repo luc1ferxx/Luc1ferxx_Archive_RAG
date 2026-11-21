@@ -152,7 +152,7 @@ after(() => {
 test("the script of a text is the script most of its letters are in", () => {
   assert.equal(detectScript(ZH_QUESTION), "han");
   assert.equal(detectScript("他们在哪些数据集上评估了BERT？"), "han");
-  // Letters, not words: four English names outnumber eight Han characters.
+  // Letters, not words: ten Latin letters outnumber eight Han characters.
   assert.equal(detectScript("BERT模型在SQuAD上的F1是多少？"), "latin");
   assert.equal(detectScript("What does カタカナ mean?"), "latin");
   // Kanji count as Japanese next to kana, hanja as Korean next to Hangul.
