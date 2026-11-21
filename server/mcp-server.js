@@ -41,6 +41,16 @@ const formatSearchResults = (query, results, limit) => {
   };
 };
 
+// serpapi rejects an answer other than 200 (a bad key, no searches left) with
+// its body, usually {"error": "..."}, not an Error.
+const readSerpApiError = (body) => {
+  try {
+    return JSON.parse(body).error || "SerpAPI answered with an error.";
+  } catch {
+    return "SerpAPI answered with an error.";
+  }
+};
+
 server.registerTool(
   "search_web",
   {
@@ -92,11 +102,8 @@ server.registerTool(
         content: [
           {
             type: "text",
-            // serpapi rejects an answer other than 200 (a bad key, no searches
-            // left) with its body, {"error": "..."}, not an Error. A body that
-            // is not JSON throws here, which McpServer also answers isError.
             text: `Error performing web search: ${
-              error instanceof Error ? error.message : JSON.parse(error).error
+              error instanceof Error ? error.message : readSerpApiError(error)
             }`,
           },
         ],
