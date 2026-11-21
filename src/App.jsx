@@ -630,23 +630,28 @@ const App = () => {
   );
   const currentTrace = currentTurn?.answer?.agentTrace ?? EMPTY_ARRAY;
   const currentRunSteps = currentTurn?.answer?.agentRunSteps ?? EMPTY_ARRAY;
+  const currentRunStatus = currentTurn?.answer?.agentRunStatus;
   const currentSources = currentTurn?.answer?.ragSources ?? EMPTY_ARRAY;
   // A denied or failed approval moves the turn's run on while the answer keeps
   // its trace (useAgentRunActions): a step that waited for the user shows its
-  // run step's status once that step is no longer paused. Every other trace
-  // status is final on the server.
+  // run step's status once that step is no longer paused, and the run's
+  // status while it is paused in a run that no longer waits (canceling a
+  // waiting run leaves its steps paused: server/rag/agent-runs.js cancelRun).
+  // Every other trace status is final on the server.
   const runCenterTrace = useMemo(
     () =>
       currentTrace.map((step) => {
         const runStep =
           step.status === "needs_input" &&
           currentRunSteps.find(({ id }) => id === step.id);
+        const status =
+          runStep?.status === "paused" && currentRunStatus !== "waiting_for_user"
+            ? currentRunStatus
+            : runStep?.status;
 
-        return runStep && runStep.status !== "paused"
-          ? { ...step, status: runStep.status }
-          : step;
+        return status && status !== "paused" ? { ...step, status } : step;
       }),
-    [currentRunSteps, currentTrace]
+    [currentRunStatus, currentRunSteps, currentTrace]
   );
   const hasActiveTaskLog = hasActiveTasks(taskLog);
   let visibleTasks = EMPTY_ARRAY;

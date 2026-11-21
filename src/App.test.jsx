@@ -801,9 +801,28 @@ describe("App", () => {
         ],
       },
     },
+    // A run canceled while it waited (from another tab, or the recovery
+    // card's Cancel run after a restart) refuses the decision; cancelRun
+    // (server/rag/agent-runs.js) leaves its steps paused.
+    {
+      action: "approve",
+      answerText: "The approval did not complete: Agent run is not waiting for user input.",
+      approvalStatus: "Canceled",
+      outcome: "canceled",
+      respond: () =>
+        Promise.reject({
+          response: { data: { error: "Agent run is not waiting for user input." }, status: 409 },
+        }),
+      runAfter: {
+        approvalGates: [WEB_APPROVAL_GATE],
+        runId: "run-1",
+        status: "canceled",
+        steps: WAITING_WEB_ANSWER.agentRunSteps,
+      },
+    },
   ])(
     "after a $outcome approval the Run Center no longer shows the approval waiting",
-    async ({ action, answerText, respond, runAfter }) => {
+    async ({ action, answerText, approvalStatus = "Completed", respond, runAfter }) => {
       const defaultGet = axios.get.getMockImplementation();
 
       axios.get.mockImplementation((url) =>
@@ -834,8 +853,8 @@ describe("App", () => {
 
       expect(runCenter.getByText("0 active")).toBeInTheDocument();
       expect(runCenter.queryByText("Needs input")).toBeNull();
-      // The step reads as its run step: decided.
-      expect(cardStatus(runCenter, "Capability Approval")).toBe("Completed");
+      // The step reads as its run step (decided), or as its canceled run.
+      expect(cardStatus(runCenter, "Capability Approval")).toBe(approvalStatus);
       expect(runCenter.getByText(APPROVAL_STEP.summary)).toBeInTheDocument();
     }
   );

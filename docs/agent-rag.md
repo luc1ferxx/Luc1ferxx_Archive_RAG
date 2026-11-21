@@ -376,7 +376,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 `task.result.goalCompletion` / `task.result.goalPlan.goalCompletion` 是目标完成自检 contract。它统一检查：task 是否 terminal completed、公开 plan steps 是否全部 completed、working memory 是否还有 unresolved gaps / unsupported claims、已请求 deliverables 是否全部 created、是否仍有 pending approval / user action、research task phases 是否完成，以及 workflow lifecycle contract 是否已记录。这个自检不重新执行 RAG，不把 evidence 写入 task memory；iteration 里只保存 working-memory 计数，供批准产物后仍可验证目标状态。
 
-前端 `src/components/AgentRunCenter.jsx` 只消费 `/tasks` 返回的公开 task contract（没有 task 时，`src/App.jsx` 改给它当前回答的 `agentTrace` 步骤）。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。审批被拒绝或失败后，回答保留原来的 trace，该轮的 run 却已往前走（`useAgentRunActions` 刷新了 `agentRunSteps`）：trace 里等待用户的步骤（`needs_input`）因此显示 run 中同 id step 的状态（仍为 `paused` 时不变），不再算作未完成；trace 的其他状态在服务端已是终态。
+前端 `src/components/AgentRunCenter.jsx` 只消费 `/tasks` 返回的公开 task contract（没有 task 时，`src/App.jsx` 改给它当前回答的 `agentTrace` 步骤）。它可以触发 `continue`、`approve` 或 `approve_deliverables` task action，但不会根据 summary 文本推断 replay safety、approval policy 或执行状态。审批被拒绝或失败后，回答保留原来的 trace，该轮的 run 却已往前走（`useAgentRunActions` 刷新了 `agentRunStatus` 和 `agentRunSteps`）：trace 里等待用户的步骤（`needs_input`）因此显示 run 中同 id step 的状态；该 step 仍为 `paused` 时，run 还在等待用户（`waiting_for_user`）就不变，run 已不再等待就显示 run 的状态（`cancelRun` 取消等待中的 run 只改 run 的状态，step 留在 `paused`，于是显示为 `canceled`），不再算作未完成；trace 的其他状态在服务端已是终态。
 
 ## Prompt 注入防护
 
