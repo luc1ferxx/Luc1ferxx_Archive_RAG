@@ -298,8 +298,8 @@ const WorkspaceSidebar = ({
 
     <SidebarSection
       caption={t("sidebar.pagesCaption", {
+        count: totalPages,
         documents: formatDocumentCount(activeDocuments.length),
-        pages: totalPages,
       })}
       className="archive-upload-section"
       sectionRef={uploadRef}
@@ -525,12 +525,9 @@ const WorkspaceSidebar = ({
 
     <section className="archive-sidebar-footer">
       <Popconfirm
-        title={t(
-          activeDocuments.length === 1
-            ? "sidebar.clearWorkspaceConfirm"
-            : "sidebar.clearWorkspaceConfirm_plural",
-          { count: activeDocuments.length }
-        )}
+        title={t("sidebar.clearWorkspaceConfirm", {
+          count: activeDocuments.length,
+        })}
         description={t("sidebar.deleteCannotBeUndone")}
         okText={t("sidebar.confirmDelete")}
         cancelText={t("common.cancel")}

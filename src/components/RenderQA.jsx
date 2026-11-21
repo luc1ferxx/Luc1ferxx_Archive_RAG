@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Spin } from "antd";
 import { createTranslator } from "../archiveI18n";
 import { formatDocumentLocation, getLocationUnit } from "../documentLocation";
@@ -438,6 +438,8 @@ const RenderQA = (props) => {
   const {
     conversation,
     activeTurnIndex,
+    canUpload = false,
+    hasDocuments = false,
     isLoading,
     selectedSource,
     onSelectSource,
@@ -449,6 +451,15 @@ const RenderQA = (props) => {
     t = defaultT,
   } = props;
   const [feedbackNotes, setFeedbackNotes] = useState({});
+  const activeTurnRef = useRef(null);
+
+  // The chat opens on its active turn, and a new turn, made active when it
+  // arrives with its answer, scrolls into view. An answer streams in the
+  // composer, so nothing here moves while the user reads an earlier turn.
+  // jsdom has no scrollIntoView.
+  useEffect(() => {
+    activeTurnRef.current?.scrollIntoView?.({ block: "start" });
+  }, [conversation?.length]);
 
   const updateFeedbackNote = useCallback((turnIndex, note) => {
     setFeedbackNotes((prev) => ({
@@ -482,8 +493,16 @@ const RenderQA = (props) => {
   if (!conversation?.length && !isLoading) {
     return (
       <div className="archive-empty-log">
-        <div className="archive-empty-mark">No conversation yet</div>
-        <div>Upload documents on the left, then ask a question to begin.</div>
+        <div className="archive-empty-mark">{t("chat.emptyTitle")}</div>
+        <div>
+          {t(
+            hasDocuments
+              ? "chat.emptyAsk"
+              : canUpload
+                ? "chat.emptyUpload"
+                : "chat.emptyNoDocuments"
+          )}
+        </div>
       </div>
     );
   }
@@ -504,6 +523,7 @@ const RenderQA = (props) => {
         return (
           <article
             key={index}
+            ref={activeTurnIndex === index ? activeTurnRef : undefined}
             className={`archive-entry ${
               activeTurnIndex === index ? "is-active" : ""
             }`}

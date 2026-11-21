@@ -230,14 +230,9 @@ const getPendingTaskScopeLabel = (pendingTask, t) => {
   }
 
   if (pendingTask.documentCount > 0) {
-    return t(
-      pendingTask.documentCount === 1
-        ? "home.selectedDocuments"
-        : "home.selectedDocuments_plural",
-      {
-        count: pendingTask.documentCount,
-      }
-    );
+    return t("home.selectedDocuments", {
+      count: pendingTask.documentCount,
+    });
   }
 
   return t("home.currentWorkspaceScope");
@@ -503,7 +498,7 @@ const WorkspaceEntryPanel = ({
         <div className="archive-home-section-head">
           <span>{t("home.compareSetup")}</span>
           <strong>
-            {t("home.selectedDocuments_plural", {
+            {t("home.selectedDocuments", {
               count: selectedCompareDocuments.length,
             })}
           </strong>

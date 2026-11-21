@@ -784,6 +784,8 @@ const App = () => {
       <RenderQA
         conversation={conversation}
         activeTurnIndex={activeTurnIndex}
+        canUpload={canUpload}
+        hasDocuments={activeDocuments.length > 0}
         isLoading={isLoading}
         selectedSource={selectedSource}
         onSelectSource={setSelectedSource}

@@ -375,4 +375,22 @@ describe("AgentRunCenter", () => {
       ],
     });
   });
+
+  test("counts only unfinished tasks as active", () => {
+    const tasks = [
+      { id: "task-running", label: "Running task", status: "running" },
+      { id: "task-waiting", label: "Waiting task", status: "waiting_for_user" },
+      { id: "task-done", label: "Done task", status: "completed" },
+      { id: "task-failed", label: "Failed task", status: "failed" },
+    ];
+    const { rerender } = render(<AgentRunCenter tasks={tasks} />);
+
+    expect(screen.getByText("2 active")).toBeInTheDocument();
+    // The list still shows every task.
+    expect(screen.getByText("Done task")).toBeInTheDocument();
+
+    rerender(<AgentRunCenter t={createTranslator("zh")} tasks={tasks} />);
+    expect(screen.getByText("2 个进行中")).toBeInTheDocument();
+  });
 });
+

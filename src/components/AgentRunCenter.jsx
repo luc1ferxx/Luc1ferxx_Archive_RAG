@@ -9,6 +9,11 @@ const defaultT = createTranslator("en");
 
 const toArray = (value) => (Array.isArray(value) ? value : []);
 
+// A finished task (the server's canceled, completed and failed; skipped for a
+// trace step) is not active: the header counts what still needs the agent or
+// the user, while the list below shows every task.
+const FINISHED_STATUSES = new Set(["canceled", "completed", "failed", "skipped"]);
+
 const getGoalPlan = (task = {}) =>
   task.result && typeof task.result === "object" ? task.result.goalPlan : null;
 
@@ -335,7 +340,13 @@ const AgentRunCenter = ({
   <div className="archive-view-panel archive-tasks-view">
     <div className="archive-view-panel-head">
       <span>Agent Run Center</span>
-      <strong>{isLoading ? "loading" : `${tasks.length} active`}</strong>
+      <strong>
+        {isLoading
+          ? t("tasks.loading")
+          : t("tasks.active", {
+              count: tasks.filter((task) => !FINISHED_STATUSES.has(task.status)).length,
+            })}
+      </strong>
     </div>
     <div className="archive-agent-task-list">
       {tasks.map((task, index) => (

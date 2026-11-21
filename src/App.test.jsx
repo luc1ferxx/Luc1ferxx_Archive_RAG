@@ -580,7 +580,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Compare documents" }));
     fireEvent.click(screen.getByLabelText(/benefits-2025\.pdf/i));
+    expect(screen.getByText("1 selected document")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/rag-notes\.pdf/i));
+    expect(screen.getByText("2 selected documents")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stage comparison" }));
 
     expect(screen.getByTestId("chat-docids")).toHaveTextContent(
@@ -604,6 +606,17 @@ describe("App", () => {
 
     expect(await screen.findByText("Corpus")).toBeInTheDocument();
     expect(screen.getByText("Mock answer")).toBeInTheDocument();
+
+    // Counts read "1 doc" and "2 turns", not "1 docs" and "2 turn".
+    fireEvent.click(screen.getByRole("button", { name: "Submit mock chat" }));
+    expect(
+      screen.getByRole("button", { name: "Workspace documents summary" })
+    ).toHaveTextContent(/^1 doc$/);
+    expect(screen.getByText("Working with 1 doc")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Conversation turns summary" })
+    ).toHaveTextContent(/^2 turns$/);
+    expect(screen.getByText("2 recorded turns")).toBeInTheDocument();
   });
 
   test("keeps arxiv documents out of chat scope until all scope is selected", async () => {

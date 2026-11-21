@@ -108,6 +108,25 @@ describe("WorkspaceSidebar deletes only after a confirm", () => {
   });
 });
 
+describe("WorkspaceSidebar counts", () => {
+  test("take their singular for one", async () => {
+    renderSidebar({
+      activeDocuments: [POLICY_DOCUMENT],
+      savedArxivSuggestionsByDocId: { "doc-1": { papers: [{ arxivId: "2401.00001v1" }] } },
+      totalPages: 1,
+    });
+
+    expect(screen.getByText("1 document · 1 page")).toBeInTheDocument();
+    expect(screen.getByText("1 arXiv recommendation")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: t("sidebar.clearWorkspace") }));
+
+    expect(
+      await screen.findByText("Delete the 1 document in this workspace?")
+    ).toBeInTheDocument();
+  });
+});
+
 // The run a failed approved web search leaves: its self-check failed too, and
 // Retry replays the capability call.
 const CAPABILITY_CALL_SAFETY = {

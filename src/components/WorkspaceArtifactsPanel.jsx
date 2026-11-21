@@ -138,7 +138,7 @@ const WorkspaceArtifactsPanel = ({ locale = "en", t = defaultT }) => {
                     {t("artifact.rowMeta", {
                       citations: artifact.citationCount ?? 0,
                       date: formatDate(artifact.createdAt, locale),
-                      docs: artifact.docCount ?? 0,
+                      docs: t("common.docs", { count: artifact.docCount ?? 0 }),
                     })}
                   </span>
                   <span className="archive-home-artifact-row-context">
@@ -233,11 +233,15 @@ const WorkspaceArtifactsPanel = ({ locale = "en", t = defaultT }) => {
           <h2>{selectedArtifact.title}</h2>
           <p>
             {t("artifact.detailMeta", {
-              citations: selectedArtifact.citationCount ?? 0,
-              docs:
-                selectedArtifact.docCount ??
-                selectedArtifact.docIds?.length ??
-                0,
+              citations: t("artifact.citations", {
+                count: selectedArtifact.citationCount ?? 0,
+              }),
+              docs: t("common.docs", {
+                count:
+                  selectedArtifact.docCount ??
+                  selectedArtifact.docIds?.length ??
+                  0,
+              }),
               version: selectedArtifact.version || "1.0.0",
             })}
           </p>
