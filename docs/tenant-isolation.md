@@ -5,8 +5,10 @@
 ## 租户模型
 
 - **租户 = 访问范围** `(userId, workspaceId)`。工作区对应一个组织；同一个用户可以属于多个工作区，每个工作区是一个独立租户。
-- 访问范围只从凭据推出：静态 token（`API_AUTH_TOKENS`）、HS256 JWT 或 OIDC access token。请求体、查询参数和普通请求头都不能指定租户；只有凭据允许时，`x-workspace-id` 才能在凭据列出的工作区里选一个。
-- **单租户模式**：关闭 auth，或者只用一个共享 `API_AUTH_TOKEN`，整个归档就是一个租户。这两种情况都是有意设计的。
+- 访问范围由凭据和请求一起决定：
+  - 凭据里写了用户（带 `userId` 的 `API_AUTH_TOKENS` 条目、HS256 JWT、OIDC）时按这个用户，请求里写的用户不起作用。没写用户的凭据里，只有单个共享 `API_AUTH_TOKEN` 和写了 `"allowClientUserId": true` 的条目能由请求指定用户（`x-user-id` 请求头，或 JSON body、query 里的 `userId`）；其他凭据的请求一写用户就是 403。
+  - 凭据固定了工作区（`workspaceId`）或列出了工作区（`workspaces`）时，请求只能用其中的。两样都没有的凭据，例如只带 `userId` 的 token、没有工作区 claim 的 JWT 或 OIDC token、只带角色的 token，可以用 `x-workspace-id`（请求头、JSON body 或 query）选任意工作区：读取、删除那个工作区里不属于具体用户的文档，也能往里上传，行级安全按同样的范围放行。要挡住，得开 `TENANT_MEMBERSHIP=enforce`（默认关，只放行成员）；只开 `RBAC_MODE=enforce`（默认角色）或 `API_AUTH_REQUIRE_WORKSPACE=true` 挡不住。
+- **单租户模式**：关闭 auth，或者只用一个共享 `API_AUTH_TOKEN`。这时没有租户隔离：请求可以自报任意用户和工作区，什么都不报时能看到所有文档。这两种情况都是有意设计的。
 - **平台主体**：不绑定工作区、也不带工作区列表的管理员凭据，只能走固定的几条平台路由（`TENANTLESS_PLATFORM_PATHS`），每条都要求对应的 `admin.*` 权限。
 
 ## 威胁模型
