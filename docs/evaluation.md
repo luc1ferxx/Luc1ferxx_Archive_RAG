@@ -117,7 +117,7 @@ npm run quality:current -- --require-planner-real
 
 证据边界：`quality:current` 是 fail-closed 的 report contract/lineage validator，不是密码学 attestation。单独运行 CLI 不能证明 runner、真实上传或检索一定发生；`evidence.command` 也是声明字段。PR 的实际执行 provenance 来自同一 GitHub Actions job 中先 producer、后 gate 的固定步骤以及上传的原始 artifacts。当前 lightweight report 不包含完整内部事件签名、上传源文件/合并文件 digest 或不可伪造的 chunk transcript；若威胁模型包含恶意 producer，需要另加签名事件链和内容 digest，不能把 current gate 的 PASS 描述成该级别证明。
 
-`/quality/latest`、`/quality/history` 与 `quality:gate` 继续保留历史兼容结构和退出码，但响应会附带 `verification.scope=historical`、`currentCommitVerified=false`，CLI/UI/admin 也会明确显示历史或未验证状态。缺少 verification marker 的旧后端响应按未验证处理。HTTP 刷新统一走受 RBAC 和审计保护的 `POST /admin/actions/quality-refresh`，请求只接受注册的 `corpusId`；自定义文件系统路径仅保留给本地可信 CLI。
+`/quality/latest`、`/quality/history` 与 `quality:gate` 继续保留历史兼容结构和退出码，但响应会附带 `verification.scope=historical`、`currentCommitVerified=false`，CLI/UI/admin 也会明确显示历史或未验证状态。缺少 verification marker 的旧后端响应按未验证处理。HTTP 刷新统一走受审计保护（开启 API 鉴权时还检查管理权限）的 `POST /admin/actions/quality-refresh`，请求只接受注册的 `corpusId`；自定义文件系统路径仅保留给本地可信 CLI。
 
 ## Release evidence gate
 
@@ -390,7 +390,7 @@ cd server
 npm run verify:quality
 ```
 
-这是唯一一条用**真实 embedding 模型 + 真实 chat 模型**验证「零基础设施档案」检索与对比质量的路径。其余测试都跑 deterministic stub embedder —— 那证明管线接通，不证明检索找对了文本。
+这是一条用**真实 embedding 模型 + 真实 chat 模型**验证「零基础设施档案」检索与对比质量的路径。其余测试都跑 deterministic stub embedder —— 那证明管线接通，不证明检索找对了文本。
 
 不需要 PostgreSQL，也不需要 OpenAI 官方 key：`rag/openai-client.js` 的 `resolveBaseUrl()` 支持 `OPENAI_BASE_URL` / `OPENAI_API_BASE`，所以任何提供 `/v1/embeddings` 和 `/v1/chat/completions` 的端点都行。本地 Ollama 示例（key 只要非空即可）：
 
@@ -465,7 +465,7 @@ node evaluation/run-doccompare-verification.mjs --self-test
 
 用 synthetic eval 那套 deterministic provider 跑完整流程，不需要 key 和网络，用来确认 harness 本身能跑通 —— 避免 harness 的崩溃在别人第一次真实运行时才被发现。
 
-**预期结果是 18/18**（`evaluation/run-doccompare-verification.mjs` 开头的说明）。对比答案有三级（`rag/answer-writer.js` 的 `writeComparisonAnswer`）—— 模型文本过 `assessStructuredDifferenceAnswer` 就用它；否则退到引擎构造的 `buildGroundedDifferenceAnswer`；两者都不过才弃答。自检走引擎构造的那一级。
+**预期结果是 18/18**（`evaluation/run-doccompare-verification.mjs` 开头的说明）。对比答案在近重复短路（`shouldShortCircuitNoMaterialDifference`，不调模型）之外有三级（`rag/answer-writer.js` 的 `writeComparisonAnswer`）—— 模型文本过 `assessStructuredDifferenceAnswer` 就用它；否则退到引擎构造的 `buildGroundedDifferenceAnswer`；两者都不过才弃答。自检的双文档对比（`compare.*`）走引擎构造的那一级。
 
 **不要以为对比答案路径在别处被覆盖了。** `test/rag.test.mjs` 的 `the MCP ask tool carries a real comparison summary onto the wire` 跑在该文件全局的 stub provider 下，`completeText` 返回的是手写死字符串，断言的只有引擎算出来的结构化字段（`comparedDocIds`、`evidenceBalance`、`explicitConflictPairs`）和引文。它真正覆盖的是**对比引擎**和 MCP 序列化接缝，不是「模型写出了正确的对比」—— 这条测试的名字夸大了它检查的内容。
 
@@ -822,7 +822,7 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 - 验收：对第二轮的 D2 和 D0 报告跑 `compare:qasper-answers`（10000 次，seed 12345），点估计与当时一次性脚本逐字相同（答题率 +0.363、翻转 +33 / −0、可答题 F1 +0.123、不可答被回答 +0.222），区间 [0.264, 0.462]、[0.081, 0.170]、[0.000, 0.556] 也一致（相差不超过 0.001）；`--exclude-report D0 --cases 100 --seed 1 --list-cases` 得到第三轮描述的 88 可答、12 不可答、82 篇论文。
 - 配对 bootstrap 的实现收进 `evaluation/paired-bootstrap.js`（`eval:query-adapter` 的 `pairedMeanDelta` 从这里导出，`eval:qasper-retrieval` 的随机数也用它），输出不变。
 
-### 抽取式作答模式：模型选证据、服务端写答案（2026-10-22，`RAG_QA_EXTRACTIVE_OUTPUT`，默认关）
+### 抽取式作答模式：模型选证据、服务端写答案（2026-10-22，`RAG_QA_EXTRACTIVE_OUTPUT`，2026-11-19 已删除）
 
 **动机**：Agent 路径在 QASPER 上几乎不作答（train 50 题 0/41、dev 100 题 0/91），根因是模型的改写过不了词法 claim 校验；rag 面的官方 F1 停在 0.23 左右，主因是答案长（作答中位 33 词）。对比答案的结构化输出（见"对比答案闸门的拒绝原因"）证明"模型只选证据、服务端按证据写答案"能让校验按构造通过。单文档问答照此做：模型返回最短确切答案和最多 4 条逐字引文（带 Source 编号），服务端把引文定位到证据句、渲染成 finalizer 写法的行，直接答案若是引文子串也写成一行，Yes/No 只放在 `directAnswer` 字段。机制见 AGENTS.md 和 configuration.md。
 
@@ -1006,7 +1006,7 @@ QA prompt 原来写的是"最多五句"，现在改成：先用尽量少的词�
 - `verify:quality` 仍是 18/18。
 - 对比答案的模板没动，它们需要分段结构。
 
-### 两段式拒答：区分"近邻替换"和"换了说法"（`RAG_QA_ANSWER_VERDICT`，默认关闭）
+### 两段式拒答：区分"近邻替换"和"换了说法"（`RAG_QA_ANSWER_VERDICT`，2026-11-20 已删除）
 
 门控用的查询词覆盖率把两种情况混在一起：段落是换了说法（问 liability caps，条款写 shall not exceed），还是讲的是相邻的东西（问 parental leave，段落是 annual leave）。两种情况覆盖率都是 0.5。
 
@@ -1946,7 +1946,7 @@ train 上（400 题）的损失拆解：
 
 **核查后的修正**（结果写完后做了一次独立核查，判定都不变）：
 - 耗时：原先把扩展耗时写成 1072 题总耗时"其中"的一部分。实际上扩展耗时只算扩展过的 1010 题，结果"一部分"反而比总数大；H 那一步还含段落嵌入。已按两种分母分开写。
-- 机制：AGENTS.md 和面试材料原先写成"丢掉的证据都只被原问题找到"。存档只能证明 22 题里的 6 题，已改。
+- 机制：AGENTS.md 原先写成"丢掉的证据都只被原问题找到"。存档只能证明 22 题里的 6 题，已改。
 - 规则修订：原先写"在任何扩展组运行前"，实际上 M 组已经启动，只是入库途中停了，没有发出扩展调用，已改为"产出数字之前"。另外补记：规则提交后看过 6 道题的样例输出。
 
 ### 重排在 top-K 10 下重测：交叉编码器和重排概率门控（2026-11-12，规则先于运行）
@@ -3370,7 +3370,7 @@ ML0 与上一节在 PostgreSQL 上的结果逐题一致。
 - 审查的探针：问"育儿假有多久？"，改写是 "How long is parental leave for employees?"。讲年假的块在 X3 下会放行，X3 之前不会。
 
 修正方案：
-- **改动**：改写找到的块凭向量分放行之前，先拿那条改写和块做一次换词否决，有替换就不放行。另修三处小问题：清洗时去掉 "Translated question:" 前缀；补一条走真实接线的集成测试；更新过时的注释和面试笔记。
+- **改动**：改写找到的块凭向量分放行之前，先拿那条改写和块做一次换词否决，有替换就不放行。另修三处小问题：清洗时去掉 "Translated question:" 前缀；补一条走真实接线的集成测试；更新过时的注释。
 - **臂**：ML5，用 ML4 的 28 题和同样的配置。
 - **规则**：m1–m5′ 同 ML4。五条都过就合并 X3′。任一条不过，就合并 ML4 测过的 X3，并在 AGENTS.md 里把相邻话题的缺口写成 shortcut。
 
@@ -3387,7 +3387,7 @@ ML0 与上一节在 PostgreSQL 上的结果逐题一致。
 
 **判定**：m1 1/5，不过；m2 7、m3 0、m5′ 3/5，都过。
 
-**处理**：按规则，合并 ML4 测过的 X3，去掉否决。相邻话题的缺口写成 shortcut，见 `buildTranslationBypass`、AGENTS.md 和 docs/agent-rag.md。审查的另外几处修正保留，因为它们不改变 ML4 测过的路径：清洗时去掉 "Translated question:"，补一条走真实接线的测试，更新注释和面试笔记。
+**处理**：按规则，合并 ML4 测过的 X3，去掉否决。相邻话题的缺口写成 shortcut，见 `buildTranslationBypass`、AGENTS.md 和 docs/agent-rag.md。审查的另外几处修正保留，因为它们不改变 ML4 测过的路径：清洗时去掉 "Translated question:"，补一条走真实接线的测试，更新注释。
 
 **只记录**：
 - zh1–zh3 这次以 "I could not verify the answer…" 结束，也就是回答核对没过；门控拒答时的结束语会是"找到相关内容但不能确认"或者联网审批。所以 m1 的下降不像是否决造成的。
@@ -3634,7 +3634,7 @@ RR1 平均每题 3.6 次重排请求（713/200），每次最多 30 个候选。
 **实现**：a2aa03e6（重新应用 1d1227f5、9e6dfbeb，加补检索例外），审查修复 bc1eed3b，运行在 bc1eed3b 上。审查（运行之前）发现三处小问题，都已修好，都不影响这次测量：
 - 缓存条目原来不过期：同一地址的重排服务换了模型而应用不重启时，会一直拿旧模型的分数。现在每条十分钟后失效，上面"改动"一条已经写进去；
 - TEI 批量上限的说明低估了单次请求的段数：有跨语言改写或问题拆分时，一次请求可到 120–240 段；
-- 面试文档里首轮的上限写错了。
+- 一份文档里首轮的上限写错了。
 
 **结果**：
 - **运行**：bc1eed3b 上的干净 worktree。RR3 用时 39.4 分钟，RR1 是 43.8 分钟，RR2 是 37.0 分钟，不开重排的 T1 是 24.6 分钟，都含入库。报告是 `latest-qasper-answers-rr-RR3`。
@@ -3901,7 +3901,7 @@ RR1 平均每题 3.6 次重排请求（713/200），每次最多 30 个候选。
   - 迁移 014 新建 `SECURITY DEFINER` 函数 `<分块表>_sparse_rank(tsquery, doc_ids, max_rows)`，以表所有者身份在给定文档里用 GIN 找候选、打分，只返回 `chunk_id` 和分数。
   - 租户的多文档全文检索先以租户身份在文档表里过滤文档 id（主键等值匹配是 leakproof 的，策略下照样走索引），再调用这个函数，最后以租户身份按 `chunk_id` 关联回分块表，由行级安全决定返回哪些行。别的租户的分块既进不了函数的 LIMIT，也回不到结果里。
   - 单文档仍用原来的普通语句：函数调用和规划的开销比直接走 `doc_id` 索引多约 0.6 ms。
-  - 函数里 `search_path` 固定为 `pg_catalog, pg_temp`，只有租户角色能执行；函数内关掉普通索引扫描（`enable_indexscan = off`），因为优化器不计解压 `search_vector` 的成本，大文档集时会错选"沿 `doc_id` 逐行过滤"，比 BitmapAnd 慢 3 倍；`ROWS 20` 让外层关联走主键索引，不会对整张表做 hash join。
+  - 函数里 `search_path` 固定为 `pg_catalog, pg_temp`，迁移 014 只授权租户角色执行（迁移 035 又授权了系统角色）；函数内关掉普通索引扫描（`enable_indexscan = off`），因为优化器不计解压 `search_vector` 的成本，大文档集时会错选"沿 `doc_id` 逐行过滤"，比 BitmapAnd 慢 3 倍；`ROWS 20` 让外层关联走主键索引，不会对整张表做 hash join。
   - `search_vector` 的统计目标提到 1000，让常见词都进入统计信息；默认值下，一条命中全表 46% 的查询被低估，串行打分要 530 ms，现在 180 ms。
   - 健康检查的行级安全项会确认租户角色能执行这个函数。
   - 现状（迁移 030 之后）：默认 BM25，以及开剪枝的 `ts_rank_cd` 多篇检索，都走 `<分块表>_sparse_search`；`_sparse_rank` 只在 `ts_rank_cd`、剪枝关、租户身份、多篇文档时使用，见 `docs/retrieval-tuning.md`。

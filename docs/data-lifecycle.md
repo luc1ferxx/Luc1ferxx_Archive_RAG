@@ -213,6 +213,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
   - `ready_out_of_grace`：已停止接收写入，不能再激活或回滚到，应退役；
   - `drift`：ready 版本的 chunk 数或文档数和活动版本不同；
   - `build_failed`；
+  - `chunk_profile_differs_from_active`、`chunk_profile_differs_from_version`：活动版本（后者是正在构建或仍在接收写入的 ready 版本）记录的切块配置和本进程现在用的不同；
   - `configuration_differs_from_active`（见上）。
 - 状态总是返回 active、building、ready 和指针上的 previous 版本；只有 retired/failed 的历史只取最新的 limit 条（默认 25），并返回 `historyLimit`。旧版本再多，active 也不会从状态里消失，健康检查也不会因此变红。
 - `GET /admin/index-versions`：需要 `admin.status.read`，只读，返回同样的内容。构建、激活、回滚、退役只能通过 CLI 执行。
@@ -253,7 +254,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 新版本表在构建开始时就建好 HNSW 索引，因为双写需要它可用。逐行维护索引比先批量加载再建索引慢。
 - 构建依赖注册表里保存的 PDF 字节。如果文档当初不是由这些字节解析出来的（例如直接传入页面文本的导入），chunk 数会和活动版本不同，激活门会拒绝，需要加 `--allow-chunk-count-drift`。
 - 固定模型的嵌入调用沿用默认 embedding 路由（同一个 provider 和 endpoint），只替换模型名，不经过模型注册表对模型本身的选择。宽度必须是模型的原生宽度，不发送 `dimensions` 参数。
-- status 和管理接口算 drift 时，会对活动表和每个 ready 表各做一次全表 COUNT。
+- status 和管理接口算 drift 时，会对活动表和每个仍在接收写入的 ready 表各做一次全表 COUNT。
 - 同一个构建者的文档事务都要更新版本行，所以在续租到提交这一段排队；解析、嵌入和 chunk 写入是并行的。嵌入延迟越高，并行的收益越大。
 - 查询向量的空间标记只挂在 `embedQueryCached` 返回的那个数组对象上。复制出来的向量没有标记，按配置空间处理：活动版本固定在别的模型上时会再嵌入一次，结果仍然正确。
 
@@ -308,7 +309,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 某个阶段用尽重试后，job 进入 `dead_letter`，并记录阶段和原因。原因只含阶段、尝试次数、状态码、错误码、错误类名和公开错误信息，不含依赖返回的原始报错。死信 job 保留字节和已完成阶段的输出，重新入队后从该阶段继续，并重新获得该阶段的完整预算。保留期是 `RAG_INGEST_JOB_RETENTION_MS`（默认 7 天，0 表示不删）：进入死信超过这个时长后，worker 的清理会把它连同字节和输出删掉，之后不能再 requeue。
 - 为兼容前端，`GET /ingest-jobs/:jobId` 对死信 job 返回 `status: "failed"`，另附 `deadLetter: { stage, deadLetteredAt }`。该接口还返回 `kind`、`stage`、`duplicate`、`superseded` 和 `documentVersion`。
 - 文档被删除时，它排队中、等待重试和死信的 job 以 failed 结束，带 `canceledReason: "document_deleted"`（迁移 040），字节和输出一起删掉。
-- 管理接口（按请求者租户隔离，别的租户的 job 返回 404）：
+- 管理接口（按请求者租户隔离，别的租户的 job 返回 404；没有访问范围的请求能列出和重新入队任何租户的死信 job，例如关闭鉴权（默认）且请求既不带用户也不带工作区时）：
   - `GET /admin/ingest-jobs/dead-letter?limit=N`（默认 50），需要 `admin.status.read`；
   - `POST /admin/ingest-jobs/:jobId/requeue`，需要 `admin.actions.recover_tasks`。
 - 命令行（以 owner 身份运行，按属主精确匹配）：

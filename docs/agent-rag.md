@@ -62,7 +62,7 @@ flowchart LR
 普通全局 top-k 很容易让最匹配的一份文档挤掉其他文档。Compare pipeline 从检索阶段保留文档边界：
 
 1. 识别显式对比、比较级问题、跨文档一致性等信号。
-2. 对每份文档分别检索 `RAG_COMPARE_TOP_K_PER_DOC` 条证据。
+2. 对每份文档分别检索若干条证据：检索计划带 `topKPerDoc` 时用计划的值（agent 的检索计划都带），否则用 `RAG_COMPARE_TOP_K_PER_DOC`。
 3. 对每份文档独立 rerank。
 4. 对齐证据，分析 shared terms、近重复、数值差异和显式冲突。
 5. 如果证据高度近似且无冲突，走 deterministic no-difference guard。
@@ -167,7 +167,7 @@ custom Skill DAG 由 LangGraph.js 调度：按 superstep 进入节点，进程�
 
 **规划器的开关还在。** DAG 由谁规划跟随 `AGENT_PLANNER_ROLLOUT`（默认 `llm`，或 `deterministic`；2026-11-19 起只剩这两个取值，其他取值拒绝启动），LLM 规划失败（格式错误、越界、校验不过）时退回 deterministic graph。`rollout:readiness` 的零降级、零分歧要求衡量的是"纯 LLM 规划能否完全不需要兜底"，本地 7B 模型目前达不到。
 
-**动态选择：** 执行规划器能看到已授权的原子 Skill 候选，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段（这正是 `planner_dynamic_skill_graph` 验证的动态选择）；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
+**动态选择：** 执行规划器能看到已授权的原子 Skill 候选的数量，因此 LLM 执行规划器可以在 Intent 没有选中 custom skill 时也加入 `custom_skills` 阶段；确定性规划器不会这样做。这一步仍受 custom skill 预算（每次运行 2 次）和授权 catalog 约束。
 
 DAG planner 和 intent、execution planner 共用一个灰度位（`AGENT_PLANNER_ROLLOUT`），不新增第二个模型开关；见 `createDagPlannerAdapter()`。Replanner 只在解析后的 planner 确实是 LLM planner 时才接线——deterministic 状态下没有可回落的确定性 replanner，接上它等于让模型绕过灰度位影响真实执行。
 
@@ -213,7 +213,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | --- | --- | --- | --- |
 | 上传 PDF | `src/components/PdfUploader.jsx` 调 `/upload` 或分片上传接口 | `server/routes/uploads.js` 校验文件名、魔数、session 和 access scope | `server/rag/index.js` 用 `pdf-loader.js` 解析 PDF，`chunker.js` 切块，`doc-registry.js` 写 PostgreSQL，`vector-store*.js` 写索引 |
 | 普通问答 | `src/components/ChatComponent.jsx` 经 `streamChatAnswer` 调 `/chat/stream`（进度和校验过的草稿实时推送，最终结果与 `/chat` 相同） | `server/routes/chat.js` 接请求，`server/rag/agent.js` 编排 bootstrap、planner、clarification 和 execution plan | `agent-document-loop.js`、`document-rag-execution.js`、retrievers、self-check、finalization flow |
-| 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
+| 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `query-router.js` 判断是否走对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
 | arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和候选 token，task service 记录等待确认并存下这份候选 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
 | Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 判断能否自动续跑：只续跑图，guarded graph 需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills`；其余中断的 run 一般转人工，已被领取过续跑的 custom Skill 图和已标过人工的 run 会被跳过（可能一直停在 `running`）。replay safety matrix 决定哪类失败 step 能由人重试，并给出原因码 | 符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时一般转人工；`agent-run-step-executor.js` 只执行审批后的 capability step 和人工重试的 step（重试接口也接受已经成功的 step），不恢复中断的 step |
@@ -290,7 +290,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 
 这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到审批的私有执行快照（gate 上的 `inputPreview` 只是预览，两者都计入 `approvalObjectHash`）。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
 
-需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。Web 搜索失败（没配 `SERPAPI_KEY`，或 SerpAPI 报错：key 无效、额度用完、连不上）时不作答：`mcp-server.js` 回 `isError`，`chat-mcp.js` 不重试、不调模型，直接以 409 和原因抛出，step 和 run 以失败结束，批准请求回 `{ error: 原因 }`，后台任务以同一原因失败。原因按失败种类给固定文本：没配 key 是 `Web search is not configured: SERPAPI_KEY is not set.`，SerpAPI 回了非 200 是 `Error performing web search: SerpAPI answered with an error.`，请求没拿到回复（网络错误、超时）是 `Error performing web search: the request to SerpAPI failed.`；SerpAPI 回复体的原文和网络错误信息只写进服务端日志（`mcp-server.js` 的 stderr），不给客户端。界面上原因只出现在聊天页的错误提示里：这一轮的审批门不会更新，后台任务的原因只记在任务的 `error` 字段，任务卡片不显示。
+需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。Web 搜索失败（没配 `SERPAPI_KEY`，或 SerpAPI 报错：key 无效、额度用完、连不上）时不作答：`mcp-server.js` 回 `isError`，`chat-mcp.js` 不重试、不调模型，直接以 409 和原因抛出，step 和 run 以失败结束，批准请求回 `{ error: 原因 }`，后台任务以同一原因失败。原因按失败种类给固定文本：没配 key 是 `Web search is not configured: SERPAPI_KEY is not set.`，SerpAPI 回了非 200 是 `Error performing web search: SerpAPI answered with an error.`，请求没拿到回复（网络错误、超时）是 `Error performing web search: the request to SerpAPI failed.`；SerpAPI 回复体的原文和网络错误信息只写进服务端日志（`mcp-server.js` 的 stderr），不给客户端。后台任务的原因只记在任务的 `error` 字段，任务卡片不显示。
 
 Agent task 的最终产物也复用同一套 capability registry。`server/rag/agent-goal-deliverables.js` 只根据公开目标、最终回答和 docIds 生成产物规格，例如 markdown report、document organization、saved summary 和 follow-up task；`agent-tasks.js` 在回答完成后把 task 暂停为 `requiredUserAction: "approve_deliverables"`，用户批准后才执行这些 capability。Artifact deliverable 只有在真实存储成功并返回 compact artifact ref 后才算 created；写入失败会保持任务未完成。这样目标交付不会绕过 action capability 的审批边界，也不会把产物结果误当成 RAG citation。
 
@@ -386,11 +386,11 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 上传的文档、文件名和网页搜索结果都是不可信文本，它们都会进入发给模型的 prompt。规划器看不到文档正文（看到的是问题、doc id、Skill 元数据和 task memory 等规划上下文），所以文档里的注入直接影响的是带文档文本的 prompt，例如答案生成、调用答案生成的 Skill、claim 评审，以及跨语言检索的改写（提示里带文档摘要）。防护分三层，都在这条路径上：
 
 1. **确定性筛查**（`rag/prompt-injection-screen.js`，`RAG_INJECTION_SCREEN`，默认 on）。
-   - **识别的句子**：检索到的切块、上传文件名和网页结果中，规则认出的对 AI 说话的句子，在进入 prompt 前会被替换成标记。包括"忽略之前的指令"、"Note to AI assistants"、"Assistant: …"、"你的新任务"、要求输出系统提示词的句子，以及 chat 模板控制符（`<|im_start|>` 等，连同其中的内容一起替换）。中文写法也覆盖。
+   - **识别的句子**：检索到的切块、证据里的上传文件名和网页结果中，规则认出的对 AI 说话的句子，在进入 prompt 前会被替换成标记。包括"忽略之前的指令"、"Note to AI assistants"、"Assistant: …"、"你的新任务"、要求输出系统提示词的句子，以及 chat 模板控制符（`<|im_start|>` 等，连同其中的内容一起替换）。中文写法也覆盖。证据之外的文件名（例如 custom Skill 拼进问题的所选文档名）和证据里单列的章节标题不经筛查。
    - **用户看到的内容不变**：引用给用户看的仍是原文。
    - **可观察**：RAG 响应里的 `injectionScreen` 报告删了几句、命中哪些规则，只记规则 id，不记原文。
 2. **不可信证据规则**（spotlighting）。
-   - 答案、网页回答和 claim 评审的 prompt 都写明：证据是不可信的数据，里面对 AI 的指令、请求和链接一律不执行、不复述，也不透露系统指令。
+   - 答案和网页回答的 prompt 写明：证据是不可信的数据，里面对 AI 的指令、请求和链接一律不执行，也不透露系统指令；claim 评审的 prompt 写明来源是文档文本而不是指令，其中对评审的请求一律忽略。
    - 对应的模板版本升到 `qa_answer` / `comparison_answer` / `guarded_comparison_answer` v1.1 / v2.1、`web_answer` v1.1 / v2.1 和 `claim_judge` v2。之后 `qa_answer` 又因"先给最短的直接答案"升到 v1.2 / v2.2。
 3. **输出链接守卫**（`guardAnswerLinks`）。
    - 答案里的 markdown 图片一律删除，因为自动加载的图片 URL 是外泄通道。
@@ -400,7 +400,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 已知边界：
 
 - 筛查是模式匹配。刻意绕开这些写法的改写能通过：红队集里的 `evasion_paraphrase` 在文档 RAG 上筛查前后都 3/3 成功（Agent 路径从 3/3 变成 1/3），这时只剩第 2 层，而 7B 模型挡不住。
-- 词法 claim 校验看的是未筛查的原文，所以理论上能支持一句复述注入内容的 claim。好在模型已经看不到被筛掉的句子。
+- 词法 claim 校验看的是未筛查的原文，所以理论上能支持一句复述注入内容的 claim。
 - 用户自己在问题里写的指令不做筛查（问题属于用户本人）；这类直接注入靠 grounding 规则和 finalizer 处理。
 
 `cd server && npm run eval:prompt-injection` 衡量效果，数字见 [evaluation.md](evaluation.md) 的“Prompt 注入红队”。
@@ -457,8 +457,8 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 `0` 关闭对应上限；空值保留默认值，避免 `.env` 里一行空值悄悄去掉上限。
 
 - **怎么计量**：每次成功的模型调用（chat、embedding、cross-encoder rerank）都会写一条 LLMOps metric，`recordLlmOpsMetric` 在写入前把它的 `totalTokens` 和 `estimatedCostUsd` 记到当前运行上。当前运行通过 `AsyncLocalStorage` 找到，所以 `ragService` 深处的调用也算在发起它的那次运行上；并发运行各记各的。失败、限流和被 LLMOps 策略拦截的调用不计（供应商不对它们计费）。没有定价的模型只计 token，并记入 `unpricedModelCalls`，所以成本上限只约束有定价的模型。
-- **在哪里生效**：在步骤边界，通过每个工具本来就要过的 `consumeBudget` / `reserveBudget`。任何一个上限用完后，下一个文档 RAG、补检索、custom skill、Web、arXiv 或 research question 都被跳过，写一条 `budget_limit` trace（原因如 `run token budget exhausted (…)`），运行走已有的澄清或证据不足降级路径，而不是报错；`getRemainingBudget` 返回 0，DAG 规划器因此不会再规划新节点。trace step 本身不受限，用完预算的运行仍能记录它为什么停下。
-- **边界**：已经开始的步骤会跑完，所以一次运行最多超出一个步骤的用量；这是"不再开始新工作"的软截止，不会中断进行中的模型调用。每次调用 `runAgentRag` 或图恢复都是一个新计量器：审批续跑可能隔了几个小时，时长从续跑时重新算才符合截止时间的含义，但这也意味着 token 和成本按调用计，不跨审批累加。意图、执行、DAG 规划器调用发生在第一个工具之前，计入用量但不受上限阻止。
+- **在哪里生效**：在步骤边界，通过每个工具本来就要过的 `consumeBudget` / `reserveBudget`。任何一个上限用完后，下一个文档 RAG、补检索、custom skill、Web、arXiv 或 research question 都被跳过，写一条 `budget_limit` trace（原因如 `run token budget exhausted (…)`），运行走已有的澄清或证据不足降级路径，而不是报错。trace step 本身不受限，用完预算的运行仍能记录它为什么停下。
+- **边界**：已经开始的步骤会跑完，所以一次运行可能超出上限不止一个步骤的用量（例如并发的图节点都会跑完；claim 评审等不经 `consumeBudget` / `reserveBudget` 的模型调用在上限用完后照常发生）；这是软截止，不会中断进行中的模型调用。每次调用 `runAgentRag` 或图恢复都是一个新计量器，token 和成本按调用计；批准后执行的 Capability（step executor 的 `applyApprovalAction`）不在任何计量器里，不受这三个上限约束。意图、执行规划器调用发生在第一个工具之前；这两个和 DAG 规划器的调用都计入用量但不受上限阻止。
 - **观测**：`agentObservability.budget.run` 返回 `limits`、`used`（`tokens`、`costUsd`、`modelCalls`、`unpricedModelCalls`、`durationMs`）和 `exhausted`（`null` / `tokens` / `cost` / `duration`）。它是新增字段，`budget.limits` / `budget.used` 的形状和图 checkpoint 摘要都不变。
 
 默认值是防失控的上限，不是按真实流量校准的：按次数预算的上限估算，一次运行最多约十次模型调用（三个规划器、两次文档 RAG、两次 custom skill、一次 Web 等），每次几千 token，合计在几万 token 量级，默认 100000 留了约两倍余量；时长按本地 7B 模型单次调用 10–20 秒估算。

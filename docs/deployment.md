@@ -63,7 +63,7 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 
 - 另起一个 `docling` 服务：docling-serve CPU 版，压缩后约 2 GB，自带模型；
 - 应用会把 PDF 交给它解析。它能按多栏的阅读顺序输出正文，并把表格还原成带列名的行；
-- 服务不可用时退回 pdf.js，并在 `/health` 的 `checks.pdfParser` 里报错；
+- 服务不可用时默认退回 pdf.js（`DOCLING_FALLBACK=none` 时上传失败），并在 `/health` 的 `checks.pdfParser` 里报错；
 - 镜像标签是 `latest`，没有固定版本。`PDF_PARSER=auto` 和页段请求是在 docling-serve-cpu 1.37.0（docling 2.138.0，`ghcr.io/docling-project/docling-serve-cpu@sha256:5a8367f3f657c26755605c3b2255546674833209a18afc2011598f4c045c6db3`）上验证的（[evaluation.md](evaluation.md)「真实 docling-serve 上的验证」）；之前的"版面解析"评测没有记录版本。要可复现的部署，把 `docker-compose.yml` 里的标签换成这个 digest 或确定的版本；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
@@ -73,7 +73,7 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 PDF_PARSER=auto docker compose --profile app --profile layout up -d
 ```
 
-- 每页先用 pdf.js 解析，同时采集页面信号。只有表格页（`layout` 路由，不做 OCR）和扫描页、纯图片页、乱码页（`ocr` 路由，强制 OCR）送 docling-serve，其余页保留 pdf.js 文本。规则和阈值见 [configuration.md](configuration.md) 的 `PDF_PARSER` 和 `PDF_AUTO_*`；
+- 每页先用 pdf.js 解析，同时采集页面信号。默认只有表格页（`layout` 路由，不做 OCR）和扫描页、纯图片页、乱码页（`ocr` 路由，强制 OCR）送 docling-serve，其余页保留 pdf.js 文本。规则和阈值见 [configuration.md](configuration.md) 的 `PDF_PARSER` 和 `PDF_AUTO_*`；
 - `PDF_PARSER` 要像上面那样写在命令前：compose 给 `app` 的 `environment` 里有 `PDF_PARSER: ${PDF_PARSER:-pdfjs}`，会盖过 `server/.env` 里的同名项。`PDF_AUTO_*`、`DOCLING_*`（`DOCLING_SERVE_URL` 除外）和 `PDF_PARSE_*` 不在 `environment` 里，写在 `server/.env` 就行；
 - 上线前可以先看自己的 PDF 会怎么分，不需要 docling-serve：`cd server && npm run pdf:route -- <file.pdf|目录>`（`--json` 输出 JSON，`--thresholds-from-env` 改用 `server/.env` 里的 `PDF_AUTO_*`，否则用默认阈值）。它只打印页码、路由、原因和信号，不打印页面文本；
 - docling-serve 不可用时，送过去的页保留 pdf.js 文本（`DOCLING_FALLBACK=pdfjs`，默认）或让上传失败（`none`）；超时或连不上时，同一文档还在排队的请求直接放弃，不再一个个等超时。`/health` 的 `checks.pdfParser` 会报错，并给出 `routes`、`doclingMaxConcurrency`、`doclingPageBatchSize`；`PDF_AUTO_ROUTES=none` 时不探测 docling-serve；
@@ -256,7 +256,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 - **模型网关**：同样起多个网关进程，列进 `MODEL_GATEWAY_URL`。多个网关副本要共享并发上限、熔断和配额计数，设 `RAG_SHARED_STATE=redis`；不设时每个网关进程各算各的。
 - **推理后端（embedding、重排）**：在网关上列多个上游，例如 `MODEL_GATEWAY_EMBEDDING_UPSTREAMS=http://gpu-a:11434/v1,http://gpu-b:11434/v1`、`MODEL_GATEWAY_RERANK_UPSTREAMS=http://r1:8081/rerank,http://r2:8081/rerank`。网关选进行中请求最少的健康副本，每个副本有自己的并发上限和熔断；连接被拒或熔断打开时立即换下一个副本。
 - **入库**：仍在 api 层（或 `npm run worker:ingest` 独立 worker）执行，扩法见上面的"异步入库"。worker 设了 `MODEL_GATEWAY_URL` 时 embedding 也走网关，同样需要内部身份：`hmac` 下是 `INTERNAL_SERVICE_KEYS`；`ed25519` 下给 worker 单独一把私钥，并设 `INTERNAL_SERVICE_ISSUER=ingest-worker`、把它的公钥以 `ingest-worker` 登记进网关的 `INTERNAL_SERVICE_TRUSTED_KEYS`，这样按调用策略它只能调用网关。不设 `INTERNAL_SERVICE_ISSUER` 时 worker 以 `all` 签名。
-- 调用方怎么选副本：进行中请求最少的优先；连不上或返回 502/503/504 的副本在 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` 内被跳过。已经发出的 `/chat` 和任务操作不会重发到另一个副本。
+- 调用方怎么选副本：进行中请求最少的优先；连不上或返回 502/503/504 的副本在 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` 内被跳过（还有健康副本时；都不健康时照样会用；调用模型网关时 502/503/504 不算）。已经发出的 `/chat` 和任务操作不会重发到另一个副本。
 
 ### 用镜像部署
 
@@ -345,7 +345,7 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - `ed25519` 只在四个独立进程的测试里跑通过（`test/service-identity-split.test.mjs`，检索层用的是 local 向量库，不是 PostgreSQL）；没有在 Docker 镜像或 PostgreSQL 上的检索层里跑过。老的几组拆分测试（`service-roles`、`retrieval-service`、`model-gateway` 等）手工签发不带绑定的 token，只在 `hmac` 下通过。
 - 没有 Redis 时，网关的配额、并发上限和熔断都按网关进程计算，多个网关副本时总量会超出设定值。
 - 公网入口的 `AGENT_SERVICE_TIMEOUT_MS` 现在也是 agent 层上运行的截止时间：到点时进行中的检索和模型调用被中止，运行在下一个安全点以 `deadline_exceeded` 结束。数据库语句不取消；检索层收到调用方断开不会停，只在自己的截止时间到时返回 504；排队等模型并发槽位的调用在取消时直接离队。检索层没有并发上限或准入控制。
-- agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
+- agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康：还有别的健康副本时跳过它 5 秒，只有这一个副本时照样会用它。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。
 - 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 不看 API auth，只对带内部身份 token 的探测返回完整报告（见上面），其他人只拿到 `{status}`。内部端口仍不能对外暴露。api 的 `/health` 会探测每个 agent 副本。
@@ -385,7 +385,7 @@ RBAC_MODE=enforce
 1. 一个 public client（SPA）：Authorization Code + PKCE，不用 client secret；登记回调地址 `http://localhost:3000/`（开发）或 `https://<你的域名>/`（单容器部署是 `http://localhost:5001/`）；允许 SPA 的 origin 跨域访问 discovery 和 token 端点。它的 client id 填 `API_AUTH_OIDC_CLIENT_ID`。
 2. 一个代表 API 的 audience，填 `API_AUTH_OIDC_AUDIENCE`。不要用 SPA 的 client id 当 audience；如果 IdP 只能这样做，设 `API_AUTH_OIDC_REQUIRE_TYP=true`，前提是它签发 `typ: at+jwt`。
 3. `API_AUTH_OIDC_ISSUER` 必须与 discovery 文档里的 `issuer` 一字不差，包括末尾斜杠。
-4. 角色：全局角色放进 roles claim（或用组 + `API_AUTH_OIDC_GROUP_ROLE_MAP`），按 workspace 的角色放进 `workspace_roles`，允许的 workspace 放进 `workspaces`。没有 `workspaces` / `workspace_id` 的 token 可以用 `x-workspace-id` 选任意 workspace，生产环境应保证每个用户都有该 claim，并在角色配齐后设 `RBAC_DEFAULT_ROLE=none`。
+4. 角色：全局角色放进 roles claim（或用组 + `API_AUTH_OIDC_GROUP_ROLE_MAP`），按 workspace 的角色放进 `workspace_roles`，允许的 workspace 放进 `workspaces`。没有 `workspaces` / `workspace_id` 的 token 在默认的 `TENANT_MEMBERSHIP=off` 下可以用 `x-workspace-id` 选任意 workspace，生产环境应保证每个用户都有该 claim，并在角色配齐后设 `RBAC_DEFAULT_ROLE=none`。
 5. claim 名按点号拆成路径，所以名字里本身含点的 claim（例如 `https://archive.example.com/roles`）无法引用，请用不含点的名字。
 
 **Keycloak**：issuer 是 `https://<host>/realms/<realm>`。给 SPA client 加一个 Audience mapper，把 `archive-rag-api` 写进 access token 的 `aud`（默认只有 `account`）；access token 的 `azp` 就是 SPA client id。realm 角色在 `realm_access.roles`，设 `API_AUTH_OIDC_ROLES_CLAIM=realm_access.roles`；组用 Group Membership mapper（关掉 full path）输出到 `groups`。`workspaces` / `workspace_roles` 用 User Attribute mapper（多值或 JSON 类型）。
@@ -402,7 +402,7 @@ RBAC_MODE=enforce
 
 - 浏览器端不校验 ID token 签名（public client），API 只认 access token。
 - refresh token（如有）放在 sessionStorage，XSS 可读。
-- workspace id 的权限匹配不区分大小写。token 列了允许的 workspace 时，数据库租户统一用列表里的小写形式，请求头写成 `ACME` 也落在 `acme`；token 没列时按请求头原样使用，此时只差大小写的两个 workspace 是两个租户，按 workspace 授予的角色只在小写形式完全一致的那个里生效。仍建议 workspace id 统一用小写。
+- workspace id 的权限匹配不区分大小写。token 列了允许的 workspace、又没有固定的 `workspace_id` 时，数据库租户统一用列表里的小写形式，请求头写成 `ACME` 也落在 `acme`；token 既没列也没固定 workspace 时按请求头原样使用，此时只差大小写的两个 workspace 是两个租户，按 workspace 授予的角色只在小写形式完全一致的那个里生效。仍建议 workspace id 统一用小写。
 - 没有 `WWW-Authenticate` 头，健康报告也不含 JWKS 状态。
 - `RBAC_MODE=enforce` 时不在路由表里的路径返回 403 而不是 404。
 
@@ -424,7 +424,7 @@ POSTGRES_READ_REPLICA_MAX_LAG_MS=2000
 ```
 
 - 设置在做检索的进程上：单体，或拆分部署的检索层（agent 层没设 `RETRIEVAL_SERVICE_URL` 时也在本地检索）。拆分部署下检索层会从主库重读请求里的每个 docId，作为一致性的锚点。
-- 检查：在本进程检索时（例如单体），`curl -s http://localhost:5001/health` 里的 `checks.readReplicas` 列出每个副本的状态、延迟、熔断和被排除的原因；拆分部署的检索层的 `/health` 没有这一项。副本落后、宕机或熔断时只报 `warning`，`/ready` 仍是 200，读取回到主库；只有配置写错才报 `error`。
+- 检查：在本进程检索时（例如单体），`curl -s http://localhost:5001/health` 里的 `checks.readReplicas` 列出每个副本的状态、延迟、熔断和被排除的原因；拆分部署的检索层的 `/health` 没有这一项。副本落后、宕机或熔断时只报 `warning`，`/ready` 仍是 200，读取交给其他可用副本或主库；只有配置写错才报 `error`。
 - 指标：`archive_rag_postgres_reads_total{target}`、`archive_rag_postgres_replica_fallbacks_total{reason}`、`archive_rag_postgres_replica_lag_seconds{replica}`（需要 `METRICS_ENABLED=true`）。
 
 ### 在本机试
@@ -441,7 +441,7 @@ bash scripts/run-pgvector-replica-integration.sh
 ### 读副本的限制
 
 - 只在一台机器上测过：主库和副本在同一台主机上，副本延迟和网络距离都和真实部署不同。
-- 副本上的语句只有连接超时，没有语句超时，也不受请求截止时间限制。
+- 副本上的语句除了连接超时，应用只给它们设 `POSTGRES_STATEMENT_TIMEOUT_MS` 的语句超时（默认 0，不设），也不受请求截止时间限制。
 - `vector:reindex --apply` 期间，落后的副本可能对重新向量化的文档返回空的稠密结果，直到追上（受延迟上限约束）。
 - 不检查副本是否真的跟随这个主库。
 

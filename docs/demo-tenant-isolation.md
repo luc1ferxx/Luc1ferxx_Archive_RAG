@@ -211,7 +211,7 @@ TEST_FILES="test/tenant-isolation-hardened.e2e.test.mjs" bash scripts/run-pgvect
 ## 组合暴露的问题
 
 - **`API_AUTH_REQUIRE_WORKSPACE=true` 拒绝所有平台身份。** 这个设置要求每个已认证请求都解析出 workspace，连平台管理路由也不例外，而平台身份（没有 workspace、也没有 workspace 列表）按设计不属于任何 workspace。结果是开了它就无法登记 workspace（`POST /admin/workspaces` 只允许平台身份），也无法擦除、导出、跨租户读用量和审计；给平台身份带上 `x-workspace-id` 也不行，路由会把它当成该 workspace 的管理员。健康探针同样受影响：平台管理员读不到健康详情。修复（`server/auth.js`）：在 `TENANTLESS_PLATFORM_PATHS` 上，对没有 workspace 列表的身份不要求 workspace，和 `requireTenantScope` 放行的范围一致；探针的权限判断不要求 workspace（它本来就不应用 `requireTenantScope`）。其他路由照旧要求。回归测试在 `test/admin-tenants-routes.test.mjs` 和 `test/health-access.test.mjs`。
-- **成员拒绝的计数把任意 workspace id 写进用量账本，也让擦除过的 workspace 重新出现。** `TENANT_MEMBERSHIP=enforce` 的每次拒绝都按"用户 + 请求里的 workspace"记一行 `refused_*`。这个 workspace 是客户端在 `x-workspace-id` 里随便写的：每个编造的 id 都变成账本里自己的行（账本没有保留期）。擦除也因此不完整：擦除先清账本、最后才删注册表，alpha 被擦除后，前成员 alice 的第一个被拒请求就把 `alpha` 写回了刚清空的账本（擦除期间 `WORKSPACE_DELETING` 的拒绝也一样）。修复（`server/auth.js` `resolveRefusalLedgerScope`）：只有注册表里存在、且不在删除中的 workspace 才按 workspace 计；其他情况只记在用户名下，指标照常计数。回归测试在 `test/tenant-refusals.test.mjs`（未登记的、已登记但不是成员的、删除中的 workspace），e2e 断言擦除后 alice 的拒绝落在 `(alice, '')`。
+- **成员拒绝的计数把任意 workspace id 写进用量账本，也让擦除过的 workspace 重新出现。** `TENANT_MEMBERSHIP=enforce` 的每次拒绝都按"用户 + 请求里的 workspace"记一行 `refused_*`。这个 workspace 是客户端在 `x-workspace-id` 里随便写的：每个编造的 id 都变成账本里自己的行（账本没有保留期）。擦除也因此不完整：擦除先清账本、最后才删注册表，alpha 被擦除后，前成员 alice 的第一个被拒请求就把 `alpha` 写回了刚清空的账本（擦除期间 `WORKSPACE_DELETING` 的拒绝也一样）。修复（`server/auth.js` `resolveRefusalLedgerScope`）：只有注册表里存在、且不在删除中的 workspace 才按 workspace 计；其他情况只记在用户名下（没有用户时不进账本），指标照常计数。回归测试在 `test/tenant-refusals.test.mjs`（未登记的、已登记但不是成员的、删除中的 workspace），e2e 断言擦除后 alice 的拒绝落在 `(alice, '')`。
 
 ## 按设计如此的行为
 

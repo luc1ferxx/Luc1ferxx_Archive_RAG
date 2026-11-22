@@ -16,7 +16,7 @@
 | `GET /ready`（应用端口） | 能不能接流量。读副本落后、agent 层不可达（拆分部署的入口）只报 `warning`，不会让它变成 503。 |
 | `GET /health`（应用端口） | 每个 `checks.*` 的状态和说明：数据库、行级安全、向量库、入库队列（`checks.ingestJobs`）、读副本（`checks.readReplicas`）、agent 层（`checks.agentService`）、拓扑（`checks.serviceTopology`）等。 |
 | `GET /metrics`（`METRICS_PORT`，默认 9464） | Prometheus 指标。设了 `METRICS_TOKEN` 时要带 `Authorization: Bearer <token>`。 |
-| 进程日志 | 拆分角色的启动健康检查和停机过程带 `[service]` 前缀；指标监听启动时打印 `[metrics] serving /metrics on http://HOST:PORT`。日志、指标标签和跨层的错误里都不带问题、prompt、模型输出、文档内容、租户 id 或密钥。 |
+| 进程日志 | 拆分角色的停机过程和检索层的启动健康检查带 `[service]` 前缀（api、agent 层的启动健康检查以 `Startup health` 开头）；指标监听启动时打印 `[metrics] serving /metrics on http://HOST:PORT`。日志、指标标签和跨层的错误里都不带问题、prompt、模型输出、文档内容、租户 id 或密钥。 |
 | `GET /usage`（模型网关） | 按租户的模型用量和配额拒绝次数；只接受系统身份、带 admin claim 或 `admin.status.read` 权限的内部 token。 |
 
 ## `/chat` 的 SLO（建议值）
@@ -113,7 +113,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 ### `ArchiveRagPostgresReplicaLagHigh`
 
-**含义**：某个读副本的重放延迟超过 `POSTGRES_READ_REPLICA_MAX_LAG_MS`，路由器把本该去它的检索送回主库（计入 `archive_rag_postgres_replica_fallbacks_total{reason="lag_exceeded"}`）。回答仍然正确，只是主库多承担了读负载。
+**含义**：某个读副本的重放延迟超过 `POSTGRES_READ_REPLICA_MAX_LAG_MS`，路由器跳过它，把检索交给其他可用的副本，没有可用副本时送回主库（计入 `archive_rag_postgres_replica_fallbacks_total`，例如 `reason="lag_exceeded"`）。回答仍然正确，只是其他副本或主库多承担了读负载。
 
 1. **主库上**：`psql "$POSTGRES_DATABASE_URL" -c "SELECT application_name, state, write_lag, replay_lag FROM pg_stat_replication"`。
 2. **副本上**：`SELECT now() - pg_last_xact_replay_timestamp();`。副本上的长查询可能拖住重放（`max_standby_streaming_delay`）。
@@ -150,7 +150,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 - 限额类：`TENANT_RATE_LIMITED`、`TENANT_CONCURRENCY_LIMITED`（`TENANT_RATE_LIMIT_*`、`TENANT_MAX_CONCURRENT_RUNS`）、`TENANT_TASK_LIMITED`（`TENANT_MAX_QUEUED_TASKS`）、`UPLOAD_SESSION_LIMIT_EXCEEDED`（`UPLOAD_SESSION_MAX_*`）、`INGEST_PENDING_LIMIT_EXCEEDED` / `INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED`（`RAG_INGEST_MAX_PENDING_*`）、`TENANT_STORAGE_QUOTA_EXCEEDED`（`TENANT_MAX_DOCUMENTS`、`TENANT_MAX_DOCUMENT_BYTES`）、`MODEL_GATEWAY_QUOTA_EXCEEDED`（进程内 `MODEL_QUOTA_ENABLED` 或模型网关，各记一次，不重复）、`MODEL_CALL_QUEUE_FULL`（`RAG_LLM_MAX_QUEUE`，每次被拒的尝试记一次）。
 - 成员关系类（`TENANT_MEMBERSHIP=enforce`）：`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`、`WORKSPACE_ROLES_LIMIT_EXCEEDED`；`TENANT_REGISTRY_UNAVAILABLE`（503）表示注册表读不出来，先查数据库。
 
-指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`（成员关系类拒绝的例外见下），和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。`TENANT_MEMBERSHIP=enforce` 的拒绝只有在请求的 workspace 已登记且不在删除中时才记在这个 workspace 下；否则（客户端随便写的 id、已擦除的 workspace）只记在用户名下，没有用户时只计指标、不进账本；账本里不会出现注册表里没有的 workspace id。
+指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`（成员关系类拒绝的例外见下），和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。`TENANT_MEMBERSHIP=enforce` 的拒绝只有在请求的 workspace 已登记且不在删除中时才记在这个 workspace 下；否则（客户端随便写的 id、已擦除的 workspace）只记在用户名下，没有用户时只计指标、不进账本。
 
 1. **哪个租户**：用平台管理员凭据（`admin.usage.read`）调 `GET /admin/usage?metric=refusals&reason=<reason>&from=<一小时前>`，按拒绝次数列出租户，每行的 `refusals` 是按错误码的次数；`groupBy=workspace` 按 workspace 汇总（按 workspace 计的限额就是这个数）。数据最多滞后 `TENANT_USAGE_FLUSH_MS`。
 2. **哪一种、在哪一层**：`sum by (reason, role) (rate(archive_rag_tenant_refusals_total[15m]))`；HTTP 限额对照 `archive_rag_http_requests_total{status_class="429"}`，网关配额对照 `archive_rag_model_gateway_quota_rejections_total`。
