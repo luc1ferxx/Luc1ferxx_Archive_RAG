@@ -42,10 +42,11 @@ const sendToUpstream = (kind, model, send, { lane = MODEL_CALL_LANES.default, si
 
 // The request timeout, plus the caller's signal when it has one (the gateway
 // passes one that fires when its caller goes away or its deadline passes).
-const buildRequestSignal = (timeoutMs, signal) =>
-  signal
-    ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
-    : AbortSignal.timeout(timeoutMs);
+const buildRequestSignal = (timeoutMs, signal) => {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  // The composite holds it: before Node 22.16 AbortSignal.any keeps it only weakly.
+  return signal ? Object.assign(AbortSignal.any([timeoutSignal, signal]), { timeoutSignal }) : timeoutSignal;
+};
 
 const parseErrorBody = (body) => {
   try {
