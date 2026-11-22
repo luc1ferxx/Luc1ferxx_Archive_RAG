@@ -93,7 +93,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 read -rs OPENAI_API_KEY && export OPENAI_API_KEY
 ```
 
-本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`。**`node server.js` 监听所有网卡，而演示 token 是公开的，同网段的人能用它们花掉这个 key 的额度**：只在防火墙后或可信网络里这样用，否则用 compose 方式（默认只绑 `127.0.0.1`）。
+本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`。**`node server.js` 监听所有网卡，而演示 token 是公开的，同网段的人能用它们花掉这个 key 的额度**：只在本机防火墙挡住 5001 端口、或在可信网络里时这样用，否则用 compose 方式（默认只绑 `127.0.0.1`）。
 
 ```bash
 OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_CHAT_MODEL=gpt-5 OPENAI_CHAT_FALLBACK_MODEL= \
@@ -121,7 +121,7 @@ docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.y
 
 之后每次 `up` 都要带这三个 `-f`，否则 app 会回到假模型。和下面的浏览器界面一起用时，先按那里的命令构建，再运行上面这条命令，但去掉 `--build`：带着它会用空 token 重新构建前端。
 
-key 会留在 app 容器的配置里，删掉容器才消失：带着这个文件运行 `docker compose config`、对这个容器运行 `docker inspect`，都会把 key 明文打印出来，不要把输出贴出去。
+key 会留在 app 容器的配置里（删掉容器才消失），对它运行 `docker inspect` 会明文打印出来；shell 里还有这个变量时，带着这个文件运行 `docker compose config` 也会明文打印出来，这和容器在不在无关。两种输出都不要贴出去。
 
 ### 浏览器界面
 

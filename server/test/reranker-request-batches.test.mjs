@@ -225,8 +225,7 @@ test("a failed later request keeps the whole fused order and caches none of the 
 test("the timeout survives garbage collection where AbortSignal.any holds its sources weakly", { timeout: 30_000 }, async () => {
   // Node 22.13-22.15 (package.json allows them) do; from 22.16 they are kept
   // alive. Only optimised code drops a variable it no longer reads, so a child
-  // process stands in such an AbortSignal.any and optimises the function. It
-  // gets no NODE_V8_COVERAGE, which would change what V8 optimises.
+  // process stands in such an AbortSignal.any and optimises the function.
   const child = `
     const { requestCrossEncoderScores: rerank } = await import(${JSON.stringify(new URL("../rag/reranker.js", import.meta.url).href)});
     AbortSignal.any = (signals) => {
