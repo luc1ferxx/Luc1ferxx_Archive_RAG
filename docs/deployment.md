@@ -129,7 +129,8 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
   - 同一台 Apple M5 Pro 不进容器、只用 CPU 时，18 个候选约 2.8 秒（英文）到 4.5 秒（900 字的中文分块）。
   - 同一台机器的容器里实测（真实分块，平均约 520 个字符）：分到 15 核时每个候选约 0.18 秒，30 个候选约 5.4 秒；限制到 4 核时每个候选约 0.38 秒。
   - 服务逐个处理请求，并发的请求在服务里排队。
-  - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`。一次 90 段（agent 三个查询的首轮）在 15 核约 16 秒，4 核约 34 秒；150 段分别约 27 秒和 57 秒。4 核时连 90 段都会超时，核少的机器在 `server/.env` 里调到 90000 或更大。超时或服务不可用时查询不会失败，但这一步既不重排，拒答门控也退回词面门控，拒答会变多。
+  - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`。一次 90 段（agent 三个查询的首轮）在 15 核约 16 秒，4 核约 34 秒；150 段分别约 27 秒和 57 秒。按这个速度推算，4 核时连 90 段都会超时，核少的机器在 `server/.env` 里调到 90000 或更大。超时或服务不可用时查询不会失败，但这一步既不重排，拒答门控也退回词面门控，拒答会变多。
+  - **拆分部署调超时要两个一起调**：一次远程检索的预算 `RETRIEVAL_SERVICE_TIMEOUT_MS` 默认 60000（取自 `INTERNAL_SERVICE_TIMEOUT_MS`），而且包含重排。它必须大于重排超时，例如重排 90000、检索 120000。否则预算先到，整次检索返回 504，查询会失败，不会退回融合顺序。
 - **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
 - **不用 Docker**：在 `server/` 目录下先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
 - **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
