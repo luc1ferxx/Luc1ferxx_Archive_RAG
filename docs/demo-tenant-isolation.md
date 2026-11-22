@@ -2,7 +2,7 @@
 
 租户隔离第 1–5 阶段的每个开关此前都只单独测过。这个演示把它们同时打开，用一组固定的演示身份跑一遍，证明组合起来仍然成立：
 
-- API 鉴权（按用户的静态 token），每个请求必须解析出 workspace；
+- API 鉴权（按用户的静态 token），每个请求必须解析出 workspace（例外如平台身份调用平台路由、`GET /auth/me`）；
 - `RBAC_MODE=enforce`，`TENANT_MEMBERSHIP=enforce`；
 - 行级安全（`enforce`）加 `POSTGRES_TENANT_CONTEXT=strict`；
 - 数据库角色拆分：owner 登录跑迁移，运行时登录不拥有任何表；
@@ -38,8 +38,8 @@
 | ben | `demo-ben-token` | 只有用户 | beta `workspace.member` |
 | carol | `demo-carol-token` | token 允许 `alpha`、`beta`，每次必须指定一个 | 两个 workspace 都是 `workspace.member`，两边各有一份自己的文档 |
 | dave | `demo-dave-token` | 只有用户 | gamma `workspace.admin`（"吵闹的邻居"，限流、配额、暂停都拿它试） |
-| platform-admin | `demo-platform-admin-token` | 没有 workspace | `admin.owner`：擦除、导出、用量、审计、健康详情 |
-| tenant-manager | `demo-tenant-manager-token` | 没有 workspace | `admin.tenant_manager`：登记 workspace 和成员 |
+| platform-admin | `demo-platform-admin-token` | 没有 workspace | token 里的 `admin.owner`：擦除、导出、用量、审计、健康详情 |
+| tenant-manager | `demo-tenant-manager-token` | 没有 workspace | token 里的 `admin.tenant_manager`：登记 workspace 和成员 |
 
 文档属于上传它的 (用户, workspace)：同一 workspace 的其他成员看不到（`documentMatchesAccessScope` 和迁移 013 的行策略）。没有用户的 workspace 凭据（alpha-library，相当于服务账号）上传的文档没有 owner，整个 workspace 都能看到，所以 anna 作为只读成员能读到它。
 
@@ -62,7 +62,7 @@ npm run demo:walkthrough
 - 端口仍然只绑定 `127.0.0.1`（`ARCHIVE_RAG_BIND_HOST`）。不要配合这个文件设 `ARCHIVE_RAG_BIND_HOST=0.0.0.0`。
 - 重新开始：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app down -v`。它只删除演示项目的容器和 `pgdata-demo`、`appdata-demo`（连同主密钥，所以演示里加密的文件也一起作废），默认部署的数据卷不受影响。
 
-这个 override 只用 `docker compose ... config` 验证过（`server/test/deployment-contract.test.mjs` 固定了它的接线），镜像没有在这里构建过。
+这个 override 用 `docker compose ... config` 验证过（`server/test/deployment-contract.test.mjs` 固定了它的接线）。
 
 ### 方式二：本地 `node server.js` 加本地 PostgreSQL
 
@@ -143,7 +143,7 @@ key 会留在 app 容器的配置里（删掉容器才消失），对它运行 `
 
 ## `demo:walkthrough`
 
-逐项检查并打印 PASS/FAIL 表，有 FAIL 时退出码为 1（无法运行时为 2）。`--only <id,...>` 只跑部分检查，`--json` 输出 JSON。检查会改动 gamma（暂停再恢复、耗尽限流、填满存储配额）、在回收站里删除再恢复 alice 的一份文档、写入再删掉 carol 的两条记忆，并在 bob 的回收站里留一份探测文档（下一次运行先恢复它再删除）。除 gamma 的配额探测文档留在回收站里（它们在清除前继续占配额，所以之后的运行一上来就被拒绝，检查仍然成立）之外，结束时都回到 seed 之后的状态，可以在同一个限流窗口内连续再跑一遍。`refusal_accounting` 要在 `tenant_rate_limit` 之后运行。
+逐项检查并打印 PASS/FAIL 表，有 FAIL 时退出码为 1（无法运行时为 2）。`--only <id,...>` 只跑部分检查，`--json` 输出 JSON。检查会改动 gamma（暂停再恢复、耗尽限流、填满存储配额）、在回收站里删除再恢复 alice 的一份文档、写入再删掉 carol 的两条记忆，并在 bob 的回收站里留一份探测文档（下一次运行先恢复它再删除）。gamma 的配额探测文档留在回收站里（它们在清除前继续占配额，所以之后的运行一上来就被拒绝，检查仍然成立），检查也会留下别的记录（例如 `memory_isolation` 给 alice 写的一条长期记忆）；可以在同一个限流窗口内连续再跑一遍。`refusal_accounting` 要在 `tenant_rate_limit` 之后运行。
 
 | 检查 | 证明什么 |
 | --- | --- |
@@ -194,9 +194,9 @@ cd server
 TEST_FILES="test/tenant-isolation-hardened.e2e.test.mjs" bash scripts/run-pgvector-integration.sh
 ```
 
-没有 `PGVECTOR_TEST_DATABASE_URL` 时报告为 skipped。它在测试集群里新建一个一次性数据库，用 `psql`（15 及以上）执行 `create-split-roles.sql` 建两个登录（密码走 `\getenv`，和 compose 初始化一样；找不到时用 pg 执行同样的语句），用 `hardened.env` 的值启动 `node server.js`（只替换数据库地址、角色名、模型地址、端口、数据目录和密钥库路径），然后：
+没有 `PGVECTOR_TEST_DATABASE_URL` 时报告为 skipped。它在测试集群里新建一个一次性数据库，用 `psql`（15 及以上）执行 `create-split-roles.sql` 建两个登录（密码走 `\getenv`，和 compose 初始化一样；找不到时用 pg 执行同样的语句），用 `hardened.env` 的值启动 `node server.js`（替换数据库地址、角色名、模型地址、端口、数据目录和密钥库路径，另有一些测试设置，例如接上测试自己的 OIDC IdP、把保留期清理间隔设成 2 秒），然后：
 
-- seed 两次（第二次全部是已有/重复）、walkthrough 两次，全部 PASS；
+- seed 两次（第二次全部是已有/重复）、walkthrough 两次，除总是 SKIP 的 `audit_chain` 外全部 PASS；
 - 数据库里每份 `rag_documents.file_bytes` 都是信封（`isTenantEnvelope`）：没有 `%PDF` 标记，也没有文档里的句子；每个 workspace 一把密钥（`tk_` 加哈希，不含原始 id），不同 workspace 不共用；用同一个本地 KMS 和本行的上下文能解出 PDF，换成别的文档的行就解不开；`tenant:keys -- status` 列出这几把密钥；
 - 用 dev OIDC IdP 登录一个 token 里自带 `admin.owner` 的用户：不是成员时被拒；登记为 beta 的 viewer 后只有 viewer 权限，平台角色被丢弃（`API_AUTH_OIDC_ALLOW_PLATFORM_ROLES=false`），不能擦除；移出成员后又被拒；
 - 假模型把每次 chat 延迟 1.5 秒，beta 的第三个并发请求返回 429 `TENANT_CONCURRENCY_LIMITED`，同时 alpha 的请求正常；
@@ -211,13 +211,13 @@ TEST_FILES="test/tenant-isolation-hardened.e2e.test.mjs" bash scripts/run-pgvect
 ## 组合暴露的问题
 
 - **`API_AUTH_REQUIRE_WORKSPACE=true` 拒绝所有平台身份。** 这个设置要求每个已认证请求都解析出 workspace，连平台管理路由也不例外，而平台身份（没有 workspace、也没有 workspace 列表）按设计不属于任何 workspace。结果是开了它就无法登记 workspace（`POST /admin/workspaces` 只允许平台身份），也无法擦除、导出、跨租户读用量和审计；给平台身份带上 `x-workspace-id` 也不行，路由会把它当成该 workspace 的管理员。健康探针同样受影响：平台管理员读不到健康详情。修复（`server/auth.js`）：在 `TENANTLESS_PLATFORM_PATHS` 上，对没有 workspace 列表的身份不要求 workspace，和 `requireTenantScope` 放行的范围一致；探针的权限判断不要求 workspace（它本来就不应用 `requireTenantScope`）。其他路由照旧要求。回归测试在 `test/admin-tenants-routes.test.mjs` 和 `test/health-access.test.mjs`。
-- **成员拒绝的计数把任意 workspace id 写进用量账本，也让擦除过的 workspace 重新出现。** `TENANT_MEMBERSHIP=enforce` 的每次拒绝都按"用户 + 请求里的 workspace"记一行 `refused_*`。这个 workspace 是客户端在 `x-workspace-id` 里随便写的：每个编造的 id 都变成账本里自己的行（账本没有保留期）。擦除也因此不完整：擦除先清账本、最后才删注册表，alpha 被擦除后，前成员 alice 的第一个被拒请求就把 `alpha` 写回了刚清空的账本（擦除期间 `WORKSPACE_DELETING` 的拒绝也一样）。修复（`server/auth.js` `resolveRefusalLedgerScope`）：只有注册表里存在、且不在删除中的 workspace 才按 workspace 计；其他情况只记在用户名下，指标照常计数；注册表不可用时保持原样。回归测试在 `test/tenant-refusals.test.mjs`（未登记的、已登记但不是成员的、删除中的 workspace），e2e 断言擦除后 alice 的拒绝落在 `(alice, '')`。
+- **成员拒绝的计数把任意 workspace id 写进用量账本，也让擦除过的 workspace 重新出现。** `TENANT_MEMBERSHIP=enforce` 的每次拒绝都按"用户 + 请求里的 workspace"记一行 `refused_*`。这个 workspace 是客户端在 `x-workspace-id` 里随便写的：每个编造的 id 都变成账本里自己的行（账本没有保留期）。擦除也因此不完整：擦除先清账本、最后才删注册表，alpha 被擦除后，前成员 alice 的第一个被拒请求就把 `alpha` 写回了刚清空的账本（擦除期间 `WORKSPACE_DELETING` 的拒绝也一样）。修复（`server/auth.js` `resolveRefusalLedgerScope`）：只有注册表里存在、且不在删除中的 workspace 才按 workspace 计；其他情况只记在用户名下，指标照常计数。回归测试在 `test/tenant-refusals.test.mjs`（未登记的、已登记但不是成员的、删除中的 workspace），e2e 断言擦除后 alice 的拒绝落在 `(alice, '')`。
 
 ## 按设计如此的行为
 
 - 文档按 (用户, workspace) 隔离，不是按 workspace：同一 workspace 的成员彼此看不到对方上传的文档，只有不带用户的 workspace 凭据上传的文档是共享的。workspace.viewer 因此只能读共享文档。回收站同样按 (用户, workspace)：同 workspace 的其他成员看不到、也恢复不了。
 - `LONG_MEMORY_SCOPE=workspace` 下笔记和 agent 经验只在写入它的 workspace 里可见；只有固定枚举的偏好（回答语言、回答风格）按用户保存，并且存成固定文本。开启前写入的记忆是用户级的，在每个 workspace 都能看到。
-- `GET /admin/ingest-jobs/dead-letter` 和重新入队是租户范围的路由。`TENANT_MEMBERSHIP=enforce` 下只有该 workspace 的成员（且有全局 `admin.status.read`）能用；平台运维用 `npm run ingest:jobs -- dead-letter list --all`。
+- `GET /admin/ingest-jobs/dead-letter` 和重新入队是租户范围的路由。`TENANT_MEMBERSHIP=enforce` 下只有该 workspace 的成员（列出要全局 `admin.status.read`，重新入队要全局 `admin.actions.recover_tasks`）能用；平台运维用 `npm run ingest:jobs -- dead-letter list --all`。
 - 擦除保留审计记录，所以擦除后的导出里仍然有该租户的审计事件。
 - 删除文档时的脱敏只替换以文档 id 标注的原文（引用、摘录、证据），不改模型写的答案。本演示的 run 只保存答案，所以 `delete_redaction` 检查反馈里的引用摘录。开着回收站时脱敏推迟到清除，因为在那之前文档还能恢复。
 - 回收站里的文档继续占存储配额，直到清除；上传与回收站里相同字节的 PDF 会成为一份新文档，不会去重成回收站里的那份。
@@ -231,6 +231,6 @@ TEST_FILES="test/tenant-isolation-hardened.e2e.test.mjs" bash scripts/run-pgvect
 - 只有单实例单体部署：拆分部署（`compose.services.yml`）、Redis 共享状态、读副本都没有覆盖。
 - 进程内状态按进程计：注册表查询缓存（`TENANT_REGISTRY_CACHE_TTL_MS`，其他进程最多晚一个 TTL；按租户分区后仍然是每个进程一份）、查询嵌入缓存（按租户分区，每个进程一份）、限流计数和并发计数（不开 `RAG_SHARED_STATE=redis` 时）、用量账本未刷写的部分。多实例时这些上限按实例分别生效，擦除也碰不到其他进程的内存缓存。
 - 假模型只证明隔离边界在一条能工作的检索和回答路径上成立，不说明回答质量。模型配额的上限设得较宽，walkthrough 不会触发模型配额拒绝。
-- 浏览器界面只适合 token 带 workspace 列表或固定 workspace 的身份（carol、alice、bob），而且 token 是构建时写进前端包的；只有用户的 token 用不了界面（见"浏览器界面"）。界面没有在这里实际打开测试过，只核对了它读取的 `/auth/me` 路径（`workspace_switcher` 检查）。
+- 浏览器界面用的静态 token 是构建时写进前端包的（见"浏览器界面"）。界面没有在这里实际打开测试过，只核对了它读取的 `/auth/me` 路径（`workspace_switcher` 检查）。
 - compose override 在 2026-10-18 构建并启动过一次：镜像构建成功、三个容器健康，walkthrough 两遍都是 26 PASS / 0 FAIL / 1 SKIP（见 `docs/tenant-isolation.md`「2026-10-18 的一次完整验证」）；e2e 测试在本地 PostgreSQL（Postgres.app 18）上跑，不是 compose 里的 pg16。
 - 保留期清理的第一次执行在启动后 1 分钟（`RETENTION_SWEEP_INTERVAL_MS` 和 60 秒取小）。e2e 把间隔调成 2 秒，并手工把记录改成过期，才在测试时间内看到删除和清除。

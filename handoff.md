@@ -1,5 +1,7 @@
 # DocCompare — Handoff
 
+> **Historical record (note added 2026-11-22):** this handoff records the DocCompare work as of 2026-08-24, with a status update of 2026-09-25; some of it no longer matches the code. README.md and docs/ describe the current system.
+
 Last updated: 2026-08-24. Branch `feat/doccompare-standalone` (12 commits on top of `main`).
 Status update 2026-09-25 on `main`: answer quality has now been measured with a real model;
 see the update at the top of "The one thing blocking everything".

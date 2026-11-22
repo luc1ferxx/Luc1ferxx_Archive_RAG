@@ -20,7 +20,7 @@
 | `GET` | `/agent-runs/:runId` | 读取单个 agent run 的 goal、plan、steps、observations、decisions、approval gates、result/error 和 event log。 |
 | `POST` | `/agent-runs/:runId/actions/:action` | 对等待用户确认的 agent run 执行 `approve` / `deny`；approve 会恢复被暂停的 capability step，不重放整条 `/chat`。 |
 | `POST` | `/agent-runs/:runId/recovery/actions/:action` | 执行 recovery 操作：`retry_failed_step` 或 `cancel`（其他动作名返回 400；`resume_from_step` 已删除）。哪类 step 能重试由 replay safety matrix 决定：`document_rag`、`follow_up_retrieval`、`research_question` 和审批绑定的 `capability_call` 可以；`custom_skill`（图节点）和 `web_search`、`arxiv_import`（要走审批后的 `capability_call`）不可以，面板也不给按钮。 |
-| `POST` | `/agent-runs/:runId/steps/:stepId/actions/retry` | 为单个已持久化 run step 排队 retry step，便于后续只重试失败步骤。图节点的 step（`custom_skill`、`graph_node`）返回 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`；`web_search`、`arxiv_import` 的主 step 也返回 409（不能直接重试）。 |
+| `POST` | `/agent-runs/:runId/steps/:stepId/actions/retry` | 为单个已持久化 run step 排队 retry step 并立即执行；run 须是 completed 或 failed，但不检查这个 step 本身是否失败过（例如已成功、审批过的 `capability_call` 会在原审批下再执行一次）。图节点的 step（`custom_skill`、`graph_node`）返回 409 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`；`web_search`、`arxiv_import` 的主 step 也返回 409（不能直接重试）。 |
 | `GET` | `/capabilities` | 列出已注册 capability contract，不暴露具体执行函数。 |
 | `GET` | `/artifacts` | 列出当前访问范围内的生成结果；支持 `artifactType=report|summary|document_collection`、`status=active|archived`、`limit` 和 `offset` 过滤。 |
 | `GET` | `/artifacts/:artifactId` | 读取 scoped artifact 的安全详情；不存在和跨 scope 访问统一返回 `404`。 |
@@ -38,8 +38,8 @@
 | `POST` | `/upload/chunk` | 上传单个文件分片。 |
 | `POST` | `/upload/complete` | 合并分片、按字节识别格式（PDF、.docx、.pptx、.xlsx，受 `RAG_DOCUMENT_FORMATS` 限制）、解析、写入索引。 |
 | `POST` | `/upload` | 旧版直接上传接口，限制 50 MB。 |
-| `GET` / `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
-| `POST` | `/chat/stream` | 与 `/chat` 同参数的 Server-Sent Events 版本：agent 每记录一步 trace 就推送一个 `trace_step` 事件（只含 id/type/label/status/summary，不含 detail），主文档答案生成时，每写完一句就用 finalizer 同一套 claim 校验检查已生成的部分，通过的句子以 `answer_draft` 事件推送（`{ draft: { index, text } }`），模型调用重试或切换备用模型时推送 `answer_draft_reset`，客户端应清空草稿；原始 token 不会发出。草稿是临时的：最终答案经 finalizer 校验后以 `result` 事件发送，内容与 `/chat` 的 status 和 body 完全一致，客户端用它替换草稿，随后是 `done`；失败时发送 `error`。客户端断开后 run 仍会完成。前端入口是 `src/archiveApi.js` 的 `streamChatAnswer`（聊天界面在用）和底层的 `streamChat`。 |
+| `POST` | `/chat` | 对选中文档提问，返回 RAG answer、sources、web answer 和 AgentRAG observability。 |
+| `POST` | `/chat/stream` | 与 `/chat` 同参数的 Server-Sent Events 版本：agent 每记录一步 trace 就推送一个 `trace_step` 事件（只含 id/type/label/status/summary，不含 detail），主文档答案生成时，每写完一句就用 finalizer 的词法 claim 校验（`evaluateClaimSupport` 加标题规整，不经 LLM 评审）检查已生成的部分，通过的句子或句子片段以 `answer_draft` 事件推送（`{ draft: { index, text } }`），模型调用重试或切换备用模型时推送 `answer_draft_reset`，客户端应清空草稿；原始 token 不会发出。草稿是临时的：最终答案经 finalizer 校验后以 `result` 事件发送，内容与 `/chat` 的 status 和 body 完全一致，客户端用它替换草稿，随后是 `done`；失败时发送 `error`。客户端断开后 run 默认仍会完成（`AGENT_CANCEL_ON_DISCONNECT=on` 时会在下一个安全点以 canceled 结束）。前端入口是 `src/archiveApi.js` 的 `streamChatAnswer`（聊天界面在用）和底层的 `streamChat`。 |
 | `DELETE` | `/sessions/:sessionId` | 清理调用方自己租户下这个 sessionId 的会话记忆（开启 auth 时按租户推导 key，见 configuration.md 行级安全一节）。 |
 | `GET` | `/memory` | 查询长期记忆。 |
 | `POST` | `/memory` | 写入长期记忆。 |
@@ -53,13 +53,13 @@
 | `POST` | `/admin/actions/:action` | 执行受控 admin action：`recover-tasks`、`recovery-scan` 或刷新历史质量 metrics 的 `quality-refresh`。`quality-refresh` 需要 `admin.actions.quality_refresh` 权限，只接受注册的 `corpusId`，并以 single-flight、固定 deterministic provider 和有限超时运行。 |
 | `GET` | `/admin/audit` | 读取 compact admin authorization audit events，支持 `limit`、`offset`、`userId`、`workspaceId`、`actionId`、`permissionId` 和 `result` 过滤；不包含 token、payload、prompt 或 raw trace。 |
 
-只有 `/health` 和 `/ready` 是公开健康检查。文档列表、artifacts、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；token 可以来自 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或启用 `API_AUTH_JWT_ENABLED=true` 后的 HS256 JWT。admin status/actions/audit 还需要 principal 携带匹配的 `roles` 或 `permissions`。
+只有 `/health`、`/ready` 和 `/livez` 是公开健康检查。文档列表、artifacts、上传、chat、memory、quality、feedback、admin status/actions/audit 和 `/documents/:docId/file` 在 `API_AUTH_ENABLED=true` 时都需要 `x-api-key` 或 `Authorization: Bearer <token>`；token 可以来自 `API_AUTH_TOKEN`、`API_AUTH_TOKENS` 或启用 `API_AUTH_JWT_ENABLED=true` 后的 HS256 JWT。admin status/actions/audit 还需要 principal 携带匹配的 `roles` 或 `permissions`。
 
 分片上传会话按 `(userId, workspaceId, fileId)` 隔离；单个会话最多 100 MiB、100 个分片，单片最多 5 MiB，并严格校验声明的文件大小、分片几何和可选 SHA-256。完成阶段使用会话级原子 claim 和稳定的 session 文档 ID，避免并发完成或崩溃恢复重放生成重复文档；服务启动时会回收已退出进程或损坏的 claim，使中断的完成操作可以重试。物理临时文件只使用服务端 UUID 命名，客户端文件名仅作受限 display metadata。安全格式升级前创建的未分域 v1 会话不会自动认领或迁移，客户端需重新初始化上传。
 
 Admin audit 默认 `ADMIN_AUDIT_STORE_PROVIDER=auto`：PostgreSQL 配好时写入 append-only `rag_admin_audit_events` 表并按 `ADMIN_AUDIT_RETENTION_DAYS` 裁剪，未配置 PostgreSQL 时回退到内存 ring buffer。
 
-前端 Chat scope 控制通过不同 `docIds` 调用同一个 `/chat` endpoint；后端 RAG 仍只检索请求传入且通过 `accessScope` 校验的文档。
+前端 Chat scope 控制通过不同 `docIds` 调用同一个 `/chat/stream` endpoint；后端 RAG 仍只检索请求传入且通过 `accessScope` 校验的文档。
 
 ## 仓库结构
 
@@ -67,10 +67,10 @@ Admin audit 默认 `ADMIN_AUDIT_STORE_PROVIDER=auto`：PostgreSQL 配好时写�
 .
 ├── src/                         # React frontend
 │   ├── components/              # Uploader, chat, answer renderer, PDF preview
-│   ├── App.js                   # Three-column archive workspace
+│   ├── App.jsx                  # Three-column archive workspace
 │   └── config.js                # API domain and auth header helper
 ├── server/
-│   ├── app.js                   # Express routes and upload/chat orchestration
+│   ├── app.js                   # Express app; mounts the routers in server/routes/
 │   ├── chat-mcp.js              # MCP web-answer client
 │   ├── mcp-server.js            # SerpAPI-backed local MCP search server
 │   ├── health.js                # Startup/readiness health checks
@@ -144,15 +144,15 @@ server/evaluation/results/<timestamped-files>
 | 层级 | 落点 |
 | --- | --- |
 | 安全 | CORS 白名单（`ALLOWED_ORIGINS`，为空时只放行本机来源）、跨站检查（浏览器发来的改数据请求核对 `Origin` / `Sec-Fetch-Site`；鉴权关闭时每个请求都核对 `Host`，只认本机名、IP 地址和 `ALLOWED_ORIGINS` 的主机）、helmet、按 IP 分级限流（全局，加上与租户限流同一份路由分类的 chat/ingest/destructive）、上传会话按 principal/workspace 分域、文件名初筛 + 文件字节判定格式（`%PDF` 魔数；Office 文件先过 ZIP 防护：条目数、解压大小、压缩比、单个解析器的 XML 量和抽出文字量都有上限）、无静态 `/uploads` 暴露。 |
-| 性能与可靠性 | 存储层异步原子写 + 写锁 + 增量 BM25 统计；embedding LRU 缓存；外部 fetch 全部带超时；上传 session TTL 清扫；store `list()` 分页；前端 `/chat` AbortController + 组件 memo 化。 |
-| 架构 | `app.js` 组合根（171 行）+ `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 8 个模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块，后端直接依赖 18 → 13。 |
+| 性能与可靠性 | 存储层异步原子写 + 写锁 + 增量 BM25 统计；embedding LRU 缓存；外部 fetch 大多带超时（Qdrant 的 `/healthz` 健康检查请求没有）；上传 session TTL 清扫；store `list()` 分页；前端 `/chat/stream` AbortController + 组件 memo 化。 |
+| 架构 | `app.js` 组合根 + `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 下的模块；`normalizeText` 收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
-当前测试基线：后端 2214 个用例（2205 通过；3 个需要 PostgreSQL 的集成测试文件和 1 个需要 Redis 的集成测试文件在无数据库时各报告 1 个跳过；用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑，PostgreSQL 部分全部通过；Redis 部分需另设 `REDIS_TEST_URL`，5 个用例）、前端 113 个用例全绿、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 90%）。
+当前测试基线：需要 PostgreSQL 或 Redis 的后端测试在没有对应数据库时报告为跳过（用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑；Redis 部分需另设 `REDIS_TEST_URL`）、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 90%）。
 
 ## Development rules
 
-- RAG 变更优先放在 `server/rag/`，route/API 行为放在 `server/app.js`。
+- RAG 变更优先放在 `server/rag/`，route/API 行为放在 `server/routes/`（由 `server/app.js` 挂载）。
 - Agent planner、run context、document loop、skill runners、observability、synthesis、finalization 已拆成独立模块；不要把这些细节重新堆回 `server/rag/agent.js`。
 - 新增 custom skill 必须走白名单注册，并确认 `accessScope` 传递到文档读取和 RAG chat。
 - `/chat` response shape 会被前端 trace UI、feedback metadata 和 evaluation 使用，改字段时需要同步测试。

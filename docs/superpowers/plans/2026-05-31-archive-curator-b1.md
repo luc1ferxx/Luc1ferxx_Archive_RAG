@@ -1,5 +1,7 @@
 # Archive Curator B1 Implementation Plan
 
+> **Historical plan (note added 2026-11-22):** dated 2026-05-31 and kept as a record. Its file names and commands are those of that time and may no longer match the repository; for example, the root `npm test` now runs `vitest run`, which rejects `--watchAll=false`. README.md and docs/ describe the current system.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the recommended B1 archive-curator slice: automatic document summaries, tags, entities, workspace discovery, and frontend metadata display.

@@ -72,7 +72,7 @@ Node 自定义评测是主回归，因为它能覆盖产品行为：
 | `evaluation/results/arxiv-rerank-sweep-latest.*` | arXiv real-paper quick sweep 当前最佳 variant 为 `broad_topk`，NDCG `0.5831`，Recall `0.8177`，MRR `0.5891`。 |
 | `evaluation/results/compare-hard-ragas.*` | Ragas supplement：faithfulness `0.8939`，context precision `1.0`，compare rubric `0.9333`。 |
 
-说明：仓库内旧的 `latest.*` snapshot 可能仍来自 near-duplicate，或尚未包含统一 lineage metadata；不要为这些旧报告补写或伪造 metadata。固定周期入口 `eval:robust-suite` 会用真实运行结果刷新 compare-hard、hard-CS 和 arXiv 三份报告。旧报告只可由 `quality:gate` 查看，不能充当 current evidence，也不能参与 `quality:current` 的 baseline 竞争；缺 lineage 的当前报告会得到 `missing_lineage`。
+说明：仓库内旧的 `latest.*` snapshot 可能仍来自 near-duplicate，或尚未包含统一 lineage metadata；不要为这些旧报告补写或伪造 metadata。手动运行的 `eval:robust-suite` 会用真实运行结果刷新 compare-hard、hard-CS 和 arXiv 三份报告。旧报告只可由 `quality:gate` 查看，不能充当 current evidence，也不能参与 `quality:current` 的 baseline 竞争；缺 lineage 的当前报告会得到 `missing_lineage`。
 
 ## Evidence metadata
 
@@ -156,11 +156,11 @@ CLI 选项：
 | `--json` | 在 stdout 输出机器可读 JSON。 |
 | `--no-fail` | 仅把失败时的进程退出码改为 0；报告内 `status` 和 reason codes 仍保持失败。 |
 
-默认每次检查都会写入 `evaluation/results/latest-release-evidence.json` 和 `.md`。逐项结果包含 `status`、`reasonCode`、`expected`、`actual`、`reportType`、`runId`、`generatedAt`、`commitSha` 以及 corpus/provider 摘要，便于 CI 用稳定 reason code 判断失败原因。当前稳定 reason codes 为：`ok`、`missing_report`、`missing_lineage`、`unknown_commit`、`commit_mismatch`、`dirty_worktree`、`stale_report`、`future_report`、`invalid_generated_at`、`report_failed`、`report_integrity_failed`、`config_hash_mismatch`、`wrong_corpus`、`wrong_provider`、`wrong_profile`、`wrong_model_route`、`source_report_lineage_mismatch` 和 `robust_lineage_split`。
+默认每次检查都会写入 `evaluation/results/latest-release-evidence.json` 和 `.md`。逐项结果包含 `status`、`reasonCode`、`expected`、`actual`、`reportType`、`runId`、`generatedAt`、`commitSha` 以及 corpus/provider 摘要，便于 CI 用稳定 reason code 判断失败原因。当前稳定 reason codes 包括：`ok`、`missing_report`、`missing_lineage`、`unknown_commit`、`commit_mismatch`、`dirty_worktree`、`stale_report`、`future_report`、`invalid_generated_at`、`report_failed`、`report_integrity_failed`、`config_hash_mismatch`、`wrong_corpus`、`wrong_provider`、`wrong_profile`、`wrong_model_route`、`source_report_lineage_mismatch`、`robust_lineage_split`、`prompt_lineage_split` 和 `semantic_cache_enabled`。
 
 ### 与 quality gate 的兼容边界
 
-默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 仅为旧调用方保留；自动 workflow 使用独立的 `robust:gate`，不会让历史报告状态影响 robust suite。PR workflow 用独立的 `quality:current` 拦截轻量 current evidence；`release:gate` 再验证完整发布批次。因此默认 PR 不需要真实 OpenAI，也不会下载 arXiv corpus。
+默认 `quality:gate` 的成本和历史语义不变：它仍兼容旧 synthetic/feedback/trajectory/planner/recovery payload，且未传 `--require-robust-suite` 时 robust gate 继续显示 pass + skipped。`quality:gate -- --require-robust-suite` 仅为旧调用方保留；robust suite 用独立的 `robust:gate` 检查，不会让历史报告状态影响 robust suite。PR workflow 用独立的 `quality:current` 拦截轻量 current evidence；`release:gate` 再验证完整发布批次。因此默认 PR 不需要真实 OpenAI，也不会下载 arXiv corpus。
 
 ## Synthetic regression
 
@@ -209,7 +209,7 @@ npm run eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json
 
 ## Robust hard/real suite
 
-`eval:robust-suite` 是固定周期入口，不放进每个 PR 的默认轻量 gate。它集中维护 hard/real 语料集合，避免 npm scripts、CI 和 quality gate 各自硬编码：
+`eval:robust-suite` 是手动运行的入口，不放进每个 PR 的默认轻量 gate。它集中维护 hard/real 语料集合，避免 npm scripts、CI 和 quality gate 各自硬编码：
 
 ```bash
 cd server
@@ -225,7 +225,7 @@ npm run robust:gate -- --fail-on-warn
 | hard-CS rerank | `evaluation/synthetic-corpus-rerank-hard-cs.json` | `evaluation/results/latest-rerank-hard-cs.*` | 检查 baseline 非饱和、NDCG/Recall 不回退，并要求 NDCG 有 lift。 |
 | arXiv real-paper rerank | `evaluation/corpora/arxiv-computer-science-rerank-v1.json` | `evaluation/results/latest-arxiv-rerank.*` | 用受版本控制且绑定 SHA-256 的真实论文 corpus 覆盖长文档、hard negative 和跨论文比较。 |
 
-compare-hard synthetic 使用真实 provider，要求 `OPENAI_API_KEY`。两项 rerank eval 使用 deterministic embedding + heuristic rerank，可稳定复跑。周期 Release 只读取 checked-in arXiv corpus；runner 在执行前校验文件 SHA-256、manifest ID 和 version，并把这些值写入 suite lineage contract。这样 arXiv 的临时 429、5xx 或超时不会被误判为代码回归。
+compare-hard synthetic 使用真实 provider，要求 `OPENAI_API_KEY`。两项 rerank eval 使用 deterministic embedding + heuristic rerank，可稳定复跑。robust suite 只读取 checked-in arXiv corpus；runner 在执行前校验文件 SHA-256、manifest ID 和 version，并把这些值写入 suite lineage contract。这样 arXiv 的临时 429、5xx 或超时不会被误判为代码回归。
 
 联网刷新与发布验证分离。需要更新论文文本时，先显式生成 ignored 候选文件：
 
@@ -236,7 +236,7 @@ npm run corpus:arxiv
 
 人工检查候选 corpus 后，再单独更新 `evaluation/corpora/arxiv-computer-science-rerank-v1.json` 及 `evaluation/eval-suite.js` 中固定的 SHA-256；两者不一致时 suite 会 fail closed，不会静默回退到网络或旧报告。
 
-`robust:gate` 只读取以上三份 report，并要求它们都存在：synthetic report 不能有失败 case；rerank report 必须有 ranking case、语料匹配、NDCG/Recall 不回退。workflow 使用 `--fail-on-warn`，因此 NDCG lift 退化成 0 或 baseline 饱和也会失败。它不会把旧 synthetic 历史、feedback、planner、trajectory 或 recovery 状态混入 robust 判定；这些信号分别由 current/release gate 校验。单独运行 `robust:gate` 的输出固定标记为 `latest_reports_unverified/currentCommitVerified=false`；只有随后执行的 `release:gate` 才验证 commit、freshness、profile 与 suite lineage。Suite lineage hash 绑定 provider、固定 corpus 的内容 hash/identity、threshold 以及实际 chunk/retrieval/rerank 配置；release gate 会从代码中的权威 suite 计划重算这个 hash，因此三份报告共享任意自造 hash 也不能通过。
+`robust:gate` 只读取以上三份 report，并要求它们都存在：synthetic report 不能有失败 case；rerank report 必须有 ranking case、语料匹配、NDCG/Recall 不回退。加 `--fail-on-warn` 时，NDCG lift 退化成 0 或 baseline 饱和也会失败。它不会把旧 synthetic 历史、feedback、planner、trajectory 或 recovery 状态混入 robust 判定；这些信号分别由 current/release gate 校验。单独运行 `robust:gate` 的输出固定标记为 `latest_reports_unverified/currentCommitVerified=false`；只有随后执行的 `release:gate` 才验证 commit、freshness、profile 与 suite lineage。Suite lineage hash 绑定 provider、固定 corpus 的内容 hash/identity、threshold 以及实际 chunk/retrieval/rerank 配置；release gate 会从代码中的权威 suite 计划重算这个 hash，因此三份报告共享任意自造 hash 也不能通过。
 
 ### 为什么换成 robust suite：改前 / 改后
 
@@ -262,7 +262,7 @@ Trajectory eval 检查 AgentRAG 行为，而不是只看答案文本：
 - Custom skill 是否传递 `accessScope`
 - Budget 是否阻止无限重试
 - Goal lifecycle 是否验证 plan steps、unresolved gaps、deliverables、pending approval 和 research phases
-- Skill graph：`guarded` 下 typed DAG 是否真的执行且 `/chat` 合同不变、`shadow` 下是否只规划不执行、非法图是否在任何 node 执行前整体被拒、有界 replan 是否只重跑受影响的 node 并在上限处停下
+- Skill graph：`guarded` 下 typed DAG 是否真的执行且 `/chat` 合同不变、非法图是否在任何 node 执行前整体被拒、有界 replan 是否只重跑受影响的 node 并在上限处停下
 
 ```bash
 cd server
@@ -301,7 +301,7 @@ npm run eval:planner -- --provider real
 
 `quality:gate` 会优先读取 provider-specific planner reports，并在没有这些文件时回退到旧的 `latest-planner.json`。任何 provider 的 planner eval 有失败 case 或 failed check，gate 都会失败，并在文本 / JSON 输出里汇总 provider、失败 case 和失败 check 数。
 
-独立 real-provider gate 用于 scheduled/manual CI，要求 real report 存在并通过，同时检查非预期 fallback 和 mock/real planner 分歧：
+独立 real-provider gate 手动运行（现在没有 workflow 运行它），要求 real report 存在并通过，同时检查非预期 fallback 和 mock/real planner 分歧：
 
 ```bash
 cd server
@@ -356,7 +356,7 @@ Trajectory eval 有三个 `skill_graph` case。它们不再设置这个变量；
 Recovery 与仍需区分的证据：
 
 - `eval:recovery-observability` 的 `skill_graph_signal` 从一次 guarded `runAgentRag` 的 `skill_graph_planned` 事件统计 replan 内复用与执行后 fallback。新增的 `skill_graph_startup_resume` 不复用这组计数冒充重启证据：它向内存 store 写入部分 graph checkpoint，重建 run/recovery 服务实例，调用生产启动恢复 API 并检查同一 run 完成、已完成写节点只执行一次、待执行节点只执行一次、CAS 只领取一次、第二次扫描不再领取且没有部分执行后回落 V1。这验证续跑协议和调用链，不证明操作系统进程重启或 PostgreSQL 跨进程持久化。该评测仍只覆盖外层 plan 恰为 `custom_skills`、无待审批且 checkpoint/step 对账成功的 guarded run；unknown in-flight 或混合外层 plan 转 manual，已被领取的 run 由其他 worker 跳过，不会自动二次执行。
-- `agent-execution-graph-postgres.integration.test.mjs` 是独立的数据库集成测试：父进程将部分 graph 和已完成写节点落到 PostgreSQL，子 Node 进程重新加载服务并运行启动恢复，然后用数据库 effect 计数证明写节点未重放、后续节点只执行一次。`bash scripts/run-pgvector-integration.sh` 会在临时数据库上运行它；`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 会运行整套后端测试且不跳过数据库用例。此测试不代替真实 LLM 与 clean-SHA 的 release 门禁。
+- `agent-execution-graph-postgres.integration.test.mjs` 是独立的数据库集成测试：父进程将部分 graph 和已完成写节点落到 PostgreSQL，子 Node 进程重新加载服务并运行启动恢复，然后用数据库 effect 计数证明写节点未重放、后续节点只执行一次。`bash scripts/run-pgvector-integration.sh` 会在临时数据库上运行它；`FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 会运行整套后端测试，只需要 `PGVECTOR_TEST_DATABASE_URL` 的数据库用例不再跳过（例如读副本套件还要 `PGVECTOR_TEST_REPLICA_URL`，仍会跳过）。此测试不代替真实 LLM 与 clean-SHA 的 release 门禁。
 - `rollout:readiness` 要求 `AGENT_SKILL_GRAPH_ROLLOUT` 未设置或为 `guarded`、real-provider 动态 DAG case 通过、guarded runtime smoke 的两次 HTTP 运行都由 LLM 规划并执行且无 fallback，此外还要求 trajectory/recovery 和原有 planner gate。`release:gate` 再对完整报告集校验新鲜度、clean worktree、同一目标提交及报告合同。这组门禁衡量的是纯 LLM 规划能否零降级、零分歧；typed DAG 成为默认执行器（2026-09-25）和唯一执行器（2026-11-13）的依据是执行语义证据（全量测试、trajectory、recovery、PostgreSQL 跨进程恢复），不以它为前提。
 - “步骤级自动重放”“手动 resume”两项信号在 ADR 0001 阶段 9（2026-11-13）随功能一起删除：它们用的是手写的、不带 `nodeId` 的 `custom_skill` 步骤，只有已删除的 V1 chain 会产生这种步骤。现在 `eval:recovery-observability` 的启动恢复造数是两个没有图可续的中断 run（一个旧 chain 形状的 `custom_skill` 步骤、一个 web search），构建函数先断言两个都转了人工、步骤没有被动过，再产出事件；“自动恢复”这组计数（`autoReplay*`，字段名没改）只由上面那次图启动续跑提供。评测从 29 项 check 变成 27 项（去掉 `resume_after_partial_step_recorded`、`resume_step_recorded`），发布门去掉 `recoveryStepResumeCount` 的下限，其余 check 和阈值没动；manifest 1.16.0 → 1.17.0。每种情形改动前后的行为逐条写在 `test/agent-skill-step-replay.test.mjs`。
 - Mock planner、注入的 trajectory planner 和 deterministic recovery fixture 是稳定接线回归；只有 `eval:planner -- --provider real` 的动态 case 与 `runtime:smoke` 检查真实 LLM 的 DAG 规划。它们不衡量真实文档上的语义差异/风险质量。
@@ -437,7 +437,7 @@ npm run verify:quality
 
 同一台机器、qwen2.5:7b + nomic-embed-text、`eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json --openai-provider real` 各跑 3 轮加 `verify:quality` 1 轮，开关关（87a0734c）和开各一组，`RAG_OBSERVABILITY_ENABLED=true` 下按 RAG trace 的 `modelRejectReason` 统计进入闸门的 16 次对比调用（23 次对比里 7 次走近重复短路、不调模型）：
 
-| | 关（基线） | 开（第一版） | 开 + 近重复补齐（当前） |
+| | 关（基线） | 开（第一版） | 开 + 近重复补齐 |
 | --- | --- | --- | --- |
 | 模型答案被采用 | 0 | 10 | 12 |
 | `unsupported_claims` | 16（175 条 claim 里 171 条不受支持） | 0 | 0 |
@@ -449,7 +449,7 @@ npm run verify:quality
 - 第一版采用的 10 次是两文档的数值、范围、审批冲突三个用例各 3 轮，加 `verify:quality` 的一次对比。渲染出来的行没有一条被词法检查拒掉。
 - 第一版没采用的两种都不是新的失败：3 次 `structured_no_differences` 全是语料外文档的用例，模型返回空列表，和基线一样拒答；3 次 `differences_not_bound_to_every_document` 全是"两份近重复 + 一份冲突"的三文档用例，模型每轮只引了其中两份（把"近重复的文档也要各给一条"写进 prompt 之后也一样），闸门要求差异覆盖每份文档，于是回退模板，答案和基线相同。
 - **近重复补齐**（同日）：模型漏掉的文档如果和已引文档是近重复对（`analysis.nearDuplicatePairs`）、自己的证据里又有同一句话，服务端就替它补上这一句；补上的条目和它的近重复伙伴同组，只和说法不同的文档配对，不会自己造出对立。再跑 3 轮：三文档用例 3 轮都被采用（每轮补 1–2 条，compare-hard 的检查照常通过）；新出现的一次回退是两文档用例里模型两条引文都改了措辞、定位不到证据，回退模板，答案和基线相同。
-- 第一版渲染器把每份文档的引文各写一行，三文档用例里 6 行差异 claim 全被判不受支持：`evaluateDifferenceSectionSupport` 只接受能两两配成"不同文档、实质对立"的差异段，奇数行或配不上的行整段作废。现在按组两两配对、同一行可以重复出现，和有依据模板一个写法。
+- 第一版渲染器把每份文档的引文各写一行，三文档用例里 6 行差异 claim 全被判不受支持：`evaluateDifferenceSectionSupport` 只接受能两两配成"不同文档、实质对立"的差异段，奇数行或配不上的行整段作废。改后按组两两配对、同一行可以重复出现，和有依据模板一个写法。
 - compare-hard 自己的 8 项检查两组相同（6/8，失败的是 QA 对照组的措辞和语料外用例的无引用拒答，10-04 就是这样）。
 - 只在 qwen2.5:7b 上测过，更强的模型在闸门下的采纳率没测。开关默认关，确定性评测和锁定基线不受影响。
 - 2026-11-19 删除（用户："按推荐全做"）：更强的模型一直没有测，用户可见的检查两边相同（`verify:quality` 18/18、compare-hard 6/8），变的只有 7B 的闸门采纳率（0/16 → 12/16）。开关、`comparison_answer_structured` 模板、渲染器和它与抽取式模式共用的引文定位代码一起删除，对比只剩散文 prompt 加有依据模板这一条路，残留的设置被忽略。
@@ -465,11 +465,11 @@ node evaluation/run-doccompare-verification.mjs --self-test
 
 用 synthetic eval 那套 deterministic provider 跑完整流程，不需要 key 和网络，用来确认 harness 本身能跑通 —— 避免 harness 的崩溃在别人第一次真实运行时才被发现。
 
-**预期结果是 16/18，不是全绿。** 但失败的原因容易搞错，这里写清楚：对比答案有三级（`rag/answer-writer.js` 约 923-957 行）—— 模型文本过 `isSafeStructuredDifferenceAnswer` 就用它；否则退到引擎构造的 `buildGroundedDifferenceAnswer`；两者都不过才弃答。deterministic stand-in 下**两级都没过**，所以弃答，`compare.answers` 和 `compare.value-binding` 因此失败 —— 这正是 harness 拒绝给假模型放行。
+**预期结果是 18/18**（`evaluation/run-doccompare-verification.mjs` 开头的说明）。对比答案有三级（`rag/answer-writer.js` 的 `writeComparisonAnswer`）—— 模型文本过 `assessStructuredDifferenceAnswer` 就用它；否则退到引擎构造的 `buildGroundedDifferenceAnswer`；两者都不过才弃答。自检走引擎构造的那一级。
 
 **不要以为对比答案路径在别处被覆盖了。** `test/rag.test.mjs` 的 `the MCP ask tool carries a real comparison summary onto the wire` 跑在该文件全局的 stub provider 下，`completeText` 返回的是手写死字符串，断言的只有引擎算出来的结构化字段（`comparedDocIds`、`evidenceBalance`、`explicitConflictPairs`）和引文。它真正覆盖的是**对比引擎**和 MCP 序列化接缝，不是「模型写出了正确的对比」—— 这条测试的名字夸大了它检查的内容。
 
-所以全绿只应出现在真实模型上，而「真实模型能否过 `isSafeStructuredDifferenceAnswer`」目前**没有测过**。第一次真跑时如果对比仍然弃答，值得查：为什么 `buildGroundedDifferenceAnswer` 在 3 页语料上不出答案，而在单元测试的 1 页语料上可以 —— 那会是真实的产品发现，不是 harness 的问题。自检报告写到 `latest-doccompare-selftest.*`，不会覆盖真实报告。
+自检报告写到 `latest-doccompare-selftest.*`，不会覆盖真实报告。
 
 ## Quality gate baseline
 
@@ -506,7 +506,7 @@ npm run eval:feedback
 npm run eval:feedback:real
 ```
 
-`feedback:corpus` 默认合并 tracked seed 数据 `server/evaluation/feedback-seed.jsonl` 和 runtime 数据 `server/data/feedback/feedback.jsonl`，收集 `citation_error`、`incomplete` 和 `hallucination` 三类负反馈。使用 `--no-seed` 可以只评测指定 runtime 输入。
+`feedback:corpus` 默认合并 tracked seed 数据 `server/evaluation/feedback-seed.jsonl` 和 runtime 数据（配置了数据库时是 PostgreSQL 的 feedback 表，否则是 JSONL 文件，例如 `server/data/feedback/feedback.jsonl`），收集 `citation_error`、`incomplete` 和 `hallucination` 三类负反馈。使用 `--no-seed` 可以只评测指定 runtime 输入。
 
 `eval:feedback` 默认使用 deterministic OpenAI provider，适合本地和 CI 稳定回归；`eval:feedback:real` 使用真实 provider，需要 `OPENAI_API_KEY`。`quality:gate` 会读取 `latest-feedback.json`；如果 feedback eval 没有 case、有失败 case 或 unsupported claim，gate 会失败，并按 `skillId@skillVersion` 汇总问题。
 
@@ -564,7 +564,7 @@ npm run eval:rerank -- evaluation/generated/arxiv-corpus.json --rerank-provider 
 
 报告包含 baseline 粗排与 rerank 后的 `NDCG@k`、`Precision@k`、`Recall@k`、`MRR`、`Noise rate@k` 和排序提升率。严格 gate 会按报告声明且由 suite 固定的 chunk 配置，从当前 corpus 重新切分每个候选，并要求候选文本、文件、页码和 chunk index 完全一致；页内任意短子串不能再冒充真实检索候选。
 
-固定周期 gate 使用 `latest-rerank-hard-cs.*` 和 `latest-arxiv-rerank.*`，不再依赖 near-duplicate rerank 的饱和报告判断 lift。
+`robust:gate` 使用 `latest-rerank-hard-cs.*` 和 `latest-arxiv-rerank.*`，不再依赖 near-duplicate rerank 的饱和报告判断 lift。
 
 ## arXiv real-paper corpus
 
@@ -1527,8 +1527,8 @@ train 上（400 题）的损失拆解：
 
 - **dev 上没有可测差别**；train 上第 1 名命中显著更差、候选覆盖显著更好，和 S1（sentence 900/180）对 S0 的方向一样：超长段落不再整段成块，块更规整，第一名少了整段块的优势，候选里同页重复块少了。
 - **当前代码等于 10-08 的 chunker-new 报告**：两份报告（`latest-qasper-retrieval-chunker-new-{train,dev}`，10-08 跑的 1dcc8467）和这次干净重跑的当前代码逐题完全相同（400 + 821 题），所以 1dcc8467 之后检索路径上的改动没有改变结果。上表 S0 用的是这次干净重跑；10-04 的 S0 报告与它相差不超过 0.003，但逐题并不相同，引用时以这次为准。
-- **主目录里跑会被污染**：这次在主目录直接跑同一个提交，dev 候选覆盖是 0.663（干净时 0.704）。原因是评测脚本只在静态导入之后才设置 `RAG_DATA_DIRECTORY`，而 `rag/storage.js` 在第一次导入时就定下数据目录，存在 `server/data/rag` 时就用它：评测会往本地档案里入库，BM25 统计也包含档案里的其他文档（当时有 664 篇之前评测留下的 QASPER 论文，已清理）。现在所有评测脚本都通过 `useEvaluationDataDirectory`（`evaluation/eval-data-directory.mjs`）设置数据目录，并检查确实生效。之前在主目录跑的检索评测都可能受过影响；10-08 的 chunker-new 和 10-04 的 S0 经核对是干净的，或者只差在第三位小数。
-- **之前在旧块上定下的东西需要留意**：QA 门控阈值 0.51、查询适配器、重排权重和概率阈值、段落识别默认开启，都是在 1dcc8467 之前的块上测的；当前块上没有重测，不代表它们失效，但引用这些数字时要说明。
+- **主目录里跑会被污染**：这次在主目录直接跑同一个提交，dev 候选覆盖是 0.663（干净时 0.704）。原因是评测脚本只在静态导入之后才设置 `RAG_DATA_DIRECTORY`，而 `rag/storage.js` 在第一次导入时就定下数据目录，存在 `server/data/rag` 时就用它：评测会往本地档案里入库，BM25 统计也包含档案里的其他文档（当时有 664 篇之前评测留下的 QASPER 论文，已清理）。现在 `eval:qasper-retrieval`、`eval:qasper-answers` 等评测脚本通过 `useEvaluationDataDirectory`（`evaluation/eval-data-directory.mjs`）设置数据目录，并检查确实生效。之前在主目录跑的检索评测都可能受过影响；10-08 的 chunker-new 和 10-04 的 S0 经核对是干净的，或者只差在第三位小数。
+- **之前在旧块上定下的东西需要留意**：QA 门控阈值 0.51、查询适配器、重排权重和概率阈值、段落识别默认开启，都是在 1dcc8467 之前的块上测的；当前块上没有重测（重排概率阈值例外：2026-11-12 在当前块上重测过，见“重排在 top-K 10 下重测”），不代表它们失效，但引用这些数字时要说明。
 - **以后怎么避免**：切块输出变了就要升 `CHUNKER_VERSION`（`rag/chunk-profile.js`，现在是 2；1 是 1dcc8467 之前的 `structured`），`test/chunk-profile.test.mjs` 固定了各策略在合成语料和生成页面上的输出摘要，输出一变就失败。入库的块带 `metadata.chunkProfileId`（策略、块大小、重叠、切块器版本、PDF 解析设置的摘要），索引版本记录切块配置，和当前配置不同时健康检查给 warning。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:layout-parsing` 的报告 `config` 记录 `chunking`（策略、块大小、重叠、切块器版本）和 `git`（提交、工作区是否干净、改动路径数），`--compare` 会列出两次运行配置的差别；qasper-retrieval 每题还记录门控放行块的字符数 `admittedChars`。 2026-10-28 起 `eval:qasper-retrieval` 的报告还记录 `config.retrieval`（检索设置）和每题命中块的两路名次，`--compare` 也列出检索设置的差异，并拒绝语料、seed 或题数不同的对照报告。
 
 ### 检索参数在 chunker v2 上重测（2026-10-28，规则先于运行）
@@ -1706,7 +1706,7 @@ train 上（400 题）的损失拆解：
 
 **工具**（三个都不调模型；`test/qasper-answer-funnel.test.mjs`、`test/qa-latency-breakdown.test.mjs`、`test/answer-labeling.test.mjs`）：
 
-- `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json> [--high-f1 0.5] [--json]`（`evaluation/qasper-answer-funnel.mjs`）：按题号把 rag 面的答案报告和同一设置的 `eval:qasper-retrieval` 报告拼起来，每道可回答题落在恰好一档：证据不在候选里、证据在候选里但被拒答、作答但证据不在上下文里、作答且证据在上下文里。每档给作答数、拒答数（按 `abstainSource`）、作答题的官方 F1 均值、F1 为 0 和 F1 不低于 `--high-f1` 的题数。两份报告都得记录了检索设置（`config.retrieval`），否则拒绝（两份都没记录时看不出差别，也证明不了相同）；记录下来的设置除检出状态（`git.*`：提交号、未提交改动的文件数）外有任何不同也拒绝（检索、切块、语料、embedding 模型、查询适配器）；Agent 面的报告也拒绝（Agent 按意图自带 topK，和检索报告不是同一条路）；有可回答题配不上也拒绝。检出状态的差别、来自不干净检出的报告都在输出里写明。两次运行在“门控是否作答”和“上下文是否含证据”上对不上的行单独计数，不修正。“证据在不在候选里”只来自检索报告（答案报告的行不记这一项），所以这一档的准确度取决于两次运行的检索是否真的相同，有两种情况设置相同也可能不同：local 索引的稀疏统计按运行入库的全部文档算，topK 小于稠密候选池时（topK 6 从稠密前 8 里取）候选会随入库的论文集合变，topK 8 起候选就是稠密前 topK、与入库集合无关；`RAG_QA_ANSWER_VERDICT` 开着时，模型拒答后加深检索重试写出的答案读的是另一批块，报告里看得出开了 verdict 时输出会写明。
+- `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json> [--high-f1 0.5] [--json]`（`evaluation/qasper-answer-funnel.mjs`）：按题号把 rag 面的答案报告和同一设置的 `eval:qasper-retrieval` 报告拼起来，每道可回答题落在恰好一档：证据不在候选里、证据在候选里但被拒答、作答但证据不在上下文里、作答且证据在上下文里。每档给作答数、拒答数（按 `abstainSource`）、作答题的官方 F1 均值、F1 为 0 和 F1 不低于 `--high-f1` 的题数。两份报告都得记录了检索设置（`config.retrieval`），否则拒绝（两份都没记录时看不出差别，也证明不了相同）；记录下来的设置除检出状态（`git.*`：提交号、未提交改动的文件数）外有任何不同也拒绝（检索、切块、语料、embedding 模型、查询适配器）；Agent 面的报告也拒绝（Agent 按意图自带 topK，和检索报告不是同一条路）；有可回答题配不上也拒绝。检出状态的差别、来自不干净检出的报告都在输出里写明。两次运行在“门控是否作答”和“上下文是否含证据”上对不上的行单独计数，不修正。“证据在不在候选里”只来自检索报告（答案报告的行不记这一项），所以这一档的准确度取决于两次运行的检索是否真的相同，有两种情况设置相同也可能不同：local 索引的稀疏统计按运行入库的全部文档算，topK 小于稠密候选池时（topK 6 从稠密前 8 里取）候选会随入库的论文集合变，topK 8 起候选就是稠密前 topK、与入库集合无关；`RAG_QA_ANSWER_VERDICT` 开着时，模型拒答后加深检索重试写出的答案读的是另一批块。
 - `npm run latency:qa -- --events <事件.jsonl> [--skip N] [--chat-price 输入,输出 --embedding-price 输入] [--compare <另一次的事件.jsonl>] [--json]`（`evaluation/qa-latency-breakdown.mjs`）：读一次问一题的运行写下的可观测性事件（`RAG_OBSERVABILITY_ENABLED=true` 加 `RAG_OBSERVABILITY_EVENTS_PATH`），把每道题的 QA 路线耗时拆成查询 embedding、答案模型和路线自己的开销（整题减前两项：检索、融合、门控、选上下文、整理答案），作答和拒答分开给 p50 / p90 / p95 / 最大值、时间占比和 token 分布，外加入库的 embedding 用量；给了单价（美元 / 百万 token）就用模型契约自己的公式 `estimateLlmOpsCost` 算成本。事件按先后归到题（一道题的模型调用之后是它的 QA trace），所以只适用于串行运行，遇到 Agent trace 直接拒绝。失败的问题（trace 没有路线）自成一题并单独计数，它的模型调用不会算到下一题头上；重排等其它模型调用的耗时落在“路线自己的开销”里，有就在输出里写明；同一个事件文件里既有模型网关的计量事件又有调用方的镜像事件时拒绝（每次调用会算两遍）；“入库”数的是文档 embedding 调用次数，重试会多算。`--compare` 把两次运行按题配对（同一批题、同样顺序；每个位置的问题文本哈希必须相同，否则拒绝），输出本次减对照：两次都作答的题上的整题耗时、答案模型耗时、输入和输出 token，两次都拒答的题上的整题耗时，各带均值差的 bootstrap 95% 区间（按题重采样，默认 10000 次、seed 12345）和差的中位数。输出里不出现问题或答案的文本。
 - `npm run label:answers -- --report <答案报告.json> --corpus <QASPER 语料.json> [--out 目录] [--name 名字] [--seed 1]`（`evaluation/build-answer-labeling.mjs`）：为报告里每道作答的题生成人工标注用的自包含 HTML 页（问题、每位标注者的参考答案、标注的证据段落、系统的答案，按种子打乱；结论用评审的判定词表：正确 / 部分正确 / 错误 / 其实是拒答，键盘 1–4；标注存在浏览器里，可导出、导入），以及同一批题的 `eval:judge` 输入（`<名字>-judge-input.json`）。导出文件的 `items` 就是 `eval:judge --labels` 读的形状，每条都有结论；只勾了“参考答案或标注有问题”或只写了备注、没给结论的题放在 `unlabeled` 里，不进一致率。拒答的题不用标，它的判定只取决于标注。保存用的键带上页面名和这批答案的指纹，所以同名页面换一份报告重建后不会把旧结论套到新答案上，另一份报告的导出文件也导不进来；导入会覆盖已有结论时先问；按住数字键不会连着给后面的答案打标，点过的按钮会让出焦点（否则空格或回车会给下一条再打一次）；同一页开两个标签页时各自的保存只改自己那一条。`--adopt-legacy-labels` 让重建的页面接手 2026-11-10 之前生成的页面存下的标注。
 - `eval:qasper-answers` 的报告此前把每条 `prediction` 截到 400 字符，标注的人看到的就不是被打分的那段答案（下面 R2 的 121 条答案里 27 条超过 400 字符，最长 1,571）。2026-11-10 起存整段；`label:answers` 遇到恰好 400 字符的答案会提醒报告可能是旧的。
@@ -2127,7 +2127,7 @@ train 上（400 题）的损失拆解：
 **核查后的修正**（独立核查发现，两条判定都不变）：
 - 结果段原先写错两处，已改正：一处说 dev 新放行的 24 题证据都被放行，另一处说多"答"了 3 道不可回答题。
 - `eval:abstention-gate` 选配置和判门槛，改成按题数比较。原来比较的是四舍五入到 4 位的比例，多放行的题恰好等于 0.03 时可能误判；这一轮没碰上，用新规则重放 train，选出的配置不变。
-- `RAG_QA_DENSE_RESCUE` 设置写错时，由重排概率判定的门控现在也报错。
+- `RAG_QA_DENSE_RESCUE` 设置写错时，由重排概率判定的门控也报错（开关删除之前）。
 
 ### 答案温度设为 0（`RAG_ANSWER_TEMPERATURE`，2026-11-10，规则先于运行）
 
@@ -2325,7 +2325,7 @@ train 上（400 题）的损失拆解：
 
 ### 交叉编码器重排（BAAI/bge-reranker-v2-m3）
 
-**做法**：开启重排后，先检索 `6 × 3 = 18` 个融合候选，由交叉编码器打分，按 `RAG_RERANK_WEIGHT` 和原始分数混合，最后保留 6 个。
+**做法**：开启重排后，先检索 top-K × 3 个融合候选（当时 top-K 是 6，即 `6 × 3 = 18` 个；现在默认 10，即 30 个），由交叉编码器打分，按 `RAG_RERANK_WEIGHT` 和原始分数混合，最后保留 top-K 个。
 - 模型：bge-reranker-v2-m3，跑在本机 Apple MPS 上，一次 18 个候选约 0.4 秒；
 - 服务：`evaluation/neural-cross-encoder-endpoint.py`。
 
@@ -2364,7 +2364,7 @@ train 上（400 题）的损失拆解：
 **思路**：交叉编码器是把问题和段落放在一起读的，它给出的相关概率，按理比"问题里的词在段落中出现了多少"更适合判断能不能答。
 
 - 重排后的结果保留服务返回的原始分数，排序用的是按题内归一化后的分数，互不影响。
-- 所有候选都有原始分数时，门控改用 sigmoid 后的概率；问题里的编号或引号短语仍然必须出现在段落里。
+- 所有候选都有原始分数时，门控改用 sigmoid 后的概率（`RAG_CROSS_ENCODER_SCORES=probabilities` 时直接用服务返回的值）；问题里的编号或引号短语仍然必须出现在段落里。
 - 没开重排或重排失败时，照旧用词面门控。
 
 **train**（`eval:abstention-gate`，800 道可回答题 + 272 道不可回答题，已开重排）：
@@ -2651,7 +2651,7 @@ G2 各组（最终答案延迟，直连 Ollama，单机）：
 - G2 的 arxiv 没有标准答案，只计回答数，不判对错。
 - 延迟只有一轮全关对照，没做配对比较。候选组 arxiv 最终答案 p95 是 13.5 s / 9.1 s，全关对照是 8.4 s。
 
-#### 拒答标记覆盖（`RAG_QA_VERDICT_OVERRIDE`，默认关闭，2026-10-03）
+#### 拒答标记覆盖（`RAG_QA_VERDICT_OVERRIDE`，2026-10-03；开关、`answer-verdict-override.js` 和它的测试已删除，见下文“第三轮”）
 
 G3 之后用户的决定：修掉误拒，换新样本重测，跑全部护栏，全部通过才作为产品决定改默认值。这一节只记录修复本身和它的确定性测试，外加两轮 `verify:quality` 单文档问题的真实模型诊断。新样本重测见下一节"第三轮：拒答标记的确定性复核"：阶段 1 没有通过，护栏没跑，默认值没有改。
 
@@ -2931,8 +2931,8 @@ DOTENV_CONFIG_PATH=/dev/null POSTGRES_DATABASE_URL= LONG_MEMORY_DATABASE_URL= RE
 | 稠密检索 | 0.23 / 0.26 ms | 0.48 / 0.55 ms | +0.25 ms |
 | 全文检索 | 0.31 / 0.36 ms | 0.56 / 0.66 ms | +0.25 ms |
 
-- 延迟增加来自每条语句多出的 3 次往返（BEGIN、租户设置、COMMIT）。按一次 `/chat` 几十条语句算，是几毫秒量级，相对模型调用可以忽略；但对语句很多的批处理不是零成本。可行的优化是把 BEGIN 和租户设置合成一次往返，目前没做。
-- 查询计划：两种模式都走索引。`off` 用 `doc_id` 索引；`enforce` 下规划器把策略条件也用上，对 `(owner_user_id, workspace_id)` 索引和 `doc_id` 索引做 BitmapAnd。全文检索的 `@@` 不是 leakproof 函数，在策略下不能先于策略条件求值，但这里本来就先用 `doc_id` 缩小范围，所以没有退化成顺序扫描。规模测试后来证实，文档集大了确实会退化（见"压测与规模"里的全文检索一节）：多文档的全文检索现在改走迁移 014 的 owner 函数，这里 enforce 一列展示的仍是普通语句的计划。
+- 延迟增加来自每条语句多出的 3 次往返（BEGIN、租户设置、COMMIT）。按一次 `/chat` 几十条语句算，是几毫秒量级，相对模型调用可以忽略；但对语句很多的批处理不是零成本。可行的优化是把 BEGIN 和租户设置合成一次往返，后来已经做了（见“每次 `/chat` 的数据库往返”）。
+- 查询计划：两种模式都走索引。`off` 用 `doc_id` 索引；`enforce` 下规划器把策略条件也用上，对 `(owner_user_id, workspace_id)` 索引和 `doc_id` 索引做 BitmapAnd。全文检索的 `@@` 不是 leakproof 函数，在策略下不能先于策略条件求值，但这里本来就先用 `doc_id` 缩小范围，所以没有退化成顺序扫描。规模测试后来证实，文档集大了确实会退化（见"压测与规模"里的全文检索一节）：多文档的全文检索现在改走 owner 函数（默认的 BM25 走迁移 030 的 `<分块表>_sparse_search`，迁移 014 的 `_sparse_rank` 只在 `ts_rank_cd`、剪枝关、租户身份、多篇文档时使用，见“全文检索与行级安全”），这里 enforce 一列展示的仍是普通语句的计划。
 - “off 下 9/9 泄露”说的是：一条漏写过滤条件的查询会读到什么。现有代码的 store 都带过滤条件，所以这个数字不代表现在就有泄露，它量化的是这层防护能兜住的那类 bug。
 
 正确性由 `test/postgres-row-level-security.integration.test.mjs` 保证（`bash scripts/run-pgvector-integration.sh` 会运行它）：每张表的隔离、四类越权写、连接池复用后不残留租户设置、owner 与租户查询交替执行、进程级文档 registry 在租户请求里首次加载时仍然加载全部文档、检索时传入其他租户的 docId 也拿不到其切块，以及健康检查探测。
@@ -3812,7 +3812,7 @@ RR1 平均每题 3.6 次重排请求（713/200），每次最多 30 个候选。
 
 ### 多实例与异步入库（2026-09-26）
 
-新开关：`--instances N`（N 个应用进程连同一个数据库）、`--balance least-outstanding|round-robin`（默认 least-outstanding，和 nginx `least_conn`、Envoy `LEAST_REQUEST` 相同）、`--shared-state redis`（wrapper 另起一次性 Redis）、`--tenant`（每个请求带租户头，数据库语句走租户事务和行级安全；不加时是 owner 路径，行级安全不生效，报告会写明）、`--no-analyze`（同一代码前后对照）、`--scenario ingest`（生成 PDF 并发上传）、`--ingest-mode sync|async`、`--ingest-workers K`、`--repeat N`（给出均值和 95% t 区间）。报告记录工作区 diff 的哈希和压测工具自身的哈希，wrapper 传入 PostgreSQL 的 pid，每档记录主机、压测器和 PostgreSQL 的 CPU。每个实例轮流接到全部问题；探测请求和任务轮询与业务流量分开做负载均衡，轮询间隔 1 秒（和前端一致）。
+新开关：`--instances N`（N 个应用进程连同一个数据库）、`--balance least-outstanding|round-robin`（默认 least-outstanding，和 nginx `least_conn`、Envoy `LEAST_REQUEST` 相同）、`--with-redis`（wrapper 另起一次性 Redis，并传 `--shared-state redis`）、`--tenant`（每个请求带租户头，数据库语句走租户事务和行级安全；不加时是 owner 路径，行级安全不生效，报告会写明）、`--no-analyze`（同一代码前后对照）、`--scenario ingest`（生成 PDF 并发上传）、`--ingest-mode sync|async`、`--ingest-workers K`、`--repeat N`（给出均值和 95% t 区间）。报告记录工作区 diff 的哈希和压测工具自身的哈希，wrapper 传入 PostgreSQL 的 pid，每档记录主机、压测器和 PostgreSQL 的 CPU。每个实例轮流接到全部问题；探测请求和任务轮询与业务流量分开做负载均衡，轮询间隔 1 秒（和前端一致）。
 
 以下都是单台机器（Apple M5 Pro）、一次性 PostgreSQL 18.6 + pgvector 0.8.6、假模型，每组单次运行（入库那组重复 3 次）：
 
@@ -4063,6 +4063,7 @@ bash scripts/run-load-test-pgvector.sh --storage pgvector --tenant --model-laten
 cd server
 python3 -m venv evaluation/.venv-ragas
 evaluation/.venv-ragas/bin/python -m pip install -r evaluation/ragas-requirements.txt
+source evaluation/.venv-ragas/bin/activate
 npm run eval:ragas -- --input evaluation/results/latest.json
 ```
 
@@ -4093,7 +4094,5 @@ npm test
 npm run eval:trajectory
 npm run eval:planner
 npm run eval:recovery-observability
-npm run rollout:readiness
 npm run quality:gate
-npm run quality:current
 ```

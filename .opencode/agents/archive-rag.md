@@ -11,7 +11,8 @@ writing.
 
 - `archive_list_documents` — list documents (docId, fileName, pageCount, chunkCount).
 - `archive_ask` — ask a question; returns `{ abstained, abstainReason, answer, citations[], evidence[] }`.
-  Pass two or more `docIds` to get a structured comparison.
+  Pass two or more `docIds` and word the question as a comparison (for example
+  "compare", "difference" or "versus") to get a structured comparison.
 - `archive_refresh` — reload the registry and vector index after a PDF was added to the archive.
 
 ## How to work

@@ -27,7 +27,7 @@ flowchart LR
 
 - Planner 先判断任务类型、文档数量、access scope 和是否需要 skill chain。
 - Retrieval 保留文档边界，尤其是 compare 请求。
-- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。范围里有多份文档时，问题含 compare/differ/similar/contrast/conflict 的各种词形（differs、compared、similarities 等，不含 differential、contrastive、similarity 这类术语）、versus/same/between/across，或区别、差异、不一样、异同、相比、比起、相似（不含相似度）、类似、共同点等中文词，就算对比问题；所以只问一份文档的对比式问题（如 "How do RAG-Sequence and RAG-Token differ...?"）在多文档范围里也要两份文档的引用。回答走哪条路线另由 `query-router.js` 自己的词表决定（只认 compare、difference、different、similar、区别、差异、对比等整词），只靠上面这些新词形判成对比的问题仍走 QA 路线：从全局 top-K 检索（带对比画像的检索 query），不按文档分别取证据、也不用对比 prompt，只是按对比问题核对引用，答案只引用一份文档时先补检索，补检索的答案仍只引用一份就转成澄清。两份词表要不要合并（合并后这些问题按文档取证据，但只问一份文档的这类问题也会走对比路线）留给负责人决定。
+- Self-check 检查关键 claim 是否能被 citation excerpt 支持。文档问答的自检只对对比问题（检索计划意图为 comparison）要求引用覆盖两份文档，其他问题引用一份即可。范围里有多份文档时，问题含 compare/differ/similar/contrast/conflict 的各种词形（differs、compared、similarities 等，不含 differential、contrastive、similarity 这类术语）、versus/same/between/across，或区别、差异、不一样、异同、相比、比起、相似（不含相似度）、类似、共同点等中文词，就算对比问题；所以只问一份文档的对比式问题（如 "How do RAG-Sequence and RAG-Token differ...?"）在多文档范围里也要两份文档的引用。回答走哪条路线另由 `query-router.js` 自己的规则决定（词表只认 compare、difference、different、similar、区别、差异、对比等整词，另有句式规则，例如 between … documents、which … more），只靠上面这些新词形判成对比、又没命中这些句式规则的问题仍走 QA 路线：从全局 top-K 检索（带对比画像的检索 query），不按文档分别取证据、也不用对比 prompt，只是按对比问题核对引用，答案只引用一份文档时先补检索，补检索的答案仍只引用一份就转成澄清。两份词表要不要合并（合并后这些问题按文档取证据，但只问一份文档的这类问题也会走对比路线）留给负责人决定。
 - Gap analysis 把 unsupported claim 转成 focused retrieval plan。
 - Budget guard 阻止无限 follow-up。
 - Finalizer 删除或降级仍未被 citation 支持的 claim。
@@ -121,7 +121,7 @@ Custom skill 阶段只有一个执行器：typed DAG，由 LangGraph 调度。ex
 | Graph contract | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph`；node 至少包含 `nodeId`、`skillId`、`dependsOn`、`inputBindings`、`failurePolicy`、`rationale`。同一个 skill 可以出现在多个 `nodeId` 下，step id 变成 `custom_skill:<nodeId>`。 |
 | Validator / compiler | 同上的 `validateExecutionGraph()` / `compileExecutionGraph()` | 纯函数校验和拓扑分层，返回稳定 reason code。 |
 | Planner adapter | `server/rag/agent-dag-planner-adapter.js` | 直接产出原子 skill node 和依赖，不再输出 `skill_chain_compare_risk` 这类复合 id。 |
-| Scheduler | `server/rag/langgraph/run-execution-graph.js`（唯一的调度器；原生调度器已在 ADR 0001 阶段 6 删除） | 拓扑调度、并发上限、预算预留、side-effect 串行化，以及解析后的输入和真实/恢复输出的运行时 schema gate；单个 node 的执行在 `agent-execution-graph-node.js`，准入、收尾和已结算图的回放在 `agent-execution-graph-runner.js`。 |
+| Scheduler | `server/rag/langgraph/run-execution-graph.js`（唯一的调度器；原生调度器已在 ADR 0001 阶段 6 删除） | 拓扑调度、并发上限、预算预留、side-effect 串行化，以及解析后的输入和真实/恢复输出的运行时 schema gate；单个 node 的执行在 `agent-execution-graph-node.js`，准入和收尾在 `agent-execution-graph-runner.js`。 |
 | Replanner | `server/rag/agent-replanner.js` | 有界局部重规划，只返回 graph patch。 |
 
 Node 输入只有两个来源：已校验的 request 字段，或它显式 `dependsOn` 的上游 node 的 typed 输出字段（`inputBindings` 的 `source` 只接受 `request` 和 `node`）。这是和 V1 最实质的区别——拼接自由文本不再是主数据接口。当前输出 schema 是 `text`、`citations`、`abstained` 的答案封套，`priorFindings` 仍是上游 `text` 字段；它没有把对比差异或风险变成经过语义验证的独立对象。
@@ -130,7 +130,7 @@ Node 输入只有两个来源：已校验的 request 字段，或它显式 `depe
 
 `validateExecutionGraph()` 是纯函数，在任何 node 执行之前整体接受或整体拒绝一张图；`compileExecutionGraph()` 只在校验通过后产出拓扑层。非法图不会部分执行。初始 plan 和每一次 replan 走同一个 validator。当前 reason code：
 
-`empty_graph`、`invalid_graph_version`、`invalid_node_shape`、`duplicate_node_id`、`dangling_dependency`、`self_dependency`、`cycle_detected`、`illegal_output_reference`、`input_type_mismatch`、`missing_required_input`、`out_of_scope_document`、`unregistered_capability`、`forged_approval`、`forged_policy`、`unsafe_parallel_side_effect`、`max_nodes_exceeded`、`max_depth_exceeded`、`budget_exceeded`。
+`empty_graph`、`invalid_graph_version`、`invalid_node_shape`、`duplicate_node_id`、`dangling_dependency`、`self_dependency`、`cycle_detected`、`illegal_output_reference`、`input_type_mismatch`、`invalid_condition`、`missing_required_input`、`out_of_scope_document`、`unregistered_capability`、`forged_approval`、`forged_policy`、`unsafe_parallel_side_effect`、`max_nodes_exceeded`、`max_depth_exceeded`、`budget_exceeded`。
 
 `forged_approval` / `forged_policy` 覆盖 runtime 独占字段：planner 写入 `approval`、`approvalGateId`、`approvedGate`、`accessScope`、`budget`、`budgetKey`、`concurrency`、`docIds`、`maxReplans`、`requiresApproval` 等字段时整图被拒，而不是被静默清洗——静默清洗会让 planner 学到"多要一点没有代价"。
 
@@ -175,7 +175,7 @@ Graph 的规划和执行结果以 agent run event `skill_graph_planned` 记录�
 
 ### Recovery 语义
 
-Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Skill 只作为图节点运行。中断的图由整图恢复续跑；失败的节点不重试（模型规划器下的有限 replan 除外）。
+Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Skill 只作为图节点运行。中断的图只能由整图恢复续跑，条件见下文；失败的节点不重试（模型规划器下的有限 replan 除外）。
 
 - **矩阵和守卫。** `server/rag/agent-run-step-replay-safety.js` 里 `custom_skill` 的 `replayActions` 是空的，原因码是 `graph_node_step`。回放守卫（`agent-run-graph-replay-guard.js`）拒绝对任何 `custom_skill` step 的单步重试（step executor 的预检和 run store 的 `retryStep`）和通用的 step 改写（`updateRunStep`），返回 `AGENT_GRAPH_STEP_REQUIRES_GRAPH_RECOVERY`（409），不看它带不带 `nodeId`、run 有没有 checkpoint。图自己写节点 step 走的是 step 生命周期（`recordRunStep`），那里只在 run 上有 checkpoint、而这个 step 不是 checkpoint 里的节点时才问守卫；没有 checkpoint 的图运行就靠这条路写 `custom_skill` step。恢复面板和聊天答案里的 Retry 按钮都按矩阵决定给不给，所以失败的 Skill 节点没有重试按钮。
 - **阶段 9 之前（2026-11-13）。** 不带 `nodeId` 的 `custom_skill` step 只有已删除的 V1 chain 写得出来。它可以由一个独立的处理器单独重跑、在启动时自动重放、在恢复面板上 “resume”，这是最后一条不经图执行 custom Skill 的路径。处理器、`resume_from_step` 动作、step executor 的 `resumeStep`、启动恢复的单步重放分支和矩阵里“可自动重放”一列都删了。删了什么、已存的 run 会怎样，见 `docs/adr/0001-langgraph-runtime.md`“阶段 9 结果”；每种情形改动前后的行为逐条写在 `server/test/agent-skill-step-replay.test.mjs`。
@@ -193,9 +193,9 @@ Node 写成 `custom_skill` step，但这个 step 不能单独执行：custom Ski
 
 Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必须带 gate 的 `approvalObjectHash`，不带或对不上的审批什么都不放行（`capabilities/policy-enforcer.js` `isApprovalGranted`，2026-11-19 起不再有按 source 豁免的未绑定审批）。
 
-"不重跑已完成的 node"先由 step executor 限定 `retry_failed_step` / approval resume 的目标（没有 `resume_from_step`，阶段 9 删除）；对于 graph node，通用单步 retry 会在任何状态修改前拒绝，中断的图只能走整图恢复，以免跳过依赖、输出契约和预算。该拒绝也在 run store 的单次 CAS 内重新判断，覆盖预检与状态修改之间的竞态；只有持久事件能证明是在终态 graph event 之后创建的外层 step/gate 才可单步续跑。图节点的启动和结算都必须携带同一恢复 claim。Graph replan 则用 `completedNodeRuns` 复用已完成或已 `reused` 的 node。Guarded stage 进一步把 graph、owner、已结算 node 和预算起点写入同一个 agent run 的私有 checkpoint；专用续跑路径会校验摘要、scope、文档、graph、live Skill contract 与已持久化 step，重算已发生的预算后才复用已完成节点。普通 `runAgentRag` 重入即使请求和 owner 相同，也会在更新 input/plan 的同一次 CAS 中拒绝已有 graph checkpoint，避免与尚未停下的原 worker 并行执行或改写快照、事件。状态不一致、缺少已完成 step 的 checkpoint、或 node 仍处于未知 in-flight 状态时会拒绝静默续跑，转由 recovery policy 处理。公开 `/agent-runs` 投影不暴露私有 checkpoint。
+"不重跑已完成的 node"先由 step executor 限定 `retry_failed_step` / approval resume 的目标（没有 `resume_from_step`，阶段 9 删除）；对于 graph node，通用单步 retry 会在任何状态修改前拒绝，中断的图只能走整图恢复，以免跳过依赖、输出契约和预算。该拒绝也在 run store 的单次 CAS 内重新判断，覆盖预检与状态修改之间的竞态；只有持久事件能证明是在终态 graph event 之后创建的外层 step/gate 才可单步续跑。图节点的启动和结算都必须携带同一恢复 claim。Graph replan 则用 `completedNodeRuns` 复用已完成或已 `reused` 的 node。Guarded stage 进一步把 graph、owner、已结算 node 和预算起点写入同一个 agent run 的私有 checkpoint；专用续跑路径会校验摘要、scope、文档、graph、live Skill contract 与已持久化 step，重算已发生的预算后才复用已完成节点。`runAgentRag` 不重入已有的 run：带 `agentRunId` 的请求新建一个 run（记一条指向原 run 的 `run_continued` 事件），不改写原 run 的快照和事件。状态不一致、缺少已完成 step 的 checkpoint、或 node 仍处于未知 in-flight 状态时会拒绝静默续跑，转由 recovery policy 处理。公开 `/agent-runs` 投影不暴露私有 checkpoint。
 
-启动自动恢复只续跑图，不单独重放任何 step。能续跑的只有 guarded custom-Skill 图（已删除的 v3 统一图留下的 run 不续跑，没结束的交给人，被更早一次启动恢复领取过的也一样，原因 `unified_graph_removed` 或 `unknown_in_flight_node`，见 ADR 0001 阶段 10）。只有 `guarded` checkpoint 与已存 step 能对账、没有待审批 gate，且持久化的外层 execution plan 恰好只有 `custom_skills` 阶段时，recovery 才通过持久化的单次 CAS claim 调用 `resumeAgentExecutionGraphRun()`。它直接使用已存 plan/graph 续跑，不重新调用 Intent 或外层 planner；已完成 node 复用，未知 in-flight 节点、owner/step 不匹配、含 document/Web 等外层阶段的 run 均转人工恢复。自动续跑只在节点间的安全边界发生；即使 in-flight 节点声明 `readOnly`，存储层也无法证明旧 worker 已停止，因此仍转人工。`phase` 已是 `completed` 或 `partial`、但 run 尚未终结时也不自动 claim：旧 worker 可能正在写入经验或提交最终响应，这个终结窗口转人工；`agent-run-recovery.test.mjs` 覆盖两个 phase。claim 和下一节点的启动在同一 run-revision CAS 上互斥：旧 worker 先启动则 claim 失败，claim 先完成则旧 worker 在调用 Skill 前被挡住。其他 worker 遇到已领取的 graph 会跳过而不改写状态；如果 owner 在领取后崩溃，claim 不会自动重放，需要运维定位并人工处理。这不意味着整个 AgentRAG execution plan 都支持自动续跑。`eval:recovery-observability` 的 `skill_graph_startup_resume` 使用同一内存 store 重建服务实例，覆盖生产续跑 API 和 checkpoint 协议；独立的 `agent-execution-graph-postgres.integration.test.mjs` 则在真实 PostgreSQL 上由另一个 Node 进程续跑，验证已完成写节点不重放。真实发布仍需通过同提交的 release 证据门禁。
+启动自动恢复只续跑图，不单独重放任何 step。能续跑的只有 guarded custom-Skill 图（已删除的 v3 统一图留下的 run 不续跑，没结束的交给人，被更早一次启动恢复领取过的也一样，原因 `unified_graph_removed` 或 `unknown_in_flight_node`，见 ADR 0001 阶段 10）。只有 `guarded` checkpoint 与已存 step 能对账、没有待审批 gate，且持久化的外层 execution plan 恰好只有 `custom_skills` 阶段时，recovery 才通过持久化的单次 CAS claim 调用 `resumeAgentExecutionGraphRun()`。它直接使用已存 plan/graph 续跑，不重新调用 Intent 或外层 planner；已完成 node 复用，未知 in-flight 节点、owner/step 不匹配、含 document/Web 等外层阶段的 run 一般转人工恢复。自动续跑只在节点间的安全边界发生；即使 in-flight 节点声明 `readOnly`，存储层也无法证明旧 worker 已停止，因此仍转人工。`phase` 已是 `completed` 或 `partial`、但 run 尚未终结时也不自动 claim：旧 worker 可能正在写入经验或提交最终响应，这个终结窗口转人工；`agent-run-recovery.test.mjs` 覆盖两个 phase。claim 和下一节点的启动在同一 run-revision CAS 上互斥：旧 worker 先启动则 claim 失败，claim 先完成则旧 worker 在调用 Skill 前被挡住。其他 worker 遇到已领取的 graph 会跳过而不改写状态；如果 owner 在领取后崩溃，claim 不会自动重放，需要运维定位并人工处理。这不意味着整个 AgentRAG execution plan 都支持自动续跑。`eval:recovery-observability` 的 `skill_graph_startup_resume` 使用同一内存 store 重建服务实例，覆盖生产续跑 API 和 checkpoint 协议；独立的 `agent-execution-graph-postgres.integration.test.mjs` 则在真实 PostgreSQL 上由另一个 Node 进程续跑，验证已完成写节点不重放。真实发布仍需通过同提交的 release 证据门禁。
 
 ### 当前限制
 
@@ -228,7 +228,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/agent-custom-skill-stage.js` | Custom skill 阶段：规划 typed DAG、交给 LangGraph 执行、管理 graph checkpoint 和 replan；图被整体拒绝时把选中的 Skill 记为未执行。对外返回一个扁平 skill result 数组。 |
 | `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 intent/chain 选择分离；不在这个目录里的 custom Skill 不会运行。 |
 | `server/rag/agent-execution-graph.js` | 版本化 `ExecutionGraph` contract 和纯函数 validator/compiler；整体接受或整体拒绝，返回稳定 reason code。 |
-| `server/rag/agent-execution-graph-runner.js` | 与调度方式无关的两端：整图准入（`admitExecutionGraphRun`）、收尾（`finishExecutionGraphRun`），以及不调度的已结算图回放（`replayExecutionGraphRun`）。原生调度循环 `runExecutionGraph` 已在 ADR 0001 阶段 6 删除；调度器是 `server/rag/langgraph/run-execution-graph.js`（LangGraph.js：拓扑层序队列、并发上限、预算预留/退回、side-effect 串行化、审批停靠），运行时 input/output schema gate 和 node run 记录在 `agent-execution-graph-node.js`。 |
+| `server/rag/agent-execution-graph-runner.js` | 与调度方式无关的两端：整图准入（`admitExecutionGraphRun`）和收尾（`finishExecutionGraphRun`）。原生调度循环 `runExecutionGraph` 已在 ADR 0001 阶段 6 删除；调度器是 `server/rag/langgraph/run-execution-graph.js`（LangGraph.js：拓扑层序队列、并发上限、预算预留/退回、side-effect 串行化），运行时 input/output schema gate 和 node run 记录在 `agent-execution-graph-node.js`。 |
 | `server/rag/agent-execution-graph-checkpoint.js` | 私有 graph checkpoint 的摘要/owner 验证、node/step 对账和完成节点复用判定；保存在既有 agent run store，而非第二套运行时。 |
 | `server/rag/agent-dag-planner-adapter.js` | V2 planner adapter；只暴露脱敏后的白名单 capability 描述、schema、授权文档范围和 planning context，产出原子 skill node 与依赖。 |
 | `server/rag/agent-replanner.js` | 有界局部重规划；只返回需重新校验的 graph patch，不执行工具，默认 `maxReplans: 1`。 |
@@ -242,7 +242,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/task-store.js` | 根据 `TASK_STORE_PROVIDER` 选择 task store adapter；默认 `auto` 会在 PostgreSQL 配好时使用持久化 store，否则使用内存 store。 |
 | `server/rag/postgres-task-store.js` | PostgreSQL task store adapter，保存 task 当前快照和审计事件；内部 `payload` 只给 runner 使用，不从 API 暴露。 |
 | `server/rag/agent-runs.js` | 定义 agent run contract 和 service，记录 goal、plan、steps、observations、decisions、approval gates、result/error 和审计 events。 |
-| `server/rag/agent-run-step-executor.js` | 执行已持久化的 run step：审批放行的 capability step，和人工重试的失败 step。不恢复中断的 step，不执行 custom Skill。只负责 action/retry 编排和 step handler 派发，让 HTTP route 不绑定具体工具执行细节。 |
+| `server/rag/agent-run-step-executor.js` | 执行已持久化的 run step：审批放行的 capability step，和人工重试的 step（重试接口也接受已经成功的 step）。不恢复中断的 step，不执行 custom Skill。只负责 action/retry 编排和 step handler 派发，让 HTTP route 不绑定具体工具执行细节。 |
 | `server/rag/agent-run-graph-replay-guard.js` | 纯函数：在同一 run 快照中判断通用单步 retry/审批是否会绕开 graph；任何 `custom_skill` step 一律拒绝。step executor 预检与 run store CAS 共同使用。 |
 | `server/rag/agent-run-recovery.js` | 启动时扫描 recoverable run。`auto` 模式自己只做一件事：经过 checkpoint/step 对账且外层 plan 仅含 `custom_skills` 的 guarded run 单次领取并走整图续跑。其余中断的 run（待审批、未知 in-flight、混合外层 plan、没有图可续、已删除的 v3 统一图留下的）一般转人工；已被领取过续跑的 custom Skill 图和已标过人工的 run 会被跳过（可能一直停在 `running`）。不单独重放任何 step。非持久化 run store 默认 manual。 |
 | `server/rag/agent-run-step-replay-safety.js` | 固定 step replay safety matrix：每类 step 的必需 input、人工 retry 是否可用、审批要求和幂等性说明；没有“可自动重放”一列。恢复面板上的原因码、“重试失败步骤”给不给、handler registry 都读这一份。 |
@@ -276,7 +276,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 
 `server/rag/agent.js` 应保留为主流程编排，不应重新堆入 planner、trace、working memory、observability 或 finalization 细节。
 
-前端 Chat scope 控制只改变传给 `/chat` 的 `docIds`：默认 `Uploaded` 排除外部 arXiv 文档，`All` 包含工作区全部文档，`Selected` 使用用户在文档列表中勾选的文档。
+前端 Chat scope 控制决定传给 `/chat/stream` 的 `docIds`：默认 `Uploaded` 排除外部 arXiv 文档，`All` 包含工作区全部文档，`Selected` 使用用户在文档列表中勾选的文档。
 
 ## Action capabilities
 
@@ -288,7 +288,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 - `summary.create`：把摘要及 doc/citation metadata 写为 `summary` artifact。
 - `external.import`：通过外部导入服务执行，或创建 scoped external import task。
 
-这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到 approval gate `inputPreview`。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
+这些 action 都使用 `user_confirmation` approval policy，并把可恢复执行所需的 sanitized input 固化到审批的私有执行快照（gate 上的 `inputPreview` 只是预览，两者都计入 `approvalObjectHash`）。用户批准后，恢复层创建 `capability_call` step；重试/恢复安全性继续由 `server/rag/agent-run-step-replay-safety.js` 的 `capability_call` policy 决定。Action 结果可以写入 task log，但不能作为 citation、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 实际返回的证据字段。
 
 需要审批的 Capability（Web 搜索、arXiv 导入、文档发现和上面的 action）只在批准之后执行：外层计划里的 Skill 走到审批门就停，不会自己执行它们；万一调用没有停在门上就返回了，Skill 直接失败（ADR 0001 阶段 13）。批准后由 `capability_call` step 作答（`capability-steps.js` 的 `buildCapabilityAnswer`），step 输出、run 结果和响应用同一个答案：arXiv 导入回答找到、导入、已存在和失败的篇数以及论文列表，语言跟随这次 run 的问题（run 的 goal；后台任务在同一个 run 里续接新问题时，仍是最初的问题），新导入和已存在的论文作为来源，一篇都没找到时算拒答；文档发现回答批准时 docIds 范围内的匹配文档（这两种在 `agent-run-step-handlers/capability-answers.js`）；其他 Capability 用自己返回的文本和引用，没有文本时回答 `<名称> completed.`。Web 搜索失败（没配 `SERPAPI_KEY`，或 SerpAPI 报错：key 无效、额度用完、连不上）时不作答：`mcp-server.js` 回 `isError`，`chat-mcp.js` 不重试、不调模型，直接以 409 和原因抛出，step 和 run 以失败结束，批准请求回 `{ error: 原因 }`，后台任务以同一原因失败。原因按失败种类给固定文本：没配 key 是 `Web search is not configured: SERPAPI_KEY is not set.`，SerpAPI 回了非 200 是 `Error performing web search: SerpAPI answered with an error.`，请求没拿到回复（网络错误、超时）是 `Error performing web search: the request to SerpAPI failed.`；SerpAPI 回复体的原文和网络错误信息只写进服务端日志（`mcp-server.js` 的 stderr），不给客户端。界面上原因只出现在聊天页的错误提示里：这一轮的审批门不会更新，后台任务的原因只记在任务的 `error` 字段，任务卡片不显示。
 
@@ -383,10 +383,10 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 ## Prompt 注入防护
 
-上传的文档、文件名和网页搜索结果都是不可信文本，它们都会进入发给模型的 prompt。规划器看不到文档正文（只看到问题、doc id 和 Skill 元数据），所以文档里的注入只能影响答案生成、调用答案生成的 Skill，以及 claim 评审。防护分三层，都在这条路径上：
+上传的文档、文件名和网页搜索结果都是不可信文本，它们都会进入发给模型的 prompt。规划器看不到文档正文（看到的是问题、doc id、Skill 元数据和 task memory 等规划上下文），所以文档里的注入直接影响的是带文档文本的 prompt，例如答案生成、调用答案生成的 Skill、claim 评审，以及跨语言检索的改写（提示里带文档摘要）。防护分三层，都在这条路径上：
 
 1. **确定性筛查**（`rag/prompt-injection-screen.js`，`RAG_INJECTION_SCREEN`，默认 on）。
-   - **识别的句子**：检索到的切块、上传文件名和网页结果中，凡是对 AI 说话的句子，在进入 prompt 前都会被替换成标记。包括"忽略之前的指令"、"Note to AI assistants"、"Assistant: …"、"你的新任务"、要求输出系统提示词的句子，以及 chat 模板控制符（`<|im_start|>` 等，连同其中的内容一起替换）。中文写法也覆盖。
+   - **识别的句子**：检索到的切块、上传文件名和网页结果中，规则认出的对 AI 说话的句子，在进入 prompt 前会被替换成标记。包括"忽略之前的指令"、"Note to AI assistants"、"Assistant: …"、"你的新任务"、要求输出系统提示词的句子，以及 chat 模板控制符（`<|im_start|>` 等，连同其中的内容一起替换）。中文写法也覆盖。
    - **用户看到的内容不变**：引用给用户看的仍是原文。
    - **可观察**：RAG 响应里的 `injectionScreen` 报告删了几句、命中哪些规则，只记规则 id，不记原文。
 2. **不可信证据规则**（spotlighting）。
@@ -399,15 +399,15 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 
 已知边界：
 
-- 筛查是模式匹配。刻意绕开这些写法的改写能通过：红队集里的 `evasion_paraphrase` 在筛查前后都 3/3 成功，这时只剩第 2 层，而 7B 模型挡不住。
+- 筛查是模式匹配。刻意绕开这些写法的改写能通过：红队集里的 `evasion_paraphrase` 在文档 RAG 上筛查前后都 3/3 成功（Agent 路径从 3/3 变成 1/3），这时只剩第 2 层，而 7B 模型挡不住。
 - 词法 claim 校验看的是未筛查的原文，所以理论上能支持一句复述注入内容的 claim。好在模型已经看不到被筛掉的句子。
 - 用户自己在问题里写的指令不做筛查（问题属于用户本人）；这类直接注入靠 grounding 规则和 finalizer 处理。
 
-`npm run eval:prompt-injection` 衡量效果，数字见 [evaluation.md](evaluation.md) 的“Prompt 注入红队”。
+`cd server && npm run eval:prompt-injection` 衡量效果，数字见 [evaluation.md](evaluation.md) 的“Prompt 注入红队”。
 
 ## Claim 校验：词法规则 + LLM 评审
 
-自检和 finalizer 的 claim 校验默认是词法规则（`self-check/`）：claim 里每个关键词、数字都要能在它引用的证据里找到。它几乎不会放过编造，但也拒绝正确的改写：模型写"liability is capped at twelve months of fees"，证据写"shall not exceed the fees paid in the twelve (12) months"，词法校验判无支持。用本地 7B 模型时，这让合同题 21 次里只有 3 次得到回答，其余都转成澄清。
+自检和 finalizer 的 claim 校验先走词法规则（`self-check/`）：claim 里每个关键词、数字都要能在它引用的证据里找到。它几乎不会放过编造，但也拒绝正确的改写：模型写"liability is capped at twelve months of fees"，证据写"shall not exceed the fees paid in the twelve (12) months"，词法校验判无支持。用本地 7B 模型时，这让合同题 21 次里只有 3 次得到回答，其余都转成澄清。
 
 `RAG_CLAIM_JUDGE=llm`（2026-11-19 起的默认值）时，词法校验拒绝的 claim 会交给 LLM 评审（`self-check/claim-judge.js`）复核，一个答案的所有待复核 claim 合成一次调用，按 strict JSON Schema 返回每条的 verdict（每条 claim 都必须有一条；理由最多 160 字符、不含引号和反斜杠：本机 Ollama 按这条正则约束生成，放过引号或反斜杠会把 JSON 截坏）。评审的权力是受限的：
 
@@ -425,11 +425,11 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 `POST /chat/stream` 推送两类中间事件，最后的 `result` 与 `/chat` 完全一致：
 
 - `trace_step`：每记录一步 trace 推一个精简摘要（`agent-event-stream.js`）。
-- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套 claim 校验（`evaluateClaimSupport` + 标题归一化）检查已生成的**前缀**，通过的句子按 finalizer 的格式推送，不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。同一次模型调用的各个前缀共用一个校验 memo，已经校验过的句子直接取结果，所以每写完一句只校验新写的句子。重试或切换备用模型时推 `answer_draft_reset`，memo 也重新开始。模型流中途报错，或者既没有 `finish_reason` 也没有 `[DONE]` 就断开，算这次调用失败并重试，不会把半截文本当答案。
+- `answer_draft` / `answer_draft_reset`：主文档答案的"已校验草稿"（`answer-drafts.js`）。模型按 token 流式生成，但 token 不出服务器；每写完一句，就用 finalizer 同一套词法 claim 校验（`evaluateClaimSupport` + 标题归一化，不经 LLM 评审）检查已生成的**前缀**，通过的 claim 按 finalizer 的格式推送（一句可能拆成几条 claim，只推通过的部分），不通过的扣下。一句话只有在它后面的 `[Source N]` 标签和下一个字符都到了才算写完，否则会在引用到达前被判为无支持。同一次模型调用的各个前缀共用一个校验 memo，已经校验过的句子直接取结果，所以每写完一句只校验新写的句子。重试或切换备用模型时推 `answer_draft_reset`，memo 也重新开始。模型流中途报错，或者既没有 `finish_reason` 也没有 `[DONE]` 就断开，算这次调用失败并重试，不会把半截文本当答案。
 
-草稿只在 agent 用 `runWithAnswerDraftChannel` 包住的主文档检索里、且有流式客户端时产生；`/chat`、后台任务、评测、Skill 内部的模型调用和补检索都不产生草稿。草稿不是最终答案：自检失败后文档循环会补检索、可能换成补检索的答案或改为澄清，finalizer 也可能重写整段，所以界面把草稿标成"已通过证据校验，最终答案可能调整"，收到 `result` 后整体替换。保证是"不展示未经校验的内容"，不是"不撤回"。
+草稿只在 agent 用 `runWithAnswerDraftChannel` 包住的主文档检索里、且有流式客户端时产生；`/chat`、后台任务、评测（`eval:answer-drafts` 除外，它挂了事件接收端）、Skill 内部的模型调用和补检索都不产生草稿。草稿不是最终答案：自检失败后文档循环会补检索、可能换成补检索的答案或改为澄清，finalizer 也可能重写整段，所以界面把草稿标成"已通过证据校验，最终答案可能调整"，收到 `result` 后整体替换。保证是"不展示未经校验的内容"，不是"不撤回"。
 
-`npm run eval:answer-drafts` 用真实模型量首个草稿时间、最终答案时间、草稿保留率和撤回原因，见 [evaluation.md](evaluation.md)。
+`cd server && npm run eval:answer-drafts` 用真实模型量首个草稿时间、最终答案时间、草稿保留率和撤回原因，见 [evaluation.md](evaluation.md)。
 
 ## OpenTelemetry trace
 
@@ -442,7 +442,7 @@ Durable agent task 对外暴露一个轻量 goal plan，让前端 Agent Run Cent
 | `execute_tool <skillId>` | `executeObservedSkill`（所有 Skill 的唯一执行入口） | `gen_ai.tool.name`、`agent.skill.ok` / `abstained` / `citation_count`；`ok: false` 标记为 ERROR |
 | `chat <model>` / `embeddings <model>` | `runWithLlmOpsMetric`（所有计量的模型调用） | `gen_ai.request.model`、`gen_ai.usage.input_tokens` / `output_tokens`、`llmops.token_source`、`llmops.estimated_cost_usd`、`llmops.route_status`；重试是 `model.retry` 事件 |
 
-Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模型调用自动挂在发起它的 Skill 下面；备用模型是同一个 Skill 下的另一个 `chat` span。Agent 步骤作为 `agent.step` 事件挂在当前 span 上，只带类型、标签和状态，和 `/chat/stream` 推送的字段一致。属性只有标识、模型名、计数和状态，不记录问题、prompt、模型输出或文档内容（`test/tracing.test.mjs` 会检查）。开启时 `agentObservability.traceId` 返回 trace id，关闭时不出现这个字段。
+Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模型调用自动挂在发起它的 Skill 下面；备用模型是同一个 Skill 下的另一个 `chat` span。Agent 步骤作为 `agent.step` 事件挂在当前 span 上，只带类型、标签和状态。属性只有标识、模型名、计数和状态，不记录问题、prompt、模型输出或文档内容（`test/tracing.test.mjs` 会检查）。开启时 `agentObservability.traceId` 返回 trace id，关闭时不出现这个字段。
 
 ## 运行预算：次数之外的 token、成本和时长
 
@@ -467,16 +467,16 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 
 `/chat` 响应会返回：
 
-- `agentSkills`：本轮候选和实际选中的 skills。
+- `agentSkills`：本轮记下结果的 skills 及其状态（`completed` / `failed`）。
 - `agentTrace`：plan、query planner、skill chain、document RAG、self-check、gap analysis、follow-up、finalizer 等步骤。
 - `agentObservability`：execution planner selected/fallback 状态、per-skill attempts、duration、citations、abstain、retry/follow-up、budget（含 `budget.run` 的 token、成本、时长用量）、error 和 working memory。
 - `agentWorkingMemory`：本次 run 内的检索 query、supported/unsupported claims、resolved/unresolved gaps。
 
 规划器回退的原因（`/chat` 里 intent / execution planner 的 `fallbackReason`，run 记录里 DAG 规划器的 `fallbackReason` 和 replanner 的 `reason`）保留规划器自己的解析、校验错误信息；模型调用失败（错误带 `code` 或 `status`：超时、HTTP 或网关错误、熔断）只记 `planner_call_failed`，不带上游错误信息，因为它可能带上游回复或模型端点；服务端日志对每种失败只记一次错误名和错误代码。
 
-其他所有客户端看得到的错误文本（2026-11-21 起）走同一条规则，即 `server/lib/error-text.js` 的 `serializeError`，路由的 `{ error }` 应答也用它（`routes/helpers.js` 转出）：`/chat` 和 `/chat/stream` 的 `errors.rag`、`errors.mcp`、`ragAnswer`、`mcpAnswer`，trace 和 run step 的摘要与错误记录，`agentSkills` 里的错误，`run.error`，恢复事件，任务记录，目标交付物，research 子问题，经验记忆的错误，arXiv 逐篇和导入任务的错误，推荐任务，以及归档 MCP 工具。只有为客户端抛出的错误保留原文：状态码 4xx 或 `expose: true`，并且不是上游模型的回复（带 `upstreamStatus`）；其他错误（没有状态码的数据库或文件系统错误，可能带主机名、路径或 SQL；5xx；上游回复，可能带端点、模型名或请求内容；不是 Error 的值）一律换成调用处原有的兜底文本，原错误用 `console.error` 记进服务端日志，同一个错误对象只记一次。写给用户看、状态码不是 4xx 的应用错误带 `expose: true`：预算拒绝和被跳过的图节点（`skills/registry.js` 的 `buildSkippedSkillResult`）、图被整张拒绝时没有运行的 Skill（`agent-custom-skill-stage.js`）、请求截止或客户端离开（`RequestCancelledError`）、依赖故障（`DependencyOutageError`）；arXiv 主题里没有可搜索的词时是 400（`arxiv-client.js`）。已经是文本或 `{ message, name }` 记录的错误在生成处已经过了这条规则，run 记录原样保存。`answerUnhandledError`（只认 `expose`）和 `toIngestJobErrorMessage`（只认 `expose` 和 413/415/422，上游回复一律不认）比这条规则更严，没有并进来。
+其他所有客户端看得到的错误文本（2026-11-21 起）走同一条规则，即 `server/lib/error-text.js` 的 `serializeError`，路由的 `{ error }` 应答也用它（`routes/helpers.js` 转出）：`/chat` 和 `/chat/stream` 的 `errors.rag`、`errors.mcp`、`ragAnswer`、`mcpAnswer`，trace 和 run step 的摘要与错误记录，`agentSkills` 里的错误，`run.error`，恢复事件，任务记录，目标交付物，research 子问题，经验记忆的错误，arXiv 逐篇和导入任务的错误，推荐任务，以及归档 MCP 工具。只有为客户端抛出的错误保留原文：状态码 4xx 或 `expose: true`，并且不是上游模型的回复（带 `upstreamStatus`）；其他错误（没有状态码的数据库或文件系统错误，可能带主机名、路径或 SQL；5xx；上游回复，可能带端点、模型名或请求内容；不是 Error 的值）一律换成调用处原有的兜底文本，原错误用 `console.error` 记进服务端日志，同一个错误对象只记一次。写给用户看、状态码不是 4xx 的应用错误带 `expose: true`，例如：预算拒绝和被跳过的图节点（`skills/registry.js` 的 `buildSkippedSkillResult`）、图被整张拒绝时没有运行的 Skill（`agent-custom-skill-stage.js`）、请求截止或客户端离开（`RequestCancelledError`）、依赖故障（`DependencyOutageError`）；arXiv 主题里没有可搜索的词时是 400（`arxiv-client.js`）。已经是文本或 `{ message, name }` 记录的错误在生成处已经过了这条规则，run 记录原样保存。`answerUnhandledError`（只认 `expose`）和 `toIngestJobErrorMessage`（只认 `expose` 和 413/415/422，上游回复一律不认）比这条规则更严，没有并进来。
 
-前端 trace UI 位于 `src/components/RenderQA.js`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
+前端 trace UI 位于 `src/components/RenderQA.jsx`，会展示选中的 skills、skill chains、retrieval queries、evidence gaps、unsupported claims 和 finalizer 删除内容。
 
 ## Clarification gate
 
@@ -516,7 +516,7 @@ Durable agent task loop 使用 `server/rag/agent-task-memory.js` 维护 task-sco
 - 用户偏好。
 - 下一步候选。
 
-Task memory 只会作为 intent/execution planner 的 planning context 传入，并带有 `evidencePolicy: "planning_context_only"`。它不能作为 citation、RAG source、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 的实际执行结果。
+Task memory 作为 intent/execution/DAG planner 的 planning context 传入，并带有 `evidencePolicy: "planning_context_only"`。它不能作为 citation、RAG source、claim support 或 final answer evidence；答案证据仍只能来自 document/web/capability 的实际执行结果。
 
 ## AgentRAG 优化路线
 
@@ -527,7 +527,7 @@ Task memory 只会作为 intent/execution planner 的 planning context 传入，
 | 1 | Planner eval gate | 已接入 `eval:planner`、`planner:gate`、`rollout:readiness` 和 `quality:gate`。 |
 | 2 | 持久化主执行路径 | Task store、agent run store、step snapshots/events 已通过 PostgreSQL-backed adapter 持久化。 |
 | 3 | Agent run recovery | 已有 startup recovery、manual/auto recovery、approval resume、step retry 和 replay safety matrix；guarded graph 增加同 run 私有 checkpoint 与受限的 graph-only startup auto resume，不会重跑已完成 node，也不宣称外层混合阶段可自动续跑。 |
-| 4 | PostgreSQL restart 覆盖 | 已补 HTTP/API 级 paused document resume、failed step retry 和 blocked approval safety 覆盖，继续复用 replay safety matrix 和 step executor。 |
+| 4 | PostgreSQL restart 覆盖 | 已补 HTTP/API 级 failed step retry 和 blocked approval safety 覆盖，继续复用 replay safety matrix 和 step executor。 |
 | 5 | 真实/困难语料评测 | 已用 `eval:robust-suite` 把 compare-hard、hard-CS rerank 和 arXiv real-paper rerank 纳入固定周期 gate，替代只看 near-duplicate 饱和分数。 |
 | 6 | Agent task 目标产物 | 已把 `report.export`、`document.organize`、`summary.create`、`task.create` 接成 task-level goal deliverables；批准后前三类会真实写入 scoped workspace artifact 并只向 task 暴露 compact refs，写入失败时目标不会误报完成。 |
 | 7 | Research task / dossier | 已加 task-level research flow：本地 `research_brief` -> web supplement -> arXiv supplement -> compare/risk review -> citation self-check -> final dossier -> report deliverables。流程由 declarative `research_dossier` workflow spec 渲染，只生成下一步问题、公开 phase 状态和 workflow lifecycle snapshot，实际执行仍复用现有 planner、skills、approval gates 和 capability registry。 |
