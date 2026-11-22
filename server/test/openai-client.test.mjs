@@ -1,5 +1,7 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import {
   createChatClient,
@@ -226,4 +228,57 @@ test("a non-JSON error body is passed through rather than swallowed", async () =
       return true;
     }
   );
+});
+
+test("the request timeout survives garbage collection beside a caller's signal", { timeout: 30_000 }, async () => {
+  // Before Node 22.16 (package.json allows 22.13) AbortSignal.any holds even a
+  // timeout source weakly. A child process stands in such an AbortSignal.any
+  // and collects garbage while the model hangs.
+  const child = `
+    const client = await import(${JSON.stringify(new URL("../rag/openai-client.js", import.meta.url).href)});
+    AbortSignal.any = (signals) => {
+      const combined = new AbortController();
+      const sources = signals.map((signal) => new WeakRef(signal));
+      const poll = setInterval(() => {
+        const aborted = sources.map((source) => source.deref()).find((signal) => signal?.aborted);
+        if (aborted) {
+          clearInterval(poll);
+          combined.abort(aborted.reason);
+        }
+      }, 10);
+      return combined.signal;
+    };
+    globalThis.fetch = (url, { signal }) =>
+      new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    setInterval(gc, 10);
+    const caller = new AbortController();
+    const options = { signal: caller.signal };
+    const chat = client.createChatClient({ apiKey: "test", model: "chat" });
+    const embeddings = client.createEmbeddingsClient({ apiKey: "test", model: "embedding" });
+    const outcomes = [];
+    for (const call of [
+      () => chat.invoke("hi", options),
+      () => chat.invokeStream("hi", options),
+      () => embeddings.embedQuery("hi", options),
+    ]) {
+      outcomes.push(await Promise.race([
+        call().catch((error) => error.code),
+        new Promise((resolve) => setTimeout(() => resolve("never timed out"), 3000)),
+      ]));
+    }
+    process.stdout.write(outcomes.join(","), () => process.exit(0));
+  `;
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ["--expose-gc", "--input-type=module", "--eval", child],
+    {
+      env: {
+        OPENAI_BASE_URL: "http://model.invalid/v1",
+        PATH: process.env.PATH,
+        RAG_LLM_REQUEST_TIMEOUT_MS: "300",
+      },
+    }
+  );
+
+  assert.equal(stdout, "ETIMEDOUT,ETIMEDOUT,ETIMEDOUT");
 });
