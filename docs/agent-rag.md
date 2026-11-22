@@ -216,7 +216,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | 多文档对比 | 同一个 `/chat` 请求传入多个 `docIds` | `agent-planner.js` 和 compare intent 判断是否需要对比路径 | `retrievers/per-doc-retriever.js`、`comparison-engine.js`、`evidence-aligner.js` 保留文档边界 |
 | arXiv 推荐导入 | 用户点击文档旁的“查找相关 arXiv 论文”调 suggestion，arXiv panel 调 task action | `arxiv-enrichment.js` 生成清理后的 topic 和候选 token，task service 记录等待确认并存下这份候选 | `job-orchestrator.js` 派发 runner，`arxiv-importer.js` 下载、去重并复用 ingestion |
 | Agent goal task | `/agent-tasks` 创建 durable goal，前端 Agent Run Center 消费 `/tasks` 返回的公开 plan | `agent-tasks.js` 驱动多轮 task loop，`agent-goal-plan.js` 生成公开计划合同 | `job-orchestrator.js` 调 runner，`runAgentRag()` 执行每轮 `/chat` 路径，task action 可继续或批准 |
-| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 判断能否自动续跑：只续跑图，guarded graph 需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills`；其余中断的 run 转人工。replay safety matrix 决定哪类失败 step 能由人重试，并给出原因码 | 符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时转人工；`agent-run-step-executor.js` 只执行审批后的 capability step 和人工重试的失败 step，不恢复中断的 step |
+| Agent run 恢复 | 前端 recovery controls 调 `/agent-runs/*`，启动时也扫描 recoverable run | `agent-run-recovery.js` 判断能否自动续跑：只续跑图，guarded graph 需私有 checkpoint 与 step 对账、无待审批且外层 plan 只有 `custom_skills`；其余中断的 run 一般转人工，已被领取过续跑的 custom Skill 图和已标过人工的 run 会被跳过（可能一直停在 `running`）。replay safety matrix 决定哪类失败 step 能由人重试，并给出原因码 | 符合上述窄条件的 graph-only run 用专用续跑路径复用已完成 node，未知 in-flight 或不一致时一般转人工；`agent-run-step-executor.js` 只执行审批后的 capability step 和人工重试的 step（重试接口也接受已经成功的 step），不恢复中断的 step |
 | 质量门控 | CLI、前端 Quality 面板或 CI 调 eval/gate | `server/evaluation/quality-*.js` 组合各类报告 | synthetic、trajectory、planner、recovery、feedback、rerank、coverage 等 runner 执行 |
 
 ## 关键模块
@@ -244,7 +244,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 | `server/rag/agent-runs.js` | 定义 agent run contract 和 service，记录 goal、plan、steps、observations、decisions、approval gates、result/error 和审计 events。 |
 | `server/rag/agent-run-step-executor.js` | 执行已持久化的 run step：审批放行的 capability step，和人工重试的失败 step。不恢复中断的 step，不执行 custom Skill。只负责 action/retry 编排和 step handler 派发，让 HTTP route 不绑定具体工具执行细节。 |
 | `server/rag/agent-run-graph-replay-guard.js` | 纯函数：在同一 run 快照中判断通用单步 retry/审批是否会绕开 graph；任何 `custom_skill` step 一律拒绝。step executor 预检与 run store CAS 共同使用。 |
-| `server/rag/agent-run-recovery.js` | 启动时扫描 recoverable run。`auto` 模式自己只做一件事：经过 checkpoint/step 对账且外层 plan 仅含 `custom_skills` 的 guarded run 单次领取并走整图续跑。其余中断的 run（待审批、未知 in-flight、混合外层 plan、没有图可续、已删除的 v3 统一图留下的）转人工，不单独重放任何 step。非持久化 run store 默认 manual。 |
+| `server/rag/agent-run-recovery.js` | 启动时扫描 recoverable run。`auto` 模式自己只做一件事：经过 checkpoint/step 对账且外层 plan 仅含 `custom_skills` 的 guarded run 单次领取并走整图续跑。其余中断的 run（待审批、未知 in-flight、混合外层 plan、没有图可续、已删除的 v3 统一图留下的）一般转人工；已被领取过续跑的 custom Skill 图和已标过人工的 run 会被跳过（可能一直停在 `running`）。不单独重放任何 step。非持久化 run store 默认 manual。 |
 | `server/rag/agent-run-step-replay-safety.js` | 固定 step replay safety matrix：每类 step 的必需 input、人工 retry 是否可用、审批要求和幂等性说明；没有“可自动重放”一列。恢复面板上的原因码、“重试失败步骤”给不给、handler registry 都读这一份。 |
 | `server/rag/agent-run-step-handlers/` | 定义可插拔 step handler registry（`index.js`）。`capability_call` 通过 capability adapter 执行审批放行或重试的调用；`web_search`、`arxiv_import` 的 handler 只用来拒绝直接重试（要走审批后的 `capability_call` step）；`document_rag`、`follow_up_retrieval`、`research_question` 的 handler 用注入的执行器重试，未接线时返回稳定 409；没有 `custom_skill` 的 handler。 |
 | `server/rag/agent-run-store.js` | 根据 `AGENT_RUN_STORE_PROVIDER` 选择 agent run store adapter；默认 `auto` 跟随 PostgreSQL 可用性，否则使用内存 store。 |
@@ -542,5 +542,5 @@ Task memory 只会作为 intent/execution planner 的 planning context 传入，
 | 11 | 运行预算 | 每次运行加 token / 成本 / 时长上限，按 LLMOps 事件计量，经 AsyncLocalStorage 归属到运行，超限后在步骤边界降级。 |
 | 12 | 模型网关保护 | 每个模型端点的并发上限和熔断器；熔断时直接切备用模型或立即失败。 |
 | 13 | 可观测性 | OpenTelemetry GenAI trace，默认 protobuf 导出（Phoenix 只收 protobuf），不记录问题、prompt、输出和文档内容。 |
-| 14 | 流式草稿 | 只推送通过 claim 校验的整句；聊天界面接上 `/chat/stream`。 |
+| 14 | 流式草稿 | 只推送通过词法 claim 校验的句子或片段（按 claim 拆开，一句可能只推一半）；聊天界面接上 `/chat/stream`。 |
 | 15 | 校验器 | 修复"twelve (12)"被算成两个数、证据在 PDF 换行处被切断两个 bug；加入受限的 LLM 评审（当时默认关闭，2026-11-19 起默认打开）。 |
