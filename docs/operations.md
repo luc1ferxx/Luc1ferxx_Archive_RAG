@@ -127,7 +127,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 **含义**：Prometheus 2 分钟抓不到某个进程。这段时间这个进程的 SLO 和运维告警都没有数据。可能的原因：进程挂了；没设 `METRICS_ENABLED=true`；`METRICS_HOST` 是回环地址而 Prometheus 在别的主机或容器里；端口不是 `METRICS_PORT`；`METRICS_TOKEN` 不对（401）。
 
-1. **进程在不在**：`curl -s http://<host>:<PORT>/livez`（应用端口，不是指标端口）。
+1. **进程在不在**：`curl -s http://<host>:<PORT>/livez`（应用端口，不是指标端口；检索层和模型网关没有 `/livez`，改用它们的 `/health`）。
 2. **监听有没有起来**：启动日志里找 `[metrics] serving /metrics on http://HOST:PORT`；`curl -s -H "Authorization: Bearer $METRICS_TOKEN" http://<host>:<METRICS_PORT>/metrics | head`。
 3. **Prometheus 的 `/targets` 页面**上这个目标最后的错误：401 是 token 不对，连接被拒是 `METRICS_HOST`（容器里用 `0.0.0.0`）或 `METRICS_PORT`。
 
