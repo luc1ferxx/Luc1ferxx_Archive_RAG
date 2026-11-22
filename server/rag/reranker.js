@@ -519,7 +519,8 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
           throw signal.reason;
         }
 
-        if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+        // The read also keeps timeoutSignal alive: before Node 22.16 AbortSignal.any holds it weakly.
+        if (timeoutSignal.aborted || error?.name === "TimeoutError" || error?.name === "AbortError") {
           const timeoutError = new Error(
             `Cross-encoder request timed out after ${timeoutMs}ms.`
           );

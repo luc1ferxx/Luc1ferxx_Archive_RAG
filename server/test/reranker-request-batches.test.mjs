@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import http from "node:http";
+import { promisify } from "node:util";
 import {
   requestCrossEncoderScores,
   rerankResultsOrKeepOrder,
@@ -218,4 +220,53 @@ test("a failed later request keeps the whole fused order and caches none of the 
   // Two requests each time: the failed call left nothing in the score cache.
   assert.deepEqual(sent.map((batch) => batch.length).sort(), [32, 8, 32, 8].sort());
   assert.ok(recovered.every((result) => typeof result.crossEncoderScore === "number"));
+});
+
+test("the timeout survives garbage collection where AbortSignal.any holds its sources weakly", { timeout: 30_000 }, async () => {
+  // Node 22.13-22.15 (package.json allows them) do; from 22.16 they are kept
+  // alive. Only optimised code drops a variable it no longer reads, so a child
+  // process stands in such an AbortSignal.any and optimises the function. It
+  // gets no NODE_V8_COVERAGE, which would change what V8 optimises.
+  const child = `
+    const { requestCrossEncoderScores: rerank } = await import(${JSON.stringify(new URL("../rag/reranker.js", import.meta.url).href)});
+    AbortSignal.any = (signals) => {
+      const combined = new AbortController();
+      const sources = signals.map((signal) => new WeakRef(signal));
+      const poll = setInterval(() => {
+        const aborted = sources.map((source) => source.deref()).find((signal) => signal?.aborted);
+        if (aborted) {
+          clearInterval(poll);
+          combined.abort(aborted.reason);
+        }
+      }, 10);
+      poll.unref();
+      return combined.signal;
+    };
+    globalThis.fetch = (endpoint, { body, signal }) => {
+      const { query, texts } = JSON.parse(body);
+      return query === "hang"
+        ? new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason)))
+        : Promise.resolve({ json: async () => ({ scores: texts.map(() => 1) }), ok: true });
+    };
+    const call = (queryText) => rerank({ endpoint: "http://rerank.invalid", queryText, texts: ["a", "b"] });
+    process.env.RAG_CROSS_ENCODER_TIMEOUT_MS = "20000";
+    %PrepareFunctionForOptimization(rerank);
+    for (let index = 0; index < 200; index += 1) await call("ok");
+    %OptimizeFunctionOnNextCall(rerank);
+    await call("ok");
+    process.env.RAG_CROSS_ENCODER_TIMEOUT_MS = "300";
+    setInterval(gc, 10);
+    const outcome = await Promise.race([
+      call("hang").catch((error) => error.code),
+      new Promise((resolve) => setTimeout(() => resolve("never timed out"), 5000)),
+    ]);
+    process.stdout.write(String(outcome), () => process.exit(0));
+  `;
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ["--allow-natives-syntax", "--expose-gc", "--input-type=module", "--eval", child],
+    { env: { PATH: process.env.PATH } }
+  );
+
+  assert.equal(stdout, "ETIMEDOUT");
 });

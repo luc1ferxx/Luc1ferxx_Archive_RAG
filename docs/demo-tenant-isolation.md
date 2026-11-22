@@ -85,7 +85,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 
 ### 换成真实模型
 
-**不要把 key 写进 `hardened.env`**：它被 git 跟踪，仓库又是公开的，写进去的 key 会随下一次提交公开。key 只放在 shell 的环境变量里。两种方式都要从空库开始（向量宽度在建表时就固定了）。
+**不要把 key 写进 `hardened.env`**：它被 git 跟踪，仓库又是公开的，写进去的 key 会随下一次提交公开。key 从 shell 的环境变量传入，不要写进任何文件。两种方式都要从空库开始（向量宽度在建表时就固定了）。
 
 先读入 key（不回显，也不进 shell 历史）：
 
@@ -93,7 +93,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 read -rs OPENAI_API_KEY && export OPENAI_API_KEY
 ```
 
-本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`：
+本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`。**`node server.js` 监听所有网卡，而演示 token 是公开的，同网段的人能用它们花掉这个 key 的额度**：只在防火墙后或可信网络里这样用，否则用 compose 方式（默认只绑 `127.0.0.1`）。
 
 ```bash
 OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_CHAT_MODEL=gpt-5 OPENAI_CHAT_FALLBACK_MODEL= \
@@ -121,7 +121,7 @@ docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.y
 
 之后每次 `up` 都要带这三个 `-f`，否则 app 会回到假模型。和下面的浏览器界面一起用时，先按那里的命令构建，再运行上面这条命令，但去掉 `--build`：带着它会用空 token 重新构建前端。
 
-带着这个文件运行 `docker compose config` 会把 key 明文打印出来，不要把输出贴出去。
+key 会留在 app 容器的配置里，删掉容器才消失：带着这个文件运行 `docker compose config`、对这个容器运行 `docker inspect`，都会把 key 明文打印出来，不要把输出贴出去。
 
 ### 浏览器界面
 
