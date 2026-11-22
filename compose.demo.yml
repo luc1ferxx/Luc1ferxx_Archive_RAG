@@ -32,8 +32,9 @@
 # - app: connects as the runtime login and migrates as the owner login; the
 #   postgres superuser URLs of docker-compose.yml are replaced.
 # - demo-model: the deterministic fake model (server/demo/fake-model.js) from
-#   the same image, on the compose network only. To use a real model, point
-#   OPENAI_* in deploy/demo/hardened.env at it and drop OPENAI_BASE_URL below.
+#   the same image, on the compose network only. To use a real model, add the
+#   untracked compose.demo.local.yml (docs/demo-tenant-isolation.md): never
+#   write a key into deploy/demo/hardened.env or this file, both tracked.
 name: luc1ferxx-archive-rag-demo
 
 services:

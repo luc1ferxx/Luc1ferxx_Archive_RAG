@@ -83,7 +83,43 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 
 `hardened.env` 故意不设 `TENANT_KEYSTORE_DIR` 和 `TENANT_KMS_MASTER_KEY_FILE`：默认值在数据目录旁边，本地运行时是 `server/data/tenant-keystore` 和 `server/data/tenant-kms-master.key`（按服务端源码目录解析，与当前工作目录无关，`server/data/` 已在 `.gitignore` 里），镜像里是 `/data/...`。没有一个相对路径能同时适合这两种情况，而写错工作目录时不能在仓库里生成主密钥。
 
-想用真实模型：改 `hardened.env` 末尾的 `OPENAI_*` 和 `RAG_EMBEDDING_DIMENSIONS`，并且从空库开始（向量宽度在建表时就固定了）。
+### 换成真实模型
+
+**不要把 key 写进 `hardened.env`**：它被 git 跟踪，仓库又是公开的，写进去的 key 会随下一次提交公开。key 只放在 shell 的环境变量里。两种方式都要从空库开始（向量宽度在建表时就固定了）。
+
+先读入 key（不回显，也不进 shell 历史）：
+
+```bash
+read -rs OPENAI_API_KEY && export OPENAI_API_KEY
+```
+
+本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`：
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_CHAT_MODEL=gpt-5 OPENAI_CHAT_FALLBACK_MODEL= \
+  OPENAI_EMBEDDING_MODEL=text-embedding-3-small RAG_EMBEDDING_DIMENSIONS=1536 \
+  DOTENV_CONFIG_PATH=../deploy/demo/hardened.env node server.js
+```
+
+compose 方式：在仓库根目录建 `compose.demo.local.yml`（已在 `.gitignore` 里），按原样保留 `${...}`，不要换成 key 本身：
+
+```yaml
+services:
+  app:
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?export it in this shell first}"
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      OPENAI_CHAT_MODEL: gpt-5
+      OPENAI_CHAT_FALLBACK_MODEL: ""
+      OPENAI_EMBEDDING_MODEL: text-embedding-3-small
+      RAG_EMBEDDING_DIMENSIONS: "1536"
+```
+
+```bash
+docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.yml --profile app up -d --build
+```
+
+带着这个文件运行 `docker compose config` 会把 key 明文打印出来，不要把输出贴出去。
 
 ### 浏览器界面
 

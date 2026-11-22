@@ -57,6 +57,9 @@ server/uploads/*
 /server/evaluation/.venv-cross-encoder/
 /server/evaluation/.venv-neural-reranker/
 
+# The demo's real-model override (docs/demo-tenant-isolation.md).
+/compose.demo.local.yml
+
 # misc
 .DS_Store
 .env

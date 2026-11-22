@@ -901,6 +901,19 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
   }
 });
 
+test("the demo's real-model instructions keep the key out of the repository", async () => {
+  const [ignored, guide] = await Promise.all([
+    readText(path.join(repositoryRoot, ".gitignore")),
+    readText(path.join(repositoryRoot, "docs", "demo-tenant-isolation.md")),
+  ]);
+
+  // The profile is tracked and the repository public: a key comes from the
+  // shell, through an override git ignores.
+  assert.match(ignored, /^\/compose\.demo\.local\.yml$/mu);
+  assert.match(guide, /^\s+OPENAI_API_KEY: "\$\{OPENAI_API_KEY:\?[^}]+\}"$/mu);
+  assert.match(guide, /-f compose\.demo\.yml -f compose\.demo\.local\.yml /u);
+});
+
 // compose.demo.yml: the one-click app on the hardened tenant-isolation profile
 // (docs/demo-tenant-isolation.md), connected as the role split's runtime
 // login. Its database passwords and tokens are public demo values on purpose;
