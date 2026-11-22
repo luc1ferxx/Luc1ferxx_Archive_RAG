@@ -2,7 +2,7 @@ name: Real Model Eval
 
 # Real-model evaluation on a CPU runner, with no API key: Ollama serves
 # nomic-embed-text and a local chat model, the same stack the numbers in
-# server/docs/interview/CURRENT-TRUTH.md were measured on.
+# docs/evaluation.md were measured on.
 #   - verify:quality: the 18 end-to-end checks against a real model (blocking);
 #   - QASPER dev evidence recall on a fixed 200-question sample (blocking below
 #     the floor; 0.655 when the floor was set);

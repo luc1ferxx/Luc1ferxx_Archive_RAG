@@ -543,4 +543,4 @@ Task memory 只会作为 intent/execution planner 的 planning context 传入，
 | 12 | 模型网关保护 | 每个模型端点的并发上限和熔断器；熔断时直接切备用模型或立即失败。 |
 | 13 | 可观测性 | OpenTelemetry GenAI trace，默认 protobuf 导出（Phoenix 只收 protobuf），不记录问题、prompt、输出和文档内容。 |
 | 14 | 流式草稿 | 只推送通过 claim 校验的整句；聊天界面接上 `/chat/stream`。 |
-| 15 | 校验器 | 修复"twelve (12)"被算成两个数、证据在 PDF 换行处被切断两个 bug；加入受限的 LLM 评审（默认关闭）。 |
+| 15 | 校验器 | 修复"twelve (12)"被算成两个数、证据在 PDF 换行处被切断两个 bug；加入受限的 LLM 评审（当时默认关闭，2026-11-19 起默认打开）。 |

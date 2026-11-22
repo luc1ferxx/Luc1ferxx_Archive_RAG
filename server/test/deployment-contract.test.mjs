@@ -342,7 +342,7 @@ test("the app image context leaves out secrets, backups, the model cache, the re
   // The app Dockerfile copies server/ whole; anything not ignored here ends up
   // in the image (server/.env, the backups npm run backup:postgres writes to
   // server/backups by default, the 2 GB Hugging Face cache, the 1 GB venv, the
-  // tests and interview notes nothing in the image reads).
+  // tests and personal notes nothing in the image reads).
   const patterns = (await readText(appDockerignorePath)).split("\n").filter(isContentLine);
 
   for (const pattern of [
