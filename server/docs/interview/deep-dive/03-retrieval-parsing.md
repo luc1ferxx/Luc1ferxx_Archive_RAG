@@ -36,7 +36,7 @@
 | `server/rag/vector-store-pgvector-version-lifecycle.js` | 建版本、校验、激活、回滚、退役；runBuildDocuments 并行建；runIndexVersionRecallProbe 召回探针 |
 | `server/rag/sparse-store.js` | 本地 BM25 searchSparseDocuments（参照实现，Lucene IDF）；评测的 standalone 档走它 |
 | `server/rag/retrievers/global-retriever.js` | searchGlobalCandidatesWithRoutes：开 rerank 时每个查询取 topK×3 个融合候选，不重排；retrieveGlobalContextWithRoutes：单查询的调用方（缺口检索）检索完自己重排 |
-| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序；一次重排超过 32 段时分批发给服务，共用一个超时；交叉编码器分数按（租户、传输、模型、分数刻度、查询、段落文字）在进程内缓存，最多 2 万条、每条十分钟 |
+| `server/rag/reranker.js` | 启发式 / cross-encoder 重排；rerankResultsOrKeepOrder 出错时保持融合顺序；一次重排超过 32 段时分批同时发给服务，共用一个超时；交叉编码器分数按（租户、传输、模型、分数刻度、查询、段落文字）在进程内缓存，最多 2 万条、每条十分钟 |
 | `server/rag/query-router.js` | routeQuery：用正则信号判 qa / compare（多文档且置信度 ≥0.5 才走 compare） |
 | `server/rag/query-decomposer.js` | buildEvidenceRequirements / buildRetrievalQueries：按 and、also、以及、分号等拆多部分问题（最多 4 个，RAG_QUERY_DECOMPOSITION_MAX_REQUIREMENTS） |
 | `server/rag/agent-query-planner.js` | buildAgentRetrievalPlan：agent 路径的检索计划（意图 → topK，INTENT_OPTIONS；模板化子查询在 agent-retrieval-queries.js buildAgentRetrievalQueries） |

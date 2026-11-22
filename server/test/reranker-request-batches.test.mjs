@@ -17,8 +17,13 @@ const TEI_MAX_CLIENT_BATCH = 32;
 const scoreOf = (text) => (Number(text.split(" ")[1]) * 7) % 241;
 const passages = (count) => Array.from({ length: count }, (_, index) => `passage ${index}`);
 
-const startService = async (t, { delayMs = 0, failRequest = 0 } = {}) => {
+// `answerAfter`: answer nothing until that many requests are waiting.
+// `delayMs`: serve one request at a time, each taking that long, as the bundled
+// endpoint does behind its inference lock.
+const startService = async (t, { answerAfter = 0, delayMs = 0, failRequest = 0 } = {}) => {
   const sent = [];
+  const waiting = [];
+  let queue = Promise.resolve();
   const server = http.createServer((req, res) => {
     let body = "";
 
@@ -39,7 +44,19 @@ const startService = async (t, { delayMs = 0, failRequest = 0 } = {}) => {
         .map((text, index) => ({ index, score: scoreOf(text) }))
         .sort((left, right) => right.score - left.score);
 
-      setTimeout(() => res.end(JSON.stringify(ranks)), delayMs);
+      const answer = () => res.end(JSON.stringify(ranks));
+
+      if (answerAfter) {
+        waiting.push(answer);
+
+        if (waiting.length >= answerAfter) {
+          waiting.splice(0).forEach((send) => send());
+        }
+
+        return;
+      }
+
+      queue = queue.then(() => new Promise((resolve) => setTimeout(resolve, delayMs))).then(answer);
     });
   });
 
@@ -79,8 +96,11 @@ for (const [count, sizes] of [
     const texts = passages(count);
     const scores = await requestCrossEncoderScores({ endpoint, queryText: "q", texts });
 
-    assert.deepEqual(sent.map((batch) => batch.length), sizes);
-    assert.deepEqual(sent.flat(), texts);
+    // They go out at once, so they may arrive in any order.
+    const batches = [...sent].sort((left, right) => texts.indexOf(left[0]) - texts.indexOf(right[0]));
+
+    assert.deepEqual(batches.map((batch) => batch.length), sizes);
+    assert.deepEqual(batches.flat(), texts);
     assert.deepEqual(scores, texts.map(scoreOf));
   });
 }
@@ -94,20 +114,33 @@ test("the model gateway's backend call is split the same way", async (t) => {
     texts,
   });
 
-  assert.deepEqual(sent.map((batch) => batch.length), [32, 7]);
+  assert.deepEqual(sent.map((batch) => batch.length).sort(), [32, 7].sort());
   assert.deepEqual(scores, texts.map(scoreOf));
 });
 
+test("a rerank's requests wait in the service's queue together, as one request did", { timeout: 15_000 }, async (t) => {
+  // Sent one after another, each would queue again behind every other rerank
+  // and overlapping reranks would time out together: this service answers
+  // only once all three are waiting.
+  const { endpoint, sent } = await startService(t, { answerAfter: 3 });
+
+  withEnv(t, { RAG_CROSS_ENCODER_TIMEOUT_MS: "2000" });
+
+  const texts = passages(90);
+
+  assert.deepEqual(await requestCrossEncoderScores({ endpoint, queryText: "q", texts }), texts.map(scoreOf));
+  assert.equal(sent.length, 3);
+});
+
 test("one timeout covers all of a rerank's requests", { timeout: 15_000 }, async (t) => {
-  // Four requests of 200 ms: each well inside 500 ms, together over it.
-  const { endpoint, sent } = await startService(t, { delayMs: 200 });
+  // Four requests served in turn at 200 ms: each inside 500 ms, together over it.
+  const { endpoint } = await startService(t, { delayMs: 200 });
 
   withEnv(t, { RAG_CROSS_ENCODER_TIMEOUT_MS: "500" });
 
   await assert.rejects(requestCrossEncoderScores({ endpoint, queryText: "q", texts: passages(128) }), {
     code: "ETIMEDOUT",
   });
-  assert.ok(sent.length < 4, "the last request never went out");
 });
 
 test("a failed later request keeps the whole fused order and caches none of the call's scores", async (t) => {
@@ -133,6 +166,7 @@ test("a failed later request keeps the whole fused order and caches none of the 
 
   const recovered = await rerank();
 
-  assert.deepEqual(sent.map((batch) => batch.length), [32, 8, 32, 8]);
+  // Two requests each time: the failed call left nothing in the score cache.
+  assert.deepEqual(sent.map((batch) => batch.length).sort(), [32, 8, 32, 8].sort());
   assert.ok(recovered.every((result) => typeof result.crossEncoderScore === "number"));
 });

@@ -471,7 +471,7 @@ const CROSS_ENCODER_MAX_TEXTS_PER_REQUEST = 32;
 
 /**
  * One rerank at a cross-encoder service ({ query, texts } -> { scores }), sent
- * in order as requests of at most CROSS_ENCODER_MAX_TEXTS_PER_REQUEST texts
+ * at once as requests of at most CROSS_ENCODER_MAX_TEXTS_PER_REQUEST texts
  * that share one timeout. Resolves the scores in the order of `texts`, or none
  * of them. An HTTP failure carries `status` and `upstreamStatus`; a timeout
  * carries code ETIMEDOUT. `signal` (the model gateway's, when its caller
@@ -484,56 +484,64 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
   const signal = withRequestSignal(callerSignal);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const requestSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
-  const scores = [];
+  const batches = [];
 
   for (let start = 0; start < texts.length; start += CROSS_ENCODER_MAX_TEXTS_PER_REQUEST) {
-    const batch = texts.slice(start, start + CROSS_ENCODER_MAX_TEXTS_PER_REQUEST);
-    let response;
-
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          query: queryText,
-          texts: batch,
-          ...(model ? { model } : {}),
-        }),
-        signal: requestSignal,
-      });
-    } catch (error) {
-      if (signal?.aborted) {
-        throw signal.reason;
-      }
-
-      if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-        const timeoutError = new Error(
-          `Cross-encoder request timed out after ${timeoutMs}ms.`
-        );
-
-        timeoutError.code = "ETIMEDOUT";
-        throw timeoutError;
-      }
-
-      throw error;
-    }
-
-    if (!response.ok) {
-      const httpError = new Error(
-        `Cross-encoder request failed with HTTP ${response.status}.`
-      );
-
-      httpError.status = response.status;
-      httpError.upstreamStatus = response.status;
-      throw httpError;
-    }
-
-    scores.push(...parseCrossEncoderScores(await response.json(), batch.length));
+    batches.push(texts.slice(start, start + CROSS_ENCODER_MAX_TEXTS_PER_REQUEST));
   }
 
-  return scores;
+  // At once, so they queue next to each other, much as one request did: in
+  // turn, each would queue again behind every other rerank, and overlapping
+  // reranks would time out together.
+  const scores = await Promise.all(
+    batches.map(async (batch) => {
+      let response;
+
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            query: queryText,
+            texts: batch,
+            ...(model ? { model } : {}),
+          }),
+          signal: requestSignal,
+        });
+      } catch (error) {
+        if (signal?.aborted) {
+          throw signal.reason;
+        }
+
+        if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+          const timeoutError = new Error(
+            `Cross-encoder request timed out after ${timeoutMs}ms.`
+          );
+
+          timeoutError.code = "ETIMEDOUT";
+          throw timeoutError;
+        }
+
+        throw error;
+      }
+
+      if (!response.ok) {
+        const httpError = new Error(
+          `Cross-encoder request failed with HTTP ${response.status}.`
+        );
+
+        httpError.status = response.status;
+        httpError.upstreamStatus = response.status;
+        throw httpError;
+      }
+
+      return parseCrossEncoderScores(await response.json(), batch.length);
+    })
+  );
+
+  return scores.flat();
 };
 
 const scoreWithHttpCrossEncoder = async ({ queryText, pairs, model = "" }) => {

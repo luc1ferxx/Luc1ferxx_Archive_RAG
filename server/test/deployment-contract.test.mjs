@@ -902,9 +902,10 @@ test("the postgres password comes from POSTGRES_PASSWORD, and every database URL
 });
 
 test("the demo's real-model instructions keep the key out of the repository", async () => {
-  const [ignored, guide] = await Promise.all([
+  const [ignored, guide, demo] = await Promise.all([
     readText(path.join(repositoryRoot, ".gitignore")),
     readText(path.join(repositoryRoot, "docs", "demo-tenant-isolation.md")),
+    readText(demoOverridePath),
   ]);
 
   // The profile is tracked and the repository public: a key comes from the
@@ -912,6 +913,8 @@ test("the demo's real-model instructions keep the key out of the repository", as
   assert.match(ignored, /^\/compose\.demo\.local\.yml$/mu);
   assert.match(guide, /^\s+OPENAI_API_KEY: "\$\{OPENAI_API_KEY:\?[^}]+\}"$/mu);
   assert.match(guide, /-f compose\.demo\.yml -f compose\.demo\.local\.yml /u);
+  assert.match(guide, /不要把 key 写进 `hardened\.env`/u);
+  assert.match(demo, /never\s*#\s*write a key into deploy\/demo\/hardened\.env/u);
 });
 
 // compose.demo.yml: the one-click app on the hardened tenant-isolation profile

@@ -119,6 +119,8 @@ services:
 docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.yml --profile app up -d --build
 ```
 
+之后每次 `up` 都要带这三个 `-f`，否则 app 会回到假模型。和下面的浏览器界面一起用时，先按那里的命令构建，再运行上面这条命令，但去掉 `--build`：带着它会用空 token 重新构建前端。
+
 带着这个文件运行 `docker compose config` 会把 key 明文打印出来，不要把输出贴出去。
 
 ### 浏览器界面
@@ -129,7 +131,7 @@ docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.y
 - `demo-alice-token`、`demo-bob-token`：固定在一个 workspace，不显示切换器，直接可用；
 - 只有用户的 token（anna、ben、dave）也能用界面：`TENANT_MEMBERSHIP=enforce` 下，`/auth/me` 列出该用户在注册表里所有 active 的成员关系，并返回 `workspaceRequired: true`，切换器因此不提供"不选 workspace"，默认选中第一个。
 
-本地：仓库根目录 `.env` 里设 `VITE_DOMAIN=http://localhost:5001`、`VITE_API_AUTH_TOKEN=demo-carol-token`，再 `npm start`（`hardened.env` 的 `ALLOWED_ORIGINS` 已包含 `http://localhost:3000`）。compose：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app build --build-arg VITE_API_AUTH_TOKEN=demo-carol-token app` 后再 `up -d`。token 会打进前端包，只适合本机演示。
+本地：仓库根目录 `.env` 里设 `VITE_DOMAIN=http://localhost:5001`、`VITE_API_AUTH_TOKEN=demo-carol-token`，再 `npm start`（`hardened.env` 的 `ALLOWED_ORIGINS` 已包含 `http://localhost:3000`）。compose：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app build --build-arg VITE_API_AUTH_TOKEN=demo-carol-token app` 后再 `up -d`（用真实模型时按上一节带三个 `-f`，不带 `--build`）。token 会打进前端包，只适合本机演示。
 
 ## `demo:seed`
 
