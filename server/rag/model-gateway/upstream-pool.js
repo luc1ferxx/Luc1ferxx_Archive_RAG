@@ -18,8 +18,9 @@ import { normalizeServiceUrl } from "../service-topology.js";
 //     unavailable error are passed over for a short cooldown, while a healthy
 //     one exists;
 //   - among the rest, the one with the fewest requests in flight; ties rotate.
-// A request that was never sent -- the replica's circuit is open, or the
-// connection was refused -- moves to the next replica at once. Any other
+// A send that met an open circuit or a refused connection moves to the next
+// replica at once, from its start (a rerank of several requests repeats the
+// ones already sent, answered or not). Any other
 // failure goes back to the caller's retry loop (openai.js withRetry), whose
 // next attempt then lands on another replica; the pool never adds retries of
 // its own.

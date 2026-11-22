@@ -83,7 +83,45 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 
 `hardened.env` 故意不设 `TENANT_KEYSTORE_DIR` 和 `TENANT_KMS_MASTER_KEY_FILE`：默认值在数据目录旁边，本地运行时是 `server/data/tenant-keystore` 和 `server/data/tenant-kms-master.key`（按服务端源码目录解析，与当前工作目录无关，`server/data/` 已在 `.gitignore` 里），镜像里是 `/data/...`。没有一个相对路径能同时适合这两种情况，而写错工作目录时不能在仓库里生成主密钥。
 
-想用真实模型：改 `hardened.env` 末尾的 `OPENAI_*` 和 `RAG_EMBEDDING_DIMENSIONS`，并且从空库开始（向量宽度在建表时就固定了）。
+### 换成真实模型
+
+**不要把 key 写进 `hardened.env`**：它被 git 跟踪，仓库又是公开的，写进去的 key 会随下一次提交公开。key 只放在 shell 的环境变量里。两种方式都要从空库开始（向量宽度在建表时就固定了）。
+
+先读入 key（不回显，也不进 shell 历史）：
+
+```bash
+read -rs OPENAI_API_KEY && export OPENAI_API_KEY
+```
+
+本地方式：不用起假模型，在同一个终端里启动服务。已经在环境里的变量优先于 `hardened.env`：
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_CHAT_MODEL=gpt-5 OPENAI_CHAT_FALLBACK_MODEL= \
+  OPENAI_EMBEDDING_MODEL=text-embedding-3-small RAG_EMBEDDING_DIMENSIONS=1536 \
+  DOTENV_CONFIG_PATH=../deploy/demo/hardened.env node server.js
+```
+
+compose 方式：在仓库根目录建 `compose.demo.local.yml`（已在 `.gitignore` 里），按原样保留 `${...}`，不要换成 key 本身：
+
+```yaml
+services:
+  app:
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?export it in this shell first}"
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      OPENAI_CHAT_MODEL: gpt-5
+      OPENAI_CHAT_FALLBACK_MODEL: ""
+      OPENAI_EMBEDDING_MODEL: text-embedding-3-small
+      RAG_EMBEDDING_DIMENSIONS: "1536"
+```
+
+```bash
+docker compose -f docker-compose.yml -f compose.demo.yml -f compose.demo.local.yml --profile app up -d --build
+```
+
+之后每次 `up` 都要带这三个 `-f`，否则 app 会回到假模型。和下面的浏览器界面一起用时，先按那里的命令构建，再运行上面这条命令，但去掉 `--build`：带着它会用空 token 重新构建前端。
+
+带着这个文件运行 `docker compose config` 会把 key 明文打印出来，不要把输出贴出去。
 
 ### 浏览器界面
 
@@ -93,7 +131,7 @@ npm run demo:seed && npm run demo:walkthrough             # 终端 3
 - `demo-alice-token`、`demo-bob-token`：固定在一个 workspace，不显示切换器，直接可用；
 - 只有用户的 token（anna、ben、dave）也能用界面：`TENANT_MEMBERSHIP=enforce` 下，`/auth/me` 列出该用户在注册表里所有 active 的成员关系，并返回 `workspaceRequired: true`，切换器因此不提供"不选 workspace"，默认选中第一个。
 
-本地：仓库根目录 `.env` 里设 `VITE_DOMAIN=http://localhost:5001`、`VITE_API_AUTH_TOKEN=demo-carol-token`，再 `npm start`（`hardened.env` 的 `ALLOWED_ORIGINS` 已包含 `http://localhost:3000`）。compose：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app build --build-arg VITE_API_AUTH_TOKEN=demo-carol-token app` 后再 `up -d`。token 会打进前端包，只适合本机演示。
+本地：仓库根目录 `.env` 里设 `VITE_DOMAIN=http://localhost:5001`、`VITE_API_AUTH_TOKEN=demo-carol-token`，再 `npm start`（`hardened.env` 的 `ALLOWED_ORIGINS` 已包含 `http://localhost:3000`）。compose：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app build --build-arg VITE_API_AUTH_TOKEN=demo-carol-token app` 后再 `up -d`（用真实模型时按上一节带三个 `-f`，不带 `--build`）。token 会打进前端包，只适合本机演示。
 
 ## `demo:seed`
 
