@@ -1050,13 +1050,15 @@ test("http cross-encoder rerank parses score arrays and indexed data payloads", 
         }),
       });
 
+      // Another question, so the score cache cannot answer it.
       reranked = await rerankResultsWithProvider({
-        queryText: "quartz capsule approval",
+        queryText: "who signs off the quartz capsule?",
         results: makeRerankResults(),
         topK: 1,
       });
 
       assert.equal(reranked[0].document.id, "semantic");
+      assert.equal(reranked[0].crossEncoderScore, 0.95);
     }
   );
 });

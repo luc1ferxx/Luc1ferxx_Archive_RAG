@@ -250,16 +250,27 @@ test("a stand-in provider is admitted too, and a rerank over quota keeps the fus
     { document: { id: "b", pageContent: "second" }, score: 0.5 },
   ];
 
-  // Bob's first rerank is scored by the cross-encoder; his second is over
-  // quota, is never sent, and keeps the fused order instead of failing.
+  // Bob's first rerank is scored by the cross-encoder; his second (another
+  // question, so the score cache cannot answer it) is over quota, is never
+  // sent, and keeps the fused order instead of failing.
   const scored = await runWithDatabaseTenant(BOB, () => rerankResultsOrKeepOrder({ queryText: "q", results, topK: 2 }));
 
   assert.equal(scored.length, 2);
   assert.equal(upstream.requests.filter((request) => request.path === "/rerank").length, 1);
 
-  const kept = await runWithDatabaseTenant(BOB, () => rerankResultsOrKeepOrder({ queryText: "q", results, topK: 2 }));
+  const kept = await runWithDatabaseTenant(BOB, () =>
+    rerankResultsOrKeepOrder({ queryText: "another question", results, topK: 2 })
+  );
 
   assert.deepEqual(kept, results);
+  assert.equal(upstream.requests.filter((request) => request.path === "/rerank").length, 1);
+  assert.equal(describeInProcessModelQuotas().rejections.requests_per_minute, 1);
+
+  // The first question again is answered from the score cache: nothing is
+  // sent, so nothing is charged or refused.
+  const cached = await runWithDatabaseTenant(BOB, () => rerankResultsOrKeepOrder({ queryText: "q", results, topK: 2 }));
+
+  assert.deepEqual(cached, scored);
   assert.equal(upstream.requests.filter((request) => request.path === "/rerank").length, 1);
   assert.equal(describeInProcessModelQuotas().rejections.requests_per_minute, 1);
 });

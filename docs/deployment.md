@@ -100,7 +100,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
   - 代价：不可回答的题被答出 3 → 9/24；新答的 49 题里，评审判 16 题答错或答了不可回答的题；全部题的 F1 没有检出差异（+0.005）；多语言 25 道可答题答对 19 → 18；
   - 时间：整轮折合每题多约 5.8 秒，包括重排（每题约 3.6 次调用）和因此多出来的补检索、作答；
   - 有 GPU 或 MPS 的机器上推荐开。应用不进容器时，按下面"不用 Docker"起重排服务，再在 `server/.env` 里设 `RAG_RERANK_ENABLED=true`、`RAG_RERANK_PROVIDER=cross-encoder`、`RAG_CROSS_ENCODER_ENDPOINT=http://127.0.0.1:8081/rerank`，这三项和评测时的重排设置相同；
-  - 上面这条命令起的重排容器只能用 CPU，每题多花多少没有实测。按下面"速度"里 CPU 的数字（18 个候选 2.8–4.5 秒）、问答检索现在一次最多 30 个候选（top-K 10 × 3）、每题约 3.6 次调用粗算，每题多约 20–30 秒。开之前先在自己的机器上试。
+  - 上面这条命令起的重排容器只能用 CPU，每题多花多少没有实测。上面那一轮的代码每个检索查询各重排一次（一次最多 30 个候选，top-K 10 × 3，每题约 3.6 次调用），按下面"速度"里 CPU 的数字（18 个候选 2.8–4.5 秒）粗算每题多约 20–30 秒。现在首轮的几个查询合并后只重排一次，几个查询重复的候选只打一次分；补检索那一步仍每个查询各重排一次，但同一题里已经按原问题打过分的段落不再打分（缺口检索的单查询补充搜索仍按自己的查询打分）。要打分的候选只少不多，但 CPU 上的时间还没有重算。开之前先在自己的机器上试。
 - **会多起一个 `reranker` 服务，配置和评测时完全一致：**
   - 服务脚本：`server/evaluation/neural-cross-encoder-endpoint.py`；
   - 依赖：`server/evaluation/neural-reranker-requirements.txt` 里固定的版本；
@@ -132,7 +132,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 - **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
 - **不用 Docker**：在 `server/` 目录下先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
 - **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
-- **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。
+- **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。另外，首轮的几个查询合并后才重排，一次请求最多约 90 段（top-K 10 × 3 × 3 个查询）。TEI 的 `--max-client-batch-size` 默认 32，要调到 90 以上，否则多查询的步骤会被拒，退回融合顺序（日志里有告警）。
 
 ### 多实例共享状态（可选）
 
