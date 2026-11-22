@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   getCrossEncoderEndpoint,
   getCrossEncoderModel,
+  getCrossEncoderScoreScale,
   getCrossEncoderTimeoutMs,
   getRerankProvider,
   getRerankWeight,
@@ -21,8 +23,9 @@ import { admitModelCallQuota, recordModelMetricEventWithQuota } from "./model-ca
 import { requestModelGatewayRerank } from "./model-gateway/client.js";
 import { MODEL_GATEWAY_MIRROR_ANNOTATION } from "./model-gateway/protocol.js";
 import { observeRerank, recordRerankDegradation } from "./metrics-retrieval.js";
+import { getActiveDatabaseTenant, getDatabaseTenantContext } from "./postgres-tenant.js";
 import { withRequestSignal } from "./request-deadline.js";
-import { isModelGatewayEnabled } from "./service-topology.js";
+import { getModelGatewayUrls, isModelGatewayEnabled } from "./service-topology.js";
 import {
   buildLlmOpsRouteContext,
   buildLlmOpsUsageMetric,
@@ -38,6 +41,39 @@ const clamp01 = (value) => Math.max(0, Math.min(1, value));
 let customRerankProvider = null;
 let crossEncoderProvider = null;
 let rerankMetricsCollector = null;
+
+// Cross-encoder scores this process already has, so each passage is scored
+// once per question: a step's queries and the agent's follow-up step meet the
+// question's candidates again. Keyed by a sha256 of the tenant the call acts
+// for (the bound database tenant, else the non-tenant context), where the
+// request goes, the model it names, the score scale, the query text and the
+// exact passage text sent (rerankResultsWithCrossEncoder). A hit skips the
+// model call and its quota, so it shows: shared across tenants, it would tell
+// a tenant that another one recently asked the same question about the same
+// text (AGENTS.md "Cross-tenant cache timing"). Only successful scores are
+// stored; the oldest entry goes first. A score lives ten minutes: long enough
+// for one question's steps, short enough that a reranker restarted on another
+// model behind the same address and model name is not answered from the old
+// model's scores for long.
+export const CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES = 20_000;
+export const CROSS_ENCODER_SCORE_CACHE_TTL_MS = 10 * 60 * 1000;
+const crossEncoderScoreCache = new Map();
+
+const recallCrossEncoderScore = (key) => {
+  const entry = crossEncoderScoreCache.get(key);
+
+  return entry && Date.now() - entry.storedAt < CROSS_ENCODER_SCORE_CACHE_TTL_MS ? entry.score : undefined;
+};
+
+const rememberCrossEncoderScore = (key, score) => {
+  // Deleted first, so an expired entry stored again counts as the newest.
+  crossEncoderScoreCache.delete(key);
+  crossEncoderScoreCache.set(key, { score, storedAt: Date.now() });
+
+  if (crossEncoderScoreCache.size > CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES) {
+    crossEncoderScoreCache.delete(crossEncoderScoreCache.keys().next().value);
+  }
+};
 
 const toFiniteNumber = (value, fallbackValue = 0) => {
   const parsedValue = Number(value);
@@ -173,10 +209,12 @@ export const resetCustomRerankProvider = () => {
 
 export const configureCrossEncoderProvider = (provider) => {
   crossEncoderProvider = provider;
+  crossEncoderScoreCache.clear();
 };
 
 export const resetCrossEncoderProvider = () => {
   crossEncoderProvider = null;
+  crossEncoderScoreCache.clear();
 };
 
 export const configureRerankMetricsCollector = (collector) => {
@@ -340,9 +378,9 @@ const rerankResultsWithScores = ({ results = [], scores = [], topK }) => {
         ...result,
         originalScore,
         rerankScore,
-        // The service's own score, before the per-query min-max above: the
-        // only one comparable across queries, which the QA gate needs
-        // (getQaMinRerankProbability in config.js).
+        // The service's own score, before the min-max above over this one
+        // rerank call: the only one comparable across calls, which the QA
+        // gate needs (getQaMinRerankProbability in config.js).
         crossEncoderScore: toFiniteNumber(scores[index], 0),
         score: mixedScore,
         __rerankIndex: index,
@@ -552,21 +590,34 @@ export const scoreTextsWithCrossEncoderBackend = async ({
   }
 };
 
-const scoreWithCrossEncoder = async ({ queryText, results }) => {
-  const pairs = buildCrossEncoderPairs(results);
-  const viaGateway = !crossEncoderProvider?.score && routesRerankThroughModelGateway();
-  const transport = crossEncoderProvider?.score
-    ? "custom-provider"
-    : viaGateway
-      ? "model-gateway"
-      : "http";
-  const routeSelection = crossEncoderProvider?.score
-    ? {
+// Where a cross-encoder request goes (`address`: the endpoint or the gateway's
+// URLs) and the model it names.
+const resolveCrossEncoderTarget = () => {
+  if (crossEncoderProvider?.score) {
+    return {
+      address: "",
+      routeSelection: {
         llmOpsContext: buildEmptyLlmOpsRouteContext(),
         model: "",
         modelRoute: buildCustomCrossEncoderModelRoute(),
-      }
-    : resolveCrossEncoderModelRoute();
+      },
+      transport: "custom-provider",
+      viaGateway: false,
+    };
+  }
+
+  const viaGateway = routesRerankThroughModelGateway();
+
+  return {
+    address: viaGateway ? getModelGatewayUrls().join(" ") : getCrossEncoderEndpoint().trim(),
+    routeSelection: resolveCrossEncoderModelRoute(),
+    transport: viaGateway ? "model-gateway" : "http",
+    viaGateway,
+  };
+};
+
+const scoreWithCrossEncoder = async ({ queryText, results, target: { routeSelection, transport, viaGateway } }) => {
+  const pairs = buildCrossEncoderPairs(results);
   const metricBase = buildCrossEncoderMetricBase({
     queryText,
     pairs,
@@ -667,10 +718,40 @@ const rerankResultsWithCrossEncoder = async ({ queryText = "", results = [], top
     return [];
   }
 
-  const scores = await scoreWithCrossEncoder({
+  const target = resolveCrossEncoderTarget();
+  const keyPrefix = [
+    getActiveDatabaseTenant() ?? getDatabaseTenantContext(),
+    target.transport,
+    target.address,
+    target.routeSelection.model,
+    getCrossEncoderScoreScale(),
     queryText,
-    results: safeResults,
-  });
+  ];
+  const keys = safeResults.map((result) =>
+    createHash("sha256").update(JSON.stringify([...keyPrefix, buildSearchableText(result)])).digest("hex")
+  );
+  // Read before storing, so storing cannot evict this call's own hits.
+  const scores = keys.map(recallCrossEncoderScore);
+  const missing = scores.flatMap((score, index) => (score === undefined ? [index] : []));
+
+  if (missing.length > 0) {
+    const fresh = await scoreWithCrossEncoder({
+      queryText,
+      results: missing.map((index) => safeResults[index]),
+      target,
+    });
+
+    if (!Array.isArray(fresh) || fresh.length !== missing.length) {
+      throw new Error(
+        `Cross-encoder returned ${fresh?.length ?? 0} score(s) for ${missing.length} candidate(s).`
+      );
+    }
+
+    missing.forEach((resultIndex, freshIndex) => {
+      scores[resultIndex] = fresh[freshIndex];
+      rememberCrossEncoderScore(keys[resultIndex], fresh[freshIndex]);
+    });
+  }
 
   return rerankResultsWithScores({
     results: safeResults,
@@ -766,10 +847,12 @@ export const rerankResults = ({ queryText = "", results = [], topK } = {}) =>
 // Reranking refines an order retrieval already produced, so an unreachable or
 // failing rerank service degrades a query to that order instead of failing it.
 // The failure is still an error metric (scoreWithCrossEncoder) and a warning,
-// logged once per distinct message.
+// logged once per distinct message. `keptOrder` is that order for `results`
+// merged from several queries' candidates: each query's own fused top-K
+// (document-rag-execution.js rerankRetrievalStep).
 const reportedRerankFallbacks = new Set();
 
-export const rerankResultsOrKeepOrder = async ({ queryText = "", results = [], topK } = {}) => {
+export const rerankResultsOrKeepOrder = async ({ queryText = "", results = [], topK, keptOrder } = {}) => {
   try {
     return await observeRerank(() => rerankResultsWithProvider({ queryText, results, topK }));
   } catch (error) {
@@ -783,7 +866,7 @@ export const rerankResultsOrKeepOrder = async ({ queryText = "", results = [], t
 
     const safeResults = Array.isArray(results) ? results : [];
 
-    return safeResults.slice(0, normalizeTopK(topK, safeResults.length));
+    return keptOrder ?? safeResults.slice(0, normalizeTopK(topK, safeResults.length));
   }
 };
 

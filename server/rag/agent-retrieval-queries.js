@@ -128,5 +128,12 @@ const buildIntentQueries = ({ question, intent, phase, focus }) => {
   ];
 };
 
+// The follow-up step's queries other than the question. Their ids reach the
+// retrieval tier, where they mark the follow-up step: it reranks each query
+// against its own text (document-rag-execution.js rerankRetrievalStep).
+const FOLLOW_UP_QUERY_IDS = new Set(["follow-up-evidence", "follow-up-source-check"]);
+
+export const isFollowUpRetrievalQuery = (retrievalQuery) => FOLLOW_UP_QUERY_IDS.has(retrievalQuery?.id);
+
 export const buildAgentRetrievalQueries = ({ question, intent, phase, focus }) =>
   dedupeQueries(buildIntentQueries({ question, intent, phase, focus }));

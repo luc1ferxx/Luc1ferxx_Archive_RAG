@@ -76,7 +76,7 @@ import {
   resetRerankMetricsCollector,
 } from "../rag/reranker.js";
 import { retrieveGlobalContext } from "../rag/retrievers/global-retriever.js";
-import { retrievePerDocumentContext } from "../rag/retrievers/per-doc-retriever.js";
+import { retrievePerDocumentContextForQueriesInProcess } from "../rag/document-rag-execution.js";
 import { resetEmbeddingCache } from "../rag/embedding-cache.js";
 import { describeChunkProfile } from "../rag/chunk-profile.js";
 import { chunkDocumentWithConfig } from "../rag/chunker.js";
@@ -114,6 +114,19 @@ const buildVectorWithQuerySimilarity = (similarity) => {
 };
 
 const RERANK_QUERY_VECTOR = buildVectorWithQuerySimilarity(1);
+
+// One query through the comparison route's retrieval, which reranks each
+// document's candidates once (retrievePerDocumentContextForQueriesInProcess).
+const retrieveOneQueryPerDocument = async ({ queryVector, queryText, docIds, topKPerDoc }) =>
+  (
+    await retrievePerDocumentContextForQueriesInProcess({
+      docIds,
+      primaryQueryText: queryText,
+      primaryQueryVector: queryVector,
+      retrievalOptions: { topKPerDoc },
+      retrievalQueries: [{ id: "primary", primary: true, query: queryText }],
+    })
+  ).resultsByDocument;
 
 const withEnv = async (overrides, callback) => {
   const originalValues = new Map(
@@ -3180,7 +3193,7 @@ test("per-document retriever accepts dynamic topK per document overrides", async
         ],
       });
 
-      const results = await retrievePerDocumentContext({
+      const results = await retrieveOneQueryPerDocument({
         queryVector: toEmbedding("refund policy"),
         queryText: "refund policy",
         docIds: ["dynamic-topk-left", "dynamic-topk-right"],
@@ -3537,7 +3550,7 @@ test("compare rerank is applied independently per selected document", async () =
         ],
       });
 
-      const perDocumentResults = await retrievePerDocumentContext({
+      const perDocumentResults = await retrieveOneQueryPerDocument({
         queryVector: RERANK_QUERY_VECTOR,
         queryText: "Compare the quartz capsule approval.",
         docIds: ["alpha-manual", "beta-manual"],
