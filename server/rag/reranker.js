@@ -51,12 +51,24 @@ let rerankMetricsCollector = null;
 // model call and its quota, so it shows: shared across tenants, it would tell
 // a tenant that another one recently asked the same question about the same
 // text (AGENTS.md "Cross-tenant cache timing"). Only successful scores are
-// stored; the oldest entry goes first.
+// stored; the oldest entry goes first. A score lives ten minutes: long enough
+// for one question's steps, short enough that a reranker restarted on another
+// model behind the same address and model name is not answered from the old
+// model's scores for long.
 export const CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES = 20_000;
+export const CROSS_ENCODER_SCORE_CACHE_TTL_MS = 10 * 60 * 1000;
 const crossEncoderScoreCache = new Map();
 
+const recallCrossEncoderScore = (key) => {
+  const entry = crossEncoderScoreCache.get(key);
+
+  return entry && Date.now() - entry.storedAt < CROSS_ENCODER_SCORE_CACHE_TTL_MS ? entry.score : undefined;
+};
+
 const rememberCrossEncoderScore = (key, score) => {
-  crossEncoderScoreCache.set(key, score);
+  // Deleted first, so an expired entry stored again counts as the newest.
+  crossEncoderScoreCache.delete(key);
+  crossEncoderScoreCache.set(key, { score, storedAt: Date.now() });
 
   if (crossEncoderScoreCache.size > CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES) {
     crossEncoderScoreCache.delete(crossEncoderScoreCache.keys().next().value);
@@ -719,7 +731,7 @@ const rerankResultsWithCrossEncoder = async ({ queryText = "", results = [], top
     createHash("sha256").update(JSON.stringify([...keyPrefix, buildSearchableText(result)])).digest("hex")
   );
   // Read before storing, so storing cannot evict this call's own hits.
-  const scores = keys.map((key) => crossEncoderScoreCache.get(key));
+  const scores = keys.map(recallCrossEncoderScore);
   const missing = scores.flatMap((score, index) => (score === undefined ? [index] : []));
 
   if (missing.length > 0) {

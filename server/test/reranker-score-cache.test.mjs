@@ -2,6 +2,7 @@ import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   CROSS_ENCODER_SCORE_CACHE_MAX_ENTRIES,
+  CROSS_ENCODER_SCORE_CACHE_TTL_MS,
   configureCrossEncoderProvider,
   rerankResultsWithProvider,
   resetCrossEncoderProvider,
@@ -123,6 +124,23 @@ test("a rerank whose candidates are all cached sends no request", async () => {
     assert.equal(requests.length, 1);
     assert.deepEqual(second, first);
     assert.ok(second.every((result) => typeof result.crossEncoderScore === "number"));
+  });
+});
+
+test("a cached score lives ten minutes, then the passage is scored again", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 0 });
+
+  await withEnv(CROSS_ENCODER_ENV, async () => {
+    const requests = stubHttpCrossEncoder();
+
+    await rerank("quartz capsule approval", ["a", "b"]);
+    t.mock.timers.tick(CROSS_ENCODER_SCORE_CACHE_TTL_MS - 1);
+    await rerank("quartz capsule approval", ["a", "b"]);
+    t.mock.timers.tick(1);
+    await rerank("quartz capsule approval", ["a", "b"]);
+    await rerank("quartz capsule approval", ["a", "b"]);
+
+    assert.deepEqual(requests.map(sentIds), [["a", "b"], ["a", "b"]]);
   });
 });
 
