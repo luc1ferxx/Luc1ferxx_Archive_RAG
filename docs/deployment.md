@@ -100,13 +100,13 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
   - 代价：不可回答的题被答出 3 → 9/24；新答的 49 题里，评审判 16 题答错或答了不可回答的题；全部题的 F1 没有检出差异（+0.005）；多语言 25 道可答题答对 19 → 18；
   - 时间：整轮折合每题多约 5.8 秒，包括重排（每题约 3.6 次调用）和因此多出来的补检索、作答。同一天按事先定的规则测过降本后的做法（evaluation.md 的"重排降本第二版"），可答题仍答出 84/176，每题约 2.1 次调用，每题多约 4.4 秒；
   - 有 GPU 或 MPS 的机器上推荐开。应用不进容器时，按下面"不用 Docker"起重排服务，再在 `server/.env` 里设 `RAG_RERANK_ENABLED=true`、`RAG_RERANK_PROVIDER=cross-encoder`、`RAG_CROSS_ENCODER_ENDPOINT=http://127.0.0.1:8081/rerank`，这三项和评测时的重排设置相同；
-  - 上面这条命令起的重排容器只能用 CPU，每题多花多少没有实测。现在首轮的几个查询合并后只重排一次，几个查询重复的候选只打一次分；补检索那一步仍每个查询各重排一次，但同一题里已经按原问题打过分的段落不再打分（缺口检索的单查询补充搜索仍按自己的查询打分）。实测每题约 65 个候选要打分（原来每个检索查询各重排一次，每题最多约 107 个），按下面"速度"里 CPU 的数字（18 个候选 2.8–4.5 秒）粗算每题多约 10–16 秒（原来约 17–27 秒）。开之前先在自己的机器上试。
+  - 上面这条命令起的重排容器只能用 CPU。现在首轮的几个查询合并后只重排一次，几个查询重复的候选只打一次分；补检索那一步仍每个查询各重排一次，但同一题里已经按原问题打过分的段落不再打分（缺口检索的单查询补充搜索仍按自己的查询打分），每题约 65 个候选要打分。2026-11-21 在 Apple M5 Pro 的 Docker Desktop 里实测（见 [evaluation.md](evaluation.md) 的"重排容器的 CPU 实测"）：重排服务每题约 12 秒（15 核）到 25 秒（4 核）。粗算再加上答出的题变多带来的作答和补检索（本机 GPU 上 qwen2.5:7b 时约 2 秒，取决于大模型），每题共多约 14 到 27 秒；这是估算，没有跑过端到端的 CPU 评测。x86 服务器没测过，开之前先在自己的机器上试。
 - **会多起一个 `reranker` 服务，配置和评测时完全一致：**
   - 服务脚本：`server/evaluation/neural-cross-encoder-endpoint.py`；
   - 依赖：`server/evaluation/neural-reranker-requirements.txt` 里固定的版本；
   - 模型：`BAAI/bge-reranker-v2-m3`，max_length 384，batch 8（都是脚本的默认值，评测时没有改）；
   - 返回原始 logits。
-- **镜像**：由 `server/evaluation/cross-encoder-service/Dockerfile` 构建，基础镜像是 python:3.14-slim，torch 装 CPU 版。`Dockerfile.dockerignore` 只把脚本和依赖文件放进构建上下文，模型缓存和评测数据不会被发送。**这个镜像还没有实际构建过**：如果 PyTorch 的 CPU 源上没有对应的 torch wheel，第一次构建会在 pip 这一步失败。这时加 `--build-arg TORCH_INDEX_URL=https://pypi.org/simple` 再构建。
+- **镜像**：由 `server/evaluation/cross-encoder-service/Dockerfile` 构建，基础镜像是 python:3.14-slim，torch 装 CPU 版。`Dockerfile.dockerignore` 只把脚本和依赖文件放进构建上下文，模型缓存和评测数据不会被发送。2026-11-21 在 Apple Silicon（linux/arm64）上构建过：下载约 258 MB，构建 46 秒，镜像 1.58 GB。x86_64 还没构建过。如果 PyTorch 的 CPU 源上没有对应的 torch wheel，构建会在 pip 这一步失败，这时加 `--build-arg TORCH_INDEX_URL=https://pypi.org/simple` 再构建。
 - **`compose.rerank.yml` 做什么**：给 `app` 设置下面这几项，并等 `reranker` 的健康检查通过后再启动 `app`：
 
   ```bash
@@ -127,8 +127,9 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 - **速度**：
   - 容器里只能用 CPU。评测里"18 个候选约 0.4 秒"是在 Apple MPS 上测的。
   - 同一台 Apple M5 Pro 不进容器、只用 CPU 时，18 个候选约 2.8 秒（英文）到 4.5 秒（900 字的中文分块）。
-  - 服务逐个处理请求。Docker Desktop 虚拟机分到的 CPU 一般更少，会更慢。
-  - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`，不够时在 `server/.env` 里调大。超时或服务不可用时查询不会失败，只是这次不重排。
+  - 同一台机器的容器里实测（真实分块，平均约 520 个字符）：分到 15 核时每个候选约 0.18 秒，30 个候选约 5.4 秒；限制到 4 核时每个候选约 0.38 秒。
+  - 服务逐个处理请求，并发的请求在服务里排队。
+  - 超时默认 `RAG_CROSS_ENCODER_TIMEOUT_MS=30000`。一次 90 段（agent 三个查询的首轮）在 15 核约 16 秒，4 核约 34 秒；150 段分别约 27 秒和 57 秒。4 核时连 90 段都会超时，核少的机器在 `server/.env` 里调到 90000 或更大。超时或服务不可用时查询不会失败，但这一步既不重排，拒答门控也退回词面门控，拒答会变多。
 - **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
 - **不用 Docker**：在 `server/` 目录下先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
 - **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
