@@ -57,6 +57,9 @@ server/uploads/*
 /server/evaluation/.venv-cross-encoder/
 /server/evaluation/.venv-neural-reranker/
 
+# Personal notes, kept out of the repository.
+/server/docs/interview/
+
 # The demo's real-model override (docs/demo-tenant-isolation.md).
 /compose.demo.local.yml
 

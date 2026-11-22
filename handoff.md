@@ -91,7 +91,7 @@ executed tests** — no live database was involved, and no audit artifact surviv
 > `f7f6690c` it scores 18/18, and so does the self-test. The passing comparison comes from
 > the engine's grounded fallback; a model-written paraphrase is still rejected by the
 > lexical claim check. Real-embedding retrieval numbers are in
-> `server/docs/interview/CURRENT-TRUTH.md`. The Phase 2/3 decision is no longer blocked on
+> `docs/evaluation.md`. The Phase 2/3 decision is no longer blocked on
 > measurement, but a 7B model remains a capability ceiling. The text below is the original
 > 2026-08-24 analysis, kept for its reasoning.
 
