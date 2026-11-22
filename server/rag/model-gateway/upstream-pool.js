@@ -20,7 +20,7 @@ import { normalizeServiceUrl } from "../service-topology.js";
 //   - among the rest, the one with the fewest requests in flight; ties rotate.
 // A send that met an open circuit or a refused connection moves to the next
 // replica at once, from its start (a rerank of several requests repeats the
-// ones already answered). Any other
+// ones already sent, answered or not). Any other
 // failure goes back to the caller's retry loop (openai.js withRetry), whose
 // next attempt then lands on another replica; the pool never adds retries of
 // its own.

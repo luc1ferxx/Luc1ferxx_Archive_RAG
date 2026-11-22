@@ -483,7 +483,8 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
   // A cancelled agent request (request-deadline.js) aborts the call too.
   const signal = withRequestSignal(callerSignal);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const requestSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
+  const siblings = new AbortController();
+  const requestSignal = AbortSignal.any([timeoutSignal, siblings.signal, ...(signal ? [signal] : [])]);
   const batches = [];
 
   for (let start = 0; start < texts.length; start += CROSS_ENCODER_MAX_TEXTS_PER_REQUEST) {
@@ -496,6 +497,7 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
   const scores = await Promise.all(
     batches.map(async (batch) => {
       let response;
+      let payload;
 
       try {
         response = await fetch(endpoint, {
@@ -510,6 +512,8 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
           }),
           signal: requestSignal,
         });
+        // Read in here: the timeout or the caller can end the body as well.
+        payload = response.ok ? await response.json() : null;
       } catch (error) {
         if (signal?.aborted) {
           throw signal.reason;
@@ -537,9 +541,13 @@ export const requestCrossEncoderScores = async ({ endpoint, model = "", queryTex
         throw httpError;
       }
 
-      return parseCrossEncoderScores(await response.json(), batch.length);
+      return parseCrossEncoderScores(payload, batch.length);
     })
-  );
+  ).catch((error) => {
+    // None of this rerank's scores can be used now: close its other requests.
+    siblings.abort();
+    throw error;
+  });
 
   return scores.flat();
 };

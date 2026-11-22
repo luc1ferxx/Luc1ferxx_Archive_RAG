@@ -17,14 +17,27 @@ const TEI_MAX_CLIENT_BATCH = 32;
 const scoreOf = (text) => (Number(text.split(" ")[1]) * 7) % 241;
 const passages = (count) => Array.from({ length: count }, (_, index) => `passage ${index}`);
 
-// `answerAfter`: answer nothing until that many requests are waiting.
+const listen = async (t, handler) => {
+  const server = http.createServer(handler);
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  return `http://127.0.0.1:${server.address().port}/rerank`;
+};
+
+// `answerAfter`: answer nothing until that many requests are waiting, then
+// answer the last of them first.
 // `delayMs`: serve one request at a time, each taking that long, as the bundled
 // endpoint does behind its inference lock.
 const startService = async (t, { answerAfter = 0, delayMs = 0, failRequest = 0 } = {}) => {
   const sent = [];
   const waiting = [];
   let queue = Promise.resolve();
-  const server = http.createServer((req, res) => {
+  const endpoint = await listen(t, (req, res) => {
     let body = "";
 
     req.on("data", (chunk) => {
@@ -47,10 +60,13 @@ const startService = async (t, { answerAfter = 0, delayMs = 0, failRequest = 0 }
       const answer = () => res.end(JSON.stringify(ranks));
 
       if (answerAfter) {
-        waiting.push(answer);
+        waiting.push({ answer, first: Number(texts[0].split(" ")[1]) });
 
         if (waiting.length >= answerAfter) {
-          waiting.splice(0).forEach((send) => send());
+          waiting
+            .splice(0)
+            .sort((left, right) => right.first - left.first)
+            .forEach((held, index) => setTimeout(held.answer, index * 15));
         }
 
         return;
@@ -60,13 +76,7 @@ const startService = async (t, { answerAfter = 0, delayMs = 0, failRequest = 0 }
     });
   });
 
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(async () => {
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-  });
-
-  return { endpoint: `http://127.0.0.1:${server.address().port}/rerank`, sent };
+  return { endpoint, sent };
 };
 
 const withEnv = (t, values) => {
@@ -121,15 +131,54 @@ test("the model gateway's backend call is split the same way", async (t) => {
 test("a rerank's requests wait in the service's queue together, as one request did", { timeout: 15_000 }, async (t) => {
   // Sent one after another, each would queue again behind every other rerank
   // and overlapping reranks would time out together: this service answers
-  // only once all three are waiting.
-  const { endpoint, sent } = await startService(t, { answerAfter: 3 });
+  // only once all eight are waiting, the last first, so the scores must come
+  // back by position and not by arrival.
+  const { endpoint, sent } = await startService(t, { answerAfter: 8 });
 
   withEnv(t, { RAG_CROSS_ENCODER_TIMEOUT_MS: "2000" });
 
-  const texts = passages(90);
+  const texts = passages(240);
 
   assert.deepEqual(await requestCrossEncoderScores({ endpoint, queryText: "q", texts }), texts.map(scoreOf));
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 8);
+});
+
+test("a failed request closes the rerank's other requests", { timeout: 10_000 }, async (t) => {
+  // Two requests are held and the third refused, as TEI refuses when it has
+  // no permit left. Left open, the held two would keep theirs until the timeout.
+  const closed = [];
+  const endpoint = await listen(t, (req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (closed.length < 2) {
+        closed.push(new Promise((resolve) => res.on("close", resolve)));
+        return;
+      }
+
+      res.writeHead(429).end();
+    });
+  });
+
+  withEnv(t, { RAG_CROSS_ENCODER_TIMEOUT_MS: "30000" });
+
+  await assert.rejects(requestCrossEncoderScores({ endpoint, queryText: "q", texts: passages(90) }), { status: 429 });
+  await Promise.all(closed);
+});
+
+test("a timeout while the answer's body is arriving is a timeout too", { timeout: 10_000 }, async (t) => {
+  const endpoint = await listen(t, (req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"scores": [');
+    });
+  });
+
+  withEnv(t, { RAG_CROSS_ENCODER_TIMEOUT_MS: "300" });
+
+  await assert.rejects(requestCrossEncoderScores({ endpoint, queryText: "q", texts: passages(1) }), {
+    code: "ETIMEDOUT",
+  });
 });
 
 test("one timeout covers all of a rerank's requests", { timeout: 15_000 }, async (t) => {

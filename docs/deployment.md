@@ -134,7 +134,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 - **拒答门控**：开启重排后，"要不要回答"改由重排模型的相关概率决定（`RAG_QA_MIN_RERANK_PROBABILITY=0.02`）。拒答少得多，但也会有更多不可回答的问题被答出来。想保留原来更严的词面门控，设为 `off`。
 - **不用 Docker**：在 `server/` 目录下先 `npm run rerank:cross-encoder:setup`，再 `RAG_CROSS_ENCODER_MODEL=BAAI/bge-reranker-v2-m3 npm run rerank:cross-encoder`。有 CUDA 或 MPS 时会用 GPU。
 - **只起重排服务、给本机评测用**：`cd server && npm run rerank:cross-encoder:docker`。用同一个镜像，监听 `127.0.0.1:8081`。
-- **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。另外，首轮的几个查询合并后才重排，一次重排最多 top-K × 3 × 这一步的查询数段：agent 首轮 3 个查询时 90 段，每多一个跨语言改写多 30 段；不走 agent 计划时问题拆分最多 5 个查询，150 段；加上改写最多约 240 段。应用把一次重排拆成每批最多 32 段、同时发出，正好不超过 TEI `--max-client-batch-size` 的默认值 32，不用改这个设置；但不能调到 32 以下，否则请求会被拒，整次重排退回融合顺序（日志里有告警）。TEI 里每一段各占一个并发名额（`--max-concurrent-requests` 默认 512），同时在途的段数超过它会立刻失败，同样退回融合顺序。分批只对着假服务测过，没有跑过真的 TEI。
+- **换成 Hugging Face TEI**：`/rerank` 接口格式相同，但 TEI 默认返回概率，要同时设 `RAG_CROSS_ENCODER_SCORES=probabilities`，否则拒答门控会按错误的分数判断。另外，首轮的几个查询合并后才重排，一次重排最多 top-K × 3 × 这一步的查询数段：agent 首轮 3 个查询时 90 段，每多一个跨语言改写多 30 段；不走 agent 计划时问题拆分最多 5 个查询，150 段；加上改写最多约 240 段。应用把一次重排拆成每批最多 32 段、同时发出，正好不超过 TEI `--max-client-batch-size` 的默认值 32，不用改这个设置；但不能调到 32 以下，否则请求会被拒，整次重排退回融合顺序（日志里有告警）。TEI 里每一段各占一个并发名额（`--max-concurrent-requests` 默认 512），同时在途的段数超过它会立刻失败，同样退回融合顺序。并发多时把它调到不小于"同时进行的重排数 × 每次的段数"：例如经模型网关、默认 8 个并发、每次 240 段时是 1920。分批只对着假服务测过，没有跑过真的 TEI。
 
 ### 多实例共享状态（可选）
 
