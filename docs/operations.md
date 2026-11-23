@@ -58,7 +58,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 ## 处理步骤
 
-每条告警在 `alert-rules.yml` 的 `runbook` 注解里有英文版；下面是同样的内容。
+每条告警在 `alert-rules.yml` 的 `runbook` 注解里有英文版。
 
 ### `ArchiveRagChatAvailabilityFastBurn` / `SlowBurn`
 
@@ -121,7 +121,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 大批量写入（`cd server && npm run vector:reindex -- --apply`、`npm run vector:index -- build`）是延迟突增最常见的原因，等它们结束或暂停它们。
 
-这条告警不覆盖宕掉的副本：测不出延迟的副本（不可达、不在 recovery）没有延迟序列。宕机要看 `archive_rag_postgres_replica_fallbacks_total{reason=~"replica_down|lag_unknown"}` 和在本进程检索的进程（例如单体）的 `/health` 里的 `checks.readReplicas`（拆分部署的检索层的 `/health` 没有这一项）；仓库里没有为它单独写告警。
+这条告警不一定覆盖宕掉的副本：测不出延迟的副本（例如从没连上过、不在 recovery）的延迟序列是 0；连上过又断开的副本按最后读到的重放位置继续算延迟，主库有写入时可能触发这条告警。宕机要看 `archive_rag_postgres_replica_fallbacks_total{reason=~"replica_down|lag_unknown"}` 和在本进程检索的进程（例如单体）的 `/health` 里的 `checks.readReplicas`（拆分部署的检索层的 `/health` 没有这一项）；仓库里没有为它单独写告警。
 
 ### `ArchiveRagMetricsTargetDown`
 

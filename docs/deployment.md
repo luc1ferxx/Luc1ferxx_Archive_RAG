@@ -78,7 +78,7 @@ PDF_PARSER=auto docker compose --profile app --profile layout up -d
 - 上线前可以先看自己的 PDF 会怎么分，不需要 docling-serve：`cd server && npm run pdf:route -- <file.pdf|目录>`（`--json` 输出 JSON，`--thresholds-from-env` 改用 `server/.env` 里的 `PDF_AUTO_*`，否则用默认阈值）。它只打印页码、路由、原因和信号，不打印页面文本；
 - docling-serve 不可用时，送过去的页保留 pdf.js 文本（`DOCLING_FALLBACK=pdfjs`，默认）或让上传失败（`none`）；超时或连不上时，同一文档还在排队的请求直接放弃，不再一个个等超时。`/health` 的 `checks.pdfParser` 会报错，并给出 `routes`、`doclingMaxConcurrency`、`doclingPageBatchSize`；`PDF_AUTO_ROUTES=none` 时不探测 docling-serve；
 - **并发要和 docling-serve 对齐**：`DOCLING_MAX_CONCURRENCY`（默认 2）是每个应用进程同时发往 docling-serve 的请求数，`docling` 和 `auto` 共用；docling-serve 自己默认 2 个本地 worker（`DOCLING_SERVE_ENG_LOC_NUM_WORKERS`，`docker-compose.yml` 没有设置）。多出来的请求只会在 docling-serve 内部排队，并在那里耗掉 `DOCLING_TIMEOUT_MS`。给 `docling` 服务加 worker 时把 `DOCLING_MAX_CONCURRENCY` 一起调大；多个应用实例或 ingest worker 共用一个 docling-serve 时，上限按进程算，各进程的值加起来不要超过它的 worker 数。`DOCLING_TIMEOUT_MS` 从请求拿到名额时开始算，排队时间不算；
-- **每个分页请求都上传整个文件**：auto 下每段连续的路由页是一个 `page_range` 请求（`DOCLING_PAGE_BATCH_SIZE` 大于 0 时再按页数拆），docling-serve 只转换这一段，但请求里带的是整份 PDF。表格页分散的长文档会把同一个文件上传很多次；应用和 docling-serve 不在同一台机器上时要考虑这部分流量。应用这边同一文档的请求共用一份文件副本，排队中的请求不持有副本。
+- **每个分页请求都上传整个文件**：auto 下默认每段连续的、路由相同的路由页是一个 `page_range` 请求（`DOCLING_PAGE_BATCH_SIZE` 大于 0 时再按页数拆），docling-serve 只转换这一段，但请求里带的是整份 PDF。表格页分散的长文档会把同一个文件上传很多次；应用和 docling-serve 不在同一台机器上时要考虑这部分流量。应用这边同一文档的请求共用一份文件副本，排队中的请求不持有副本。
 
 **pdf.js 放到 worker 线程（`PDF_PARSE_WORKERS`）**：
 
@@ -186,7 +186,7 @@ docker compose --profile app up -d   # 先在 server/.env 里设 RAG_INGEST_MODE
 
 - 升级到包含分块丢字修复的版本后，已入库文档仍是旧分块：表格行、"Label:" 引导句和页尾标题行可能不在任何 chunk 里。运行 `cd server && npm run vector:reindex -- --from documents --apply` 按新切块器重建。新上传和 `PUT /documents/:docId` 替换自动使用新切块器。重复上传相同内容不会重建，入库去重会直接指向已有文档。
 - 镜像构建时把 `VITE_DOMAIN` 设成 `same-origin`。构建参数 `VITE_API_AUTH_TOKEN` 会打进前端包、发给每个浏览器，只适合单个可信用户。多用户部署用 `API_AUTH_TOKENS`，由前端之外的方式分发 token。
-- 镜像以非 root 用户 `node` 运行，可写的只有 `/data`，以及管理页“质量刷新”写报告用的 `/app/server/evaluation/results` 和 `evaluation/generated`。
+- 镜像以非 root 用户 `node` 运行，可写的有 `/data`，以及管理页“质量刷新”写报告用的 `/app/server/evaluation/results` 和 `evaluation/generated`；回收站恢复、建索引版本等还会在系统临时目录（`os.tmpdir()`，默认 `/tmp`）里写临时文件。
 - 多租户隔离演示：`docker compose -f docker-compose.yml -f compose.demo.yml --profile app up -d --build` 用 `deploy/demo/hardened.env` 打开全部租户隔离开关（只读这一个文件，不读 `server/.env`），PostgreSQL 在初始化时建好角色拆分的两个登录，app 以运行时登录连接，另起一个不发布端口的假模型。它是一个单独的 compose 项目（`luc1ferxx-archive-rag-demo`），容器名和数据卷（`pgdata-demo`、`appdata-demo`，本地 KMS 的主密钥也在后者里）都是自己的，所以 `docker compose -f docker-compose.yml -f compose.demo.yml --profile app down -v` 只删演示的数据，不碰默认部署的 `pgdata`、`appdata`。两者端口相同，不能同时运行。token 和密码都是公开的演示值，不发布新端口，不要配合 `ARCHIVE_RAG_BIND_HOST=0.0.0.0` 使用。详见 [demo-tenant-isolation.md](demo-tenant-isolation.md)。
 - 镜像里的 npm 10 在安装服务端依赖时会要求 `@qdrant/js-client-rest` 的 peer 依赖 typescript。本机 npm 11 生成的锁文件里没有它，而运行时也用不到，所以 Dockerfile 用 `--legacy-peer-deps` 安装。
 
@@ -239,8 +239,8 @@ ARCHIVE_RAG_ROLE=agent         PORT=5101 node server.js &
 ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 ```
 
-- 上面是默认的 `hmac`。改用 `ed25519` 时，把 `INTERNAL_SERVICE_KEYS` 换成 `INTERNAL_SERVICE_AUTH=ed25519` 和共享的 `INTERNAL_SERVICE_TRUSTED_KEYS`，再给 api、agent、retrieval 三个进程各自设自己的 `INTERNAL_SERVICE_SIGNING_KEY`（模型网关不调用别人，不需要私钥）；步骤见下面的"内部身份与密钥"。
-- 四个进程用同一份环境变量（`ed25519` 下私钥除外）。每一层都会忽略指向自己的地址，模型网关还会忽略 agent 和检索层的地址（启动时各打印一条警告），所以不用为每个角色单独准备一份。
+- 上面是默认的 `hmac`。改用 `ed25519` 时，把 `INTERNAL_SERVICE_KEYS` 换成 `INTERNAL_SERVICE_AUTH=ed25519` 和共享的 `INTERNAL_SERVICE_TRUSTED_KEYS`，再给 api、agent、retrieval 三个进程各自设自己的 `INTERNAL_SERVICE_SIGNING_KEY`（模型网关不调用别人，不需要私钥；但它的环境里有 `AGENT_SERVICE_URL` 或 `RETRIEVAL_SERVICE_URL` 时，没有私钥会拒绝启动，所以启动它时不要带这两个变量）；步骤见下面的"内部身份与密钥"。
+- 四个进程用同一份环境变量（`ed25519` 下私钥除外；没有私钥的模型网关还要去掉 `AGENT_SERVICE_URL`、`RETRIEVAL_SERVICE_URL`，见上一条）。每一层都会忽略指向自己的地址，`hmac` 下模型网关还会忽略 agent 和检索层的地址（启动时各打印一条警告），所以不用为每个角色单独准备一份。
 - `server/.env` 照常读取；上面的 `export` 优先。`PORT` 写明比依赖默认值稳妥：`server/.env` 里如果设了 `PORT`，所有角色都会用它。
 - 只拆一部分也可以：只设 `MODEL_GATEWAY_URL`、不设角色，就是"单体 + 独立模型网关"；`agent` 不设 `RETRIEVAL_SERVICE_URL` 时在本进程检索。
 - 开 OpenTelemetry 时给每个角色设不同的 `OTEL_SERVICE_NAME`，否则在 trace 后端里它们是同一个服务名。
