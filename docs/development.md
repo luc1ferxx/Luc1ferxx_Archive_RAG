@@ -109,7 +109,7 @@ npm run start                 # 启动时跑 migration，/health 的 vectorStore
 ```bash
 cd server
 npm run vector:reindex                       # dry-run：逐文档列出 copy / reembed / skip 计划
-npm run vector:reindex -- --apply            # 复用已有向量（维度一致时）写入 pgvector，每份文档一个事务
+npm run vector:reindex -- --apply            # 写入 pgvector，每份文档一个事务；默认重新 embedding，只有另加 --trust-source-embeddings 且维度一致时才复用已有向量
 npm run vector:reindex -- --from qdrant --apply
 npm run vector:reindex -- --from documents --apply   # 换 embedding 模型后：用库里存的原文件（PDF 或 Office 文件）重新切块、重新 embedding
 ```
@@ -145,7 +145,7 @@ server/evaluation/results/<timestamped-files>
 | --- | --- |
 | 安全 | CORS 白名单（`ALLOWED_ORIGINS`，为空时只放行本机来源）、跨站检查（浏览器发来的非 GET/HEAD/OPTIONS 请求核对 `Origin` / `Sec-Fetch-Site`；鉴权关闭时每个请求都核对 `Host`，只认本机名、IP 地址和 `ALLOWED_ORIGINS` 的主机）、helmet、按 IP 分级限流（全局，加上与租户限流同一份路由分类的 chat/ingest/destructive）、上传会话按 principal/workspace 分域、文件名初筛 + 文件字节判定格式（`%PDF` 魔数；Office 文件先过 ZIP 防护：条目数、解压大小、压缩比、单个解析器的 XML 量和抽出文字量都有上限）、无静态 `/uploads` 暴露。 |
 | 性能与可靠性 | 存储层异步原子写 + 写锁 + 增量 BM25 统计；embedding LRU 缓存；外部 fetch 大多带超时（Qdrant 的 `/healthz` 健康检查请求没有）；上传 session TTL 清扫；store `list()` 分页；前端 `/chat/stream` AbortController + 组件 memo 化。 |
-| 架构 | `app.js` 组合根 + `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 下的模块；`normalizeText` 部分收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块。 |
+| 架构 | `app.js` 组合根 + `app-services.js` 服务装配 + `server/routes/` 特性 Router + zod 校验；`agent-self-check` 拆为 `self-check/` 下的模块；`normalizeText` 部分收敛到 `server/lib/normalize-text.js`；langchain 替换为 `prompt-template.js` / `openai-client.js` / `pdf-loader.js` 三个自有模块（agent 运行时依赖 `@langchain/core`、`@langchain/langgraph` 等包）。 |
 | 工程化 | 前端 CRA → Vite 7 + Vitest 3（测试 97s → ~7s，构建 ~8s）；后端测试并行化（24s → ~4s，含 Windows 全平台通过）；CI 后端测试与 eval gate 拆并行 job；评测脚本共享 helper 收敛到 `eval-cli.js` / `eval-case-helpers.js`。 |
 
 当前测试基线：需要 PostgreSQL 或 Redis 的后端测试在没有对应数据库时报告为跳过（用 `FULL_SUITE=1 bash scripts/run-pgvector-integration.sh` 在一次性集群上跑；Redis 部分需另设 `REDIS_TEST_URL`）、生产构建通过，覆盖率门禁通过（后端全局行覆盖约 90%）。

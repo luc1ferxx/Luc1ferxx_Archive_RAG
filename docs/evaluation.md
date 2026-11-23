@@ -96,7 +96,7 @@ CI 可通过 `EVAL_TARGET_COMMIT_SHA` 把报告绑定到指定 SHA；它必须�
 
 - gate 执行时 checkout 必须仍是 target SHA 且 clean；
 - `latest-quality.json`、feedback、trajectory、planner-mock 和 recovery 五份 required reports 必须存在；synthetic/feedback 报告的 `summary.retrieval` 必须声明 `pgvector` + hybrid + `rrf` 且能从 case 重算（见 “Retrieval 架构证据”）；
-- evidence profile 必须是 `quality-current`；trajectory/planner/recovery 必须精确匹配版本化 manifest 中的 case/check IDs，synthetic 与 feedback 必须匹配 corpus case，并保留固定的 8 个 near-duplicate cases 和 2 个 feedback seed cases；固定 case 的问题、答案片段、事实 claim/来源归属、证据页、文档页内容和拒答输出也必须匹配 manifest；
+- evidence profile 必须是 `quality-current`；trajectory/planner/recovery 必须精确匹配版本化 manifest 中的 case/check IDs，synthetic 与 feedback 必须匹配 corpus case，并保留固定的 8 个 near-duplicate cases 和 2 个 feedback seed cases；固定 case 的问题、答案片段、证据页、文档页内容和拒答输出也必须匹配 manifest，2 个 feedback seed case 的事实 claim/来源归属也必须匹配；
 - synthetic/feedback 会交叉校验 document/upload/citation 身份、固定 chunk/byte/path 关系和 evidence schema；每个 citation 必须对应本次 raw `retrievedContexts`，Ragas context identity 由 raw retrieval 重建。门禁再从版本化 corpus page 重建 citation evidence，并复用生产 claim checker 独立重算 answer claims 与 claim support；upload resume 和 summary metrics 也会从 raw payload 重算，summary 或自报 `supported=true` 不能覆盖 raw failure；
 - planner/trajectory 的关键模式、技能链、planner、budget、loop、telemetry 与 trace 字段必须匹配版本化 response projection；作用域、approval resume/deny、retry、memory、privacy 与 goal lifecycle 等高风险 case 还必须携带最小化、privacy-safe 的 `case.response.observed` 原始观测。`check.detail` 只用于诊断，不作为 verdict oracle；recovery cases/checks 则由独立共享 builder 从 `report.recovery` 重新计算；
 - 每份报告必须包含完整 evidence、来自同一 target SHA、`git.dirty=false`，且默认不超过 24 小时；
@@ -433,7 +433,7 @@ npm run verify:quality
   - 另一个是不相关文档用例：nomic 检索让它过了覆盖门控，到答案阶段才拒答。拒答本身没错，但没有带引用，所以页码检查失败。
 - 原因是 Summary / Agreements 里没有标来源的概括句，以及差异句换了数值的说法。也就是说，这个模型的瓶颈在词法 claim 检查，不在标题写法。
 
-**结构化输出（2026-10-21，`RAG_COMPARISON_STRUCTURED_OUTPUT`，默认关）**：既然 7B 的对比答案全部倒在词法 claim 检查上，就不让它写散文。打开开关后对比调用换成 `comparison_answer_structured` 模板并带 strict JSON Schema：模型按差异点返回每份文档一条逐字引文和它的 Source 编号（编号只能是这次给它看过的）；服务端把每条引文定位到所引证据块里的句子（折叠空白、大小写、引号和破折号写法，数字必须一字不差），同一差异点下引文相同的文档归为一组，少于两组的差异点丢掉，然后把每两组之间的每一对写成有依据模板同样的 `- <文档> states <句子> [Source N]` 两行，再过同一个闸门。机制见 AGENTS.md。
+**结构化输出（2026-10-21，`RAG_COMPARISON_STRUCTURED_OUTPUT`，2026-11-19 已删除）**：既然 7B 的对比答案全部倒在词法 claim 检查上，就不让它写散文。打开开关后对比调用换成 `comparison_answer_structured` 模板并带 strict JSON Schema：模型按差异点返回每份文档一条逐字引文和它的 Source 编号（编号只能是这次给它看过的）；服务端把每条引文定位到所引证据块里的句子（折叠空白、大小写、引号和破折号写法，数字必须一字不差），同一差异点下引文相同的文档归为一组，少于两组的差异点丢掉，然后把每两组之间的每一对写成有依据模板同样的 `- <文档> states <句子> [Source N]` 两行，再过同一个闸门。机制见 AGENTS.md。
 
 同一台机器、qwen2.5:7b + nomic-embed-text、`eval:synthetic -- evaluation/synthetic-corpus-compare-hard.json --openai-provider real` 各跑 3 轮加 `verify:quality` 1 轮，开关关（87a0734c）和开各一组，`RAG_OBSERVABILITY_ENABLED=true` 下按 RAG trace 的 `modelRejectReason` 统计进入闸门的 16 次对比调用（23 次对比里 7 次走近重复短路、不调模型）：
 
@@ -824,7 +824,7 @@ QASPER dev v0.3（281 篇 NLP 论文、1005 个问题，标注者选定了证据
 
 ### 抽取式作答模式：模型选证据、服务端写答案（2026-10-22，`RAG_QA_EXTRACTIVE_OUTPUT`，2026-11-19 已删除）
 
-**动机**：Agent 路径在 QASPER 上几乎不作答（train 50 题 0/41、dev 100 题 0/91），根因是模型的改写过不了词法 claim 校验；rag 面的官方 F1 停在 0.23 左右，主因是答案长（作答中位 33 词）。对比答案的结构化输出（见"对比答案闸门的拒绝原因"）证明"模型只选证据、服务端按证据写答案"能让校验按构造通过。单文档问答照此做：模型返回最短确切答案和最多 4 条逐字引文（带 Source 编号），服务端把引文定位到证据句、渲染成 finalizer 写法的行，直接答案若是引文子串也写成一行，Yes/No 只放在 `directAnswer` 字段。机制见 AGENTS.md 和 configuration.md。
+**动机**：Agent 路径在 QASPER 上几乎不作答（train 50 题 0/41、dev 100 题 0/91），根因是模型的改写过不了词法 claim 校验；rag 面的官方 F1 停在 0.23 左右，主因是答案长（作答中位 33 词）。对比答案的结构化输出（见"对比答案闸门的拒绝原因"）证明"模型只选证据、服务端按证据写答案"能让校验按构造通过。单文档问答照此做：模型返回最短确切答案和最多 4 条逐字引文（带 Source 编号），服务端把引文定位到证据句、渲染成 finalizer 写法的行，直接答案若是引文子串也写成一行，Yes/No 只放在 `directAnswer` 字段。机制见 AGENTS.md。
 
 **先核实的前提（2026-10-22，离线、不调模型）**：
 
@@ -1123,7 +1123,7 @@ train 上（400 题）的损失拆解：
 - 其中 41 个点属于门控判定可回答的题，但只有 23 个点真正给了模型；
 - 另外 28 个点属于门控判定不回答的题。这部分是拒答的取舍，这次不动。
 
-**改动**（`selectQaContext`）：是否拒答仍由门控决定。决定要答之后，上下文是：先放门控放行的段落，再按检索顺序补其余候选，总数最多 `RAG_RETRIEVAL_TOP_K` 条。补充的段落要满足三条：
+**改动**（`selectQaContext`）：是否拒答仍由门控决定。决定要答之后，上下文是：先放门控放行的段落，再按检索顺序补其余候选，补到 `RAG_RETRIEVAL_TOP_K` 条为止；门控放行的段落多于这个数时全部保留。补充的段落要满足三条：
 - 过相关度的回退下限；
 - 问题里有编号或引号短语时，段落里也要有；
 - 不是近邻替换，否则问 amber ceiling 会把 cobalt ceiling 那条也引进来。
@@ -1706,7 +1706,7 @@ train 上（400 题）的损失拆解：
 
 **工具**（三个都不调模型；`test/qasper-answer-funnel.test.mjs`、`test/qa-latency-breakdown.test.mjs`、`test/answer-labeling.test.mjs`）：
 
-- `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json> [--high-f1 0.5] [--json]`（`evaluation/qasper-answer-funnel.mjs`）：按题号把 rag 面的答案报告和同一设置的 `eval:qasper-retrieval` 报告拼起来，每道可回答题落在恰好一档：证据不在候选里、证据在候选里但被拒答、作答但证据不在上下文里、作答且证据在上下文里。每档给作答数、拒答数（按 `abstainSource`）、作答题的官方 F1 均值、F1 为 0 和 F1 不低于 `--high-f1` 的题数。两份报告都得记录了检索设置（`config.retrieval`），否则拒绝（两份都没记录时看不出差别，也证明不了相同）；记录下来的设置除检出状态（`git.*`：提交号、未提交改动的文件数）外有任何不同也拒绝（检索、切块、语料、embedding 模型、查询适配器）；Agent 面的报告也拒绝（Agent 按意图自带 topK，和检索报告不是同一条路）；有可回答题配不上也拒绝。检出状态的差别、来自不干净检出的报告都在输出里写明。两次运行在“门控是否作答”和“上下文是否含证据”上对不上的行单独计数，不修正。“证据在不在候选里”只来自检索报告（答案报告的行不记这一项），所以这一档的准确度取决于两次运行的检索是否真的相同，有两种情况设置相同也可能不同：local 索引的稀疏统计按运行入库的全部文档算，topK 小于稠密候选池时（topK 6 从稠密前 8 里取）候选会随入库的论文集合变，topK 8 起候选就是稠密前 topK、与入库集合无关；`RAG_QA_ANSWER_VERDICT` 开着时，模型拒答后加深检索重试写出的答案读的是另一批块。
+- `npm run funnel:qasper-answers -- <答案报告.json> <检索报告.json> [--high-f1 0.5] [--json]`（`evaluation/qasper-answer-funnel.mjs`）：按题号把 rag 面的答案报告和同一设置的 `eval:qasper-retrieval` 报告拼起来，每道可回答题落在恰好一档：证据不在候选里、证据在候选里但被拒答、作答但证据不在上下文里、作答且证据在上下文里。每档给作答数、拒答数（按 `abstainSource`）、作答题的官方 F1 均值、F1 为 0 和 F1 不低于 `--high-f1` 的题数。两份报告都得记录了检索设置（`config.retrieval`），否则拒绝（两份都没记录时看不出差别，也证明不了相同）；记录下来的设置除检出状态（`git.*`：提交号、未提交改动的文件数）外有任何不同也拒绝（检索、切块、语料、embedding 模型、查询适配器）；Agent 面的报告也拒绝（Agent 按意图自带 topK，和检索报告不是同一条路）；有可回答题配不上也拒绝。检出状态的差别、来自不干净检出的报告都在输出里写明。两次运行在“门控是否作答”和“上下文是否含证据”上对不上的行单独计数，不修正。“证据在不在候选里”只来自检索报告（答案报告的行不记这一项），所以这一档的准确度取决于两次运行的检索是否真的相同，有两种情况设置相同也可能不同：local 索引的稀疏统计按运行入库的全部文档算，topK 小于稠密候选池时（topK 6 从稠密前 8 里取）候选会随入库的论文集合变，topK 8 起候选就是稠密前 topK、与入库集合无关；`RAG_QA_ANSWER_VERDICT`（2026-11-20 已删除）开着时，模型拒答后加深检索重试写出的答案读的是另一批块。
 - `npm run latency:qa -- --events <事件.jsonl> [--skip N] [--chat-price 输入,输出 --embedding-price 输入] [--compare <另一次的事件.jsonl>] [--json]`（`evaluation/qa-latency-breakdown.mjs`）：读一次问一题的运行写下的可观测性事件（`RAG_OBSERVABILITY_ENABLED=true` 加 `RAG_OBSERVABILITY_EVENTS_PATH`），把每道题的 QA 路线耗时拆成查询 embedding、答案模型和路线自己的开销（整题减前两项：检索、融合、门控、选上下文、整理答案），作答和拒答分开给 p50 / p90 / p95 / 最大值、时间占比和 token 分布，外加入库的 embedding 用量；给了单价（美元 / 百万 token）就用模型契约自己的公式 `estimateLlmOpsCost` 算成本。事件按先后归到题（一道题的模型调用之后是它的 QA trace），所以只适用于串行运行，遇到 Agent trace 直接拒绝。失败的问题（trace 没有路线）自成一题并单独计数，它的模型调用不会算到下一题头上；重排等其它模型调用的耗时落在“路线自己的开销”里，有就在输出里写明；同一个事件文件里既有模型网关的计量事件又有调用方的镜像事件时拒绝（每次调用会算两遍）；“入库”数的是文档 embedding 调用次数，重试会多算。`--compare` 把两次运行按题配对（同一批题、同样顺序；每个位置的问题文本哈希必须相同，否则拒绝），输出本次减对照：两次都作答的题上的整题耗时、答案模型耗时、输入和输出 token，两次都拒答的题上的整题耗时，各带均值差的 bootstrap 95% 区间（按题重采样，默认 10000 次、seed 12345）和差的中位数。输出里不出现问题或答案的文本。
 - `npm run label:answers -- --report <答案报告.json> --corpus <QASPER 语料.json> [--out 目录] [--name 名字] [--seed 1]`（`evaluation/build-answer-labeling.mjs`）：为报告里每道作答的题生成人工标注用的自包含 HTML 页（问题、每位标注者的参考答案、标注的证据段落、系统的答案，按种子打乱；结论用评审的判定词表：正确 / 部分正确 / 错误 / 其实是拒答，键盘 1–4；标注存在浏览器里，可导出、导入），以及同一批题的 `eval:judge` 输入（`<名字>-judge-input.json`）。导出文件的 `items` 就是 `eval:judge --labels` 读的形状，每条都有结论；只勾了“参考答案或标注有问题”或只写了备注、没给结论的题放在 `unlabeled` 里，不进一致率。拒答的题不用标，它的判定只取决于标注。保存用的键带上页面名和这批答案的指纹，所以同名页面换一份报告重建后不会把旧结论套到新答案上，另一份报告的导出文件也导不进来；导入会覆盖已有结论时先问；按住数字键不会连着给后面的答案打标，点过的按钮会让出焦点（否则空格或回车会给下一条再打一次）；同一页开两个标签页时各自的保存只改自己那一条。`--adopt-legacy-labels` 让重建的页面接手 2026-11-10 之前生成的页面存下的标注。
 - `eval:qasper-answers` 的报告此前把每条 `prediction` 截到 400 字符，标注的人看到的就不是被打分的那段答案（下面 R2 的 121 条答案里 27 条超过 400 字符，最长 1,571）。2026-11-10 起存整段；`label:answers` 遇到恰好 400 字符的答案会提醒报告可能是旧的。

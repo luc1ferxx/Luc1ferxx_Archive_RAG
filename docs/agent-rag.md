@@ -223,7 +223,7 @@ Approval 仍然绑定原始 input hash：交给 Capability 的每个审批都必
 
 | 模块 | 职责 |
 | --- | --- |
-| `server/rag/agent-planner.js` | 请求分类、planner actions、skill/chain 选择、执行前 clarification 判断。 |
+| `server/rag/agent-planner.js` | planner actions、skill chain 排序、执行前 clarification 判断。 |
 | `server/rag/skills/skill-contract.js` | Skill contract：`inputSchema`/`outputSchema`/`effects`/`idempotency`/`parallelSafe`/`replaySafe` 的规范化与安全默认值，以及随 step 持久化的 replay contract 切片。 |
 | `server/rag/agent-custom-skill-stage.js` | Custom skill 阶段：规划 typed DAG、交给 LangGraph 执行、管理 graph checkpoint 和 replan；图被整体拒绝时把选中的 Skill 记为未执行。对外返回一个扁平 skill result 数组。 |
 | `server/rag/skills/authorized-catalog.js` | 根据已注册 custom Skill 的显式 typed contract、`accessScope` 和选中文档核验构造模型可见的原子候选；与 intent/chain 选择分离；不在这个目录里的 custom Skill 不会运行。 |
@@ -457,7 +457,7 @@ Span 在 AsyncLocalStorage 上下文里嵌套，所以 `ragService` 深处的模
 `0` 关闭对应上限；空值保留默认值，避免 `.env` 里一行空值悄悄去掉上限。
 
 - **怎么计量**：每次成功的模型调用（chat、embedding、cross-encoder rerank）都会写一条 LLMOps metric，`recordLlmOpsMetric` 在写入前把它的 `totalTokens` 和 `estimatedCostUsd` 记到当前运行上。当前运行通过 `AsyncLocalStorage` 找到，所以 `ragService` 深处的调用也算在发起它的那次运行上；并发运行各记各的。失败、限流和被 LLMOps 策略拦截的调用不计（供应商不对它们计费）。没有定价的模型只计 token，并记入 `unpricedModelCalls`，所以成本上限只约束有定价的模型。
-- **在哪里生效**：在步骤边界，通过每个工具本来就要过的 `consumeBudget` / `reserveBudget`。任何一个上限用完后，下一个文档 RAG、补检索、custom skill、Web、arXiv 或 research question 都被跳过，写一条 `budget_limit` trace（原因如 `run token budget exhausted (…)`），运行走已有的澄清或证据不足降级路径，而不是报错。trace step 本身不受限，用完预算的运行仍能记录它为什么停下。
+- **在哪里生效**：在步骤边界，通过 `consumeBudget` / `reserveBudget`。任何一个上限用完后，下一个文档 RAG、补检索、custom skill、Web、arXiv 或 research question 都被跳过，写一条 `budget_limit` trace（原因如 `run token budget exhausted (…)`），运行走已有的澄清或证据不足降级路径，而不是报错。trace step 本身不受限，用完预算的运行仍能记录它为什么停下。
 - **边界**：已经开始的步骤会跑完，所以一次运行可能超出上限不止一个步骤的用量（例如并发的图节点都会跑完；claim 评审等不经 `consumeBudget` / `reserveBudget` 的模型调用在上限用完后照常发生）；这是软截止，不会中断进行中的模型调用。每次调用 `runAgentRag` 或图恢复都是一个新计量器，token 和成本按调用计；批准后执行的 Capability（step executor 的 `applyApprovalAction`）不在任何计量器里，不受这三个上限约束。意图、执行规划器调用发生在第一个工具之前；这两个和 DAG 规划器的调用都计入用量但不受上限阻止。
 - **观测**：`agentObservability.budget.run` 返回 `limits`、`used`（`tokens`、`costUsd`、`modelCalls`、`unpricedModelCalls`、`durationMs`）和 `exhausted`（`null` / `tokens` / `cost` / `duration`）。它是新增字段，`budget.limits` / `budget.used` 的形状和图 checkpoint 摘要都不变。
 

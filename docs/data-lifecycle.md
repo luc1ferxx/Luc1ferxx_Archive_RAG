@@ -211,12 +211,12 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
   - `build_stalled`：在构建但租约已过期，每次上传仍会为它嵌入，直到 resume 或 retire；
   - `ready_not_activated`：已构建但从未激活，会一直被双写；
   - `ready_out_of_grace`：已停止接收写入，不能再激活或回滚到，应退役；
-  - `drift`：ready 版本的 chunk 数或文档数和活动版本不同；
+  - `drift`：仍在接收写入的 ready 版本的 chunk 数或文档数和活动版本不同；
   - `build_failed`；
   - `chunk_profile_differs_from_active`、`chunk_profile_differs_from_version`：活动版本（后者是正在构建或仍在接收写入的 ready 版本）记录的切块配置和本进程现在用的不同；
   - `configuration_differs_from_active`（见上）。
 - 状态总是返回 active、building、ready 和指针上的 previous 版本；只有 retired/failed 的历史只取最新的 limit 条（默认 25），并返回 `historyLimit`。旧版本再多，active 也不会从状态里消失，健康检查也不会因此变红。
-- `GET /admin/index-versions`：需要 `admin.status.read`，只读，返回同样的内容。构建、激活、回滚、退役只能通过 CLI 执行。
+- `GET /admin/index-versions`：开启鉴权时需要 `admin.status.read`，只读，返回同样的内容。构建、激活、回滚、退役只能通过 CLI 执行。
 - `/health` 的 `checks.vectorStore`：`table` 和 `embedding` 按活动版本描述，另有 `activeVersion` 和 `indexVersions`（活动版本、构建进度、警告）。健康检查不算 drift（报告里 `drift` 为 null），不对每个 ready 表做全表 COUNT；drift 只在 status 和管理接口里有。
 - `checks.rowLevelSecurity`：检查所有存活版本的表，以及活动版本的 sparse-rank 函数。
 - `npm run vector:reindex` 原地重写活动版本（以及它双写的版本）。活动版本是固定模型时，它会提示：`--apply` 按该模型重写；要换到配置模型，用 `vector:index build` 再激活。
@@ -288,7 +288,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 
 每个阶段的输出写入 `rag_ingest_jobs_outputs`（迁移 017，带租户授权和 `tenant_isolation` 行策略），写完才推进到下一阶段。所以重试从失败的阶段继续，不从头开始。
 
-- 单个输出不能超过 `RAG_INGEST_STAGE_OUTPUT_MAX_BYTES`（默认 64 MiB，0 表示不限），超过时报 413。
+- 单个输出（`document_file` 除外）不能超过 `RAG_INGEST_STAGE_OUTPUT_MAX_BYTES`（默认 64 MiB，0 表示不限），超过时报 413。
 - embeddings 的上限按每个空间单独算：构建第二个模型期间，文档不会因为多了一组向量而超限。
 - job 结束（succeeded 或 failed）后阶段输出随之删除。
 
@@ -310,9 +310,9 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 为兼容前端，`GET /ingest-jobs/:jobId` 对死信 job 返回 `status: "failed"`，另附 `deadLetter: { stage, deadLetteredAt }`。该接口还返回 `kind`、`stage`、`duplicate`、`superseded` 和 `documentVersion`。
 - 文档被删除时，它排队中、等待重试和死信的 job 以 failed 结束，带 `canceledReason: "document_deleted"`（迁移 040），字节和输出一起删掉。
 - 管理接口（按请求者租户隔离，别的租户的 job 返回 404；没有访问范围的请求能列出和重新入队任何租户的死信 job，例如关闭鉴权（默认）且请求既不带用户也不带工作区时）：
-  - `GET /admin/ingest-jobs/dead-letter?limit=N`（默认 50），需要 `admin.status.read`；
-  - `POST /admin/ingest-jobs/:jobId/requeue`，需要 `admin.actions.recover_tasks`。
-- 命令行（以 owner 身份运行，按属主精确匹配）：
+  - `GET /admin/ingest-jobs/dead-letter?limit=N`（默认 50），开启鉴权时需要 `admin.status.read`；
+  - `POST /admin/ingest-jobs/:jobId/requeue`，开启鉴权时需要 `admin.actions.recover_tasks`。
+- 命令行（在系统上下文里运行，不开角色拆分时即 owner 身份；按属主精确匹配）：
   - `npm run ingest:jobs -- dead-letter list --user <id> --workspace <id>`（`--all` 覆盖所有租户，`--limit` 默认 50、最多 500）；
   - `npm run ingest:jobs -- dead-letter requeue <jobId> --user <id> --workspace <id>`；
   - `npm run ingest:jobs -- counts`。
@@ -407,7 +407,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 
 ### 零停机切换的适用范围
 
-`docs/evaluation.md` 里 index-switch 的数字（0 错误、2 秒内跟上新指针、切换和回滚命令约 235 ms）来自只读 /chat、800 个 chunk，期间没有并发的上传、删除或替换，也不含 retire，只能按这个范围引用。retire 对读者的影响以集成测试的实测为准（最长约 100 ms，见"回滚与退役"）。
+`docs/evaluation.md` 里 index-switch 的数字（0 错误、2 秒内跟上新指针、切换和回滚命令约 235 ms）来自只读 /chat、800 个 chunk，期间没有并发的上传、删除或替换，也不含 retire，只能按这个范围引用。retire 对读者的影响以集成测试的实测为准（测试把每次删表尝试的锁等待设为 100 ms，读者最长约 100 ms；默认每次尝试等 200 ms，见"回滚与退役"）。
 
 ### 查询嵌入跟随活动版本、并行构建
 
