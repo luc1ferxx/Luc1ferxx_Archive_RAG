@@ -1,8 +1,9 @@
 # ADR 0001：Agent 编排运行时迁到 LangGraph.js（strangler，保留领域层）
 
-- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。阶段 8（2026-11-13）：用户决定删除 custom Skill 阶段的 V1 顺序链和选择它的 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，agent 里不再有不走 LangGraph 的路径，见“阶段 8 结果”。阶段 10（2026-11-14）：用户决定删除 v3 统一图和选择它的 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow`，回答一个请求只剩外层执行计划一种方式，见“阶段 10 结果”。阶段 11（2026-11-15）：删除共用图模块里只有 v3 用过的代码（节点停在审批门和同一线程续跑、v3 图契约、v2 checkpoint、run store 的图审批门、任务级 `deny` 等），见“阶段 11 结果”。阶段 13（2026-11-17）：需审批的内置 Skill 只走到审批门，批准后的 arXiv 导入和文档发现由 `capability_call` 步骤用格式化的结果作答，外层计划里只有测试走得到的内联分支已删除，见“阶段 13 结果”。
+- 状态：**已采纳**（2026-10-14）。阶段 0–4 已完成：自阶段 4 起 `AGENT_RUNTIME` 默认 `langgraph`。取消方案（drain，不把请求 signal 直接交给 LangGraph）和外层计划保持原生循环（阶段 3）都已认可。阶段 5（收尾，2026-10-16）对照"完成的定义"逐条处理，结论见"阶段 5 结果"。外层计划长期保持原生循环、不放宽压测硬门，曾定为最终决定（用户认可，2026-10-16）；阶段 7（2026-11-13）按用户的新决定推翻：外层计划也只走 LangGraph，原生循环和 `AGENT_OUTER_PLAN_RUNTIME` 开关已删除，见“阶段 7 结果”。阶段 6（2026-10-16）：用户决定提前结束约束 12 的回退窗口，原生图调度器 `runExecutionGraph` 和 `AGENT_RUNTIME=native` 已删除，需要持久状态与中断的图一律由 LangGraph 调度，没有运行时回退开关，见"阶段 6 结果"。阶段 8（2026-11-13）：用户决定删除 custom Skill 阶段的 V1 顺序链和选择它的 `AGENT_SKILL_GRAPH_ROLLOUT=off|shadow`，见“阶段 8 结果”。阶段 10（2026-11-14）：用户决定删除 v3 统一图和选择它的 `AGENT_UNIFIED_GRAPH_ROLLOUT=guarded|shadow`，回答一个请求只剩外层执行计划一种方式，见“阶段 10 结果”。阶段 11（2026-11-15）：删除共用图模块里只有 v3 用过的代码（节点停在审批门和同一线程续跑、v3 图契约、v2 checkpoint、run store 的图审批门、任务级 `deny` 等），见“阶段 11 结果”。阶段 13（2026-11-17）：需审批的内置 Skill 只走到审批门，批准后的 arXiv 导入和文档发现由 `capability_call` 步骤用格式化的结果作答，外层计划里只有测试走得到的内联分支已删除，见“阶段 13 结果”。
 - 日期：2026-10-14
 - 范围：`server/rag/` 的 Agent 编排运行时。领域层（检索 SQL、切块、门控、claim 校验、finalizer、注入筛查、鉴权/RBAC/RLS、服务身份、指标）不在范围内。
+- 注（2026-11-22）：各阶段“结果”一节记录的是该阶段当时的代码和行为，其中的“现在”“目前”指当时，后来的阶段和改动可能又改了它们；现状以 README.md 和 docs/ 下其他文档为准。
 
 ## 背景
 
@@ -32,11 +33,11 @@
 
 阶段 5（收尾）、阶段 6（删除原生图调度器）和阶段 7（删除外层原生循环）是后加的，见各自的"结果"一节。阶段 6 提前结束了阶段 4 这一行的"`native` 保留一个发布周期"；阶段 7 之后 agent 只有 LangGraph 一种运行方式。
 
-**迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 是生产调度器，不属于被替代的调度代码，要删的只有原生图调度器 `runExecutionGraph`，阶段 6 已删除，见“阶段 5 结果”“阶段 6 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
+**迁移完成的定义**（来自目标文件；阶段 5 的最终决定修订了“被替代的调度代码已删除”一条：外层计划的原生循环 `runAgentExecutionPlan` 当时是生产调度器（阶段 7 已删除这个原生循环），不属于被替代的调度代码，要删的只有原生图调度器 `runExecutionGraph`，阶段 6 已删除，见“阶段 5 结果”“阶段 6 结果”）：`AGENT_RUNTIME=langgraph` 为默认；被替代的调度代码已删除；所有确定性评测在屏蔽 id 和时间后与迁移前逐字节一致，或差异已按流程在 `quality-current-suite-manifest.js` 升版本并逐条说明；`verify:quality` 18/18；`eval:load-test:pgvector` 的 app CPU/请求和 p95 退化不超过 10%。
 
 ### 不可放松的约束
 
-1. 模型只提议、运行时决定。外层计划按确定性的阶段顺序执行（生产为原生循环 `runAgentExecutionPlan`，见阶段 5 的最终决定；实验开关下为同序的底层 Pregel 图），只用确定性条件，不用 `createAgent` 的自由 ReAct 循环。
+1. 模型只提议、运行时决定。外层计划按确定性的阶段顺序执行（阶段 7 起只在同序的底层 Pregel 图上执行，原生循环和选择它的开关已删除，见“阶段 7 结果”），只用确定性条件，不用 `createAgent` 的自由 ReAct 循环。
 2. 不出现第二个 run store 和第二套回放安全矩阵。checkpointer 是自定义 `BaseCheckpointSaver`，写现有 agent run store（revision CAS、RLS 租户、事件契约不变），不用 `PostgresSaver` 的 `checkpoints` 表。
 3. 有副作用的节点在审批前零写入，审批后只跑一次，带 run+node 幂等键；`interrupt()` 是节点里第一个有效操作。
 4. 原始答案 token 不出服务器：SSE 只用 `streamMode: ["updates", "custom"]`，不开 `messages`。
@@ -171,7 +172,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 真实审批路径：`pauseExecutionGraphForApproval`、审批快照、`waiting_for_user` 状态、真实 Capability 的 preflight 与 `verifyCapabilityGraphApproval`。spike 用的是测试替身，暂停期间 run 仍是 `running`。
 - PostgreSQL run store：JSONB、/chat 语句数、没有 cursor 时每次读整条事件列表（随 superstep 数平方增长）。
 - finalization 收据回放；用 checkpointer 的 `list` 做启动恢复。
-- LangGraph 记录的修剪：目前每个 superstep 都在增长。
+- LangGraph 记录的修剪：spike 时每个 superstep 都在增长（阶段 4 起执行器的 saver 只保留每个命名空间最新的 2 个 checkpoint）。
 - 阶段 1 的模型与检索适配器、LangChain 回调到 OTel 的桥。
 
 ## 阶段 1 结果：适配层
@@ -391,10 +392,10 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 | 条目 | 状态 |
 | --- | --- |
 | `AGENT_RUNTIME=langgraph` 为默认 | 达成（阶段 4） |
-| 被替代的调度代码已删除 | 达成（阶段 6）：`runExecutionGraph` 的调度循环、两个 stage 的 `native` 分支和 `AGENT_RUNTIME=native` 已删除。这是用户提前结束约束 12 回退窗口的结果，不是等窗口过去。外层原生循环 `runAgentExecutionPlan` 不是被替代的调度代码：按阶段 5 的最终决定，它是外层计划的生产调度器，保留。checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
+| 被替代的调度代码已删除 | 达成（阶段 6）：`runExecutionGraph` 的调度循环、两个 stage 的 `native` 分支和 `AGENT_RUNTIME=native` 已删除。这是用户提前结束约束 12 回退窗口的结果，不是等窗口过去。外层原生循环 `runAgentExecutionPlan` 当时不算被替代的调度代码：按阶段 5 的最终决定，它是外层计划的生产调度器，保留；阶段 7 已删除这个原生循环。checkpoint 模块与 `agent-unified-graph-run.js` 没有调度代码可删 |
 | 确定性评测屏蔽后逐字节一致 | 阶段 5 达成：`eval:trajectory`、`eval:planner`、`eval:recovery-observability` 在两种 runtime 下一致，`quality:current` 通过。阶段 6 达成：删除前后三项评测屏蔽后逐字节一致，`quality:current` 的结果见“阶段 6 结果”的证据；阶段 6 起没有 native 可比，图相关套件对照删除前从 native 冻结的 golden |
 | `verify:quality` 18/18 | 达成（阶段 3，qwen2.5:7b；文档 RAG 路径与 runtime 无关） |
-| 压测退化不超过 10% | 默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%），按最终决定门不放宽，外层计划不交给 LangGraph |
+| 压测退化不超过 10% | 阶段 5 时默认配置达成（外层计划原生）；外层计划放到 LangGraph 上不达成（并发 1 时 CPU +17.6%、p95 +13%），按当时的最终决定门不放宽，外层计划不交给 LangGraph；阶段 7 推翻了这个决定，外层计划只走 LangGraph，门没有重测，见“阶段 7 结果”的“代价” |
 
 ## 阶段 6 结果：删除原生图调度器（2026-10-16）
 
@@ -538,7 +539,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - 进程内（2026-11-13，删除之前在同一进程里交替 7 轮、每轮 400 次文档问答，Node 24.21.0，内存 run store、桩 ragService）：每次 `runAgentRag` 的 CPU 中位数 0.605 ms（原生循环）对 0.894 ms（LangGraph），多 0.29 ms；墙钟 0.506 对 0.701 ms。与阶段 5 的 0.28 ms 一致。
 - 压测没有重跑。阶段 5 的数字仍是唯一的端到端测量：pgvector、模型 0 ms、并发 1，每请求 CPU 中位数 5.68 → 6.68 ms（+17.6%），p95 9.3 → 10.5 ms（+13%）。阶段 7 之前写的压测报告里，`/chat` 的每请求 CPU 比同一提交现在测出来的低约 1 ms。
 - 真实模型下一次文档问答约 2.4 s，其中 99.5% 是答案模型（见 `docs/evaluation.md`“默认配置的答案漏斗、延迟和 token”），这 0.3 ms 看不出来。受影响的是 0 ms 假模型下的单进程吞吐上限。
-- 回答 agent 请求的进程在第一个请求时加载 `@langchain/*`。2026-11-13 实测（Node 24.21.0，`agent.js` 之后导入图模块，GC 后的 RSS）：一次性约 115 ms，RSS 82 → 143 MB。默认配置下 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core（约 70 ms，RSS 到 122 MB），所以阶段 7 实际多出的是 LangGraph 本身：约 50 ms、约 21 MB；规划器全用确定性实现的部署才承担全部的 115 ms 和约 60 MB。split 部署的 api 边缘层、ingest worker、检索层和模型网关仍然不加载。（阶段 12 起，承载 agent tier 的进程在 listen 之后就在后台加载 LangGraph，第一个请求不再付这笔，见阶段 12。）
+- 回答 agent 请求的进程在第一个请求时加载 `@langchain/*`。2026-11-13 实测（Node 24.21.0，`agent.js` 之后导入图模块，GC 后的 RSS）：一次性约 115 ms，RSS 82 → 143 MB。默认配置下 LLM 规划器本来就在第一个 `/chat` 加载 LangChain core（约 70 ms，RSS 到 122 MB），所以阶段 7 实际多出的是 LangGraph 本身：约 50 ms、约 21 MB；规划器全用确定性实现的部署才承担全部的 115 ms 和约 60 MB。split 部署的 api 边缘层、ingest worker、检索层和模型网关仍然不加载。（阶段 12 起，承载 agent tier 的进程在 listen 之后就在后台加载 LangGraph，后台导入成功之后到达的请求不再付这笔，见阶段 12。）
 
 ### 删了什么
 
@@ -617,7 +618,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 复核没能验证的两项：`server/.env` 按规则没有读（里面如果有 `AGENT_OUTER_PLAN_RUNTIME=native` 或拼错的值，`node server.js` 现在拒绝启动）；Node 22 上新 golden 的比较，当时等 CI，推送后已通过（见上面“证据”里的 Node 版本一条）。
 
-修正之后重跑（提交 9b74106c，即修正提交 8f51955f 加面试材料的文档提交，本机 Node 24.21.0）：
+修正之后重跑（提交 9b74106c，即修正提交 8f51955f 加一个文档提交，本机 Node 24.21.0）：
 
 - `coverage:gate` 接一次性 PostgreSQL 18 + pgvector：4,585 个测试，4,578 通过、7 跳过、0 失败；全局行覆盖 92.58%，五组覆盖率门和目标都通过。数字与删除提交上的那次相同（修正没有增减测试）。
 - `quality:current` 按 CI 的 `quality-gate` 步骤在该提交的干净 worktree 上运行：通过，八项检查全部 `pass`。
@@ -1020,7 +1021,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 拒绝已删除的取值
 
-- `AGENT_UNIFIED_GRAPH_ROLLOUT` 进了 `rag/config.js` 的已删除开关表，是第四个：未设置、空、空白或 `off`（去首尾空白、不区分大小写）照常启动；其他任何值以 `AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED` 拒绝。它是四个里唯一一个“剩下的那个值就是默认值”的，所以从没开过 v3 的部署不需要改配置，`.env` 里照抄示例写着 `off` 的也照常启动。
+- `AGENT_UNIFIED_GRAPH_ROLLOUT` 进了 `rag/config.js` 的已删除开关表，是第四个：未设置、空、空白或 `off`（去首尾空白、不区分大小写）照常启动；其他任何值以 `AGENT_UNIFIED_GRAPH_ROLLOUT_REMOVED` 拒绝。它剩下的那个值 `off` 原来就是默认值，所以从没开过 v3 的部署不需要改配置，`.env` 里照抄示例写着 `off` 的也照常启动。
 - 以前拼错的值会被当作 `off`，现在拒绝。写错的人要的是一个已经不存在的东西，照 `off` 回答等于不告诉他。
 - 检查位置和前三个开关相同：`server.js`、`startServiceRole`、`createAppServices`、外层计划入口、custom Skill stage、执行器。不建 app 直接调 `runAgentRag` 的评测 runner 在外层计划入口被拒：run 已经建了，以 failed 结束，没有读文档、没有规划、没有存图。在走到外层计划之前就结束的请求（例如两份文档的比较缺一份、直接向用户提问）碰不到这个检查，照常回答；经 `server.js` 或 `createAppServices` 起来的进程没有这种情况，它们根本起不来。
 - `eval:trajectory` 的 runner 以前把这个开关钉成 `off`，现在不钉了。环境里带着已删除的取值时，走到外层计划的用例都以 `case_error` 失败，而不是被 runner 盖住。
@@ -1073,7 +1074,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 ### 升级时已存的 run
 
-- 从没开过 `guarded` 的部署：库里没有 v3 run，升级没有任何要处理的。
+- 从没开过 `guarded` 的部署：库里没有 v3 run。
 - 开过 `guarded` 的部署：升级前先把 `AGENT_UNIFIED_GRAPH_ROLLOUT` 去掉或改成 `off`，否则新版本拒绝启动。升级后第一次启动（`auto` 模式）会把没结束的 v3 run 交给人，原因见上表；已经结束的不动。想让停在审批门上的 run 得到决定，要在升级之前批准或拒绝。
 - 先停旧版本、再起新版本。新版本的启动恢复不看一个 v3 run 是不是还有旧版本的进程在跑：它会把旧进程正在执行的、连同旧进程的启动恢复正在续跑的（带 claim 的）v3 run 一起交给人，旧进程下一次写入会被 run 的版本检查拒绝。滚动发布、新旧版本同时在线的情形没有测过，这一条是读代码得出的。
 - run 和 checkpoint 的格式没有变，没有数据迁移。
@@ -1147,7 +1148,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 两个都和后台任务回到它暂停的 run 有关。我各用一个探针在三棵树上复现过：现在的代码、删除之前的 21eae0c6、阶段 7 之前的 b8e4d2ed，结果相同，所以不是这几个阶段改出来的。
 
 - **后台任务批准一个普通的 Capability 审批门会失败。** 带着批准重入之后，Web 搜索执行一次，然后请求以 409 `AGENT_RUN_ACTIVE_STEP_CONFLICT` 失败（审批门那一步还是 paused），run 留在 `running`、门还是 pending。run 没有被标成失败，复核读代码的解释是完成 run 的那个调用在 `try` 里没有 `await`，`catch` 接不到它；这个解释我没有另外验证。现有的任务审批测试都把 agent 换成了桩，所以没有测到；经过真实 agent 的那条端到端用例是 v3 的 golden，已随 v3 删除。只在进程内复现，没有经过 HTTP，也没有用任务跑过。任务卡片上的 Approve 按钮发的就是这个任务级的批准（读前端代码得出）；从 run 的审批端点批准（聊天页用的那条路，有经过 HTTP 的测试）不受影响。（2026-11-16 已修：任务的批准不再重入 run 重新规划，而是和聊天页一样走 run 的审批路径（`agent-tasks.js` 的 `createAgentTaskIterationRunner`，接到 step executor 的 `applyApprovalAction`）：核对绑定、批准门、把批准的 Capability 作为排好的步骤执行、完成 run。这样“文档之后的 Web 门”和“custom Skill 图之后的门”也一起好了。agent 里完成 run 的三处改为 `await`，完成被拒的 run 以 failed 结束。端到端测试在 `test/agent-task-approval-reentry.test.mjs`。中间有一版先把批准记到 run 上再重入，对带图 checkpoint 的 run 会先写后被围住，已由 ef36d0c0 修正，现在那段代码已经删掉。）
-- **重入一个带着 custom Skill 图 checkpoint 的 run 会被围住。** 探针重入的是一个跑过两个 custom Skill、已经完成的 run，得到 409 `AGENT_GRAPH_EXECUTION_FENCED`。任务在失败之后、或者在等用户输入时的 `continue` 会带着原来的 run 重入，所以某一轮跑过 custom Skill 的任务很可能续不下去；后半句是读 `agent-tasks.js` 得出的，没有用任务跑过。（2026-11-16 处理：调查数清了 14 种已存状态，全部是 409；另外任何已结束的 run 重入都被状态机拒绝，所以任务用完迭代次数之后的 Continue 对所有任务都失败。用户选了方案 A：已结束的 run、以及 custom Skill 图已收尾且只在等用户回答的 run，续接时开新 run，原因分别是 `run_ended` 和 `graph_finalized_as_question`；其余带图 checkpoint 的 run 仍被围住。规则在 `agent-runs.js` 的 `getSettledReentryReason`，测试在 `test/agent-task-continue-settled-run.test.mjs`。任务批准 custom Skill 阶段之后的门、以及批准会让文档步骤重开的问题，随任务批准改走聊天页的审批路径一起修好了。）
+- **重入一个带着 custom Skill 图 checkpoint 的 run 会被围住。** 探针重入的是一个跑过两个 custom Skill、已经完成的 run，得到 409 `AGENT_GRAPH_EXECUTION_FENCED`。任务在失败之后、或者在等用户输入时的 `continue` 会带着原来的 run 重入，所以某一轮跑过 custom Skill 的任务很可能续不下去；后半句是读 `agent-tasks.js` 得出的，没有用任务跑过。（2026-11-16 处理：调查数清了 14 种已存状态，全部是 409；另外任何已结束的 run 重入都被状态机拒绝，所以任务用完迭代次数之后的 Continue 对所有任务都失败。用户选了方案 A：已结束的 run、以及 custom Skill 图已收尾且只在等用户回答的 run，续接时开新 run，原因分别是 `run_ended` 和 `graph_finalized_as_question`；其余带图 checkpoint 的 run 当时仍被围住，规则在 `agent-runs.js` 的 `getSettledReentryReason`；后来又改为点名一个 run 的请求不管那个 run 处于什么状态都开新 run、不重入它（`rag/agent.js` 的 `runAgentRag`），`getSettledReentryReason` 已不存在。测试在 `test/agent-task-continue-settled-run.test.mjs`。任务批准 custom Skill 阶段之后的门、以及批准会让文档步骤重开的问题，随任务批准改走聊天页的审批路径一起修好了。）
 
 **复核没能验证的**：测试套件、评测和覆盖率（它只读了日志）；PostgreSQL 上的 run store；真实执行 `node server.js` 的拒绝；前端测试；真实模型的规划器；滚动发布或多实例（读代码的结论见“升级时已存的 run”）。它当时也没有经过建好的 app 走 HTTP，这一项在修正时补了测试。
 
@@ -1330,7 +1331,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 - **replanner 的新规则在一种情形下反而放宽了（中级，改了）。** tokens、费用或时间用完时 `getRemainingBudget` 把所有调用键报为 0，旧规则因此拒绝；新规则先按 Skill 看，选中的 Skill 没有预算键就放行，于是会调模型。现在先判断“还有没有任何调用预算”，再按 Skill 看；补了测试（去掉修复时失败）。上线的 4 个 custom Skill 都用 `customSkillCalls`，所以生产里很少遇到。
 - **预热的测试证明不了默认加载器真的加载了图模块（中级，改了）。** 测试只看日志行，而默认加载器换成空函数也会打出成功日志。现在预热要确认加载到的模块导出 `runAgentExecutionPlanOnLangGraph`，否则算失败；agent 角色的默认预热有了自己的测试（把默认加载器改坏时失败）。
-- **文档（中级，改了）：** AGENTS.md 两处仍说“第一个请求时加载”；面试材料里 `tools.js`、`evidence` 输出、整图被拒没有计数、第一个请求加载等说法过时。复核还报了“ADR 没有阶段 12 一节”，那是它读文件时这一节还没写进去。
+- **文档（中级，改了）：** AGENTS.md 两处仍说“第一个请求时加载”。复核还报了“ADR 没有阶段 12 一节”，那是它读文件时这一节还没写进去。
 - **低级（都改了）：** 整图被拒的计数把“执行器准入拒绝、记为已执行”的图也算了进去，改为只数没执行的；没有 Skill 的灰度包装测试在修复前后都通过，改为记录确定性规划器收到的上下文（修复前会被问两次，第一次拿到脱敏上下文）；角色测试没有检查 retrieval 不预热，加了；monolith 测试等预热日志没有超时，改为等两种日志里任一行，预热失败时带着消息失败而不是挂住；AGENTS.md 里“任务的 approve 重入 run”和“批准不带进新 run”两句跟着改了，replanner 规则写窄了也改了；`docs/evaluation.md` 的计数列表补上新计数。
 - 复核确认没有问题的：生产里没有调用方再往 `runAgentRag` 或 Capability 调用里塞批准（审批路径之外只有 `capability-steps.js` 那一处，就是审批路径本身）；没有东西 import `tools.js`；删掉的内置 Skill 字段没有读者；围栏在 CAS 里判断，外层计划的图不带 checkpointer；包装两次的规划器也认得出；预热不会拒绝，并发的动态导入共用同一个模块记录，静态 import runner 不会带进 LangGraph。
 
@@ -1355,7 +1356,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 - **复核**（两个只读复核 agent，一轮，我逐条判断）：
   - 中级，改了：第一个 Skill 因依赖故障失败时，B 让第二个也去调用已经挂掉的依赖，多一次超时、多计一次调用；第二个如果因别的原因失败，整个阶段不再算“全部是故障”，可重试的 503 会变成 200 弃答。调查给用户的方案 B 写的是“故障时不变”，所以补上：因故障失败的依赖照旧阻塞，加了端到端和单元测试。
   - 中级，改了：`docs/agent-rag.md` 一条现状描述、`agent-dag-planner-adapter.js` 一处注释仍是旧规则。
-  - 低级，改了：表里 `fail_fast` 那一行说宽了（只有下游只绑可选输入时原因才变）；阶段 8 的几处“失去”和面试材料没有加阶段 12 的注；阶段 12 的“答案不变”要限定到那九项；注释说一个测试文件钉住了它没有钉住的情形。
+  - 低级，改了：表里 `fail_fast` 那一行说宽了（只有下游只绑可选输入时原因才变）；阶段 8 的几处“失去”没有加阶段 12 的注；阶段 12 的“答案不变”要限定到那九项；注释说一个测试文件钉住了它没有钉住的情形。
   - 低级，接受并记录：上面“已知的副作用”。
   - 复核确认没有问题的：判断按 `dependsOn` 的下标逐个依赖做，`compile-execution-graph.js` 是唯一的生产调用方，四处决定点都拿到契约；多个依赖时一个可选地失败、一个还在跑会等待；同一依赖的重复绑定要全部可选；`fail_fast` 的中止在节点结算之前就置位；新启动的节点照常预留预算；启动恢复和 checkpoint 对账不受影响；节点拿到的正好是请求的输入，持久化的步骤输入里没有 `priorFindings`。
 
@@ -1423,7 +1424,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
   - 中级，改了：流式草稿的 memo 留着每个前缀的整段结果，内存随句数平方增长，400 句约 70 MB。现在每个前缀查完就丢掉，400 句约 1 MB。
   - 中级，改了：pgvector 规模压测的 recall 一轮，没有把稠密检索的前置语句传下去，测到的是不开迭代扫描的 recall 和执行计划。
   - 低级，接受：子查询预取在问题本身向量化失败、或向量缓存设得比一次请求的查询数还小的时候，会多算向量。
-- **文档，改了**：AGENTS.md、`docs/agent-rag.md`、`docs/configuration.md`、本 ADR 阶段 12 两处和面试材料里过时的说法。
+- **文档，改了**：AGENTS.md、`docs/agent-rag.md`、`docs/configuration.md` 和本 ADR 阶段 12 两处过时的说法。
 
 ## 后果
 
@@ -1448,7 +1449,7 @@ LangGraph 状态只放回执（`status`、`reason`、`outputDigest`）。typed �
 
 **阶段 2 的一处保留（2026-10-14）。** 原生队列按整张图的声明顺序发射节点，LangGraph 按超步进入节点。如果图不是按层声明（例如节点写在它的依赖之前，或者 `[a, c 依赖 a, b]` 且并发上限为 1），而上限或独占节点又会让原生队列压住一个就绪节点，原生每次都会先发射后层的节点。这时两个运行时会给不同节点拨预算、跑不同节点、因 fail_fast 中止不同节点，而且与时序无关。这类调用（`canScheduleExecutionGraphOnLangGraph` 为假）先丢弃线程记录，再整体交给原生调度器，结果与原生完全一致。阶段 4 删除原生调度之前必须先解决它。一种做法是在规划阶段把声明顺序规范化，但这会改变原生行为，需要单独评估。（阶段 5 已解决：没有改规划，而是让两种调度器都按校验器的层序排队，原生行为的变化与证据见阶段 5“层序调度”。）
 
-**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。删掉原生图调度器 `runExecutionGraph` 后（阶段 6 已删，提前结束了回退窗口；外层原生循环不在删除之列），再用行数和测试数衡量维护面有没有真的缩小，数字见“阶段 6 结果”的证据。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
+**代码量不会自动变少。** spike 的 runner 有 2,143 行，原生 `agent-execution-graph-runner.js` 是 1,055 行。原因是 runner 自己实现了准入、复用、恢复检查、审批门绑定、取消桥接、并发闸门，还要绕开 LangGraph 的两个并发缺陷。阶段 2 要复用原生模块（调用导出的恢复检查、审批 preflight），不能复制。删掉原生图调度器 `runExecutionGraph` 后（阶段 6 已删，提前结束了回退窗口；外层原生循环当时不在删除之列，阶段 7 已删除），再用行数和测试数衡量维护面有没有真的缩小，数字见“阶段 6 结果”的证据。如果到阶段 3 结束仍明显变大，应回到这里重新评估方案 A。
 
 ## 回退
 

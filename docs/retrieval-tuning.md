@@ -142,7 +142,7 @@ npm run eval:sparse-scoring -- --corpus evaluation/generated/qasper-train.json -
 
 `RAG_SEMANTIC_CACHE=on` 开启一个进程内的语义答案缓存（`server/rag/semantic-cache.js`）。它挂在答案接缝 `executeDocumentRag` 上，`/chat`（经 agent 的 document_rag 步骤）和 MCP `archive_ask` 都经过这里。
 
-**查找位置**：路由和查询向量计算之后、检索之前。查找复用检索本来就要算的那个向量，不多调一次模型。命中时跳过检索和答案模型，直接返回缓存的文档 RAG 响应。
+**查找位置**：路由和查询向量计算之后、检索之前。检索在本进程执行时，查找复用检索本来就要算的那个向量，不多调一次模型。命中时跳过检索和答案模型，直接返回缓存的文档 RAG 响应。
 
 **缓存键**：下列各项的摘要，跨键永不命中。
 
@@ -185,7 +185,7 @@ v1 守卫丢掉了情态词、介词、代词和否定词的位置，审查找�
 - 注册表读到别的实例删除或替换了文档时，通过 `onDocumentStoreChange` 清掉相关条目；
 - 查找时发现某篇文档、索引版本或查询适配器文件指纹是本进程没见过的，清掉建立在旧值上的条目；
 - 键本身带版本，旧条目本来就不可达；
-- 生成答案期间索引版本切换了、适配器文件换了，或某篇文档被替换、删除了，这个答案不存；检索结果里记录的适配器指纹（`routes.dense.queryAdapter`）和键里的不一致时也不存（`storeSkipReason: query_adapter_changed`）；
+- 生成答案期间索引版本切换了、适配器文件换了，或某篇文档被替换、删除了，而且本进程在存答案前已经察觉（例如另一次查找读到了新值），这个答案不存；检索结果里记录的适配器指纹（`routes.dense.queryAdapter`）和键里的不一致时也不存（`storeSkipReason: query_adapter_changed`）；
 - 租户擦除清掉本进程里该租户的条目（`server/rag/tenant-lifecycle.js`），别的进程的条目碰不到，只能等失效或过期；
 - 每次查找和写入都会清扫所有过期条目。
 
@@ -284,7 +284,7 @@ v1 那次运行还有两个观察：
 
 **分数保持原刻度**：dense 路由按 W q 排序，但 `vectorScore` / `admissionScore` 仍是模型原向量的余弦。所以 `RAG_MIN_RELEVANCE_SCORE`、`selectQaContext` 的额外候选门槛、比较的语义旁路都还是按原刻度设定的。W q 会把余弦整体压低（留出的 train 论文上，篇内平均余弦 0.59 → 0.14，top-1 0.72 → 0.31），远低于这些门槛。
 
-**失效方式**：在适用范围内却没法适配时（文件缺失或损坏、训练空间与配置不一致、路由或融合方式不对、向量库不支持、替身 provider 的向量），检索退回未适配，每种原因只告警一次，不会让请求失败。不在适用范围的调用（不是单篇 QA，或不止一篇文档）直接不适配，也不告警。健康检查 `checks.queryAdapter`：文件不可读或格式不对时报 error（`STARTUP_HEALTH_STRICT` 下启动失败）；空间不匹配、路由不是 hybrid、融合不是 RRF、向量库不支持时报 warning（这些情况下不适配）。
+**失效方式**：在适用范围内却没法适配时（文件缺失或损坏、训练空间与查询向量所在的空间不一致、路由或融合方式不对、向量库不支持、替身 provider 的向量），检索退回未适配，每种原因只告警一次，不会让请求失败。不在适用范围的调用（不是单篇 QA，或不止一篇文档）直接不适配，也不告警。健康检查 `checks.queryAdapter`：文件不可读或格式不对时报 error（`STARTUP_HEALTH_STRICT` 下启动失败）；空间不匹配、路由不是 hybrid、融合不是 RRF、向量库不支持时报 warning（后三种情况下不适配）。
 
 **可追溯**：被适配的检索在 `routes.dense.queryAdapter` 和 `provenance.queryAdapter` 上带适配器指纹。`eval:qasper-retrieval`、`eval:qasper-answers`、`eval:abstention-gate` 在 `config.queryAdapter` 里记录指纹；`eval:qasper-retrieval --compare` 拒绝配对指纹不同的两份报告（2026-10-28 起也拒绝语料、seed 或题数不同的报告，并列出 `config.retrieval` 的差异）。没开适配器时，检索结果和 `retrieval` 块不加这两个字段，响应和评测基线的形状不变；三个评测报告的 `config.queryAdapter` 记为 null。
 
@@ -343,4 +343,4 @@ npm run eval:query-adapter    # QASPER dev，hybrid 单篇 QA 路由上比较 id
 - 只在 QASPER + nomic-embed-text + hybrid RRF + 单篇 QA 这一组合上测过。换 embedding 模型或语料要重新训练、重新评测。
 - `/chat` 的 agent 路径目前不经过适配器，收益只对不带检索计划的单篇调用有意义。
 - 未测量：pgvector 后端上的效果（评测用 local 索引）、与 cross-encoder 重排叠加、比较和多文档检索。
-- 训练产物不在镜像里，部署时要挂载；在同一路径替换文件后，语义缓存会换键并清掉旧条目（见上一节）。
+- 训练产物不在镜像里，部署时要挂载；在同一路径替换文件后，语义缓存会换键并清掉旧条目（见上一节；例如修改时间和大小都没变的替换要等进程重启）。

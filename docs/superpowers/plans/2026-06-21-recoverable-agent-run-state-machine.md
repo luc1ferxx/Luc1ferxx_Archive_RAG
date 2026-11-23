@@ -1,5 +1,7 @@
 # Recoverable Agent Run State Machine Implementation Plan
 
+> **Historical plan (note added 2026-11-22):** dated 2026-06-21 and kept as a record; its "Current State" section describes the code at that time. For example, the primary `document_rag` step is now recorded as it runs (`server/rag/agent-document-loop.js`), and the step executor no longer resumes single steps. README.md and docs/ describe the current system.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make AgentRAG primary execution recoverable by persisting every replayable tool step's input, output, error, status, and event timeline before final `/chat` response assembly.

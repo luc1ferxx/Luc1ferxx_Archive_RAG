@@ -10,7 +10,8 @@ Steps:
 1. Call `archive_list_documents` to see what is available, unless the request
    already names docIds.
 2. Identify which documents to compare. If it is ambiguous, ask before comparing.
-3. Call `archive_ask` once, passing **all** the docIds together so the archive
+3. Call `archive_ask` once, passing **all** the docIds together with a question
+   worded as a comparison (for example "compare" or "difference"), so the archive
    runs its comparison path (per-document retrieval plus evidence alignment).
 4. Report organised by point of difference — each point with both sides' position
    and its citation (`fileName`, page number, excerpt). Say so explicitly when a

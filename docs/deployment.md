@@ -10,7 +10,7 @@ docker compose --profile app up -d --build
 - 浏览器打开 http://localhost:5001：前端由 API 服务直接托管，页面按同源地址调用 API。
 - 数据位置：
   - 文档、分块、向量、运行记录在 PostgreSQL 的 `pgdata` 卷里；
-  - 上传的原始文件和本地数据在 `appdata` 卷里（容器内 `/data`）。
+  - 上传过程中的临时文件和本地数据在 `appdata` 卷里（容器内 `/data`）；上传的原始文件也存在 PostgreSQL 里。
 - 数据库迁移在启动时自动执行。`docker compose ps` 里 `app` 显示 `healthy` 表示 `/ready` 返回 200，也就是健康报告里每一项检查都通过（`/health` 无论结果如何都返回 200，不能当健康检查用）。显示 `unhealthy` 时进程仍在运行，用 `curl -s http://localhost:5001/ready` 看是哪一项报 `error`。开启 API auth 后，不带凭据只返回 `{status}`，要带上单个共享的 `API_AUTH_TOKEN`，或者带有 `admin.status.read` 的 token（例如 admin.viewer 角色）：`curl -s -H "x-api-key: <token>" http://localhost:5001/ready`。
 - 所有发布的端口默认只绑定 `127.0.0.1`，只能从本机访问，见下面的"端口与网络暴露"。
 
@@ -28,7 +28,7 @@ docker compose --profile app up -d --build
 - **为什么默认只绑本机**：默认配置不适合放到网络上：PostgreSQL 是超级用户 `postgres`，密码也是 `postgres`；Redis 没有密码；API 默认不开鉴权。而在 Linux 上，Docker 发布的端口会绕过 ufw / firewalld，防火墙规则挡不住。
 - **有意在局域网开放**：所有发布的端口都绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`）。按下面的顺序做：
   1. 设数据库密码。`POSTGRES_PASSWORD` 同时用于 `postgres` 服务和 compose 里所有的数据库地址，不设时仍是 `postgres`。密码会原样拼进连接 URL，所以只用 URL 安全的字符，例如 `openssl rand -hex 24` 生成的值。
-  2. 在 `server/.env` 里开启 API 鉴权（`API_AUTH_ENABLED=true`，加上 `API_AUTH_TOKENS`，见 [configuration.md](configuration.md)；或者用 OIDC，见下面的"OIDC 登录和 RBAC"）。旧的 `server/.env` 里如果还有 `API_AUTH_TOKEN=change-me-for-local-dev`（以前的示例带的公开值），清空它或换成长随机值；HS256 secret 至少 32 个字符。否则服务拒绝启动。
+  2. 在 `server/.env` 里开启 API 鉴权（`API_AUTH_ENABLED=true`，加上 `API_AUTH_TOKENS`，见 [configuration.md](configuration.md)；或者用 OIDC，见下面的"OIDC 登录和 RBAC"）。旧的 `server/.env` 里如果还有 `API_AUTH_TOKEN=change-me-for-local-dev`（以前的示例带的公开值），清空它（多租户部署要清空：它不受租户隔离，见 [tenant-isolation.md](tenant-isolation.md)）或换成长随机值；HS256 secret 至少 32 个字符。否则服务拒绝启动。
   3. 带上这两个变量启动：
 
      ```bash
@@ -37,7 +37,7 @@ docker compose --profile app up -d --build
      ```
 
   `0.0.0.0` 表示所有网卡；只想在一块网卡上开放时，写那块网卡的地址（例如 `192.168.1.20`）。
-- **用什么地址访问**：鉴权关闭时，服务只认本机名（`localhost`、`127.0.0.1`、`[::1]`）和 IP 地址，用其他域名访问会得到 403 `HOST_NOT_ALLOWED`（挡 DNS rebinding）；要用域名访问，就开启鉴权（上面第 2 步）。前端和 API 不同源时，前端的来源要写进 `ALLOWED_ORIGINS`，否则改数据的请求会得到 403 `CROSS_SITE_REQUEST_REFUSED`。见 [configuration.md](configuration.md) 的“跨站请求、CORS 和按 IP 限流”。
+- **用什么地址访问**：鉴权关闭时，服务只认本机名（`localhost`、`127.0.0.1`、`[::1]`）、IP 地址和 `ALLOWED_ORIGINS` 里的主机名，用其他域名访问会得到 403 `HOST_NOT_ALLOWED`（挡 DNS rebinding）；要用域名访问，就开启鉴权（上面第 2 步）。前端和 API 不同源时，前端的来源要写进 `ALLOWED_ORIGINS`，否则改数据的请求会得到 403 `CROSS_SITE_REQUEST_REFUSED`。见 [configuration.md](configuration.md) 的“跨站请求、CORS 和按 IP 限流”。
 - **这个变量对所有发布的端口一起生效**：开放 app 时，5432 的 PostgreSQL 和（启用时）6379 的 Redis 也会对外。Redis 仍然没有密码。只想开放应用时，保持默认的 `127.0.0.1`，在宿主机上用反向代理（nginx、Caddy 等）转发到 `127.0.0.1:5001`；这时同样要开启鉴权，并把对外地址（例如 `https://archive.example.com`）写进 `ALLOWED_ORIGINS`：nginx 默认把 `Host` 改成 `127.0.0.1:5001`，不写进去，页面发出的每个写请求都会被当成跨站，得到 403。
 - **`POSTGRES_PASSWORD` 只在数据卷第一次初始化时生效**：`pgdata` 卷已经存在时，改这个变量不会改掉库里的密码，应用会因为密码不对连不上。已有数据时先在库里改密码（`docker compose exec postgres psql -U postgres -c "ALTER USER postgres PASSWORD '<新密码>'"`），再用同一个值带上 `POSTGRES_PASSWORD` 重启。不在容器里跑后端（`npm run server`）时，`server/.env` 里 `POSTGRES_DATABASE_URL` 的密码也要一起改。
 
@@ -63,7 +63,7 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 
 - 另起一个 `docling` 服务：docling-serve CPU 版，压缩后约 2 GB，自带模型；
 - 应用会把 PDF 交给它解析。它能按多栏的阅读顺序输出正文，并把表格还原成带列名的行；
-- 服务不可用时退回 pdf.js，并在 `/health` 的 `checks.pdfParser` 里报错；
+- 服务不可用时默认退回 pdf.js（`DOCLING_FALLBACK=none` 时上传失败），并在 `/health` 的 `checks.pdfParser` 里报错；
 - 镜像标签是 `latest`，没有固定版本。`PDF_PARSER=auto` 和页段请求是在 docling-serve-cpu 1.37.0（docling 2.138.0，`ghcr.io/docling-project/docling-serve-cpu@sha256:5a8367f3f657c26755605c3b2255546674833209a18afc2011598f4c045c6db3`）上验证的（[evaluation.md](evaluation.md)「真实 docling-serve 上的验证」）；之前的"版面解析"评测没有记录版本。要可复现的部署，把 `docker-compose.yml` 里的标签换成这个 digest 或确定的版本；
 - 效果和代价见 [evaluation.md](evaluation.md) 的"版面解析"。
 
@@ -73,13 +73,12 @@ PDF_PARSER=docling docker compose --profile app --profile layout up -d
 PDF_PARSER=auto docker compose --profile app --profile layout up -d
 ```
 
-- 每页先用 pdf.js 解析，同时采集页面信号。只有表格页（`layout` 路由，不做 OCR）和扫描页、纯图片页、乱码页（`ocr` 路由，强制 OCR）送 docling-serve，其余页保留 pdf.js 文本。规则和阈值见 [configuration.md](configuration.md) 的 `PDF_PARSER` 和 `PDF_AUTO_*`；
+- 每页先用 pdf.js 解析，同时采集页面信号。默认只有表格页（`layout` 路由，不做 OCR）和扫描页、纯图片页、乱码页（`ocr` 路由，强制 OCR）送 docling-serve，其余页保留 pdf.js 文本。规则和阈值见 [configuration.md](configuration.md) 的 `PDF_PARSER` 和 `PDF_AUTO_*`；
 - `PDF_PARSER` 要像上面那样写在命令前：compose 给 `app` 的 `environment` 里有 `PDF_PARSER: ${PDF_PARSER:-pdfjs}`，会盖过 `server/.env` 里的同名项。`PDF_AUTO_*`、`DOCLING_*`（`DOCLING_SERVE_URL` 除外）和 `PDF_PARSE_*` 不在 `environment` 里，写在 `server/.env` 就行；
 - 上线前可以先看自己的 PDF 会怎么分，不需要 docling-serve：`cd server && npm run pdf:route -- <file.pdf|目录>`（`--json` 输出 JSON，`--thresholds-from-env` 改用 `server/.env` 里的 `PDF_AUTO_*`，否则用默认阈值）。它只打印页码、路由、原因和信号，不打印页面文本；
 - docling-serve 不可用时，送过去的页保留 pdf.js 文本（`DOCLING_FALLBACK=pdfjs`，默认）或让上传失败（`none`）；超时或连不上时，同一文档还在排队的请求直接放弃，不再一个个等超时。`/health` 的 `checks.pdfParser` 会报错，并给出 `routes`、`doclingMaxConcurrency`、`doclingPageBatchSize`；`PDF_AUTO_ROUTES=none` 时不探测 docling-serve；
 - **并发要和 docling-serve 对齐**：`DOCLING_MAX_CONCURRENCY`（默认 2）是每个应用进程同时发往 docling-serve 的请求数，`docling` 和 `auto` 共用；docling-serve 自己默认 2 个本地 worker（`DOCLING_SERVE_ENG_LOC_NUM_WORKERS`，`docker-compose.yml` 没有设置）。多出来的请求只会在 docling-serve 内部排队，并在那里耗掉 `DOCLING_TIMEOUT_MS`。给 `docling` 服务加 worker 时把 `DOCLING_MAX_CONCURRENCY` 一起调大；多个应用实例或 ingest worker 共用一个 docling-serve 时，上限按进程算，各进程的值加起来不要超过它的 worker 数。`DOCLING_TIMEOUT_MS` 从请求拿到名额时开始算，排队时间不算；
-- **每个分页请求都上传整个文件**：auto 下每段连续的路由页是一个 `page_range` 请求（`DOCLING_PAGE_BATCH_SIZE` 大于 0 时再按页数拆），docling-serve 只转换这一段，但请求里带的是整份 PDF。表格页分散的长文档会把同一个文件上传很多次；应用和 docling-serve 不在同一台机器上时要考虑这部分流量。应用这边同一文档的请求共用一份文件副本，排队中的请求不持有副本；
-- 还没有在真实的 docling-serve 上跑过：分页请求、`page_range` 的页码、OCR 和合并只由测试里的替身覆盖，答案质量也没有测（[evaluation.md](evaluation.md) 的"按页分流和并行解析"）。
+- **每个分页请求都上传整个文件**：auto 下每段连续的路由页是一个 `page_range` 请求（`DOCLING_PAGE_BATCH_SIZE` 大于 0 时再按页数拆），docling-serve 只转换这一段，但请求里带的是整份 PDF。表格页分散的长文档会把同一个文件上传很多次；应用和 docling-serve 不在同一台机器上时要考虑这部分流量。应用这边同一文档的请求共用一份文件副本，排队中的请求不持有副本。
 
 **pdf.js 放到 worker 线程（`PDF_PARSE_WORKERS`）**：
 
@@ -104,7 +103,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 - **会多起一个 `reranker` 服务，配置和评测时完全一致：**
   - 服务脚本：`server/evaluation/neural-cross-encoder-endpoint.py`；
   - 依赖：`server/evaluation/neural-reranker-requirements.txt` 里固定的版本；
-  - 模型：`BAAI/bge-reranker-v2-m3`，max_length 384，batch 8（都是脚本的默认值，评测时没有改）；
+  - 模型：`BAAI/bge-reranker-v2-m3`（由 `RAG_CROSS_ENCODER_MODEL` 指定），max_length 384，batch 8（这两项是脚本的默认值，评测时没有改）；
   - 返回原始 logits。
 - **镜像**：由 `server/evaluation/cross-encoder-service/Dockerfile` 构建，基础镜像是 python:3.14-slim，torch 装 CPU 版。`Dockerfile.dockerignore` 只把脚本和依赖文件放进构建上下文，模型缓存和评测数据不会被发送。2026-11-21 在 Apple Silicon（linux/arm64）上构建过：下载约 258 MB，构建 46 秒，镜像 1.58 GB。x86_64 还没构建过。如果 PyTorch 的 CPU 源上没有对应的 torch wheel，构建会在 pip 这一步失败，这时加 `--build-arg TORCH_INDEX_URL=https://pypi.org/simple` 再构建。
 - **`compose.rerank.yml` 做什么**：给 `app` 设置下面这几项，并等 `reranker` 的健康检查通过后再启动 `app`：
@@ -139,7 +138,7 @@ docker compose -f docker-compose.yml -f compose.rerank.yml --profile app --profi
 ### 多实例共享状态（可选）
 
 ```bash
-RAG_SHARED_STATE=redis docker compose --profile app --profile shared-state up -d
+docker compose --profile app --profile shared-state up -d   # 先在 server/.env 里设 RAG_SHARED_STATE=redis
 ```
 
 - 多个单体实例之间，下面"给某一层加副本"里 agent 层和 api 层的限制同样成立：每个实例启动时都做启动恢复，会把别的实例正在跑的 run 转人工；api 层那一条列出的进程内状态每个实例各一份。向量库只用 pgvector（见下面的"异步入库"）。
@@ -147,11 +146,11 @@ RAG_SHARED_STATE=redis docker compose --profile app --profile shared-state up -d
 ### 异步入库（可选）
 
 ```bash
-RAG_INGEST_MODE=async docker compose --profile app up -d
+docker compose --profile app up -d   # 先在 server/.env 里设 RAG_INGEST_MODE=async
 ```
 
 - 上传在校验后立即返回 202，解析、向量化和写索引由 worker 完成。默认每个 API 进程同时运行 worker（每进程 2 个任务）。
-- 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、`RAG_DOCUMENT_FORMATS`、Office 文件的 `RAG_OFFICE_*` 和 `RAG_XLSX_MAX_CELLS` 上限、上传目录；这几个格式设置不合法时 worker 拒绝启动），只跑 worker、不监听端口。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务不会同时交给两个 worker。
+- 把入库放到单独的进程：API 进程设 `RAG_INGEST_WORKER_ENABLED=false`，另外运行一个或多个 `cd server && npm run worker:ingest`，环境变量和 API 相同（数据库、模型、`PDF_PARSER`、`RAG_DOCUMENT_FORMATS`、Office 文件的 `RAG_OFFICE_*` 和 `RAG_XLSX_MAX_CELLS` 上限、上传目录；这几个格式设置不合法时 worker 拒绝启动），只跑 worker、不监听应用端口（`METRICS_ENABLED=true` 时另开指标端口）。多个 worker 通过 `SKIP LOCKED` 领取任务，同一个任务在租约有效期内不会再交给另一个 worker。
 - 跨进程入库要用 pgvector。`VECTOR_STORE_PROVIDER=local` 的索引在每个进程自己的内存和文件里：独立 worker 拒绝启动，API 进程忽略 `RAG_INGEST_WORKER_ENABLED=false`、在本进程运行 worker 并打印错误。Qdrant 的稀疏词表（词的编号和 BM25 统计）也在每个进程里，只随本进程自己的写入更新：独立 worker 入库后，API 进程的稀疏检索仍按旧的编号打分，直到重启；这个组合目前既不拒绝也不警告。没有 PostgreSQL 时队列在 API 进程内存里，同样只由本进程处理。
 - 每个运行 worker 的进程额外保持一个不走连接池的 PostgreSQL 连接，用来 `LISTEN` 新任务的通知，算连接数时要算上。它必须直连数据库或经过会话池：PgBouncer 事务池下收不到 `NOTIFY`，worker 退回每 `RAG_INGEST_WORKER_POLL_MS` 轮询一次。
 - 多实例部署时，每个实例按请求租户从 PostgreSQL 重读文档注册表（`GET /documents`、每个 `/chat` 开头、arXiv 查重），删除前按 id 重读，所以别的实例上传或删除的文档在这里立即可见；代价是每个 `/chat` 多一次按租户列出文档的查询。这对 `sync` 和 `async` 都成立。
@@ -164,7 +163,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 - **SheetJS 来自仓库里的 tarball**：`server/vendor/xlsx-0.20.3.tgz` 是 SheetJS Community Edition 0.20.3（Apache-2.0，没有依赖，没有安装脚本），从 SheetJS 官方 CDN 下载（`https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz`，sha256 `8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8`），`server/package.json` 以 `"xlsx": "file:vendor/xlsx-0.20.3.tgz"` 安装，代码里照常 `import ... from "xlsx"`。npm registry 上的 `xlsx` 包停在 0.18.5，带 CVE-2023-30533 和 CVE-2024-22363，修复只发布在 SheetJS 的 CDN 上：不要换成 registry 上的包，也不要运行 `npm install xlsx`（装上的就是那个旧版本）。
 - **镜像构建**：`.dockerignore` 排除 `server/test`、`server/docs`（测试约 11 MB，和本地未跟踪的个人笔记；运行时不读它们）和 `server/backups`（`backup:postgres` 的默认输出，里面是所有租户的数据），所以容器里不能跑 `npm test`。Dockerfile 在 `npm ci` 之前 `COPY server/vendor ./vendor`，构建时不从网络下载 SheetJS；`.dockerignore` 不能排除 `vendor` 目录或 `.tgz` 文件。`test/deployment-contract.test.mjs` 检查这两点，以及 `server/package.json` 里每个 `file:` 依赖都是 `server/vendor/` 下真实存在的 `.tgz`。2026-11-11 用 4db859c6 实际构建过一次：镜像里的 npm 10.9.9 在 `--legacy-peer-deps` 下装上了这个 tarball；容器（Node 22.23.4）解析 .docx、.pptx、.xlsx 和 PDF 的结果与本机（Node 24）逐字相同；接上 pgvector 和演示用的假模型后，上传返回 201（伪装成 .docx 的 OLE2 文件返回 415），`/chat` 和 MCP `ask` 的引用带幻灯片、工作表和章节位置，下载拿回的字节与原文件一致（Office 文件按附件下载，PDF 内联显示）。
 - **升级 SheetJS**：从 CDN 下载新版本的 tarball，算出它的 sha256 记在提交说明里（当前版本的见上），放进 `server/vendor/` 并删掉旧文件，改 `server/package.json` 里的 `file:` 路径，再在 `server/` 里运行 `npm install`，让锁文件记下新的 integrity。SheetJS 的版本号是 Excel 分块切块配置的一部分，新切出的分块的 `metadata.chunkProfileId` 会随之改变；已入库的工作簿仍是旧版本切出的分块，需要时用 `cd server && npm run vector:reindex -- --from documents --apply` 重建；索引版本记录的切块配置只含 PDF 设置，所以升级不会出现在 `chunk_profile_differs_*` 警告里。
-- **资源**：Office 文件在调用线程里解析（`PDF_PARSE_WORKERS` 的 worker 池只管 pdf.js），大工作簿或大文档解析期间会占住进程的事件循环，也没有 worker 的内存上限兜底：防止一个文件耗尽堆、让整个进程退出，靠的是解析前的几个上限。mammoth 建出的树约是所读 XML 的 60–115 倍，PowerPoint 读取器约 25–50 倍（实测），`RAG_OFFICE_MAX_XML_BYTES`（默认 16 MiB：Word 文档的 XML 合计、演示文稿和工作簿的单个部件）因此在默认值下最多可能要约 2 GB 堆，适合 64 位主机的默认 V8 堆；内存小的容器（V8 默认堆约为可用内存的四分之一）要调低它。SheetJS 把解析出的每个单元格都放在内存里（实测数值单元格约 130 字节）；`RAG_XLSX_MAX_CELLS` 的预检拒绝可见工作表里单元格元素超过上限两倍的工作簿，按这个数估算，默认设置下解析一个大工作簿可能要几百 MB 内存（没有端到端测过）。内存小的容器调低 `RAG_XLSX_MAX_CELLS`；`RAG_OFFICE_MAX_TEXT_CHARS` 限制一个文件最多展开成多少文字（也就限制了要向量化的量）。大的 Office 文件多时用 `RAG_INGEST_MODE=async`，把 worker 放到单独的进程（见上面的"异步入库"）。同步上传的 Office 文件会解压两次（上传检查一次、解析一次），两次都受 `RAG_OFFICE_*` 上限约束。
+- **资源**：Office 文件默认在 worker 线程里解析（`RAG_OFFICE_PARSE_WORKERS`，默认 1；`PDF_PARSE_WORKERS` 的 worker 池只管 pdf.js），解析耗尽 worker 的内存时只结束这个 worker，这份文档以 413 失败。设成 0 时在调用线程里解析，大工作簿或大文档解析期间会占住进程的事件循环，也没有 worker 的内存上限兜底：防止一个文件耗尽堆、让整个进程退出，靠的是解析前的几个上限。mammoth 建出的树约是所读 XML 的 60–115 倍，PowerPoint 读取器约 25–50 倍（实测），`RAG_OFFICE_MAX_XML_BYTES`（默认 16 MiB：Word 文档的 XML 合计、演示文稿的单个部件、工作簿里 SheetJS 整个读入的单个部件，例如共享字符串；工作表另由 `RAG_XLSX_MAX_CELLS` 约束）因此在默认值下最多可能要约 2 GB 堆，适合 64 位主机的默认 V8 堆；内存小的容器（V8 默认堆约为可用内存的四分之一）要调低它。SheetJS 把解析出的每个单元格都放在内存里（实测数值单元格约 130 字节）；`RAG_XLSX_MAX_CELLS` 的预检拒绝可见工作表里单元格元素超过上限两倍的工作簿，按这个数估算，默认设置下解析一个大工作簿可能要几百 MB 内存（没有端到端测过）。内存小的容器调低 `RAG_XLSX_MAX_CELLS`；`RAG_OFFICE_MAX_TEXT_CHARS` 限制一个文件最多展开成多少文字（也就限制了要向量化的量）。大的 Office 文件多时用 `RAG_INGEST_MODE=async`，把 worker 放到单独的进程（见上面的"异步入库"）。同步上传的 Office 文件会解压两次（上传检查一次、解析一次），两次都受 `RAG_OFFICE_*` 上限约束。
 - **限制**：不收旧版 .doc / .ppt / .xls、设了打开密码的文件、启用宏的文件、模板和幻灯片放映（.ppsx）；只取文字，页眉页脚、批注、图表、SmartArt 和图片都不提取，也不做 OCR。工作台里 Office 文件没有内联预览，只提供下载和被引用的原文。检索和答案只测过一轮，用的是合成的工作簿、演示文稿和排成 Word 的 QASPER 论文，对话模型只有 qwen2.5:7b（[evaluation.md](evaluation.md) 的"Office 文件对比 Office 自己导出的 PDF"）：在单元格查找题上，工作簿直接上传比上传 Excel 导出的 PDF 答得更准；Word 正文和演示文稿正文没有检测到差异；PowerPoint 默认导出的 PDF 只有幻灯片、不含演讲者备注，所以备注要上传 .pptx 才检索得到（导出备注页的 PDF 没有测过）。
 
 ### 停机（`docker stop`、`docker compose down`、重新部署）
@@ -180,7 +179,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 `docker-compose.yml` 给 `app` 设了 `stop_grace_period: 30s`，比默认的 25 + 3 秒长，docker 不会在收尾前就发 SIGKILL。调大 `SERVICE_SHUTDOWN_GRACE_MS` 时，要把 `stop_grace_period` 一起调大，至少比它多 3 秒以上。
 
 限制：
-- 等待只覆盖 HTTP 请求。进程内的后台 agent 任务停机时仍会被中断，下次启动时由启动恢复处理。
+- 进程内的后台 agent 任务停机时仍会被中断，下次启动时由启动恢复处理。
 - 进程还在启动、没注册信号处理时收到的 SIGTERM，按默认行为立即退出。
 
 ### 其他说明
@@ -202,11 +201,11 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 | 角色 | 默认端口 | 做什么 | 调用谁（设了对应地址时） |
 | --- | --- | --- | --- |
 | `api` | `PORT`，否则 5001 | 公网入口：鉴权、限流、CORS、前端静态文件、上传、文档、入库任务（包括进程内的入库 worker）、管理接口。`/chat`、`/chat/stream`、任务、agent run 及其操作、管理动作转发给 agent 层。不跑 Agent，也不做启动恢复。 | agent 层；入库的 embedding 走模型网关 |
-| `agent` | `PORT`，否则 5001 | Agent 编排：`runAgentRag`、后台任务、启动恢复、公网入口转来的管理动作。只接受内部签名身份。 | 检索层、模型网关 |
-| `retrieval` | `PORT`，否则 5002 | 按调用方的租户（行级安全）做查询 embedding、稠密 + 稀疏检索、融合、重排。只接受内部签名身份。 | 模型网关 |
+| `agent` | `PORT`，否则 5001 | Agent 编排：`runAgentRag`、后台任务、启动恢复、公网入口转来的管理动作。只接受内部签名身份（健康探测除外）。 | 检索层、模型网关 |
+| `retrieval` | `PORT`，否则 5002 | 按调用方的租户（行级安全）做查询 embedding、稠密 + 稀疏检索、融合、重排。只接受内部签名身份（健康探测除外）。 | 模型网关 |
 | `model-gateway` | `MODEL_GATEWAY_PORT`，否则 `PORT`，否则 5003 | OpenAI 兼容的模型服务：重试、退避、切换备用模型、并发上限、熔断、用量计量、按 workspace 的配额，并在多个上游副本之间分配请求。 | chat、embedding、重排的上游 |
 
-- 每个角色都有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，状态码都不需要身份（检索层和模型网关的完整报告要内部身份，见下）；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
+- `api` 和 `agent` 有 `GET /livez`（只说明进程在）、`GET /health` 和 `GET /ready`，检索层有 `GET /health` 和 `GET /ready`，模型网关只有 `GET /health`，状态码都不需要身份（检索层和模型网关的完整报告要内部身份，见下）；设了 `METRICS_ENABLED=true` 时，每个角色还在单独的端口上提供 `/metrics`（见下面的"指标与告警"）。api 的 `/health` 多两项：`checks.serviceTopology`，以及逐个探测 agent 副本的 `checks.agentService`。agent 层不可达时这一项是 `warning`，不会让 `/ready` 变成 503，所以公网入口留在负载均衡里，文档和上传照常可用，Agent 相关接口返回 503。
 - 检索层的 `GET /health`、`GET /ready` 和模型网关的 `GET /health` 对谁都返回同样的状态码，但完整报告（检索层：向量库、索引版本、query adapter、拓扑和密钥 id；网关：每个上游副本的在途数、熔断状态、配额设置和密钥 id）只给带有效内部身份 token 的请求：audience 是这一层，issuer 在 `SERVICE_CALL_POLICY` 允许探测这一层的列表里，系统 token 也算，按 `requireServiceIdentity` 的规则校验（请求绑定、防重放）。其他调用方（包括容器健康检查）只拿到 `{status}`。要看细节，用 service client 签名请求（`createServiceClient({ audience }).request({ path: "/health", system: true })`）。`GET /usage` 按租户列出用量，只接受系统身份、带 `admin` claim 或带 `admin.status.read` 权限的内部 token，不对公网开放。
 
 ### 前提
@@ -222,7 +221,7 @@ RAG_INGEST_MODE=async docker compose --profile app up -d
 
   - `ed25519`：每个会调用别的层的进程有自己的私钥，所有层共享一份受信公钥列表。用 `node server/service-keys.mjs` 生成。
 
-- **同一份其余配置**：模型、`RAG_*`、embedding 前缀、查询适配器文件等在各层保持一致，目前没有自动检查。开语义缓存时，查询适配器文件也要挂到 agent 层（缓存键读调用方进程里的文件）。模型的 key 只需要给网关；其他层在设了 `MODEL_GATEWAY_URL` 后不再直接调用模型（例外见下面的"限制"）。
+- **同一份其余配置**：模型、`RAG_*`、embedding 前缀、查询适配器文件等在各层保持一致，目前没有自动检查。开语义缓存时，查询适配器文件也要挂到 agent 层（缓存键读调用方进程里的文件）。模型的 key 只需要给网关；其他层在设了 `MODEL_GATEWAY_URL` 后不再直接调用模型。
 - 启动时先校验拓扑：角色未知、地址无效、`api` 没有 `AGENT_SERVICE_URL`、缺少可用密钥（`ed25519` 下还包括缺私钥、被调用的层没有任何合法调用方的公钥、`INTERNAL_SERVICE_REQUEST_BINDING` / `INTERNAL_SERVICE_REPLAY_CACHE` 写了无法识别的值），都会拒绝启动，报错里没有密钥。
 
 ### 在一台机器上跑起来
@@ -257,11 +256,11 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
 - **模型网关**：同样起多个网关进程，列进 `MODEL_GATEWAY_URL`。多个网关副本要共享并发上限、熔断和配额计数，设 `RAG_SHARED_STATE=redis`；不设时每个网关进程各算各的。
 - **推理后端（embedding、重排）**：在网关上列多个上游，例如 `MODEL_GATEWAY_EMBEDDING_UPSTREAMS=http://gpu-a:11434/v1,http://gpu-b:11434/v1`、`MODEL_GATEWAY_RERANK_UPSTREAMS=http://r1:8081/rerank,http://r2:8081/rerank`。网关选进行中请求最少的健康副本，每个副本有自己的并发上限和熔断；连接被拒或熔断打开时立即换下一个副本。
 - **入库**：仍在 api 层（或 `npm run worker:ingest` 独立 worker）执行，扩法见上面的"异步入库"。worker 设了 `MODEL_GATEWAY_URL` 时 embedding 也走网关，同样需要内部身份：`hmac` 下是 `INTERNAL_SERVICE_KEYS`；`ed25519` 下给 worker 单独一把私钥，并设 `INTERNAL_SERVICE_ISSUER=ingest-worker`、把它的公钥以 `ingest-worker` 登记进网关的 `INTERNAL_SERVICE_TRUSTED_KEYS`，这样按调用策略它只能调用网关。不设 `INTERNAL_SERVICE_ISSUER` 时 worker 以 `all` 签名。
-- 调用方怎么选副本：进行中请求最少的优先；连不上或返回 502/503/504 的副本在 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` 内被跳过。已经发出的 `/chat` 和任务操作不会重发到另一个副本。
+- 调用方怎么选副本：进行中请求最少的优先；连不上或返回 502/503/504 的副本在 `INTERNAL_SERVICE_UNHEALTHY_COOLDOWN_MS` 内被跳过（还有健康副本时；都不健康时照样会用；调用模型网关时 502/503/504 不算）。已经发出的 `/chat` 和任务操作不会重发到另一个副本。
 
 ### 用镜像部署
 
-- 同一个镜像，给每个容器设不同的 `ARCHIVE_RAG_ROLE`，`CMD` 不用改。镜像里预设了 `PORT=5001`，所以每个角色在自己的容器里都监听 5001。镜像的健康检查只判断进程是否存活：按角色选端口（网关先看 `MODEL_GATEWAY_PORT`，其余看 `PORT`，和进程自己选端口的规则一样），`all`、`api`、`agent` 探测 `/livez`；`retrieval` 和 `model-gateway` 的应用没有 `/livez`，探测它们自己的 `/health`。要按就绪状态摘流量，在编排里另配 `/ready`。
+- 同一个镜像，给每个容器设不同的 `ARCHIVE_RAG_ROLE`，`CMD` 不用改。镜像里预设了 `PORT=5001`，所以每个角色在自己的容器里都监听 5001。镜像的健康检查只判断进程是否存活：按角色选端口（网关先看 `MODEL_GATEWAY_PORT`，其余看 `PORT`，和进程自己选端口的规则一样），`all`、`api`、`agent` 探测 `/livez`；`retrieval` 和 `model-gateway` 的应用没有 `/livez`，探测它们自己的 `/health`。要按就绪状态摘流量，在编排里另配 `/ready`（模型网关没有 `/ready`）。
 - 只有 api 容器需要对外发布端口；其他层放在内部网络，服务地址写容器名，例如 `AGENT_SERVICE_URL=http://agent:5001`。
 - `compose.services.yml` 把四个角色作为四个服务跑，用同一个镜像，只有 api 发布端口：
 
@@ -283,7 +282,7 @@ ARCHIVE_RAG_ROLE=api           PORT=5001 node server.js
   - 它是追加在基础文件上的 override，不能和 `--profile app` 同时用（两者都占 5001）。api 只跑一个容器（见上面的"给某一层加副本"），`ARCHIVE_RAG_API_PORTS` 只用来换宿主机端口。
   - api 的端口和基础文件里的端口一样绑定 `ARCHIVE_RAG_BIND_HOST`（默认 `127.0.0.1`），各层的数据库地址用同一个 `POSTGRES_PASSWORD`，见上面的"端口与网络暴露"。
   - `--scale` 起的副本共用一个 DNS 名（例如 `--scale retrieval=2` 的 `http://retrieval:5002`），service client 把它当成一个副本，负载靠 Docker DNS 在建连时分散。要用按副本的最少在途选择和故障转移，得在地址里逐个列出副本。只有检索层和模型网关能这样扩，api 和 agent 各跑一个。
-  - `--scale agent=2` 时 `AGENT_SERVICE_URL=http://agent:5001` 仍只有一个地址，启动时的拓扑检查看不出来。api 的 `/health` 每次都解析这个主机名（最多等 250 毫秒，同一个名字同时只解析一次；解析器更慢时这次不报）：同一协议族解析出多个地址时，`checks.agentService` 报 `warning`（`warnings: ["several_agents_behind_one_name"]`，启动时的健康摘要里是 `agentService=warning`）。一个 IPv4 加一个 IPv6 地址算一台主机。前面放了负载均衡（或 Kubernetes 的 ClusterIP Service）、只解析出一个地址时查不出来；反过来，负载均衡本身解析出多个地址时（例如跨多个可用区的云负载均衡、DNS 轮询），后面即使只有一个 agent 也会报，这时以负载均衡的目标数为准。
+  - `--scale agent=2` 时 `AGENT_SERVICE_URL=http://agent:5001` 仍只有一个地址，启动时的拓扑检查看不出来。api 的 `/health` 会解析这个主机名（最多等 250 毫秒，同一个名字同时只解析一次；解析器更慢时这次不报）：同一协议族解析出多个地址时，`checks.agentService` 报 `warning`（`warnings: ["several_agents_behind_one_name"]`，启动时的健康摘要里是 `agentService=warning`）。一个 IPv4 加一个 IPv6 地址算一台主机。前面放了负载均衡（或 Kubernetes 的 ClusterIP Service）、只解析出一个地址时查不出来；反过来，负载均衡本身解析出多个地址时（例如跨多个可用区的云负载均衡、DNS 轮询），后面即使只有一个 agent 也会报，这时以负载均衡的目标数为准。
   - 2026-11-20 在 ca7184a0 上真正构建并启动过一次（hmac、静态 token、宿主机 Ollama 作上游）：五个服务都 healthy，上传、问答、arXiv 搜索→确认→导入都走通，`--scale agent=2` 时 `/health` 报告警（见 [evaluation.md](evaluation.md)）。CI 不构建它，只由 `test/deployment-contract.test.mjs` 按文本固定（不调用 docker）。
 - 仓库里没有 Kubernetes 清单。
 
@@ -346,10 +345,10 @@ node service-keys.mjs generate ingest-worker   # 只有独立入库 worker 调�
 - `ed25519` 只在四个独立进程的测试里跑通过（`test/service-identity-split.test.mjs`，检索层用的是 local 向量库，不是 PostgreSQL）；没有在 Docker 镜像或 PostgreSQL 上的检索层里跑过。老的几组拆分测试（`service-roles`、`retrieval-service`、`model-gateway` 等）手工签发不带绑定的 token，只在 `hmac` 下通过。
 - 没有 Redis 时，网关的配额、并发上限和熔断都按网关进程计算，多个网关副本时总量会超出设定值。
 - 公网入口的 `AGENT_SERVICE_TIMEOUT_MS` 现在也是 agent 层上运行的截止时间：到点时进行中的检索和模型调用被中止，运行在下一个安全点以 `deadline_exceeded` 结束。数据库语句不取消；检索层收到调用方断开不会停，只在自己的截止时间到时返回 504；排队等模型并发槽位的调用在取消时直接离队。检索层没有并发上限或准入控制。
-- agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康，跳过 5 秒。
+- agent 层因为下游故障返回的 503（例如模型熔断）也会让入口把这个 agent 副本当作不健康：还有别的健康副本时跳过它 5 秒，只有这一个副本时照样会用它。
 - 检索层或模型网关停掉时，`/chat` 返回 503 `AGENT_DEPENDENCY_UNAVAILABLE`（带 `Retry-After` 和 `dependency`），运行记为可重试的失败；单体里模型或数据库故障时也一样。以前这种情况返回 200，请用户批准 Web 搜索。
 - 各进程的 `/metrics` 和 `deploy/prometheus/` 的告警规则没有在真实的 Prometheus 里加载过；`compose.services.yml` 没有设置 `METRICS_*`。
-- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 不看 API auth，只对带内部身份 token 的探测返回完整报告（见上面），其他人只拿到 `{status}`。内部端口仍不能对外暴露。api 的 `/health` 每次都会探测每个 agent 副本。
+- 开启 API auth 时，api 和 agent 层的 `/health`、`/ready`、`/livez` 只对单个共享 `API_AUTH_TOKEN` 或带 `admin.status.read` 的凭据返回完整报告，其他人只拿到 `{status}`；检索层和模型网关的 `/health` 不看 API auth，只对带内部身份 token 的探测返回完整报告（见上面），其他人只拿到 `{status}`。内部端口仍不能对外暴露。api 的 `/health` 会探测每个 agent 副本。
 - 拆分模式下检索请求有上限（`RETRIEVAL_SERVICE_MAX_*`），超长问题或配得过大的 topK 返回 400，单体没有这些限制。
 
 ## OIDC 登录和 RBAC（可选）
@@ -386,7 +385,7 @@ RBAC_MODE=enforce
 1. 一个 public client（SPA）：Authorization Code + PKCE，不用 client secret；登记回调地址 `http://localhost:3000/`（开发）或 `https://<你的域名>/`（单容器部署是 `http://localhost:5001/`）；允许 SPA 的 origin 跨域访问 discovery 和 token 端点。它的 client id 填 `API_AUTH_OIDC_CLIENT_ID`。
 2. 一个代表 API 的 audience，填 `API_AUTH_OIDC_AUDIENCE`。不要用 SPA 的 client id 当 audience；如果 IdP 只能这样做，设 `API_AUTH_OIDC_REQUIRE_TYP=true`，前提是它签发 `typ: at+jwt`。
 3. `API_AUTH_OIDC_ISSUER` 必须与 discovery 文档里的 `issuer` 一字不差，包括末尾斜杠。
-4. 角色：全局角色放进 roles claim（或用组 + `API_AUTH_OIDC_GROUP_ROLE_MAP`），按 workspace 的角色放进 `workspace_roles`，允许的 workspace 放进 `workspaces`。没有 `workspaces` / `workspace_id` 的 token 可以用 `x-workspace-id` 选任意 workspace，生产环境应保证每个用户都有该 claim，并在角色配齐后设 `RBAC_DEFAULT_ROLE=none`。
+4. 角色：全局角色放进 roles claim（或用组 + `API_AUTH_OIDC_GROUP_ROLE_MAP`），按 workspace 的角色放进 `workspace_roles`，允许的 workspace 放进 `workspaces`。没有 `workspaces` / `workspace_id` 的 token 在默认的 `TENANT_MEMBERSHIP=off` 下可以用 `x-workspace-id` 选任意 workspace，生产环境应保证每个用户都有该 claim，并在角色配齐后设 `RBAC_DEFAULT_ROLE=none`。
 5. claim 名按点号拆成路径，所以名字里本身含点的 claim（例如 `https://archive.example.com/roles`）无法引用，请用不含点的名字。
 
 **Keycloak**：issuer 是 `https://<host>/realms/<realm>`。给 SPA client 加一个 Audience mapper，把 `archive-rag-api` 写进 access token 的 `aud`（默认只有 `account`）；access token 的 `azp` 就是 SPA client id。realm 角色在 `realm_access.roles`，设 `API_AUTH_OIDC_ROLES_CLAIM=realm_access.roles`；组用 Group Membership mapper（关掉 full path）输出到 `groups`。`workspaces` / `workspace_roles` 用 User Attribute mapper（多值或 JSON 类型）。
@@ -397,13 +396,13 @@ RBAC_MODE=enforce
 
 ### RBAC 在部署里的位置
 
-`RBAC_MODE=enforce` 时检查在 `requireApiAuth` 之后、路由之前。拆分部署里由 api edge 在转发前检查，agent 层不挂 RBAC，只信任 edge 签名的内部身份，所以 agent 层的端口不能暴露到公网。`workspaceRoles` 不随内部身份转发，这在 RBAC 只在 edge 执行时不影响结果。
+`RBAC_MODE=enforce` 时检查在 `requireApiAuth` 之后、路由之前。拆分部署里由 api edge 在转发前检查，agent 层不挂 RBAC，只信任 edge 签名的内部身份，所以 agent 层的端口不能暴露到公网。内部身份只带当前 workspace 的 `workspaceRoles`，其他 workspace 的授权不转发。
 
 ### OIDC 和 RBAC 的限制
 
 - 浏览器端不校验 ID token 签名（public client），API 只认 access token。
 - refresh token（如有）放在 sessionStorage，XSS 可读。
-- workspace id 的权限匹配不区分大小写。token 列了允许的 workspace 时，数据库租户统一用列表里的小写形式，请求头写成 `ACME` 也落在 `acme`；token 没列时按请求头原样使用，此时只差大小写的两个 workspace 是两个租户，按 workspace 授予的角色只在小写形式完全一致的那个里生效。仍建议 workspace id 统一用小写。
+- workspace id 的权限匹配不区分大小写。token 列了允许的 workspace、又没有固定的 `workspace_id` 时，数据库租户统一用列表里的小写形式，请求头写成 `ACME` 也落在 `acme`；token 既没列也没固定 workspace 时按请求头原样使用，此时只差大小写的两个 workspace 是两个租户，按 workspace 授予的角色只在小写形式完全一致的那个里生效。仍建议 workspace id 统一用小写。
 - 没有 `WWW-Authenticate` 头，健康报告也不含 JWKS 状态。
 - `RBAC_MODE=enforce` 时不在路由表里的路径返回 403 而不是 404。
 
@@ -414,7 +413,7 @@ RBAC_MODE=enforce
 ### 副本的前提
 
 - 副本是同一个数据库的流复制热备（`hot_standby=on`），由你自己用 PostgreSQL 的流复制搭好；仓库的 compose 文件里没有副本服务。
-- 只有带访问范围的请求会分流（开启鉴权，或请求带 `x-user-id` / `x-workspace-id`），并且要保持 `POSTGRES_ROW_LEVEL_SECURITY=enforce`（默认）。没有访问范围的请求或关闭行级安全时，语句都以 owner 身份在主库执行，配了副本也不会有任何分流，`/health` 也不会提示这一点。
+- 只有带访问范围的请求会分流（开启鉴权，或请求带 `x-user-id` / `x-workspace-id`），并且要保持 `POSTGRES_ROW_LEVEL_SECURITY=enforce`（默认）。没有访问范围的请求或关闭行级安全时，语句都在主库执行，配了副本也不会有任何分流，`/health` 也不会提示这一点。
 - 只分流 pgvector 的检索语句（稠密和稀疏）。写入、迁移、文档列表、文件下载、运行和任务的读接口都留在主库。
 
 ### 打开
@@ -425,7 +424,7 @@ POSTGRES_READ_REPLICA_MAX_LAG_MS=2000
 ```
 
 - 设置在做检索的进程上：单体，或拆分部署的检索层（agent 层没设 `RETRIEVAL_SERVICE_URL` 时也在本地检索）。拆分部署下检索层会从主库重读请求里的每个 docId，作为一致性的锚点。
-- 检查：`curl -s http://localhost:5001/health` 里的 `checks.readReplicas` 列出每个副本的状态、延迟、熔断和被排除的原因。副本落后、宕机或熔断时只报 `warning`，`/ready` 仍是 200，读取回到主库；只有配置写错才报 `error`。
+- 检查：在本进程检索时（例如单体），`curl -s http://localhost:5001/health` 里的 `checks.readReplicas` 列出每个副本的状态、延迟、熔断和被排除的原因；拆分部署的检索层的 `/health` 没有这一项。副本落后、宕机或熔断时只报 `warning`，`/ready` 仍是 200，读取交给其他可用副本或主库；只有配置写错才报 `error`。
 - 指标：`archive_rag_postgres_reads_total{target}`、`archive_rag_postgres_replica_fallbacks_total{reason}`、`archive_rag_postgres_replica_lag_seconds{replica}`（需要 `METRICS_ENABLED=true`）。
 
 ### 在本机试
@@ -442,9 +441,8 @@ bash scripts/run-pgvector-replica-integration.sh
 ### 读副本的限制
 
 - 只在一台机器上测过：主库和副本在同一台主机上，副本延迟和网络距离都和真实部署不同。
-- 副本上的语句只有连接超时，没有语句超时，也不受请求截止时间限制。
+- 副本上的语句除了连接超时，应用只给它们设 `POSTGRES_STATEMENT_TIMEOUT_MS` 的语句超时（默认 0，不设），也不受请求截止时间限制。
 - `vector:reindex --apply` 期间，落后的副本可能对重新向量化的文档返回空的稠密结果，直到追上（受延迟上限约束）。
-- `/chat` 开始时的注册表刷新失败只打日志；这时落后但仍在延迟上限内的副本可能返回替换前的内容，直到追上。
 - 不检查副本是否真的跟随这个主库。
 
 ## 截止时间和取消（可选）

@@ -9,7 +9,7 @@
 
 ## 索引版本：零停机重建 pgvector 索引
 
-只适用于 `VECTOR_STORE_PROVIDER=pgvector`（默认）。`local` 和 `qdrant` 仍然只有一份索引，没有版本、双写、切换和回滚。`npm run vector:index` 直接拒绝这两个 provider，它们继续用 `npm run vector:reindex` 原地重写。
+只适用于 `VECTOR_STORE_PROVIDER=pgvector`（默认）。`local` 和 `qdrant` 仍然只有一份索引，没有版本、双写、切换和回滚。`npm run vector:index` 直接拒绝这两个 provider。
 
 ### 数据模型（迁移 016、019）
 
@@ -91,8 +91,8 @@ npm run vector:index -- build [--model M] [--dimensions N] [--document-prefix P]
   - 并发为 1 时，和原来的串行构建一样。
 - 嵌入走入库流水线的跨文档合批器（`rag/ingest-embedding-batcher.js`，本进程的默认实例），向量仍按版本宽度校验：
   - 遵守 `RAG_LLM_MAX_CONCURRENCY`（设了 `RAG_LLM_INGEST_MAX_CONCURRENCY` 时用它）；
-  - 只有上限小于同时处理的文档数时才会有文档排队，排队的文档再合并成一个请求。默认配置（4 篇在处理、上限 8）下每篇文档单独一个请求；
-  - `RAG_INGEST_EMBED_BATCHING=false`（入库的合批开关）对构建同样生效：每篇文档单独一个请求。
+  - 在上限不为 0、每篇文档都装得进一个请求（条数和 token 上限见"跨文档 embedding 批处理"）的前提下，只有上限小于同时处理的文档数时才会有文档排队，排队的文档再合并发送，默认配置（4 篇在处理、上限 8）下每篇文档单独一个请求；
+  - `RAG_INGEST_EMBED_BATCHING=false`（入库的合批开关）对构建同样生效：每篇文档单独发请求。
 - 每个文档一个独立事务，依次执行：
   1. 对文档行加 `FOR SHARE`，确认 `uploaded_at` 和 `content_version` 没变；
   2. 替换该文档的 chunk；
@@ -124,7 +124,7 @@ npm run vector:index -- build [--model M] [--dimensions N] [--document-prefix P]
 - 构建时读不出源字节的文档在目标版本里没有 chunk，激活门会拦住并列出它们（`unreadable`、`unreadableDocuments`）。加 `--allow-unreadable-sources` 才放行这些文档，放行后它们在新版本里检索不到。这不能当默认：构建进程看不到 keystore 或主密钥时，每个加密文档都会这样报；
 - 如果活动版本仍跟随配置，执行激活的进程的嵌入配置必须和它存储的行一致，这样才能正确 pin；
 - 可选的召回探针，阈值用 `--min-recall`（默认 0.8），K 用 `--probe-top-k`（默认 5）：
-  - `--probe-sample N`：抽 N 个已存 chunk 当查询，每个都要在本版本全表 top-K 里找回自己；
+  - `--probe-sample N`：抽 N 个已存 chunk 当查询，统计有多大比例能在本版本全表 top-K 里找回自己；
   - `--probe-queries file.json`：用保存下来的查询，统计新版本返回了活动版本 top-K 中的多大比例。
 
 活动版本的表不存在时（手工 DROP、部分恢复），activate 和 rollback 默认拒绝，并在原因里提示 `--active-unreadable`。带上它后，跳过所有与活动表的比较，只做目标侧检查（状态、写窗口、宽度、嵌入身份、内容版本），并把表已丢失的旧活动版本标成 failed，不进入宽限期，否则每次上传都会写这张不存在的表。
@@ -150,13 +150,13 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 缓存从读取开始时计时，不从返回时计时；
 - 要改这个上界，直接更新该行：调大立即生效；调小要等所有实例当前的缓存过期后才完全生效。
 
-切换后，同一进程内的并发请求共享一次 schema 校验（按校验 key 单飞），不会每个请求各做一次全表 GROUP BY。
+切换后，同一进程内的并发检索共享一次 schema 校验（按校验 key 单飞），不会每个检索各做一次全表 GROUP BY。
 
 退役会删表。搜索撞上已删除的表（错误码 42P01 或 42883）时，会刷新指针并重试一次；在调用方自己的事务里不重试，因为事务已经中止。
 
 ### 查询嵌入跟随活动版本
 
-- 每个查询只嵌入一次，而且是在活动版本的嵌入空间里。`rag/embedding-cache.js` 嵌入之前先用 `peekServingQueryEmbeddingSpace`（指针缓存为空或已过期时用 `resolveServingQueryEmbeddingSpace` 读一次指针，都在 `rag/vector-store-pgvector-versions.js`）确定空间：
+- 检索在本进程执行时，每个查询只嵌入一次，而且是在活动版本的嵌入空间里。`rag/embedding-cache.js` 嵌入之前先用 `peekServingQueryEmbeddingSpace`（指针缓存为空或已过期时用 `resolveServingQueryEmbeddingSpace` 读一次指针，都在 `rag/vector-store-pgvector-versions.js`）确定空间：
   - local、Qdrant，或者没有配置数据库时，用配置空间；
   - pgvector 时，用指针缓存里活动版本的空间。检索紧接着读的也是这份 TTL 缓存，所以不会多一次数据库往返。
 - 活动版本固定在别的模型上时，直接用那个模型、它的查询前缀和宽度嵌入，不会先按配置模型再嵌入一次。
@@ -165,7 +165,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
   - 过期时间是 `RAG_EMBEDDING_CACHE_TTL_MS`（默认 10 分钟）；
   - `RAG_EMBEDDING_CACHE_ENABLED=false` 关闭缓存；
   - `RAG_EMBEDDING_CACHE_SCOPE=tenant` 按租户分区，见 `docs/configuration.md`。
-- 同一文本的并发请求只嵌入一次（在途合并）。原来给固定模型单独用的缓存（固定 256 条，不合并并发请求）已经删除。
+- 开着缓存时，同一租户内同一文本的并发请求只嵌入一次（在途合并，不跨租户合并）。原来给固定模型单独用的缓存（固定 256 条，不合并并发请求）已经删除。
 - 返回的向量带着它所在空间的标记。检索时标记和活动版本一致，就直接用这个向量。只有两种情况会按活动空间再嵌入一次（同样走这份缓存）：
   - 嵌入和检索之间指针变了，比如 TTL 刚过期时发生了切换或回滚；
   - 调用方传入自己按配置模型算的向量（没有标记，按配置空间处理），而活动版本固定在别的模型上。
@@ -213,8 +213,9 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
   - `ready_out_of_grace`：已停止接收写入，不能再激活或回滚到，应退役；
   - `drift`：ready 版本的 chunk 数或文档数和活动版本不同；
   - `build_failed`；
+  - `chunk_profile_differs_from_active`、`chunk_profile_differs_from_version`：活动版本（后者是正在构建或仍在接收写入的 ready 版本）记录的切块配置和本进程现在用的不同；
   - `configuration_differs_from_active`（见上）。
-- 状态总是返回 active、building、ready 和指针上的 previous 版本；只有 retired/failed 的历史按 limit（默认 25）分页，并返回 `historyLimit`。旧版本再多，active 也不会从状态里消失，健康检查也不会因此变红。
+- 状态总是返回 active、building、ready 和指针上的 previous 版本；只有 retired/failed 的历史只取最新的 limit 条（默认 25），并返回 `historyLimit`。旧版本再多，active 也不会从状态里消失，健康检查也不会因此变红。
 - `GET /admin/index-versions`：需要 `admin.status.read`，只读，返回同样的内容。构建、激活、回滚、退役只能通过 CLI 执行。
 - `/health` 的 `checks.vectorStore`：`table` 和 `embedding` 按活动版本描述，另有 `activeVersion` 和 `indexVersions`（活动版本、构建进度、警告）。健康检查不算 drift（报告里 `drift` 为 null），不对每个 ready 表做全表 COUNT；drift 只在 status 和管理接口里有。
 - `checks.rowLevelSecurity`：检查所有存活版本的表，以及活动版本的 sparse-rank 函数。
@@ -253,7 +254,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 新版本表在构建开始时就建好 HNSW 索引，因为双写需要它可用。逐行维护索引比先批量加载再建索引慢。
 - 构建依赖注册表里保存的 PDF 字节。如果文档当初不是由这些字节解析出来的（例如直接传入页面文本的导入），chunk 数会和活动版本不同，激活门会拒绝，需要加 `--allow-chunk-count-drift`。
 - 固定模型的嵌入调用沿用默认 embedding 路由（同一个 provider 和 endpoint），只替换模型名，不经过模型注册表对模型本身的选择。宽度必须是模型的原生宽度，不发送 `dimensions` 参数。
-- status 和管理接口算 drift 时，会对活动表和每个 ready 表各做一次全表 COUNT。
+- status 和管理接口算 drift 时，会对活动表和每个仍在接收写入的 ready 表各做一次全表 COUNT。
 - 同一个构建者的文档事务都要更新版本行，所以在续租到提交这一段排队；解析、嵌入和 chunk 写入是并行的。嵌入延迟越高，并行的收益越大。
 - 查询向量的空间标记只挂在 `embedQueryCached` 返回的那个数组对象上。复制出来的向量没有标记，按配置空间处理：活动版本固定在别的模型上时会再嵌入一次，结果仍然正确。
 
@@ -300,15 +301,15 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 重试判定按阶段区分：
   - 408/409/425/429、5xx 和网络错误在任何阶段都重试；
   - parse/chunk 阶段的其他 4xx（无可提取文本、pages/chunks 超限 413）直接 failed，因为重试读的还是同样的字节；
-  - embed/index 阶段的 4xx（401/403/404、宽度错误、embeddings 超限 413）属于供应商或配置问题：先用完该阶段的预算，再进入 `dead_letter`，保留字节和各阶段输出，运维修复后可以 requeue；
+  - embed/index 阶段的 4xx（401/403/404、宽度错误、embeddings 超限 413）属于供应商或配置问题：先用完该阶段的预算，再进入 `dead_letter`，保留字节和各阶段输出，运维在保留期内修复后可以 requeue；
   - 错误自身标记为不可重试的（被替换的文档已不存在、job 丢了文件）在任何阶段都直接失败。
 - 写入仍按 job_id + claimed_by + attempt_count 做围栏，worker 仍在 job 自己的租户下执行。
 - worker 在 index 提交前（以及一步式 ingest 前）做一次带围栏的续租：已失去租约或已被交回的尝试不会再开始提交。
 - `advanceStage` 是幂等的：提交已成功、只是响应丢失时，重试同一调用返回成功，不当作丢了租约。claim 清扫把一个 job 判为 succeeded 时，会一并删除它的阶段输出。
-- 某个阶段用尽重试后，job 进入 `dead_letter`，并记录阶段和原因。原因只含阶段、尝试次数、状态码、错误码、错误类名和公开错误信息，不含依赖返回的原始报错。死信 job 保留字节和已完成阶段的输出，重新入队后从该阶段继续，并重新获得该阶段的完整预算。
+- 某个阶段用尽重试后，job 进入 `dead_letter`，并记录阶段和原因。原因只含阶段、尝试次数、状态码、错误码、错误类名和公开错误信息，不含依赖返回的原始报错。死信 job 保留字节和已完成阶段的输出，重新入队后从该阶段继续，并重新获得该阶段的完整预算。保留期是 `RAG_INGEST_JOB_RETENTION_MS`（默认 7 天，0 表示不删）：进入死信超过这个时长后，worker 的清理会把它连同字节和输出删掉，之后不能再 requeue。
 - 为兼容前端，`GET /ingest-jobs/:jobId` 对死信 job 返回 `status: "failed"`，另附 `deadLetter: { stage, deadLetteredAt }`。该接口还返回 `kind`、`stage`、`duplicate`、`superseded` 和 `documentVersion`。
 - 文档被删除时，它排队中、等待重试和死信的 job 以 failed 结束，带 `canceledReason: "document_deleted"`（迁移 040），字节和输出一起删掉。
-- 管理接口（按请求者租户隔离，别的租户的 job 返回 404）：
+- 管理接口（按请求者租户隔离，别的租户的 job 返回 404；没有访问范围的请求能列出和重新入队任何租户的死信 job，例如关闭鉴权（默认）且请求既不带用户也不带工作区时）：
   - `GET /admin/ingest-jobs/dead-letter?limit=N`（默认 50），需要 `admin.status.read`；
   - `POST /admin/ingest-jobs/:jobId/requeue`，需要 `admin.actions.recover_tasks`。
 - 命令行（以 owner 身份运行，按属主精确匹配）：
@@ -330,7 +331,7 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - 失败的处理：
   - 只有 `CIRCUIT_OPEN` 和 429 算整批失败，所有相关 job 各自按带抖动的退避重试；
   - 其他失败（包括 5xx 和超时）可能只由某个 job 的输入引起，此时按 job 分别重发一次，只让出错的那个 job 失败。
-- `RAG_INGEST_EMBED_BATCHING=false` 绕过批处理器：每个 job 按嵌入空间各发一个请求，和同步上传一样。
+- `RAG_INGEST_EMBED_BATCHING=false` 绕过批处理器：每个 job 按嵌入空间各自发请求，和同步上传一样。
 
 实测（每项 3 次重复，64 份上传，2 个独立 worker × 8 路，200 ms/请求的假模型）：
 
@@ -360,9 +361,9 @@ API 实例不需要重启：它们用短 TTL 缓存指针（`RAG_INDEX_VERSION_P
 - docId、属主和 uploadedAt 不变，`version` 加 1，`updatedAt` 更新。
 - 同步模式返回 200 和文档；异步模式返回 202，body 带 `kind: "replace"`。
 - 替换会锁住文档行，在同一个事务里删除旧 chunk、写入新 chunk：每条检索语句要么看到完整的旧版本，要么看到完整的新版本，不会看到一半，也不会一个都看不到；提交后旧版本的 chunk 不再返回。chunk 的 metadata 带 `documentVersion`。
-- 后发起的替换胜出，排序统一用数据库时钟：
+- 异步替换之间后发起的胜出，排序统一用数据库时钟：
   - 异步 job 按它的 `created_at`；同步写入不带请求时间，`content_updated_at` 由数据库 `NOW()` 写入；
-  - 请求时间早于当前内容的替换即使晚完成，也不会覆盖：异步 job 以 succeeded 结束并带 `superseded: true`（迁移 019 的列）；同步 PUT 返回 409 和 `superseded: true`。
+  - 请求时间早于当前内容的替换即使晚完成，也不会覆盖：异步 job 以 succeeded 结束并带 `superseded: true`（迁移 019 的列）。
 - 替换同样写入正在构建的索引版本。构建者比较 `uploaded_at` 和 `content_version`，不会用构建开始时读到的旧内容覆盖替换结果。
 - 同一次检索里的版本一致：dense 和 sparse 两路是两条语句，替换可能恰好在中间提交。融合时对每个文档只保留各路结果中最新的内容版本（`keepNewestDocumentVersion`）。
 - 版本 2 及以后的 chunk 的 `publicFilePath` 是 `documents/<id>/file?version=N`。`GET /documents/:docId/file?version=N` 在 N 不是当前版本时返回 409（附 `currentVersion`），不会给出其他版本的 PDF。

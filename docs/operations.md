@@ -16,7 +16,7 @@
 | `GET /ready`（应用端口） | 能不能接流量。读副本落后、agent 层不可达（拆分部署的入口）只报 `warning`，不会让它变成 503。 |
 | `GET /health`（应用端口） | 每个 `checks.*` 的状态和说明：数据库、行级安全、向量库、入库队列（`checks.ingestJobs`）、读副本（`checks.readReplicas`）、agent 层（`checks.agentService`）、拓扑（`checks.serviceTopology`）等。 |
 | `GET /metrics`（`METRICS_PORT`，默认 9464） | Prometheus 指标。设了 `METRICS_TOKEN` 时要带 `Authorization: Bearer <token>`。 |
-| 进程日志 | 拆分角色的启动健康检查和停机过程带 `[service]` 前缀；指标监听启动时打印 `[metrics] serving /metrics on http://HOST:PORT`。日志、指标标签和跨层的错误里都不带问题、prompt、模型输出、文档内容、租户 id 或密钥。 |
+| 进程日志 | 拆分角色的停机过程和检索层的启动健康检查带 `[service]` 前缀（api、agent 层的启动健康检查以 `Startup health` 开头）；指标监听启动时打印 `[metrics] serving /metrics on http://HOST:PORT`。日志、指标标签和跨层的错误里都不带问题、prompt、模型输出、文档内容、租户 id 或密钥。 |
 | `GET /usage`（模型网关） | 按租户的模型用量和配额拒绝次数；只接受系统身份、带 admin claim 或 `admin.status.read` 权限的内部 token。 |
 
 ## `/chat` 的 SLO（建议值）
@@ -113,7 +113,7 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 ### `ArchiveRagPostgresReplicaLagHigh`
 
-**含义**：某个读副本的重放延迟超过 `POSTGRES_READ_REPLICA_MAX_LAG_MS`，路由器把本该去它的检索送回主库（计入 `archive_rag_postgres_replica_fallbacks_total{reason="lag_exceeded"}`）。回答仍然正确，只是主库多承担了读负载。
+**含义**：某个读副本的重放延迟超过 `POSTGRES_READ_REPLICA_MAX_LAG_MS`，路由器跳过它，把检索交给其他可用的副本，没有可用副本时送回主库（计入 `archive_rag_postgres_replica_fallbacks_total`，例如 `reason="lag_exceeded"`）。回答仍然正确，只是其他副本或主库多承担了读负载。
 
 1. **主库上**：`psql "$POSTGRES_DATABASE_URL" -c "SELECT application_name, state, write_lag, replay_lag FROM pg_stat_replication"`。
 2. **副本上**：`SELECT now() - pg_last_xact_replay_timestamp();`。副本上的长查询可能拖住重放（`max_standby_streaming_delay`）。
@@ -121,13 +121,13 @@ critical 表示现在就要有人处理，warning 进工单队列。
 
 大批量写入（`cd server && npm run vector:reindex -- --apply`、`npm run vector:index -- build`）是延迟突增最常见的原因，等它们结束或暂停它们。
 
-这条告警不覆盖宕掉的副本：测不出延迟的副本（不可达、不在 recovery）没有延迟序列。宕机要看 `archive_rag_postgres_replica_fallbacks_total{reason=~"replica_down|lag_unknown"}` 和 `/health` 的 `checks.readReplicas`；仓库里没有为它单独写告警。
+这条告警不覆盖宕掉的副本：测不出延迟的副本（不可达、不在 recovery）没有延迟序列。宕机要看 `archive_rag_postgres_replica_fallbacks_total{reason=~"replica_down|lag_unknown"}` 和在本进程检索的进程（例如单体）的 `/health` 里的 `checks.readReplicas`（拆分部署的检索层的 `/health` 没有这一项）；仓库里没有为它单独写告警。
 
 ### `ArchiveRagMetricsTargetDown`
 
 **含义**：Prometheus 2 分钟抓不到某个进程。这段时间这个进程的 SLO 和运维告警都没有数据。可能的原因：进程挂了；没设 `METRICS_ENABLED=true`；`METRICS_HOST` 是回环地址而 Prometheus 在别的主机或容器里；端口不是 `METRICS_PORT`；`METRICS_TOKEN` 不对（401）。
 
-1. **进程在不在**：`curl -s http://<host>:<PORT>/livez`（应用端口，不是指标端口）。
+1. **进程在不在**：`curl -s http://<host>:<PORT>/livez`（应用端口，不是指标端口；检索层和模型网关没有 `/livez`，改用它们的 `/health`）。
 2. **监听有没有起来**：启动日志里找 `[metrics] serving /metrics on http://HOST:PORT`；`curl -s -H "Authorization: Bearer $METRICS_TOKEN" http://<host>:<METRICS_PORT>/metrics | head`。
 3. **Prometheus 的 `/targets` 页面**上这个目标最后的错误：401 是 token 不对，连接被拒是 `METRICS_HOST`（容器里用 `0.0.0.0`）或 `METRICS_PORT`。
 
@@ -148,9 +148,9 @@ critical 表示现在就要有人处理，warning 进工单队列。
 **含义**：某一种按租户的拒绝持续了 15 分钟（`archive_rag_tenant_refusals_total{reason}`，所有进程合计）。短暂的一阵 429 是限额在正常工作；这条告警只在同一种拒绝一直出现时触发：通常是某个租户一直顶着某个上限（客户端在循环重试），或者一次注册表、成员关系的改动把某个租户挡在了外面。`reason` 就是被拒的客户端看到的稳定错误码：
 
 - 限额类：`TENANT_RATE_LIMITED`、`TENANT_CONCURRENCY_LIMITED`（`TENANT_RATE_LIMIT_*`、`TENANT_MAX_CONCURRENT_RUNS`）、`TENANT_TASK_LIMITED`（`TENANT_MAX_QUEUED_TASKS`）、`UPLOAD_SESSION_LIMIT_EXCEEDED`（`UPLOAD_SESSION_MAX_*`）、`INGEST_PENDING_LIMIT_EXCEEDED` / `INGEST_WORKSPACE_PENDING_LIMIT_EXCEEDED`（`RAG_INGEST_MAX_PENDING_*`）、`TENANT_STORAGE_QUOTA_EXCEEDED`（`TENANT_MAX_DOCUMENTS`、`TENANT_MAX_DOCUMENT_BYTES`）、`MODEL_GATEWAY_QUOTA_EXCEEDED`（进程内 `MODEL_QUOTA_ENABLED` 或模型网关，各记一次，不重复）、`MODEL_CALL_QUEUE_FULL`（`RAG_LLM_MAX_QUEUE`，每次被拒的尝试记一次）。
-- 成员关系类（`TENANT_MEMBERSHIP=enforce`）：`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`、`WORKSPACE_ROLES_LIMIT_EXCEEDED`；`TENANT_REGISTRY_UNAVAILABLE`（503）表示注册表读不出来，所有租户都会被拒，先查数据库。
+- 成员关系类（`TENANT_MEMBERSHIP=enforce`）：`WORKSPACE_MEMBERSHIP_REQUIRED`、`WORKSPACE_SUSPENDED`、`WORKSPACE_DELETING`、`WORKSPACE_NOT_REGISTERED`、`WORKSPACE_ROLES_LIMIT_EXCEEDED`；`TENANT_REGISTRY_UNAVAILABLE`（503）表示注册表读不出来，先查数据库。
 
-指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：每次拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`，和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。`TENANT_MEMBERSHIP=enforce` 的拒绝只有在请求的 workspace 已登记且不在删除中时才记在这个 workspace 下；否则（客户端随便写的 id、已擦除的 workspace）只记在用户名下，账本里不会出现注册表里没有的 workspace id。
+指标里没有租户标签（注册表拒绝这种标签）。被拒的是哪个租户记在用量账本里：拒绝按做出判断时针对的租户（用户和 workspace 这一对）记一条 `refused_<reason>`（成员关系类拒绝的例外见下），和这个租户的其他用量一样按小时汇总、每 `TENANT_USAGE_FLUSH_MS` 刷入数据库。`TENANT_MEMBERSHIP=enforce` 的拒绝只有在请求的 workspace 已登记且不在删除中时才记在这个 workspace 下；否则（客户端随便写的 id、已擦除的 workspace）只记在用户名下，没有用户时只计指标、不进账本。
 
 1. **哪个租户**：用平台管理员凭据（`admin.usage.read`）调 `GET /admin/usage?metric=refusals&reason=<reason>&from=<一小时前>`，按拒绝次数列出租户，每行的 `refusals` 是按错误码的次数；`groupBy=workspace` 按 workspace 汇总（按 workspace 计的限额就是这个数）。数据最多滞后 `TENANT_USAGE_FLUSH_MS`。
 2. **哪一种、在哪一层**：`sum by (reason, role) (rate(archive_rag_tenant_refusals_total[15m]))`；HTTP 限额对照 `archive_rag_http_requests_total{status_class="429"}`，网关配额对照 `archive_rag_model_gateway_quota_rejections_total`。
@@ -212,9 +212,9 @@ npm run backup:postgres -- --database-url "$BACKUP_DATABASE_URL" --out /srv/back
 npm run backup:verify -- --dump /srv/backups/archive-rag-<时间>.dump
 ```
 
-`backup:verify` 不带 `--database-url` 时自己起一个一次性集群（和 `run-pgvector-integration.sh` 一样：`$TMPDIR` 下的新数据目录，只监听 `/tmp` 下一个 0700 目录里的 unix socket，trust 认证，所以不需要任何密码），用一个非超级用户登录（拥有临时库，和生产里的迁移登录一样）恢复，然后检查：
+`backup:verify` 不带 `--database-url` 时自己起一个一次性集群（数据目录和 `run-pgvector-integration.sh` 一样新建在 `$TMPDIR` 下；只监听 `/tmp` 下一个 0700 目录里的 unix socket，trust 认证，所以不需要任何密码），用一个非超级用户登录（拥有临时库，和生产里的迁移登录一样）恢复，然后检查：
 
-1. dump 的 SHA-256 与 manifest 一致（没传 `--dump` 时，检查 manifest 旁边的那个 dump）；manifest 旁边有 `--with-files` 的 tar 时也校验它的 SHA-256；
+1. dump 的 SHA-256 与 manifest 一致（没传 `--manifest` 时，用 dump 旁边的那个 manifest）；manifest 旁边有 `--with-files` 的 tar 时也校验它的 SHA-256；
 2. 代码里每个迁移都已应用、没有未知的迁移，已应用列表与 manifest 一致（旧代码的备份用 `--allow-pending-migrations`）。校验从不迁移恢复出来的库：有待执行的迁移时，第 4 项会先跑迁移，所以跳过（`skipped: "pending_migrations"`），审计链也在不跑迁移的情况下读取；
 3. 每张表的行数、每个租户的文档数与 manifest 一致；
 4. 健康报告的 `checks.rowLevelSecurity` 没有 error（角色、策略、授权、角色切换）；
@@ -234,7 +234,7 @@ npm run backup:restore -- --database-url <目标库> --dump <file>
 - 缺少行策略引用的 NOLOGIN 角色（租户角色、系统角色）时先创建；缺少 pgvector 时先尝试创建，没有权限时提示由超级用户执行 `CREATE EXTENSION vector`。
 - `pg_restore --no-owner --exit-on-error --single-transaction`：要么全部恢复，要么什么都不变；所有对象归恢复所用的登录所有（用迁移登录）。扩展本身和扩展的注释不在恢复里（需要超级用户），由上一步预先创建。
 - 最后把租户角色授给恢复所用的登录（迁移 013 在原库上做过的事）。角色密码和成员关系是整个集群的，不在 dump 里：role split 时，用新的 `POSTGRES_DATABASE_URL` / `POSTGRES_MIGRATION_DATABASE_URL` 启动应用，迁移器会重新授予运行时登录；运行时登录本身要先建好（`deploy/postgres/create-split-roles.sql`）。
-- `--with-files` 的 tar 在停服时解压到对应目录（成员名是 `uploads/`、`upload-sessions/`、`data/`）。
+- `--with-files` 的 tar 在停服时解压到对应目录（成员名是各目录自己的名字，默认是 `uploads/`、`upload-sessions/`、`data/`）。
 - 恢复的是备份那一刻：之后的上传、删除、租户擦除都不在里面。尤其是备份之后擦除的租户，用旧备份恢复会把它的数据带回来，恢复后要重新执行那些擦除（审计日志里的 `admin.tenant.erased` 记录了是谁）。回收站里的文档按原来的 `deleted_at` 继续计时。
 
 ### RPO 和 RTO
@@ -274,7 +274,7 @@ npm run backup:restore -- --database-url <目标库> --dump <file>
 升级演练的运行方式（需要一份旧版本的检出）：
 
 ```bash
-git worktree add --detach /tmp/archive-rag-main main
+git worktree add --detach /tmp/archive-rag-main fe833c50
 ```
 
 ```bash

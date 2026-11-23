@@ -6,10 +6,10 @@
 
 - **租户 = 访问范围** `(userId, workspaceId)`。工作区对应一个组织；同一个用户可以属于多个工作区，每个工作区是一个独立租户。
 - 访问范围由凭据和请求一起决定：
-  - 凭据里写了用户（带 `userId` 的 `API_AUTH_TOKENS` 条目、HS256 JWT、OIDC）时按这个用户，请求里写的用户不起作用。没写用户的凭据里，只有单个共享 `API_AUTH_TOKEN` 和写了 `"allowClientUserId": true` 的条目能由请求指定用户（`x-user-id` 请求头，或 JSON body、query 里的 `userId`）；其他凭据的请求一写用户就是 403。
+  - 凭据里写了用户（带 `userId` 的 `API_AUTH_TOKENS` 条目、HS256 JWT、OIDC）时按这个用户，请求里写的用户不起作用。没写用户的凭据里，只有单个共享 `API_AUTH_TOKEN` 和写了 `"allowClientUserId": true` 的条目能由请求指定用户（`x-user-id` 请求头，或 JSON body、query 里的 `userId`）；其他凭据的请求一写用户就是 403（个别管理路由里的 `userId` 是过滤条件或操作对象，不算写用户，例如 `GET /admin/audit?userId=`）。
   - 凭据固定了工作区（`workspaceId`）或列出了工作区（`workspaces`）时，请求只能用其中的。两样都没有的凭据，例如只带 `userId` 的 token、没有工作区 claim 的 JWT 或 OIDC token、只带角色的 token，可以用 `x-workspace-id`（请求头、JSON body 或 query）选任意工作区：读取、删除那个工作区里不属于具体用户的文档，也能往里上传，行级安全按同样的范围放行。要挡住上面举的这几种凭据，得开 `TENANT_MEMBERSHIP=enforce`（默认关，只放行成员）；只开 `RBAC_MODE=enforce`（默认角色）或 `API_AUTH_REQUIRE_WORKSPACE=true` 挡不住。
 - **单租户模式**：关闭 auth，或者配了单个共享 `API_AUTH_TOKEN`（没配 `API_AUTH_TOKENS` 时它才生效）。这时没有租户隔离：请求可以自报任意用户和工作区，默认配置下什么都不报就能看到所有文档。这两种情况都是有意设计的。同时开着 JWT 或 OIDC 时，持这个 token 的请求照样不受隔离，`TENANT_MEMBERSHIP=enforce` 也不管它，所以多租户部署要把 `API_AUTH_TOKEN` 留空。
-- **平台主体**：不绑定工作区、也不带工作区列表的管理员凭据，只能走固定的几条平台路由（`TENANTLESS_PLATFORM_PATHS`），每条都要求对应的 `admin.*` 权限。
+- **平台主体**：不绑定工作区、也不带工作区列表的管理员凭据，在访问范围里既没有用户也没有工作区时，只能走固定的几条平台路由（`TENANTLESS_PLATFORM_PATHS`），其中的管理路由都要求对应的 `admin.*` 权限。
 
 ## 威胁模型
 
@@ -28,16 +28,16 @@
 
 ### 1. 认证与租户解析（`server/auth.js`）
 
-- 认证后的空租户直接拒绝（`requireTenantScope`）：既没有用户也没有工作区的访问范围，在数据库层会被当成"所有租户"，所以在入口就挡掉。启动时拒绝没有任何范围的 `API_AUTH_TOKENS` 条目。
-- `TENANT_MEMBERSHIP=enforce`：工作区必须在注册表里登记，用户必须是成员，工作区必须是 active；暂停、删除中、未登记一律 403，注册表故障是 503，不会放行。
-- `API_AUTH_REQUIRE_WORKSPACE=true`：多工作区凭据必须选一个工作区，平台路由和 `GET /auth/me` 除外。
+- 认证后的空租户直接拒绝（`requireTenantScope`；例外如单个共享 `API_AUTH_TOKEN`、不带工作区列表的主体调用平台路由）：既没有用户也没有工作区的访问范围，在数据库层会被当成"所有租户"，所以在入口就挡掉。开着鉴权启动时，拒绝用户、工作区、角色和权限都没写、也没开 `allowClientUserId` 的 `API_AUTH_TOKENS` 条目。
+- `TENANT_MEMBERSHIP=enforce`（单个共享 `API_AUTH_TOKEN` 等不受这项检查）：工作区必须在注册表里登记，用户必须是成员，工作区必须是 active；暂停、删除中、未登记一律 403，注册表故障是 503，不会放行。
+- `API_AUTH_REQUIRE_WORKSPACE=true`：多工作区凭据必须选一个工作区，`GET /auth/me` 除外。
 - RBAC（`RBAC_MODE=enforce`）：每条路由都在 `RBAC_ROUTE_TABLE` 里登记权限，未登记的路由在 enforce 模式下是 403；`test/rbac-routes.test.mjs` 保证新路由不会漏登记。
 - OIDC 平台角色：`API_AUTH_OIDC_ALLOW_PLATFORM_ROLES=false` 时，IdP 发的 `admin.*` 角色一律丢弃。
 
 ### 2. 请求层
 
-- 认证之后的所有响应都带 `Cache-Control: private, no-store` 和按凭据区分的 `Vary`，防止中间缓存把一个租户的响应给另一个租户。
-- 健康探针对外只返回 `{status}`。完整报告只给单租户 token、持有 `admin.status.read` 的主体，以及（检索层和模型网关上）有效的内部签名身份。
+- 认证之后的响应默认都带 `Cache-Control: private, no-store` 和按凭据区分的 `Vary`（个别路由改写 `Cache-Control`，例如 `/chat/stream` 是 `no-cache, no-transform`），防止中间缓存把一个租户的响应给另一个租户。
+- 开着鉴权时，健康探针对外只返回 `{status}`，完整报告只给单租户 token、持有 `admin.status.read` 的主体，以及（检索层和模型网关上）有效的内部签名身份。
 - 输入上限：问题长度、docId 个数和长度、任务路由的 id、载荷大小和嵌套深度。api 边缘层和 agent 层用同一套校验函数。
 
 ### 3. 数据库（PostgreSQL 行级安全）
@@ -53,19 +53,19 @@
 - 按租户的固定窗口限流（chat / ingest / 破坏性操作 / 其他四类）和并发上限。
 - 模型调用的等待队列按租户公平调度，最近最少被服务的租户先出队；单个租户的排队长度有上限。
 - 模型配额（进程内或模型网关）、存储配额（文档数和字节数，在提交事务里加锁检查）、入库排队上限、任务并发和排队上限。
-- 每一类拒绝都有 Prometheus 计数（只带错误码，不带租户标签），同时按租户记进用量账本，`GET /admin/usage?metric=refusals` 能看出是哪个租户在被拒。非成员访问某个工作区被拒时，记录只记在请求者自己名下，不写进对方工作区，所以随便编工作区 id 撑不大账本，被探测的工作区也看不到探测者是谁。账本可以按 `TENANT_USAGE_RETENTION_DAYS` 定期清理。
+- 每一类拒绝都有 Prometheus 计数（只带错误码，不带租户标签），同时按租户记进用量账本（也有只计指标的，例如没有用户的凭据指定一个不属于它的工作区、被成员检查拒绝时），`GET /admin/usage?metric=refusals` 能看出是哪个租户在被拒。非成员访问某个工作区被拒时，记录只记在请求者自己名下，不写进对方工作区，所以随便编工作区 id 撑不大账本，被探测的工作区也看不到探测者是谁。账本可以按 `TENANT_USAGE_RETENTION_DAYS` 定期清理。
 
 ### 5. 跨工作区和侧信道
 
 - 会话记忆按 `(userId, workspaceId, sessionId)` 的哈希做键，客户端选的 sessionId 单独构不成租户边界。
-- `LONG_MEMORY_SCOPE=workspace`：自由文本笔记和经验记忆只在写入它的工作区可见；不选工作区时写的笔记单独标记为个人范围（迁移 046），也不会出现在任何工作区里。只有固定枚举的偏好（回复语言、回答风格）是用户级。数据库策略同步限制。
-- 前端工作区切换器从 `/auth/me` 读可选的工作区（凭据里列出的，加上注册表里的成员关系）；切换时清掉上一个工作区的界面状态，401 重试仍发往原来的工作区。
+- `LONG_MEMORY_SCOPE=workspace`：开着鉴权时，开启后写入的自由文本笔记和经验记忆只在写入它的工作区可见；不选工作区时写的笔记单独标记为个人范围（迁移 046），也不会出现在任何工作区里；只有固定枚举的偏好（回复语言、回答风格）写成用户级；开启前写入的记忆是用户级的，在每个工作区都可见。数据库策略同步限制。
+- 前端工作区切换器从 `/auth/me` 读可选的工作区（凭据里列出的，`TENANT_MEMBERSHIP=enforce` 下还可能加上注册表里的成员关系）；切换时清掉上一个工作区的界面状态，401 重试仍发往原来的工作区。
 - `RAG_EMBEDDING_CACHE_SCOPE=tenant`、`TENANT_REGISTRY_CACHE_SCOPE=tenant`：缓存按租户分区，命中与否不会泄露别的租户最近问过什么、用过哪个工作区。其他缓存的排查结论见 `AGENTS.md`。
 - 公开的 run 事件 id 是每个 run 自己的序号（`runId:n`），不暴露跨租户共用的全局序列。
 
 ### 6. 数据生命周期
 
-- **删除联动**：删除文档时取消它的入库任务，从每个索引版本里删掉切块；`DOCUMENT_DELETE_REDACTION=on` 时，把已结束的 run、引用它的产物和反馈里的原文替换成占位符。
+- **删除联动**：删除文档时取消它的入库任务，从每个索引版本里删掉切块；`DOCUMENT_DELETE_REDACTION=on` 时，把已结束的 run、引用它的产物和反馈里的原文替换成占位符（开着回收站时推迟到清除）。
 - **回收站**（`DOCUMENT_TRASH_RETENTION_HOURS`）：删除和清空先进回收站，切块立即删除，所有读路径都看不到它；宽限期内可以恢复（从存着的原件重新切块和嵌入），过期后由保留期清理任务彻底清除。
 - **保留期**：run、任务、产物、反馈、观测日志按天清理，可以按工作区覆盖；策略读不到时这一轮什么都不删。
 - **租户擦除和导出**：按固定顺序遍历每个存储（入库任务、上传会话、任务、run、文档和所有索引版本的切块、产物、反馈、会话和长期记忆、Redis、语义缓存、用量账本、注册表）。默认只做 dry run；擦除前先把工作区标成 deleting；审计记录保留，并写一条墓碑。导出在租户自己的 RLS 下进行。
@@ -86,7 +86,7 @@
 
 ## 加固配置
 
-`deploy/demo/hardened.env` 把上面所有开关一起打开（演示用的固定 token 和密码，不要在别处复用），`compose.demo.yml` 用独立的数据卷和非超级用户的运行时登录启动它。`test/tenant-isolation-hardened.e2e.test.mjs` 在真实 PostgreSQL 上用这份配置启动 `node server.js`，跑完整的 seed 和检查清单，再做一次真实擦除。
+`deploy/demo/hardened.env` 把上面大部分开关一起打开（演示用的固定 token 和密码，不要在别处复用），`compose.demo.yml` 用独立的数据卷和非超级用户的运行时登录启动它。`test/tenant-isolation-hardened.e2e.test.mjs` 在真实 PostgreSQL 上用这份配置启动 `node server.js`，跑完整的 seed 和检查清单，再做一次真实擦除。
 
 ## 验证证据
 
@@ -96,7 +96,7 @@
 | RLS 策略、租户角色直接执行 SQL 越权失败、健康检查 | `test/postgres-row-level-security.integration.test.mjs` |
 | 角色拆分 | `test/postgres-role-split.test.mjs`、`test/postgres-role-split.integration.test.mjs` |
 | strict 上下文没有漏绑 | `test/postgres-strict-tenant-context-sweep.test.mjs`、`test/postgres-strict-tenant-context.e2e.test.mjs` |
-| 全部开关一起打开 | `test/tenant-isolation-hardened.e2e.test.mjs` |
+| 大部分开关一起打开 | `test/tenant-isolation-hardened.e2e.test.mjs` |
 | 从旧版本升级（最小权限库、角色拆分） | `test/postgres-upgrade.integration.test.mjs`（需要 `ARCHIVE_RAG_UPGRADE_FROM`） |
 | 加密、密钥销毁、密文换行失败 | `test/tenant-encryption-postgres.integration.test.mjs` |
 | 回收站、连接池耗尽回归 | `test/document-trash-postgres.integration.test.mjs`、`test/document-commit-pool.integration.test.mjs` |
