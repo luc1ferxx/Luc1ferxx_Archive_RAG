@@ -1,6 +1,6 @@
 # Development Notes
 
-这份文档放 API、目录结构和开发约束。README 只保留项目入口。
+这份文档放 API、本地 PostgreSQL 和开发约束；目录结构见 README 的[代码结构](../README.md#代码结构)。
 
 ## API
 
@@ -63,34 +63,7 @@ Admin audit 默认 `ADMIN_AUDIT_STORE_PROVIDER=auto`：PostgreSQL 配好时写�
 
 ## 仓库结构
 
-```text
-.
-├── src/                         # React frontend
-│   ├── components/              # Uploader, chat, answer renderer, PDF preview
-│   ├── App.jsx                  # Three-column archive workspace
-│   └── config.js                # API domain and auth header helper
-├── server/
-│   ├── app.js                   # Express app; mounts the routers in server/routes/
-│   ├── chat-mcp.js              # MCP web-answer client
-│   ├── mcp-server.js            # SerpAPI-backed local MCP search server
-│   ├── health.js                # Startup/readiness health checks
-│   ├── db/migrations/           # PostgreSQL tables
-│   ├── rag/                     # Custom RAG + AgentRAG pipeline
-│   │   ├── agent*.js            # Planner, run context, run steps/handlers, self-check, finalizer, trace, working memory
-│   │   ├── workspace-artifacts/ # Scoped artifact schema, service, stores and projections
-│   │   ├── skills/              # Built-ins and whitelisted custom skills
-│   │   ├── retrievers/          # Global and per-document retrievers
-│   │   ├── chunker.js
-│   │   ├── confidence.js
-│   │   ├── evidence-aligner.js
-│   │   ├── comparison-engine.js
-│   │   ├── reranker.js
-│   │   └── vector-store*.js
-│   ├── evaluation/              # Synthetic, trajectory, feedback, rerank, ragas evaluation
-│   └── test/                    # Backend tests
-├── docs/
-└── README.md
-```
+目录和模块的职责见 README 的[代码结构](../README.md#代码结构)，一次请求经过哪些文件见[一次请求怎么跑](../README.md#一次请求怎么跑)。
 
 ## 本地 PostgreSQL + pgvector
 
